@@ -379,7 +379,9 @@ mod tests {
     fn project_config_can_opt_into_strict_diagnostics() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(directory.path().join(".octet")).unwrap();
-        let project = directory.path().join(".octet/config.toml");
+        // Join in two steps so the literal spelling uses native separators;
+        // the diagnostic path is canonicalized, which never preserves `/`.
+        let project = directory.path().join(".octet").join("config.toml");
         std::fs::write(&project, "strict_config = true\nthemee = 'ignored'\n").unwrap();
         let mut cli = Cli::try_parse_from(["octet"]).unwrap();
         cli.workspace = Some(directory.path().into());
@@ -394,6 +396,9 @@ mod tests {
         .to_string();
 
         assert!(error.contains("project config"));
+        // The diagnostic path may be canonicalized, which on Windows adds a
+        // `\\?\` verbatim prefix absent from the test's literal path.
+        let error = error.replace(r"\\?\", "");
         assert!(error.contains(&format!("{}:2:1", project.display())));
         assert!(error.contains("themee"));
     }

@@ -11080,6 +11080,8 @@ mod tests {
         assert!(config.theme.is_none());
     }
 
+    // Requires a POSIX shell plus coreutils (`yes`, `head`): Unix-only.
+    #[cfg(unix)]
     #[test]
     fn posix_shell_quote_round_trips_shell_sensitive_selector() {
         let selector = "resume id;$(printf pwned);'\"$HOME\" * 雪";
@@ -11637,6 +11639,8 @@ mod tests {
         assert_eq!(output.render("stdout"), "012345é");
     }
 
+    // Drives `sh` with `yes`/`head` to fill both pipes: Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn shell_pipes_are_drained_concurrently_with_process_exit() {
         let mut child = tokio::process::Command::new("sh")
@@ -11916,12 +11920,25 @@ mod tests {
         ))
     }
 
+    /// The platform's native-paste gesture (`app.clipboard.pasteImage`):
+    /// `ctrl+v` on Unix, `alt+v` in the win32 keymap.
+    fn paste_gesture() -> Event {
+        Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('v'),
+            if cfg!(windows) {
+                KeyModifiers::ALT
+            } else {
+                KeyModifiers::CONTROL
+            },
+        ))
+    }
+
     #[tokio::test]
     async fn idle_clipboard_gesture_inserts_native_text_without_submitting() {
         clipboard_read::set_test_text(Some("pasted from the clipboard".to_owned()));
         // Ctrl-D settles the idle wait without submitting or discarding the
         // draft the paste created.
-        let (shell, idle) = idle_shell_after(vec![ctrl_key('v'), ctrl_key('d')]).await;
+        let (shell, idle) = idle_shell_after(vec![paste_gesture(), ctrl_key('d')]).await;
         clipboard_read::clear_test_text();
 
         assert!(matches!(idle, Idle::Quit));
@@ -11932,7 +11949,7 @@ mod tests {
     async fn idle_clipboard_gesture_without_text_keeps_the_existing_fallback() {
         clipboard_read::set_test_text(None);
         let (shell, idle) = idle_shell_after(vec![
-            ctrl_key('v'),
+            paste_gesture(),
             // The terminal-originated bracketed paste remains the fallback when
             // no native transport produced text.
             Event::Paste("terminal bracketed paste".to_owned()),
@@ -12201,10 +12218,7 @@ mod tests {
                 "recall" => {
                     let queued = shell.drain_composed();
                     shell.queue_follow_up(queued);
-                    Event::Key(crossterm::event::KeyEvent::new(
-                        KeyCode::Up,
-                        KeyModifiers::ALT,
-                    ))
+                    dequeue_gesture()
                 }
                 _ => Event::Key(crossterm::event::KeyEvent::new(
                     KeyCode::Enter,
@@ -12301,7 +12315,7 @@ mod tests {
     async fn clipboard_gesture_is_consumed_on_the_active_run_path_too() {
         let mut shell = InteractiveShell::test_shell();
         shell.begin_run("test");
-        let gesture = ctrl_key('v');
+        let gesture = paste_gesture();
 
         clipboard_read::set_test_text(Some("steer text".to_owned()));
         assert!(paste_clipboard_text(&mut shell, &gesture).await);
@@ -15128,9 +15142,17 @@ mod tests {
         const CHILD: &str = "OCTET_TEST_REASONING_CONTROL_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let home = tempfile::tempdir().unwrap();
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
                 .args(["--exact", "modes::interactive::tests::thinking_control_preserves_active_run_and_hands_off_wire_update", "--nocapture"])
-                .env(CHILD, "1").env("HOME", home.path()).output().unwrap();
+                .env(CHILD, "1")
+                .env("HOME", home.path());
+            // `dirs::home_dir()` ignores `HOME` on Windows (it reads
+            // `USERPROFILE`), so isolate that too; otherwise the child
+            // observes and mutates the developer's real profile.
+            #[cfg(windows)]
+            command.env("USERPROFILE", home.path());
+            let result = command.output().unwrap();
             assert!(
                 result.status.success(),
                 "{}\n{}",
@@ -15233,6 +15255,12 @@ mod tests {
                     )]),
                     "active updates defer only the final preference write until idle"
                 );
+                // The re-exec child isolates `HOME`, but on Windows
+                // `dirs::home_dir()` resolves through `SHGetKnownFolderPath`,
+                // which no environment variable redirects, so this check can
+                // only observe an isolated home on Unix. Deferral itself is
+                // asserted through `pending` on all platforms above.
+                #[cfg(not(windows))]
                 assert!(
                     !crate::cli::global_config_path().unwrap().exists(),
                     "active control handling must not persist before the idle boundary"
@@ -15739,6 +15767,20 @@ mod tests {
         );
     }
 
+    /// The platform's "restore queued message" gesture (`app.message.dequeue`):
+    /// `alt+up` on Unix, `alt+q` in the win32 keymap.
+    fn dequeue_gesture() -> Event {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        Event::Key(KeyEvent::new(
+            if cfg!(windows) {
+                KeyCode::Char('q')
+            } else {
+                KeyCode::Up
+            },
+            KeyModifiers::ALT,
+        ))
+    }
+
     #[tokio::test]
     async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement() {
         use crossterm::event::KeyEvent;
@@ -15777,7 +15819,7 @@ mod tests {
                 Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
                 Event::Paste("queued second".into()),
                 Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                dequeue_gesture(),
                 Event::Paste(" edited".into()),
                 Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             ];
@@ -16511,7 +16553,7 @@ mod tests {
                 Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
                 // Option/Alt+Up recalls the newest retractable live steering
                 // before the provider boundary can claim it.
-                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                dequeue_gesture(),
                 Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ],
         )
@@ -16540,7 +16582,7 @@ mod tests {
             vec![
                 Event::Paste("original".into()),
                 Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                dequeue_gesture(),
                 Event::Paste(" edited".into()),
                 Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             ],
@@ -16574,7 +16616,7 @@ mod tests {
                 Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
                 Event::Paste("beta".into()),
                 Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                dequeue_gesture(),
                 Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ],
         )

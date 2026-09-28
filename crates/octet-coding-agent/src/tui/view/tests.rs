@@ -1932,11 +1932,16 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     // The index is walked off-thread; the popup needs the finished walk.
     shell.settle_file_index();
     let paths = shell_chrome(&shell.state.borrow(), 120, Instant::now()).suggestions;
+    // Rendered separators are platform-native (`/` on Unix, `\` on Windows).
+    let expected_mention = format!("› src{}main.rs", std::path::MAIN_SEPARATOR);
     let selected = paths
         .iter()
-        .find(|line| line.contains("src/main.rs"))
+        .find(|line| {
+            let plain = strip_terminal_sequences(line);
+            plain.contains("src/main.rs") || plain.contains("src\\main.rs")
+        })
         .expect("selected mention suggestion");
-    assert_eq!(strip_terminal_sequences(selected).trim(), "› src/main.rs");
+    assert_eq!(strip_terminal_sequences(selected).trim(), expected_mention);
     assert!(selected.contains(&model_accent), "{selected:?}");
     assert!(!selected.contains(&ui_accent), "{selected:?}");
     let footer = paths.last().expect("mention suggestion footer");
@@ -2231,9 +2236,16 @@ fn mention_completion_inserts_path_reference_for_text_files() {
     assert!(rendered
         .iter()
         .any(|line| { strip_terminal_sequences(line).contains("project files · tab complete") }));
-    assert!(rendered.iter().any(|line| line.contains("src/main.rs")));
+    // Rendered separators are platform-native.
+    assert!(rendered
+        .iter()
+        .any(|line| { line.contains("src/main.rs") || line.contains("src\\main.rs") }));
     assert_input_suggestions_replace_status_footer(&mut shell, "project files");
     shell.complete_path();
+    // The inserted reference keeps the platform-native spelling.
+    #[cfg(windows)]
+    assert_eq!(shell.pending(), "see @src\\main.rs ");
+    #[cfg(not(windows))]
     assert_eq!(shell.pending(), "see @src/main.rs ");
 }
 

@@ -9733,6 +9733,10 @@ mod tests {
     }
 
     #[cfg(any(unix, windows))]
+    // NTFS refuses to rename a directory with open descendants, and the
+    // live manager holds its team directory (and lease files) open, so this
+    // replacement scenario cannot be set up on Windows. Unix-only.
+    #[cfg(unix)]
     #[test]
     fn child_session_creation_rejects_a_replaced_team_directory() {
         let directory = tempfile::tempdir().unwrap();

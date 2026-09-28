@@ -3377,7 +3377,12 @@ async fn stale_positive_custom_cache_is_available_without_waiting_for_discovery(
         .map(|entry| entry.unwrap().path())
         .next()
         .unwrap();
-    std::fs::File::open(&cache_path)
+    // `File::open` is read-only, and Windows requires write-attribute access
+    // for `set_times`; open read/write so the backdate works on all platforms.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&cache_path)
         .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
         .unwrap();
@@ -4353,12 +4358,15 @@ fn tool_schema_reserve_is_positive_and_deterministic() {
     let mut all_core = ExtensionHost::new();
     all_core.load(&CoreTools);
     let all_core_definitions = all_core.tool_definitions();
+    let mut expected_all = vec!["read", "edit", "write", "bash", "search"];
+    #[cfg(windows)]
+    expected_all.push("powershell");
     assert_eq!(
         all_core_definitions
             .iter()
             .map(|definition| definition.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["read", "edit", "write", "bash", "search"]
+        expected_all
     );
     assert!(tool_schema_reserve(&all_core_definitions) > default_reserve);
 }

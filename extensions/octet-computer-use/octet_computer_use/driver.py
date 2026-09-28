@@ -140,6 +140,10 @@ def _install_environment() -> Dict[str, str]:
         environment.pop(name, None)
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    # Force UTF-8 stdio so pip/driver output decodes deterministically
+    # regardless of the Windows ANSI code page (see `_run`).
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
     return environment
 
 
@@ -158,6 +162,13 @@ def _run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # Without an explicit encoding, Windows decodes with the ANSI
+            # code page (cp1252): any byte undefined there (e.g. from pip or
+            # `--version` banners) raises `UnicodeDecodeError` out of
+            # `communicate()`, which is neither `TimeoutExpired` nor
+            # `OSError` and would escape uncaught below.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -203,8 +214,12 @@ def installed_binary(paths: DriverPaths) -> Optional[Path]:
     python = paths.venv_python
     if not python.is_file():
         return None
+    # The venv path can contain non-ASCII characters (non-ASCII usernames);
+    # run the probe under the sanitized UTF-8 environment so the printed
+    # path decodes to the real path.
     probe = _run(
         [str(python), "-c", "import cua_driver, sys; sys.stdout.write(str(cua_driver.get_binary_path()))"],
+        env=_install_environment(),
         timeout=PROBE_TIMEOUT_SECONDS,
     )
     if probe.returncode != 0:

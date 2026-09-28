@@ -79,7 +79,8 @@ def theme_id(lab: str) -> str:
 
 def installed_theme_ids(binary: Path) -> set[str]:
     result = subprocess.run([str(binary), "cursor-theme", "list", "--json"],
-                            capture_output=True, text=True, timeout=15, check=True)
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=15, check=True)
     ids = json.loads(result.stdout)
     if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
         raise ValueError("invalid Cua cursor-theme inventory")
@@ -100,7 +101,8 @@ def install_bundled_themes(binary: Path) -> int:
             raise RuntimeError(f"bundled cursor theme is missing: {lab}")
         command = subprocess.run(
             [str(binary), "cursor-theme", "install", str(artifact)],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30, check=False,
         )
         if command.returncode != 0:
             raise RuntimeError(f"cursor theme {lab} installation failed: "

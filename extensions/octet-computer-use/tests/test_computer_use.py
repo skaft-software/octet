@@ -355,6 +355,71 @@ class ClientClassificationTests(unittest.TestCase):
         self.assertEqual(environment["DISPLAY"], ":9")
 
 
+class DriverTransportEncodingTests(unittest.TestCase):
+    """The MCP stdio transport is UTF-8 with LF framing on every host.
+
+    On Windows the default text encoding is cp1252, so any byte undefined
+    there (window titles, pip banners, lone 0x90) used to kill the reader
+    and report the driver as closed. These tests pin the binary-pipe
+    contract without needing a live driver.
+    """
+
+    def test_frame_is_utf8_with_a_single_lf(self):
+        from octet_computer_use.driver_client import _frame
+
+        raw = _frame({"text": "— curly “quotes” —"})
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertFalse(raw.endswith(b"\r\n"))
+        self.assertTrue(raw.decode("utf-8").endswith('"}\n'))
+
+    def test_reader_decodes_utf8_and_survives_undefined_cp1252_bytes(self):
+        import io
+        import queue
+
+        from octet_computer_use.driver_client import DriverClient
+
+        stream = io.BytesIO(
+            '{"jsonrpc":"2.0","id":1,"result":{}}\n'.encode("utf-8")
+            + "—\n".encode("utf-8")
+            + b"\x90\n"
+            + '{"jsonrpc":"2.0","id":2,"result":{}}\n'.encode("utf-8")
+        )
+        sink: queue.Queue = queue.Queue()
+        DriverClient._read_lines(stream, sink)
+        got = [sink.get(timeout=5) for _ in range(5)]
+        self.assertTrue(got[0].startswith('{"jsonrpc"'))
+        self.assertIn("—", got[1])
+        # errors="replace": the lone 0x90 becomes U+FFFD and the stream
+        # continues instead of reporting EOF.
+        self.assertIn("�", got[2])
+        self.assertTrue(got[3].startswith('{"jsonrpc"'))
+        self.assertIsNone(got[4])
+
+    def test_run_decodes_subprocess_output_as_utf8(self):
+        from unittest import mock
+
+        from octet_computer_use import driver as driver_module
+
+        with mock.patch("subprocess.run") as run:
+            driver_module._run(["octet", "--version"])
+        _, kwargs = run.call_args
+        self.assertEqual(kwargs.get("encoding"), "utf-8")
+        self.assertEqual(kwargs.get("errors"), "replace")
+
+    def test_cursor_theme_probes_decode_as_utf8(self):
+        from unittest import mock
+
+        from octet_computer_use import cursor_theme
+
+        with mock.patch.object(cursor_theme.subprocess, "run") as run:
+            run.return_value = mock.Mock(stdout="[]", stderr="", returncode=0)
+            cursor_theme.installed_theme_ids(Path("cua-driver"))
+        self.assertTrue(run.call_args_list)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs.get("encoding"), "utf-8")
+            self.assertEqual(call.kwargs.get("errors"), "replace")
+
+
 class VersionSpecTests(unittest.TestCase):
     def test_pip_spec_is_validated(self):
         from octet_computer_use.driver import _pip_spec, ProvisionError
@@ -443,11 +508,27 @@ class StatusRowTests(unittest.TestCase):
         )
 
     def test_missing_screen_recording_is_visible_before_any_action(self):
-        statuses = self._publish(
-            {"installed": True, "permissions": "denied", "screen_recording": False}
-        )
+        from unittest import mock
+
+        # macOS wording is pinned: the label names the missing grant.
+        with mock.patch.object(entrypoint.platform, "system", return_value="Darwin"):
+            statuses = self._publish(
+                {"installed": True, "permissions": "denied", "screen_recording": False}
+            )
         self.assertEqual(statuses[0]["state"], "pending")
         self.assertIn("Screen Recording", statuses[0]["label"])
+
+    def test_pending_label_names_windows_limits_on_windows(self):
+        from unittest import mock
+
+        with mock.patch.object(entrypoint.platform, "system", return_value="Windows"):
+            statuses = self._publish(
+                {"installed": True, "permissions": "denied", "screen_recording": False}
+            )
+        self.assertEqual(statuses[0]["state"], "pending")
+        self.assertIn("non-elevated target", statuses[0]["label"])
+        self.assertNotIn("Screen Recording", statuses[0]["label"])
+        self.assertNotIn("macOS", statuses[0]["label"])
 
     def test_unprovisioned_bundle_says_so(self):
         statuses = self._publish({"installed": False})
@@ -479,53 +560,93 @@ class StatusRowTests(unittest.TestCase):
         self.assertEqual(computer_use.publish_status()["permissions"], "granted")
 
     def test_rendered_status_names_the_missing_grant_and_the_fix(self):
-        text = _render_status(
-            {
-                "installed": True,
-                "version": "0.29.1",
-                "doctor_ok": True,
-                "permissions": "denied",
-                "screen_recording": False,
-                "permission_detail": "still needs: Screen Recording",
-            }
-        )
+        from unittest import mock
+
+        # macOS wording is pinned so the contract holds on every host.
+        with mock.patch.object(entrypoint.platform, "system", return_value="Darwin"):
+            text = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "denied",
+                    "screen_recording": False,
+                    "permission_detail": "still needs: Screen Recording",
+                }
+            )
         self.assertIn("still needs: Screen Recording", text)
         # The fix must name the app the user actually grants: the one running
         # octet. Pointing at a helper app would send them to grant the wrong
         # identity and never succeed.
         self.assertIn("app you run octet from", text)
 
+    def test_rendered_status_names_windows_limits_on_windows(self):
+        from unittest import mock
+
+        with mock.patch.object(entrypoint.platform, "system", return_value="Windows"):
+            denied = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "denied",
+                    "screen_recording": False,
+                    "permission_detail": "still needs: Screen Recording",
+                }
+            )
+            granted = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "granted",
+                    "runtime": "direct",
+                }
+            )
+            unavailable = _render_status({"installed": True, "runtime": "unavailable"})
+        self.assertIn("Windows limits", denied)
+        self.assertIn("secure desktop", denied)
+        self.assertNotIn("Accessibility", denied)
+        self.assertIn("no separate grant", granted)
+        self.assertNotIn("Accessibility", granted)
+        self.assertIn("non-elevated target", unavailable)
+        self.assertNotIn("Grant Accessibility", unavailable)
+
     def test_status_reports_the_live_runtime(self):
         # The permission fix differs per runtime, so a user must be able to see
-        # which one is live instead of guessing.
-        direct = _render_status(
-            {
-                "installed": True,
-                "version": "0.29.1",
-                "doctor_ok": True,
-                "permissions": "granted",
-                "runtime": "direct",
-            }
-        )
-        self.assertIn("runtime: direct", direct)
-        host = _render_status(
-            {
-                "installed": True,
-                "version": "0.29.1",
-                "doctor_ok": True,
-                "permissions": "granted",
-                "runtime": "desktop-host",
-            }
-        )
-        self.assertIn("runtime: desktop host", host)
-        self.assertIn("cursor", host)
-        unavailable = _render_status({"installed": True, "runtime": "unavailable"})
-        self.assertIn("that host", unavailable)
-        self.assertNotIn("app you run octet from", unavailable)
-        denied_host = _render_status({"installed": True, "runtime": "desktop-host",
-                                      "permissions": "denied"})
-        self.assertIn("selected Cua Driver desktop host", denied_host)
-        self.assertNotIn("app you run octet from", denied_host)
+        # which one is live instead of guessing. macOS wording is pinned so
+        # the contract holds on every host.
+        from unittest import mock
+
+        with mock.patch.object(entrypoint.platform, "system", return_value="Darwin"):
+            direct = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "granted",
+                    "runtime": "direct",
+                }
+            )
+            self.assertIn("runtime: direct", direct)
+            host = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "granted",
+                    "runtime": "desktop-host",
+                }
+            )
+            self.assertIn("runtime: desktop host", host)
+            self.assertIn("cursor", host)
+            unavailable = _render_status({"installed": True, "runtime": "unavailable"})
+            self.assertIn("that host", unavailable)
+            self.assertNotIn("app you run octet from", unavailable)
+            denied_host = _render_status({"installed": True, "runtime": "desktop-host",
+                                          "permissions": "denied"})
+            self.assertIn("selected Cua Driver desktop host", denied_host)
+            self.assertNotIn("app you run octet from", denied_host)
 
     def test_runtime_selection_fails_closed_by_default_on_macos(self):
         # The permission fix differs per runtime, so a user must be able to see
@@ -552,14 +673,18 @@ class StatusRowTests(unittest.TestCase):
                 os.environ["OCTET_CUA_DESKTOP_HOST"] = original_env
 
     def test_granted_status_stops_short(self):
-        text = _render_status(
-            {
-                "installed": True,
-                "version": "0.29.1",
-                "doctor_ok": True,
-                "permissions": "granted",
-            }
-        )
+        from unittest import mock
+
+        # macOS wording is pinned so the contract holds on every host.
+        with mock.patch.object(entrypoint.platform, "system", return_value="Darwin"):
+            text = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "granted",
+                }
+            )
         self.assertIn("Accessibility and Screen Recording allowed", text)
         self.assertNotIn("cannot grant a system permission", text)
 

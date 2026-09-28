@@ -3370,6 +3370,17 @@ max_output_bytes = 4096
 
     #[test]
     fn persistent_extension_trust_grants_preserve_exact_source_paths() {
+        // Absolute-path detection is platform-relative: Unix spellings are
+        // not absolute on Windows, so each platform exercises its own form.
+        #[cfg(windows)]
+        let grants = normalize_extension_trust_grants([
+            "Git-Tools".to_owned(),
+            "git-tools@C:/workspace/.octet/extensions/git-tools/extension.toml".to_owned(),
+            "git-tools@C:/dev@home/git-tools/extension.toml".to_owned(),
+            " Git-Tools ".to_owned(),
+        ])
+        .unwrap();
+        #[cfg(not(windows))]
         let grants = normalize_extension_trust_grants([
             "Git-Tools".to_owned(),
             "git-tools@/workspace/.octet/extensions/git-tools/extension.toml".to_owned(),
@@ -3377,6 +3388,16 @@ max_output_bytes = 4096
             " Git-Tools ".to_owned(),
         ])
         .unwrap();
+        #[cfg(windows)]
+        assert_eq!(
+            grants,
+            vec![
+                "git-tools",
+                "git-tools@C:/dev@home/git-tools/extension.toml",
+                "git-tools@C:/workspace/.octet/extensions/git-tools/extension.toml",
+            ]
+        );
+        #[cfg(not(windows))]
         assert_eq!(
             grants,
             vec![

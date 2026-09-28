@@ -6507,6 +6507,17 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     std::fs::write(&external_file, "host secret").unwrap();
     let external_write = external_dir.path().join("must-not-exist.txt");
     let bash_marker = workspace.join("bash-must-not-run.txt");
+    // The shell command carries a literal path: use the non-canonical
+    // spelling with forward slashes. Canonicalization adds a `\\?\`
+    // verbatim prefix shells cannot consume, and Git Bash silently drops
+    // `>` redirects to backslash paths (exit 0, no file created). Both
+    // spellings name the same file.
+    let bash_marker_for_shell = workspace_dir
+        .path()
+        .join("bash-must-not-run.txt")
+        .display()
+        .to_string()
+        .replace('\\', "/");
 
     let calls = vec![
         (
@@ -6527,7 +6538,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
         (
             "call_process",
             "bash",
-            serde_json::json!({"command": format!("printf ran > {}", bash_marker.display())}),
+            serde_json::json!({"command": format!("printf ran > {}", bash_marker_for_shell)}),
         ),
         (
             "call_host_mutation",
@@ -11242,9 +11253,12 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         .iter()
         .map(|contribution| contribution.name.as_str())
         .collect::<Vec<_>>();
+    // `PowerShellTool` registers (with a snippet) on Windows only.
+    let mut expected = vec!["read", "edit", "write", "bash", "search"];
+    #[cfg(windows)]
+    expected.push("powershell");
     assert_eq!(
-        declared,
-        vec!["read", "edit", "write", "bash", "search"],
+        declared, expected,
         "contributions follow wire order for exactly the tools that declare a snippet"
     );
     // Search contributes its own snippet and stays callable. Rendering does
