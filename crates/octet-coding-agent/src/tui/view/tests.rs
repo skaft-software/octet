@@ -813,6 +813,25 @@ fn wide_session_picker_gives_titles_and_metadata_separate_rows() {
     assert!(lines.iter().all(|line| visible_width(line) <= 100));
 }
 
+#[test]
+fn session_picker_hides_advanced_filter_hints_until_used() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.open_panel(Panel::SessionPicker {
+        picker: PickerState::new(vec![picker_session("one", "First session", 1, 1)], None),
+    });
+    let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 100).join("\n"));
+    assert!(plain.contains("^f transcripts"), "{plain:?}");
+    assert!(plain.contains("^s sort"), "{plain:?}");
+    assert!(!plain.contains("re:<pattern>"), "{plain:?}");
+
+    let mut advanced = PickerState::new(vec![picker_session("one", "First session", 1, 1)], None);
+    advanced.filter = "re:foo".into();
+    shell.close_panel();
+    shell.open_panel(Panel::SessionPicker { picker: advanced });
+    let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 100).join("\n"));
+    assert!(plain.contains("re:<pattern>"), "{plain:?}");
+}
+
 fn plain_composer_surface(shell: &InteractiveShell, width: u16, now: Instant) -> Vec<String> {
     crate::tui::composer_surface::render_composer_surface(&shell.state.borrow(), width, now)
         .into_iter()

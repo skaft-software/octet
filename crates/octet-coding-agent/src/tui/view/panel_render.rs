@@ -603,6 +603,13 @@ pub(super) fn panel_action_footer(
     fit_prioritized_footer(prefix, &separator, &mut segments, width)
 }
 
+fn picker_shows_advanced_filter_hints(picker: &PickerState) -> bool {
+    // Progressive disclosure: `re:` / `"phrase"` / transcript search are
+    // powerful but noisy as always-on chrome. Show them once the filter
+    // actually uses them, keeping the default picker to scope + transcripts.
+    picker.entry_search.is_some() || picker.filter.contains("re:") || picker.filter.contains('"')
+}
+
 fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String, String) {
     let now = Instant::now();
     let inset = " ".repeat(usize::from(
@@ -634,22 +641,33 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
     ) {
         render_ordinary_status(&state.theme, &picker.surface.lifecycle, now).map_or_else(
             || {
-                panel_action_footer(
-                    state,
-                    width,
-                    &inset,
-                    None,
-                    ("tab", "scope"),
-                    &[
-                        ("^f", "transcripts"),
-                        ("re:<pattern>", "filter"),
-                        ("\"phrase\"", "exact"),
-                    ],
-                )
+                if picker_shows_advanced_filter_hints(picker) {
+                    panel_action_footer(
+                        state,
+                        width,
+                        &inset,
+                        None,
+                        ("tab", "scope"),
+                        &[
+                            ("^f", "transcripts"),
+                            ("re:<pattern>", "filter"),
+                            ("\"phrase\"", "exact"),
+                        ],
+                    )
+                } else {
+                    panel_action_footer(
+                        state,
+                        width,
+                        &inset,
+                        None,
+                        ("tab", "scope"),
+                        &[("^f", "transcripts")],
+                    )
+                }
             },
             |status| fit_line(&format!("{inset}{status}"), width),
         )
-    } else {
+    } else if picker_shows_advanced_filter_hints(picker) {
         panel_action_footer(
             state,
             width,
@@ -661,6 +679,15 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
                 ("re:<pattern>", "filter"),
                 ("\"phrase\"", "exact"),
             ],
+        )
+    } else {
+        panel_action_footer(
+            state,
+            width,
+            &inset,
+            None,
+            ("tab", "scope"),
+            &[("^f", "transcripts")],
         )
     };
     let second = if picker.confirming_delete || picker.rename.is_some() {
