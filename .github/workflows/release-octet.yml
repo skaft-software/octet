@@ -933,7 +933,7 @@ jobs:
               echo "skipping already verified immutable package $package@$VERSION"
               continue
             fi
-            npm publish "npm-assets/$artifact" --registry "$NPM_REGISTRY" \
+            npm publish "./npm-assets/$artifact" --registry "$NPM_REGISTRY" \
               --access public \
               --provenance \
               --ignore-scripts \
