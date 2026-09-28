@@ -4358,6 +4358,7 @@ fn tool_schema_reserve_is_positive_and_deterministic() {
     let mut all_core = ExtensionHost::new();
     all_core.load(&CoreTools);
     let all_core_definitions = all_core.tool_definitions();
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut expected_all = vec!["read", "edit", "write", "bash", "search"];
     #[cfg(windows)]
     expected_all.push("powershell");

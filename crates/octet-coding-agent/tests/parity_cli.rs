@@ -182,6 +182,8 @@ struct Fixture {
     home: PathBuf,
     workspace: PathBuf,
     sessions: PathBuf,
+    // Only read on Windows, where TMP/TEMP are redirected into the fixture.
+    #[cfg_attr(not(windows), allow(dead_code))]
     tmp: PathBuf,
 }
 

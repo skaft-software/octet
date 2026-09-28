@@ -11288,6 +11288,7 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         .map(|contribution| contribution.name.as_str())
         .collect::<Vec<_>>();
     // `PowerShellTool` registers (with a snippet) on Windows only.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut expected = vec!["read", "edit", "write", "bash", "search"];
     #[cfg(windows)]
     expected.push("powershell");
