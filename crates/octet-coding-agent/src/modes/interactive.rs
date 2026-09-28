@@ -8500,7 +8500,8 @@ async fn apply_detected_terminal_background<S>(
     shell: &mut InteractiveShell,
     input: &mut EventStream<S>,
     config: &crate::config::Config,
-) where
+) -> bool
+where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     if explicit_terminal_background_override()
@@ -8509,21 +8510,22 @@ async fn apply_detected_terminal_background<S>(
             .is_some()
         || shell.theme().background() != TerminalBackground::Unknown
     {
-        return;
+        return false;
     }
     if shell.theme().capabilities().color == crate::tui::terminal::ColorDepth::None {
         // NO_COLOR still gets the deterministic Auto fallback, but should not
         // receive a background query or any other colour-oriented control.
-        return;
+        return false;
     }
     let Some((red, green, blue)) =
         crate::tui::terminal::query_terminal_background_color(input, Duration::from_millis(120))
             .await
     else {
-        return;
+        return false;
     };
     let background = background_from_terminal_rgb(red, green, blue);
     shell.set_theme(load_theme_for_background(config, background));
+    true
 }
 
 fn terminal_theme_picker_data() -> (Vec<String>, Vec<Option<String>>) {
@@ -8841,6 +8843,11 @@ async fn run_interactive_without_model(
     crate::app::bootstrap::startup_phase("frame.ready");
     shell.finish_startup();
     shell.render();
+    // Terminal appearance is cosmetic. The bounded OSC 11 probe must never
+    // delay the first editable frame or provider/session readiness.
+    if apply_detected_terminal_background(shell, input, &boot.config).await {
+        shell.render();
+    }
 
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     scroll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -9606,7 +9613,6 @@ async fn run_interactive_once(
         shell.startup_update_notifier(),
     );
     let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
-    apply_detected_terminal_background(&mut shell, &mut input, &config).await;
     if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
         && !config.plain
@@ -9727,6 +9733,9 @@ async fn run_interactive_once(
     crate::app::bootstrap::startup_phase("frame.ready");
     shell.finish_startup();
     shell.render();
+    if apply_detected_terminal_background(&mut shell, &mut input, &app.config).await {
+        shell.render();
+    }
 
     let mut pending_actions = VecDeque::new();
     let mut goal_deadline = recovered_goal_deadline(&app)?;

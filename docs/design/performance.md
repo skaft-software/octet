@@ -221,7 +221,12 @@ putting timing text on the TUI. `process.enter` is after Tokio runtime creation;
 `--models` scope and resume selector resolution. Catalog phases separate base,
 selected-route, Codex credential/inventory, and deferred fleet work;
 `session.resolve`, `session.replay`, `app.build`, `history.hydrate`, and
-`frame.ready` cover later readiness. Differences between adjacent phase times
+`frame.ready` cover later readiness. Extension startup additionally brackets
+`extensions.digest` (manifest/source hashing) and `extensions.handshake`
+(process launch and initialize), with counters for catalog entries, hashed
+files/bytes, and eligible handshakes. Disabled or untrusted entries do not
+hash their source trees. `history.hydrate` reports replayed messages and its
+configured tail budget. Differences between adjacent phase times
 attribute *in-process* work, not process spawn, a physical keypress, or terminal
 paint. Measure spawn-to-first-editable-frame and input-to-PTY separately with a
 PTY; record cold/warm caches, selected route, resumed route, custom inventory,

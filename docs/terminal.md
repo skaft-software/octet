@@ -47,6 +47,9 @@ inventory discovery also runs after the shell owns input, not before first paint
 After session resolution, the interactive renderer sets the terminal window title
 to `octet` or `octet · <user-assigned session name>` via OSC 2. It updates on
 rename and session changes without placing controls in plain, print, or RPC output.
+When auto-theme detection needs an OSC 11 background-color reply, the terminal
+probe starts after the first ready frame. A changed background triggers a
+repaint; a timeout or unsupported reply keeps the initial theme.
 
 ## Input and active work
 

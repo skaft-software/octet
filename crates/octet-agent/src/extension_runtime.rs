@@ -290,8 +290,20 @@ impl ExtensionRuntimeCatalogEntry {
     }
 
     fn current_digest(&self) -> Result<(ExtensionContentDigest, bool), String> {
-        catalog_content_digest(&self.descriptor)
+        catalog_content_digest(&self.descriptor, &mut ExtensionDigestWork::default())
     }
+}
+
+/// Bounded source work performed while constructing one catalog. Admission and
+/// post-handshake source rechecks remain separate security boundaries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtensionDigestWork {
+    /// Source files whose bytes entered the catalog hash.
+    pub files: usize,
+    /// Source bytes whose content entered the catalog hash.
+    pub bytes: usize,
+    /// Discovered entries skipped because they cannot activate.
+    pub inactive: usize,
 }
 
 /// Static content-bound catalog used by a runtime manager.
@@ -299,6 +311,7 @@ impl ExtensionRuntimeCatalogEntry {
 pub struct ExtensionRuntimeCatalog {
     entries: BTreeMap<String, ExtensionRuntimeCatalogEntry>,
     diagnostics: Vec<ExtensionRuntimeCatalogDiagnostic>,
+    digest_work: ExtensionDigestWork,
 }
 
 impl ExtensionRuntimeCatalog {
@@ -318,27 +331,49 @@ impl ExtensionRuntimeCatalog {
                 });
                 continue;
             }
-            let (content_digest, source_verified) = match catalog_content_digest(&descriptor) {
-                Ok(value) => value,
-                Err(message) => {
-                    catalog.diagnostics.push(ExtensionRuntimeCatalogDiagnostic {
-                        extension: name.clone(),
-                        message,
-                    });
-                    // Keep isolated legacy behavior available while preventing
-                    // unverified source sharing. The fallback remains stable for
-                    // the parsed manifest and cannot collide with verified
-                    // content because it has a separate domain tag.
-                    let encoded = serde_json::to_vec(&descriptor.manifest).unwrap_or_default();
-                    (
-                        ExtensionContentDigest(sha256_hex(
-                            b"octet-extension-unverified-catalog-v1\0",
+            // Status still retains inactive descriptors, but no content identity
+            // can authorize their launch. An enable/trust/policy change builds a
+            // new catalog and verifies the source before any activation.
+            if !descriptor.activation.enabled
+                || descriptor.activation.trust != ExtensionTrust::Trusted
+            {
+                catalog.digest_work.inactive += 1;
+                let encoded = serde_json::to_vec(&descriptor.manifest).unwrap_or_default();
+                catalog.entries.insert(
+                    name,
+                    ExtensionRuntimeCatalogEntry {
+                        descriptor,
+                        content_digest: ExtensionContentDigest(sha256_hex(
+                            b"octet-extension-inactive-catalog-v1\0",
                             encoded,
                         )),
-                        false,
-                    )
-                }
-            };
+                        source_verified: false,
+                    },
+                );
+                continue;
+            }
+            let (content_digest, source_verified) =
+                match catalog_content_digest(&descriptor, &mut catalog.digest_work) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        catalog.diagnostics.push(ExtensionRuntimeCatalogDiagnostic {
+                            extension: name.clone(),
+                            message,
+                        });
+                        // Keep isolated legacy behavior available while preventing
+                        // unverified source sharing. The fallback remains stable for
+                        // the parsed manifest and cannot collide with verified
+                        // content because it has a separate domain tag.
+                        let encoded = serde_json::to_vec(&descriptor.manifest).unwrap_or_default();
+                        (
+                            ExtensionContentDigest(sha256_hex(
+                                b"octet-extension-unverified-catalog-v1\0",
+                                encoded,
+                            )),
+                            false,
+                        )
+                    }
+                };
             catalog.entries.insert(
                 name,
                 ExtensionRuntimeCatalogEntry {
@@ -349,6 +384,11 @@ impl ExtensionRuntimeCatalog {
             );
         }
         catalog
+    }
+
+    /// Returns bounded catalog hashing work for opt-in startup attribution.
+    pub fn digest_work(&self) -> &ExtensionDigestWork {
+        &self.digest_work
     }
 
     /// Returns an entry by selected manifest name.
@@ -428,10 +468,13 @@ fn python_package_sources(root: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn catalog_content_digest(
     descriptor: &DiscoveredExtension,
+    work: &mut ExtensionDigestWork,
 ) -> Result<(ExtensionContentDigest, bool), String> {
     let manifest_path = absolute_path(&descriptor.manifest_path)?;
     let manifest = read_regular_file_bounded(&manifest_path, 64 * 1024)
         .map_err(|_| "manifest content cannot be verified".to_owned())?;
+    work.files += 1;
+    work.bytes += manifest.len();
     let mut hasher = Sha256::new();
     hasher.update(b"octet-extension-runtime-content-v1\0manifest\0");
     hasher.update(&manifest);
@@ -455,6 +498,8 @@ fn catalog_content_digest(
     let local = absolute_path(&local)?;
     match read_regular_file_bounded(&local, MAX_CATALOG_SOURCE_BYTES) {
         Ok(bytes) => {
+            work.files += 1;
+            work.bytes += bytes.len();
             hasher.update(b"\0source\0");
             let python_entrypoint = local.extension().is_some_and(|extension| extension == "py")
                 || bytes
@@ -477,6 +522,8 @@ fn catalog_content_digest(
                     let content = read_regular_file_bounded(&source, remaining)
                         .map_err(|_| "extension package source cannot be verified".to_owned())?;
                     total += content.len();
+                    work.files += 1;
+                    work.bytes += content.len();
                     hasher.update(b"\0package\0");
                     hasher.update(relative.to_string_lossy().as_bytes());
                     hasher.update(b"\0");
@@ -2758,6 +2805,40 @@ for line in sys.stdin:
         assert_eq!(manager.usage(), ExtensionRuntimeUsage::default());
         binding.release().await;
         manager.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inactive_python_source_is_not_scanned_until_it_can_activate() {
+        use std::os::unix::fs::symlink;
+        let temporary = tempfile::tempdir().unwrap();
+        let mut selected = python_descriptor(temporary.path(), "python-service");
+        let package = selected
+            .manifest_path
+            .parent()
+            .unwrap()
+            .join("linked-package");
+        symlink(temporary.path(), &package).unwrap();
+        selected.activation.enabled = false;
+        let inactive = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        assert_eq!(inactive.digest_work().inactive, 1);
+        assert_eq!(inactive.digest_work().files, 0);
+        assert_eq!(inactive.digest_work().bytes, 0);
+        assert!(inactive.diagnostics().is_empty());
+        assert!(!inactive.get("python-service").unwrap().source_verified);
+
+        selected.activation.enabled = true;
+        selected.activation.trust = ExtensionTrust::Untrusted;
+        let untrusted = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        assert_eq!(untrusted.digest_work().inactive, 1);
+        assert_eq!(untrusted.digest_work().files, 0);
+        assert!(untrusted.diagnostics().is_empty());
+
+        selected.activation.trust = ExtensionTrust::Trusted;
+        let enabled = ExtensionRuntimeCatalog::from_descriptors([selected]);
+        assert!(!enabled.diagnostics().is_empty());
+        assert!(!enabled.get("python-service").unwrap().source_verified);
+        assert!(enabled.digest_work().files > 0);
     }
 
     #[cfg(unix)]
