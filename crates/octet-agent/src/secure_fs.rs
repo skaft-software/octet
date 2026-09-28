@@ -3914,7 +3914,7 @@ mod tests {
         let created = existing.join("created");
         let too_long = "x".repeat(512);
 
-        assert!(create_private_directory_all(&created.join(too_long)).is_err());
+        assert!(create_private_directory_all(&created.join(&too_long)).is_err());
         assert!(existing.is_dir());
         assert!(!created.exists());
 
