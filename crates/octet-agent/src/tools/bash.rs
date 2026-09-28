@@ -794,8 +794,12 @@ impl Tool for CheckpointedBashTool {
     }
 }
 
+/// Resolve the Bash-compatible shell used on Windows: an explicit
+/// `shell_path`, then Git for Windows `bash.exe`, then `bash` on `PATH`,
+/// excluding legacy WSL `bash.exe`. cmd.exe and PowerShell are never implicit
+/// fallbacks. Shared by the bash tool and the interactive `!` command.
 #[cfg(windows)]
-fn resolve_windows_shell(configured: Option<&std::path::Path>) -> Result<PathBuf, ToolError> {
+pub fn resolve_windows_shell(configured: Option<&std::path::Path>) -> Result<PathBuf, ToolError> {
     if let Some(configured) = configured {
         // An explicit host path is an intentional contract: it must provide
         // Bash-compatible `-c` semantics, but octet does not reinterpret it as
@@ -810,7 +814,9 @@ fn resolve_windows_shell(configured: Option<&std::path::Path>) -> Result<PathBuf
         }
     }
     if let Some(path) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&path) {
+        // An empty or relative entry would resolve against the current
+        // directory, which is the workspace; only absolute entries are used.
+        for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
             candidates.push(directory.join("bash.exe"));
             candidates.push(directory.join("bash"));
         }

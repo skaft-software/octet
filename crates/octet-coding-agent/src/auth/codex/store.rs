@@ -84,14 +84,30 @@ pub struct CredentialStore {
     legacy_home: Option<PathBuf>,
 }
 
-/// Cross-process refresh serialization guard. The lock is held on the private
-/// credential directory itself, whose descriptor stays stable while credential
-/// files are atomically replaced.
+/// Cross-process refresh serialization guard. On Unix the lock is held on
+/// the private credential directory itself, whose descriptor stays stable
+/// while credential files are atomically replaced. On Windows `LockFileEx`
+/// fails on directory handles (`ERROR_INVALID_PARAMETER`), so the lock is
+/// held on a dedicated lock file inside that directory instead.
 #[must_use = "the refresh lock must be retained until the protected operation completes"]
 pub(crate) struct RefreshLock {
     directory: std::fs::File,
     path: PathBuf,
     locked: bool,
+}
+
+/// Name of the dedicated refresh-lock file inside the private credential
+/// directory (Windows; Unix locks the directory itself).
+#[cfg(not(unix))]
+const REFRESH_LOCK_FILE_NAME: &str = ".codex-refresh.lock";
+
+/// Whether an `fs2` lock attempt failed because another process holds the
+/// lock. `fs2` reports contention with the platform's lock error
+/// (`EWOULDBLOCK` on Unix, `ERROR_LOCK_VIOLATION` on Windows), so compare
+/// against its own contended error instead of assuming `WouldBlock`.
+fn lock_contention(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 impl RefreshLock {
@@ -203,8 +219,15 @@ impl CredentialStore {
     /// exists, still releases exactly as before.
     pub(crate) fn lock_refresh_within(&self, wait: std::time::Duration) -> Result<RefreshLock> {
         let path = self.refresh_lock_directory()?;
+        #[cfg(unix)]
         let directory = octet_agent::secure_fs::open_private_directory_for_lock(&path)
             .with_context(|| format!("opening refresh lock directory {}", path.display()))?;
+        #[cfg(not(unix))]
+        let directory = {
+            let lock_path = path.join(REFRESH_LOCK_FILE_NAME);
+            octet_agent::secure_fs::open_private_lock_file(&lock_path)
+                .with_context(|| format!("opening refresh lock file {}", lock_path.display()))?
+        };
         let deadline = std::time::Instant::now() + wait;
         loop {
             match fs2::FileExt::try_lock_exclusive(&directory) {
@@ -215,7 +238,7 @@ impl CredentialStore {
                         locked: true,
                     });
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if lock_contention(&error) => {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
                         anyhow::bail!(

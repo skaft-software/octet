@@ -2186,6 +2186,17 @@ mod tests {
         assert!(!destination.exists());
     }
 
+    // No octet Serve package is published for this target
+    // (`target_triple` errs); local-install logic is covered on distributed
+    // targets.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )),
+        ignore = "no octet Serve package is published for this target"
+    )]
     #[test]
     fn local_archive_classifier_keeps_application_and_bundle_formats_distinct() {
         let directory = tempfile::tempdir().unwrap();
@@ -2231,6 +2242,15 @@ mod tests {
         );
     }
 
+    // See `local_archive_classifier_keeps_application_and_bundle_formats_distinct`.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )),
+        ignore = "no octet Serve package is published for this target"
+    )]
     #[test]
     fn local_archive_installs_expected_shape_and_can_be_replaced() {
         let directory = tempfile::tempdir().unwrap();
@@ -2302,6 +2322,15 @@ mod tests {
         assert!(extract_archive(&path, &output).is_err());
     }
 
+    // See `local_archive_classifier_keeps_application_and_bundle_formats_distinct`.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )),
+        ignore = "no octet Serve package is published for this target"
+    )]
     #[test]
     fn incompatible_manifest_is_rejected() {
         let manifest: PackageManifest = toml::from_str(&package_manifest(b"runtime")).unwrap();
@@ -2315,6 +2344,15 @@ mod tests {
         assert!(validate_manifest(&manifest).is_err());
     }
 
+    // See `local_archive_classifier_keeps_application_and_bundle_formats_distinct`.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )),
+        ignore = "no octet Serve package is published for this target"
+    )]
     #[test]
     fn removal_does_not_touch_data_outside_the_package() {
         let directory = tempfile::tempdir().unwrap();

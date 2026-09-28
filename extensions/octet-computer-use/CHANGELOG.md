@@ -4,6 +4,11 @@
 
 ### Added
 
+- An attended, opt-in live observe-act-verify smoke (`tests/live_smoke.py`)
+  that refuses to run in CI, without a confirmation flag, or without an
+  interactive terminal, and a no-driver status/fail-closed test through the
+  real entrypoint. See the README's Windows section.
+
 - Bundle 24 MIT-attributed Cua dotLottie cursor themes with an Octet-inspired,
   slightly smaller silhouette and the stable model-adaptive TUI prompt colors.
   `/computer-use setup` installs the compiled themes locally; cursor sessions
@@ -47,6 +52,12 @@
   of silently switching to direct mode.
 
 ### Fixed
+
+- Stage full-size screenshots on Windows, where `O_NOFOLLOW` does not exist:
+  exclusive creation plus a final-path check against the resolved scratch
+  root replaces it, and junctions are rejected wherever symlinks were. The
+  optional Jev key gets a protected current-user-only ACL on Windows and is
+  not stored if that cannot be applied.
 
 - `computer_use_setup` honors an explicitly requested driver version. The request
   is validated before any reuse, and an existing install is reused only when it

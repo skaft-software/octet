@@ -883,6 +883,13 @@ mod tests {
         }
     }
 
+    // The update path needs atomic directory exchange, which is unavailable
+    // on Windows (`atomic_exchange_directories` is linux/macOS-only); a
+    // non-atomic fallback with crash recovery is a separate product decision.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        ignore = "atomic directory exchange is unavailable on this platform"
+    )]
     #[test]
     fn local_bundle_installs_lists_updates_atomically_and_removes() {
         let directory = tempfile::tempdir().unwrap();

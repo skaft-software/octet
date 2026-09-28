@@ -103,9 +103,12 @@ cargo build --release --locked -p octet-coding-agent --bins
 This builds `octet` and `octet-host` under `target/release` without replacing an
 installed copy. To build only the terminal binary, use
 `cargo build --release --locked -p octet-coding-agent --bin octet`.
-Command execution is Unix-only. Normal builds use checked-in model metadata;
-they do not refresh the catalog over the network. Continue with
-[provider setup](providers.md).
+Normal builds use checked-in model metadata; they do not refresh the catalog
+over the network. Continue with [provider setup](providers.md).
+
+On Windows, build the `x86_64-pc-windows-gnu` target with a MinGW-w64 toolchain
+as described in [Windows](windows.md#target-and-toolchain); bash commands there
+need Git for Windows or another Bash-compatible shell.
 
 ## Optional packages
 

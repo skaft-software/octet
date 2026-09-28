@@ -343,6 +343,36 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(replies[4]["result"]["segments"][0]["text"], "ok")
 
 
+class ProcessStdioTests(unittest.TestCase):
+    def test_process_streams_carry_exact_utf8_lf_frames(self):
+        # Windows text streams encode with the ANSI code page and translate LF
+        # to CRLF. Model both; run() must use the binary buffers underneath.
+        frames = "\n".join([
+            json.dumps(initialize(tools=["hello_world"])),
+            json.dumps(request(2, "tool/call", {
+                "name": "hello_world", "arguments": {"name": "Zoë \U0001f44b"}, "context": {},
+            }), ensure_ascii=False),
+            json.dumps(request(3, "shutdown")),
+        ]) + "\n"
+        raw_input = io.BytesIO(frames.encode("utf-8"))
+        raw_output = io.BytesIO()
+        text_input = io.TextIOWrapper(raw_input, encoding="cp1252", newline=None)
+        text_output = io.TextIOWrapper(raw_output, encoding="cp1252", newline="\r\n")
+        extension = Extension(stderr=io.StringIO())
+
+        @extension.tool(name="hello_world", description="Greet someone")
+        def hello(args):
+            return {"content": f"Hello, {args['name']}!"}
+
+        with patch.object(sys, "stdin", text_input), patch.object(sys, "stdout", text_output):
+            extension.run()
+        written = raw_output.getvalue()
+        self.assertNotIn(b"\r", written)
+        messages = [json.loads(line) for line in written.decode("utf-8").splitlines()]
+        self.assertEqual([message["id"] for message in messages], [1, 2, 3])
+        self.assertEqual(messages[1]["result"]["content"], "Hello, Zoë \U0001f44b!")
+
+
 class CleanIdentityTests(unittest.TestCase):
     def test_previous_environment_prefix_is_not_read(self):
         with patch.dict(os.environ, {"YGG_EXTENSION_API_VERSION": "0.2"}, clear=True):

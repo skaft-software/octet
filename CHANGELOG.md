@@ -9,6 +9,44 @@
   `npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1`.
   README, installation, distribution, getting-started, and release docs now lead
   with the npm lane.
+- Build native Windows x64 (`x86_64-pc-windows-gnu`) binaries again: the
+  interactive crate did not compile for Windows. A new Windows CI job builds
+  `octet.exe` and `octet-host.exe`, checks the host hello handshake, runs the
+  Windows terminal, ConPTY, workspace, Python SDK and computer-use suites, and
+  uploads an unsigned pull-request test artifact. Nothing is published; see
+  [Windows](docs/windows.md).
+- Run the interactive frontend in native Windows Terminal and conhost. Both
+  export no `TERM`, so PowerShell and cmd sessions always fell back to plain
+  output. The console is now detected directly (Windows Terminal: Unicode,
+  truecolor, italics, links; conhost: ASCII, 256 colors; mintty pipes and
+  redirected streams stay plain). Frames reach the console in one
+  `WriteConsoleW` call, delayed end-of-line wrapping keeps full-width rows from
+  shifting later frames, and console close, `Ctrl+Break`, logoff and shutdown
+  restore the console through the coordinated shutdown path.
+- Stop a Windows terminal's background-colour reply from leaking into the
+  composer: crossterm reports a key-up for every synthesized key-down, which
+  flushed an unconfirmed reply prefix as typed text.
+- Start Python extensions on Windows through `py -3` or `python.exe` from
+  `PATH`; Windows cannot run a script by its `#!` line. The Python SDK now
+  frames stdio as exact UTF-8 with LF on every platform instead of the
+  Windows code page and CRLF.
+- Run the interactive `!` command through Git Bash on Windows with Job Object
+  cleanup, matching the bash tool, instead of requiring `sh` on `PATH`.
+- Publish new files on Windows through the directory-relative native rename
+  (`NtSetInformationFile`) instead of the Win32 wrapper, which documents its
+  name as a NUL-terminated path. New private files failed to publish on the
+  Windows runner with `ERROR_INVALID_PARAMETER`.
+- Start extensions and open sessions from an elevated Windows session: the
+  host's artifact store (its temporary root and per-generation scratch) and the
+  workspace session directory are now created owned by the current user,
+  instead of adopting directories an elevated process creates owned by the
+  Administrators group.
+- Replace existing files on Windows through pin, then displace, then publish:
+  the target is pinned (deny write/delete sharing while holding `DELETE`),
+  re-verified, renamed aside to `.octet-old-*`, and the staged file is
+  published with a no-replace rename. This unblocks the `edit` tool and every
+  rewrite of existing private state (session metadata, auth stores, model
+  caches) beyond first-run writes; see [Windows](docs/windows.md).
 
 ## [0.8.1] - 2026-09-27
 

@@ -445,6 +445,15 @@ pub fn translate_with_bindings(
             if matches("app.message.dequeue") && press {
                 return InputAction::EditQueued;
             }
+            // The paste gesture never falls through to character insertion.
+            // A successful native read is consumed before translation by the
+            // interactive paste pre-check; reaching here means there was no
+            // text to paste (notably alt+v on win32, which would otherwise
+            // insert 'v'). This is the consume half of the recorded
+            // `PasteImage` keymap work; image payloads remain a separate task.
+            if matches("app.clipboard.pasteImage") && press {
+                return InputAction::Ignore;
+            }
             if matches("app.interrupt") && press {
                 return if active {
                     InputAction::DispatchQueued
@@ -667,6 +676,24 @@ mod tests {
         Event::Key(KeyEvent::new(code, modifiers))
     }
 
+    /// Translate with the Linux default bindings, for assertions that pin a
+    /// Linux-specific gesture. The win32 keymap intentionally binds these
+    /// keys differently (see `keybindings::default_definitions`); win32
+    /// behavior is covered by the interactive gesture tests instead.
+    fn translate_linux(event: Option<Event>, active: bool, editor_text: &str) -> InputAction {
+        translate_with_bindings(
+            event,
+            active,
+            editor_text,
+            true,
+            &keybindings::KeybindingsManager::with_platform(
+                "linux",
+                false,
+                std::collections::BTreeMap::new(),
+            ),
+        )
+    }
+
     #[test]
     fn extension_shortcuts_normalize_events_and_preserve_host_bindings() {
         let parsed = parse_extension_shortcut("ctrl+shift+p").unwrap();
@@ -775,7 +802,7 @@ mod tests {
                     kind,
                 )));
                 assert_eq!(
-                    translate(event, active, ""),
+                    translate_linux(event, active, ""),
                     if kind == KeyEventKind::Press {
                         InputAction::EditQueued
                     } else {
@@ -1097,8 +1124,9 @@ mod tests {
             ),
             InputAction::Edit(EditAction::Backspace)
         );
+        // `alt+enter` is the Linux follow-up gesture (win32 uses `ctrl+q`).
         assert_eq!(
-            translate(Some(key(KeyCode::Enter, KeyModifiers::ALT)), false, "x"),
+            translate_linux(Some(key(KeyCode::Enter, KeyModifiers::ALT)), false, "x"),
             InputAction::Submit("x".into())
         );
         assert_eq!(

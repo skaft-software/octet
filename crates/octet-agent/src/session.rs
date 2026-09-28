@@ -1209,6 +1209,17 @@ impl Session {
     /// Creates a new empty session file on disk. Fails if the file exists.
     pub fn create(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
+        #[cfg(windows)]
+        if path.is_absolute() {
+            // New session files carry an owner-only ACL from creation,
+            // matching the Unix `0o600` behavior below and the production
+            // team-file path. Without this, later owner-only reads (for
+            // example delegation's child-session reconciliation) fail closed
+            // on files inheriting `%TEMP%` ACLs.
+            let file = crate::secure_fs::create_regular_file_for_append(&path)
+                .map_err(partial_journal_file_error)?;
+            return Self::create_with_file(path, file);
+        }
         let mut options = OpenOptions::new();
         options.create_new(true).read(true).append(true);
         #[cfg(unix)]
@@ -1346,9 +1357,16 @@ impl Session {
         let mut options = OpenOptions::new();
         options.read(true);
         if recover_tail {
-            // Windows tail repair needs FILE_WRITE_DATA in addition to append
-            // access so `set_len` can remove a torn final record.
-            options.write(true).append(true);
+            options.write(true);
+            // `append(true)` is Unix-only here: on Windows `std` maps an
+            // append handle to `FILE_APPEND_DATA` without `FILE_WRITE_DATA`,
+            // so tail repair's `set_len` fails with `ERROR_ACCESS_DENIED`.
+            // Writers seek to the end under an exclusive lock before every
+            // write, and `GENERIC_WRITE` already carries append-data access,
+            // so plain `write(true)` preserves append behavior while also
+            // allowing truncation of a torn final record.
+            #[cfg(unix)]
+            options.append(true);
         }
         let file = options.open(&path)?;
         Self::open_file_impl_with_limits(path, file, recover_tail, max_file_bytes, max_records)
@@ -4729,6 +4747,18 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn newly_created_session_is_owner_only_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let session = Session::create(&path).unwrap();
+        drop(session);
+        // Delegation reconciles child sessions through an owner-only read;
+        // a session created the ordinary way must pass that same check.
+        crate::secure_fs::open_private_file_for_read(&path).unwrap();
     }
 
     #[test]

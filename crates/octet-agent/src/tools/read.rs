@@ -368,13 +368,50 @@ fn workspace_relative_file_url_path(path: String, ctx: &ToolContext<'_>) -> Stri
     if ctx.sandbox.allow_external_paths {
         return path;
     }
-    Path::new(&path)
-        .strip_prefix(ctx.workspace)
+    if let Some(relative) = strip_workspace_prefix(&path, ctx.workspace) {
+        return relative;
+    }
+    path
+}
+
+/// Lexically relativize a URL-derived absolute path against the workspace.
+///
+/// Plain `strip_prefix` first (covers Unix and Windows when both spellings
+/// agree). On Windows the workspace is usually canonicalized, so it carries
+/// a `\\?\` verbatim prefix while URL-derived paths do not, and drive-letter
+/// case may differ; fall back to a normalized comparison that slices the
+/// original spelling at the matched length.
+fn strip_workspace_prefix(path: &str, workspace: &Path) -> Option<String> {
+    if let Some(relative) = Path::new(path)
+        .strip_prefix(workspace)
         .ok()
         .filter(|relative| !relative.as_os_str().is_empty())
-        .map_or(path.clone(), |relative| {
-            relative.to_string_lossy().into_owned()
-        })
+    {
+        return Some(relative.to_string_lossy().into_owned());
+    }
+    #[cfg(windows)]
+    {
+        let workspace_text = workspace.to_string_lossy();
+        let workspace_body = workspace_text
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&workspace_text);
+        let path_body = path.strip_prefix(r"\\?\").unwrap_or(path);
+        // Separator replacement preserves byte indices, so a match in the
+        // normalized spelling maps back onto the original slice directly.
+        let workspace_norm = workspace_body.replace('/', "\\");
+        let path_norm = path_body.replace('/', "\\");
+        if path_norm.len() > workspace_norm.len() + 1
+            && path_norm[..workspace_norm.len()].eq_ignore_ascii_case(&workspace_norm)
+            && path_norm.as_bytes()[workspace_norm.len()] == b'\\'
+        {
+            let cut = path.len() - path_body.len() + workspace_norm.len() + 1;
+            let relative = &path[cut..];
+            if !relative.is_empty() {
+                return Some(relative.to_owned());
+            }
+        }
+    }
+    None
 }
 
 async fn validated_remote_endpoint(

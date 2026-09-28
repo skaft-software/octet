@@ -4,7 +4,12 @@
 //! Windows they are opened relative to already-authorized directory handles
 //! with reparse-point traversal disabled. Mutations stay bound to those parent
 //! handles, and private Windows objects use a protected current-user-only ACL.
-//! Platforms without descriptor-relative primitives fail closed.
+//! Replacing an existing file is compare-and-swap on both: Linux and macOS
+//! exchange the names atomically and roll back if the displaced object is not
+//! the one observed; Windows, which has no exchange, pins the verified object
+//! against writers and deleters, renames it aside, and publishes with a
+//! no-replace rename. Platforms without descriptor-relative primitives fail
+//! closed.
 
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -155,7 +160,8 @@ pub fn read_regular_file_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, S
 /// Returns `true` if a file was removed and `false` when it was already
 /// absent. Symbolic links and special files are rejected. On Unix, the final
 /// name is atomically moved to a private random name and revalidated before it
-/// is unlinked, so a replacement cannot be removed by cleanup.
+/// is unlinked; on Windows the opened object is deleted by handle. Either way a
+/// replacement cannot be removed by cleanup.
 pub fn remove_regular_file_if_exists(path: &Path) -> Result<bool, SecureFileError> {
     validate_absolute_file_path(path)?;
     imp::remove_regular_file_if_exists(path)
@@ -456,8 +462,9 @@ pub fn write_private_atomic_if_unchanged(
 /// Atomically publish regular-file bytes only if the target still matches an
 /// earlier caller snapshot. The descriptor-bound mutation revalidates both
 /// bytes and file identity, uses no-replace creation for a missing target, and
-/// uses rollback-safe exchange for an existing target where the platform
-/// supports it.
+/// for an existing target uses a rollback-safe exchange (Linux, macOS) or a
+/// pinned rename-aside followed by no-replace publication (Windows, where
+/// readers can briefly find the target missing).
 pub fn write_atomic_if_unchanged(
     path: &Path,
     expected: Option<&[u8]>,
@@ -1924,22 +1931,23 @@ mod imp {
 mod imp {
     use super::*;
     use std::ffi::{c_void, OsStr, OsString};
-    use std::fs::{File, OpenOptions, Permissions};
+    use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, Write};
     use std::mem::{offset_of, size_of};
-    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
     use std::os::windows::fs::OpenOptionsExt as _;
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
     use std::path::{Component, PathBuf, Prefix};
     use std::ptr::{null, null_mut};
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
-        NtCreateFile, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-        FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        FileRenameInformation, NtCreateFile, NtSetInformationFile, FILE_CREATE,
+        FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
+        FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
     };
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, LocalFree, RtlNtStatusToDosError, HANDLE, INVALID_HANDLE_VALUE,
-        OBJ_CASE_INSENSITIVE, UNICODE_STRING,
+        CloseHandle, GetLastError, LocalFree, RtlNtStatusToDosError, ERROR_SHARING_VIOLATION,
+        HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, UNICODE_STRING,
     };
     use windows_sys::Win32::Security::Authorization::{
         GetSecurityInfo, SetEntriesInAclW, SetSecurityInfo, EXPLICIT_ACCESS_W, SET_ACCESS,
@@ -1955,15 +1963,18 @@ mod imp {
         SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, GetFileInformationByHandle,
-        SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ALL_ACCESS,
-        FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
-        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-        FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES,
-        FILE_WRITE_DATA, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+        FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileNameInfo,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, SetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_READONLY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM, FILE_BASIC_INFO,
+        FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_NAME_INFO,
+        FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, READ_CONTROL, SYNCHRONIZE,
+        WRITE_DAC,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -1988,6 +1999,32 @@ mod imp {
         | FILE_WRITE_ATTRIBUTES
         | READ_CONTROL
         | SYNCHRONIZE;
+    // A pinned replacement target is opened with DELETE (so this handle can
+    // rename it) while denying delete sharing: no other opener can rename,
+    // delete, or replace the verified object while it is held. Write sharing
+    // is allowed so a file octet itself holds open (session and journal
+    // descriptors, which share everything) or that a cooperative holder
+    // keeps open (editors, `tempfile` handles) does not make every
+    // replacement fail with a sharing violation. The residual race is the
+    // same as the Unix one: bytes written through such a handle after the
+    // check below lose to the staged replacement. The hard guarantees are
+    // unaffected: the pin still verifies identity and bytes, no step
+    // overwrites a name it did not vacate itself, and a name recreated in
+    // the displacement window still wins with the original kept under
+    // `.octet-old-*`. Holders that do not share delete access still report
+    // the file as in use.
+    const PIN_ACCESS: u32 =
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE | SYNCHRONIZE;
+    const PIN_SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    // Scanners and sync clients briefly hold files open; retry a pin that
+    // meets one for up to about 200 ms before reporting the file as in use.
+    const PIN_SHARING_ATTEMPTS: u32 = 10;
+    const PIN_SHARING_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+    // Attributes a replacement carries over from the file it replaces.
+    const PRESERVED_ATTRIBUTES: u32 = FILE_ATTRIBUTE_READONLY
+        | FILE_ATTRIBUTE_HIDDEN
+        | FILE_ATTRIBUTE_SYSTEM
+        | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct FileIdentity {
@@ -2247,6 +2284,29 @@ mod imp {
         attributes: u32,
         security_descriptor: *const SECURITY_DESCRIPTOR,
     ) -> Result<(File, usize), SecureFileError> {
+        nt_open_at_shared(
+            parent,
+            name,
+            access,
+            disposition,
+            options,
+            attributes,
+            security_descriptor,
+            SHARE_ALL,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn nt_open_at_shared(
+        parent: HANDLE,
+        name: &OsStr,
+        access: u32,
+        disposition: u32,
+        options: u32,
+        attributes: u32,
+        security_descriptor: *const SECURITY_DESCRIPTOR,
+        share: u32,
+    ) -> Result<(File, usize), SecureFileError> {
         if !component_is_safe(name) {
             return Err(SecureFileError::InvalidPath(
                 name.to_string_lossy().into_owned(),
@@ -2282,7 +2342,7 @@ mod imp {
                 &mut io_status,
                 null(),
                 attributes,
-                SHARE_ALL,
+                share,
                 disposition,
                 options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
                 null(),
@@ -2682,12 +2742,25 @@ mod imp {
                 descriptor,
             )
         };
-        let (file, information) = if private_creation {
-            with_private_descriptor(false, open)?
+        let result = if private_creation {
+            with_private_descriptor(false, open)
         } else {
-            open(null())?
+            open(null())
         };
-        Ok((file, information == 2))
+        match result {
+            Ok((file, information)) => Ok((file, information == 2)),
+            Err(error) => {
+                // `FILE_NON_DIRECTORY_FILE` refuses directories with an
+                // access-denied shaped error, hiding "is a directory" from
+                // callers that map `NotRegular` to a friendly diagnostic
+                // (read/write tools). Probe with a directory open so those
+                // callers keep working; any other failure keeps its error.
+                if open_directory_at(parent, name, false, false).is_ok() {
+                    return Err(SecureFileError::NotRegular);
+                }
+                Err(error)
+            }
+        }
     }
 
     pub(super) fn create_private_directory_all(path: &Path) -> Result<(), SecureFileError> {
@@ -3057,7 +3130,6 @@ mod imp {
         Regular {
             bytes: Vec<u8>,
             identity: FileIdentity,
-            permissions: Permissions,
         },
     }
 
@@ -3098,19 +3170,11 @@ mod imp {
                 validate_private_acl(&file, false)?;
             }
         }
-        let permissions = file.metadata()?.permissions();
         let bytes = read_open_file_bounded(&file, limit)?;
         if file_identity(&file)? != identity {
             return Err(SecureFileError::Changed);
         }
-        Ok((
-            Original::Regular {
-                bytes,
-                identity,
-                permissions,
-            },
-            Some(file),
-        ))
+        Ok((Original::Regular { bytes, identity }, Some(file)))
     }
 
     fn unchanged(
@@ -3124,13 +3188,10 @@ mod imp {
         let same = match (original, current) {
             (Original::Missing, Original::Missing) => true,
             (
-                Original::Regular {
-                    bytes, identity, ..
-                },
+                Original::Regular { bytes, identity },
                 Original::Regular {
                     bytes: current_bytes,
                     identity: current_identity,
-                    ..
                 },
             ) => *identity == current_identity && *bytes == current_bytes,
             _ => false,
@@ -3141,26 +3202,40 @@ mod imp {
         Ok(handle)
     }
 
+    /// Rename `file` to `name` inside the directory bound by `parent`.
+    ///
+    /// This uses the native call rather than the Win32
+    /// `SetFileInformationByHandle(FileRenameInfo)` wrapper, which documents
+    /// `FileName` as a NUL-terminated path that may be resolved against the
+    /// current directory. `NtSetInformationFile` resolves the length-counted
+    /// name strictly relative to `RootDirectory`, so publication stays bound to
+    /// the parent handle opened by the path walk.
     fn rename_handle(
         file: &File,
         parent: &File,
         name: &OsStr,
         replace: bool,
     ) -> Result<(), SecureFileError> {
+        let invalid = || SecureFileError::InvalidPath(name.to_string_lossy().into_owned());
         let wide = name.encode_wide().collect::<Vec<_>>();
         let name_bytes = wide
             .len()
             .checked_mul(size_of::<u16>())
             .and_then(|length| u32::try_from(length).ok())
-            .ok_or_else(|| SecureFileError::InvalidPath(name.to_string_lossy().into_owned()))?;
-        let offset = offset_of!(FILE_RENAME_INFO, FileName);
+            .ok_or_else(invalid)?;
+        let offset = offset_of!(FILE_RENAME_INFORMATION, FileName);
+        // Keep a trailing NUL, and never pass less than the fixed structure
+        // size that the I/O manager validates for a short name.
         let bytes = offset
             .checked_add(name_bytes as usize)
-            .ok_or_else(|| SecureFileError::InvalidPath(name.to_string_lossy().into_owned()))?;
+            .and_then(|length| length.checked_add(size_of::<u16>()))
+            .map(|length| length.max(size_of::<FILE_RENAME_INFORMATION>()))
+            .ok_or_else(invalid)?;
+        let length = u32::try_from(bytes).map_err(|_| invalid())?;
         let words = bytes.div_ceil(size_of::<usize>());
         let mut buffer = vec![0_usize; words];
-        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        // SAFETY: the aligned buffer is at least offset + name_bytes bytes long.
+        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+        // SAFETY: the zeroed, aligned buffer is at least offset + name_bytes + 2 bytes long.
         unsafe {
             (*info).Anonymous.ReplaceIfExists = replace;
             (*info).RootDirectory = parent.as_raw_handle();
@@ -3171,17 +3246,20 @@ mod imp {
                 name_bytes as usize,
             );
         }
-        // SAFETY: info points to a correctly sized FILE_RENAME_INFO variable-length buffer.
-        if unsafe {
-            SetFileInformationByHandle(
+        let mut io_status = IO_STATUS_BLOCK::default();
+        // SAFETY: info points to a correctly sized FILE_RENAME_INFORMATION
+        // buffer, and both handles stay open for this synchronous call.
+        let status = unsafe {
+            NtSetInformationFile(
                 file.as_raw_handle(),
-                FileRenameInfo,
+                &mut io_status,
                 info.cast(),
-                bytes as u32,
+                length,
+                FileRenameInformation,
             )
-        } == 0
-        {
-            let error = last_error();
+        };
+        if status < 0 {
+            let error = ntstatus_error(status);
             if !replace && error.kind() == std::io::ErrorKind::AlreadyExists {
                 return Err(SecureFileError::Changed);
             }
@@ -3222,6 +3300,210 @@ mod imp {
             return Err(last_error().into());
         }
         Ok(())
+    }
+
+    /// Open the existing target so that no other opener can write, rename,
+    /// delete, or replace it, then verify through that handle that it is still
+    /// exactly the object and bytes observed during preparation.
+    ///
+    /// Windows has no atomic exchange, so this pin is what binds the
+    /// replacement to the verified object: from here until the pinned handle is
+    /// renamed away, the target name cannot come to refer to anything else.
+    fn pin_unchanged(
+        parent: &File,
+        name: &OsStr,
+        original: &Original,
+        limit: usize,
+        private: bool,
+    ) -> Result<File, SecureFileError> {
+        let Original::Regular { bytes, identity } = original else {
+            return Err(SecureFileError::Changed);
+        };
+        let mut attempts = 0;
+        let pinned = loop {
+            attempts += 1;
+            match nt_open_at_shared(
+                parent.as_raw_handle(),
+                name,
+                PIN_ACCESS,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE,
+                FILE_ATTRIBUTE_NORMAL,
+                null(),
+                PIN_SHARE,
+            ) {
+                Ok((file, _)) => break file,
+                Err(SecureFileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(SecureFileError::Changed);
+                }
+                Err(SecureFileError::Io(error))
+                    if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
+                        && attempts < PIN_SHARING_ATTEMPTS =>
+                {
+                    std::thread::sleep(PIN_SHARING_BACKOFF);
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let current = file_identity(&pinned)?;
+        ensure_regular(current)?;
+        if private {
+            validate_private_acl(&pinned, false)?;
+        }
+        if current != *identity
+            || read_open_file_bounded(&pinned, limit)? != *bytes
+            || file_identity(&pinned)? != *identity
+        {
+            return Err(SecureFileError::Changed);
+        }
+        Ok(pinned)
+    }
+
+    /// The name a replacement is published under: the pinned file's own
+    /// spelling when that name, looked up in the same bound parent, is the
+    /// pinned object. NTFS matches names case-insensitively (and by 8.3
+    /// alias), so republishing under the caller's spelling would otherwise
+    /// rename `README.md` to `readme.md`.
+    fn published_name(parent: &File, pinned: &File, requested: &OsStr) -> OsString {
+        let on_disk = (|| {
+            // FileNameInfo reports the volume-relative path of this open;
+            // UNICODE_STRING bounds it to 32767 UTF-16 units.
+            let bytes = size_of::<FILE_NAME_INFO>() + 2 * usize::from(u16::MAX);
+            let mut buffer = vec![0_u32; bytes.div_ceil(size_of::<u32>())];
+            // SAFETY: the aligned buffer is writable for `bytes` bytes and the handle is open.
+            if unsafe {
+                GetFileInformationByHandleEx(
+                    pinned.as_raw_handle(),
+                    FileNameInfo,
+                    buffer.as_mut_ptr().cast(),
+                    bytes as u32,
+                )
+            } == 0
+            {
+                return None;
+            }
+            let info = buffer.as_ptr().cast::<FILE_NAME_INFO>();
+            // SAFETY: a successful call initializes FileNameLength bytes of
+            // FileName, which lie inside the buffer.
+            let path = unsafe {
+                std::slice::from_raw_parts(
+                    (*info).FileName.as_ptr(),
+                    (*info).FileNameLength as usize / size_of::<u16>(),
+                )
+            };
+            let last = path.rsplit(|unit| *unit == u16::from(b'\\')).next()?;
+            Some(OsString::from_wide(last))
+        })();
+        let Some(on_disk) = on_disk else {
+            return requested.to_os_string();
+        };
+        if on_disk.as_os_str() == requested || !component_is_safe(&on_disk) {
+            return requested.to_os_string();
+        }
+        let names_pinned = open_file_at(
+            parent,
+            &on_disk,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_OPEN,
+            false,
+        )
+        .and_then(|(alias, _)| Ok((file_identity(&alias)?, file_identity(pinned)?)))
+        .is_ok_and(|(alias, pinned)| (alias.volume, alias.index) == (pinned.volume, pinned.index));
+        if names_pinned {
+            on_disk
+        } else {
+            requested.to_os_string()
+        }
+    }
+
+    /// Carry the replaced file's user-visible attributes (read-only, hidden,
+    /// system, not-indexed) over to its replacement; the replacement is new
+    /// content, so it is also marked for archiving.
+    fn carry_attributes(file: &File, original: FileIdentity) -> Result<(), SecureFileError> {
+        let basic = FILE_BASIC_INFO {
+            // Zero timestamps leave the replacement's own times unchanged.
+            CreationTime: 0,
+            LastAccessTime: 0,
+            LastWriteTime: 0,
+            ChangeTime: 0,
+            FileAttributes: (original.attributes & PRESERVED_ATTRIBUTES) | FILE_ATTRIBUTE_ARCHIVE,
+        };
+        // SAFETY: the input struct and handle remain valid for this call.
+        if unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                (&basic as *const FILE_BASIC_INFO).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(last_error().into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// Runs once between displacing a pinned target and publishing its
+        /// replacement, so tests can race that window deterministically.
+        pub(super) static AFTER_DISPLACEMENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Replace the pinned target with `staged`: rename the pinned object to a
+    /// private backup name, publish `staged` under the target name with a
+    /// no-replace rename, then delete the backup by handle.
+    ///
+    /// Every step is bound to the parent handle and to the two file handles,
+    /// and no step can overwrite a name it did not vacate itself. Between the
+    /// two renames, readers can briefly find the target missing. If another
+    /// writer creates the target in that window it wins: the staged file is
+    /// not published and the displaced original stays under its backup name
+    /// rather than being destroyed.
+    fn replace_pinned(
+        parent: &File,
+        name: &OsStr,
+        staged: &File,
+        pinned: File,
+    ) -> Result<(), SecureFileError> {
+        let published = published_name(parent, &pinned, name);
+        let mut displaced = false;
+        for _ in 0..TEMP_NAME_ATTEMPTS {
+            let backup = OsString::from(format!(".octet-old-{}", random_temp_suffix()?));
+            match rename_handle(&pinned, parent, &backup, false) {
+                Ok(()) => {
+                    displaced = true;
+                    break;
+                }
+                // A no-replace rename reports an occupied name as Changed.
+                Err(SecureFileError::Changed) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        if !displaced {
+            return Err(SecureFileError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "could not allocate a unique secure backup name",
+            )));
+        }
+        #[cfg(test)]
+        if let Some(hook) = AFTER_DISPLACEMENT.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        match rename_handle(staged, parent, &published, false) {
+            Ok(()) => {
+                // Best effort, as on Unix: the replacement is already
+                // published, and a leftover backup holds only the old bytes.
+                let _ = delete_handle(&pinned);
+                Ok(())
+            }
+            Err(error) => {
+                // Restore only into a still-free name.
+                let _ = rename_handle(&pinned, parent, &published, false);
+                Err(error)
+            }
+        }
     }
 
     pub(super) struct PreparedMutation {
@@ -3266,9 +3548,18 @@ mod imp {
             self.original.bytes()
         }
 
+        /// Delete the target only while it is still the prepared object: the
+        /// pinned handle is verified and then deleted by handle, so a
+        /// concurrent replacement is never removed.
         pub(super) fn remove(self) -> Result<(), SecureFileError> {
-            let _ = self;
-            Err(SecureFileError::PublicationUnavailable)
+            let pinned = pin_unchanged(
+                &self.parent,
+                &self.name,
+                &self.original,
+                self.limit,
+                self.private,
+            )?;
+            delete_handle(&pinned)
         }
 
         pub(super) fn commit(
@@ -3296,16 +3587,14 @@ mod imp {
             if private != self.private {
                 return Err(private_error("private mutation mode changed"));
             }
-            let _initial = unchanged(
+            // Fail early, before staging, when the target already changed.
+            drop(unchanged(
                 &self.parent,
                 &self.name,
                 &self.original,
                 self.limit,
                 private,
-            )?;
-            if cancelled() {
-                return Err(SecureFileError::Cancelled);
-            }
+            )?);
             let mut temp = {
                 let mut created = None;
                 for _ in 0..TEMP_NAME_ATTEMPTS {
@@ -3347,33 +3636,48 @@ mod imp {
                     }
                     temp.write_all(chunk)?;
                 }
-                temp.sync_all()?;
+                if cancelled() {
+                    return Err(SecureFileError::Cancelled);
+                }
                 if !private {
-                    if let Original::Regular { permissions, .. } = &self.original {
-                        temp.set_permissions(permissions.clone())?;
+                    if let Original::Regular { identity, .. } = &self.original {
+                        carry_attributes(&temp, *identity)?;
                     }
                 }
-                if cancelled() {
-                    return Err(SecureFileError::Cancelled);
+                temp.sync_all()?;
+                match &self.original {
+                    Original::Missing => {
+                        drop(unchanged(
+                            &self.parent,
+                            &self.name,
+                            &self.original,
+                            self.limit,
+                            private,
+                        )?);
+                        if cancelled() {
+                            return Err(SecureFileError::Cancelled);
+                        }
+                        // A no-replace rename never overwrites a target
+                        // created after the check above.
+                        rename_handle(&temp, &self.parent, &self.name, false)
+                    }
+                    Original::Regular { .. } => {
+                        // Never fall back to ReplaceIfExists: that would
+                        // overwrite whatever the name refers to at that
+                        // moment. The pin keeps it the verified object.
+                        let pinned = pin_unchanged(
+                            &self.parent,
+                            &self.name,
+                            &self.original,
+                            self.limit,
+                            private,
+                        )?;
+                        if cancelled() {
+                            return Err(SecureFileError::Cancelled);
+                        }
+                        replace_pinned(&self.parent, &self.name, &temp, pinned)
+                    }
                 }
-                let _final = unchanged(
-                    &self.parent,
-                    &self.name,
-                    &self.original,
-                    self.limit,
-                    private,
-                )?;
-                if cancelled() {
-                    return Err(SecureFileError::Cancelled);
-                }
-                if !matches!(self.original, Original::Missing) {
-                    // Windows exposes atomic no-replace rename but no atomic
-                    // exchange/CAS primitive for an existing destination.
-                    // Do not fall back to ReplaceIfExists after `unchanged()`.
-                    return Err(SecureFileError::PublicationUnavailable);
-                }
-                rename_handle(&temp, &self.parent, &self.name, false)?;
-                Ok(())
             })();
             if result.is_err() {
                 let _ = delete_handle(&temp);
@@ -3825,19 +4129,281 @@ mod tests {
         );
     }
 
+    fn directory_names(directory: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn existing_target_is_replaced_without_residue() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("target.txt");
+        std::fs::write(&path, "prepared version").unwrap();
+
+        let prepared = PreparedMutation::prepare(&path, false, 1024).unwrap();
+        assert_eq!(prepared.original(), Some(&b"prepared version"[..]));
+        prepared.commit(b"replacement").unwrap();
+        write_atomic_if_unchanged(&path, Some(b"replacement"), b"second", 1024).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(directory_names(&root), ["target.txt"]);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn private_existing_target_is_replaced_and_stays_private() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("private/state.json");
+        write_private_atomic(&path, b"first", 1024).unwrap();
+        write_private_atomic(&path, b"second", 1024).unwrap();
+        write_private_atomic_if_unchanged(&path, Some(b"second"), b"third", 1024).unwrap();
+
+        assert_eq!(read_private_file_bounded(&path, 1024).unwrap(), b"third");
+        assert_eq!(directory_names(&root.join("private")), ["state.json"]);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn compare_and_delete_removes_only_the_expected_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("target.txt");
+        std::fs::write(&path, "current").unwrap();
+
+        assert!(matches!(
+            remove_regular_file_if_unchanged(&path, b"stale", 1024),
+            Err(SecureFileError::Changed)
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "current");
+        remove_regular_file_if_unchanged(&path, b"current", 1024).unwrap();
+        assert!(!path.exists());
+
+        let private = root.join("private/token.json");
+        write_private_atomic(&private, b"token", 1024).unwrap();
+        remove_private_file_if_unchanged(&private, b"token", 1024).unwrap();
+        assert!(!private.exists());
+        assert!(directory_names(&root.join("private")).is_empty());
+    }
+
+    /// Every conditional read-modify-write either commits against the exact
+    /// bytes it read or reports `Changed`; none is lost or applied twice.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn concurrent_conditional_writers_never_lose_an_update() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = std::sync::Arc::new(root.join("counter.txt"));
+        std::fs::write(path.as_ref(), "0").unwrap();
+        let committed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let writers = (0..4)
+            .map(|_| {
+                let path = std::sync::Arc::clone(&path);
+                let committed = std::sync::Arc::clone(&committed);
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        let Ok(prepared) = PreparedMutation::prepare(&path, false, 64) else {
+                            continue;
+                        };
+                        let Some(current) = prepared.original() else {
+                            continue;
+                        };
+                        let value: usize = std::str::from_utf8(current).unwrap().parse().unwrap();
+                        let next = (value + 1).to_string();
+                        match prepared.commit(next.as_bytes()) {
+                            Ok(()) => {
+                                committed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Err(SecureFileError::Changed) => {}
+                            // Windows reports a sharing violation when another
+                            // writer holds its pin past the retry budget.
+                            #[cfg(windows)]
+                            Err(SecureFileError::Io(error))
+                                if error.raw_os_error()
+                                    == Some(
+                                        windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION
+                                            as i32,
+                                    ) => {}
+                            Err(error) => panic!("unexpected conditional write failure: {error}"),
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let committed = committed.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(committed > 0);
+        assert_eq!(
+            std::fs::read_to_string(path.as_ref()).unwrap(),
+            committed.to_string()
+        );
+        assert_eq!(directory_names(&root), ["counter.txt"]);
+    }
+
     #[cfg(windows)]
     #[test]
-    fn windows_existing_target_publication_fails_closed() {
+    fn windows_replacement_keeps_the_on_disk_name_and_attributes() {
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::os::windows::fs::MetadataExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
+        };
+
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().canonicalize().unwrap().join("target.txt");
+        let root = directory.path().canonicalize().unwrap();
+        let actual = root.join("README.md");
+        std::fs::write(&actual, "prepared version").unwrap();
+        let mut permissions = std::fs::metadata(&actual).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&actual, permissions).unwrap();
+        let wide = actual
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let attributes = std::fs::metadata(&actual).unwrap().file_attributes();
+        // SAFETY: `wide` is a NUL-terminated path that outlives the call.
+        assert_ne!(
+            unsafe { SetFileAttributesW(wide.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) },
+            0
+        );
+
+        // NTFS resolves the lowercase spelling to the existing entry.
+        let prepared = PreparedMutation::prepare(&root.join("readme.md"), false, 1024).unwrap();
+        prepared.commit(b"replacement").unwrap();
+
+        assert_eq!(directory_names(&root), ["README.md"]);
+        assert_eq!(std::fs::read_to_string(&actual).unwrap(), "replacement");
+        let attributes = std::fs::metadata(&actual).unwrap().file_attributes();
+        assert_ne!(attributes & FILE_ATTRIBUTE_READONLY, 0);
+        assert_ne!(attributes & FILE_ATTRIBUTE_HIDDEN, 0);
+
+        let mut permissions = std::fs::metadata(&actual).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&actual, permissions).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pinned_target_cannot_be_changed_after_the_final_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("target.txt");
+        let displaced = root.join("prepared-version.txt");
+        std::fs::write(&path, "prepared version").unwrap();
+        let prepared = PreparedMutation::prepare(&path, false, 1024).unwrap();
+        let cancellation_checks = std::cell::Cell::new(0);
+
+        prepared
+            .commit_if(b"replacement", || {
+                let check = cancellation_checks.get() + 1;
+                cancellation_checks.set(check);
+                // The third check occurs after the target is pinned and
+                // verified, immediately before it is renamed aside.
+                if check == 3 {
+                    // Rename and delete still fail: the pin denies delete
+                    // sharing, so the verified name cannot move.
+                    assert!(std::fs::rename(&path, &displaced).is_err());
+                    assert!(std::fs::remove_file(&path).is_err());
+                    // A cooperative writer is no longer locked out: its open
+                    // succeeds (the residual content race matches Unix, where
+                    // the staged replacement still wins the name).
+                    std::fs::write(&path, "competing replacement").unwrap();
+                    // Readers that share deletion still read through the pin.
+                    assert_eq!(
+                        std::fs::read_to_string(&path).unwrap(),
+                        "competing replacement"
+                    );
+                }
+                false
+            })
+            .unwrap();
+
+        assert_eq!(cancellation_checks.get(), 3);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+        assert_eq!(directory_names(&root), ["target.txt"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_target_created_after_displacement_is_not_overwritten() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("target.txt");
         std::fs::write(&path, "prepared version").unwrap();
         let prepared = PreparedMutation::prepare(&path, false, 1024).unwrap();
 
+        let competitor = path.clone();
+        imp::AFTER_DISPLACEMENT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(competitor, "competing creation").unwrap();
+            }));
+        });
         assert!(matches!(
-            prepared.commit(b"replacement"),
-            Err(SecureFileError::PublicationUnavailable)
+            prepared.commit(b"stale replacement"),
+            Err(SecureFileError::Changed)
         ));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "prepared version");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "competing creation"
+        );
+        // The displaced original is kept rather than destroyed, and the
+        // staged replacement is removed.
+        let names = directory_names(&root);
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert_eq!(names[1], "target.txt");
+        assert!(names[0].starts_with(".octet-old-"), "{names:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(&names[0])).unwrap(),
+            "prepared version"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_held_open_by_another_writer_is_reported_in_use() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("target.txt");
+        std::fs::write(&path, "prepared version").unwrap();
+        let prepared = PreparedMutation::prepare(&path, false, 1024).unwrap();
+        // Another program holds the file open for writing without sharing
+        // write or delete access.
+        let holder = std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+
+        let error = prepared.commit(b"replacement").unwrap_err();
+        assert!(
+            matches!(&error, SecureFileError::Io(error)
+                if error.raw_os_error()
+                    == Some(windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION as i32)),
+            "{error:?}"
+        );
+        drop(holder);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "prepared version");
+        assert_eq!(directory_names(&root), ["target.txt"]);
+        assert!(matches!(
+            remove_regular_file_if_unchanged(&path, b"prepared version", 1024),
+            Ok(())
+        ));
     }
 
     #[cfg(windows)]
@@ -3850,15 +4416,32 @@ mod tests {
         let target = workspace.join("slot/new/victim.txt");
         let prepared = PreparedMutation::prepare(&target, true, 1024).unwrap();
 
-        std::fs::rename(workspace.join("slot"), workspace.join("original-slot")).unwrap();
-        std::fs::create_dir_all(workspace.join("slot/new")).unwrap();
-        prepared.commit(b"bound to original parent").unwrap();
+        match std::fs::rename(workspace.join("slot"), workspace.join("original-slot")) {
+            Ok(()) => {
+                std::fs::create_dir_all(workspace.join("slot/new")).unwrap();
+                prepared.commit(b"bound to original parent").unwrap();
 
-        assert!(!target.exists());
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("original-slot/new/victim.txt")).unwrap(),
-            "bound to original parent"
-        );
+                assert!(!target.exists());
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join("original-slot/new/victim.txt"))
+                        .unwrap(),
+                    "bound to original parent"
+                );
+            }
+            // NTFS refuses to rename a directory while a descendant is open,
+            // so the parent handle held by the prepared mutation already pins
+            // the ancestor path and the swap cannot happen.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                prepared.commit(b"bound to original parent").unwrap();
+
+                assert!(!workspace.join("original-slot").exists());
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    "bound to original parent"
+                );
+            }
+            Err(error) => panic!("unexpected ancestor rename failure: {error}"),
+        }
     }
 
     #[cfg(windows)]
@@ -3899,7 +4482,13 @@ mod tests {
                 assert!(write_private_atomic(&link, b"replacement", 1024).is_err());
                 assert_eq!(std::fs::read(&alias).unwrap(), b"secret");
             }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            // Standard accounts without Developer Mode lack the symlink privilege.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.raw_os_error()
+                        == Some(
+                            windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD as i32,
+                        ) => {}
             Err(error) => panic!("could not create test symlink: {error}"),
         }
     }
@@ -3914,7 +4503,7 @@ mod tests {
         let created = existing.join("created");
         let too_long = "x".repeat(512);
 
-        assert!(create_private_directory_all(&created.join(too_long)).is_err());
+        assert!(create_private_directory_all(&created.join(&too_long)).is_err());
         assert!(existing.is_dir());
         assert!(!created.exists());
 

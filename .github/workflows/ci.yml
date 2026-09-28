@@ -174,6 +174,290 @@ jobs:
           OCTET_PTY_TRACE: "1"
       - run: cargo check --workspace --all-targets --no-default-features --locked
 
+  windows:
+    # Native Windows x64 build and qualification lane for pull requests. It
+    # uses the target of the opt-in release-candidate contract
+    # (scripts/package-octet-windows-release.py) and produces an unsigned,
+    # PR-scoped test artifact only; signed release publication stays in
+    # release-octet.yml. No GUI, driver, credential, or permission action runs.
+    name: windows (x86_64-pc-windows-gnu)
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-gnu
+      PYTHONDONTWRITEBYTECODE: "1"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # The runner's Git converts checkouts to CRLF; the repository's fixtures
+      # and golden files are LF, as on every other platform.
+      - name: Check out with repository line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      # This action revision is fixed to Rust 1.86.0 (the MSRV used by CI).
+      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: x86_64-pc-windows-gnu
+      - name: Select the MinGW-w64 linker and C compiler for the GNU target
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = 'x86_64-w64-mingw32-gcc.exe'
+          $found = @('C:\mingw64\bin', 'C:\msys64\mingw64\bin') |
+            Where-Object { Test-Path (Join-Path $_ $compiler) } | Select-Object -First 1
+          if (-not $found) {
+            # The runner image ships MSYS2; install its MinGW-w64 GCC only when
+            # the image has no preinstalled toolchain.
+            C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-gcc
+            if ($LASTEXITCODE -ne 0) { throw 'MinGW-w64 GCC installation failed' }
+            $found = 'C:\msys64\mingw64\bin'
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $found
+          & (Join-Path $found $compiler) --version
+          rustc -vV
+      - id: build
+        name: Build native octet.exe and octet-host.exe
+        run: cargo build --release --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --bins
+      - id: smoke
+        name: Smoke native binaries (version, help, host hello handshake)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $release = Join-Path $env:GITHUB_WORKSPACE "target\$env:WINDOWS_TARGET\release"
+          $octet = Join-Path $release 'octet.exe'
+          $octetHost = Join-Path $release 'octet-host.exe'
+          $observed = (& $octet --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $observed -ne "octet $version") { throw "octet.exe --version: '$observed'" }
+          & $octet --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'octet.exe --help failed' }
+          $request = '{"protocol_version":1,"request_id":"ci-smoke","command":"hello"}'
+          $hello = ($request | & $octetHost | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "octet-host.exe exited $LASTEXITCODE" }
+          $frame = $hello | ConvertFrom-Json
+          if ($frame.type -ne 'hello' -or $frame.request_id -ne 'ci-smoke' -or
+              $frame.data.protocol_version -ne 1 -or $frame.data.sdk_version -ne $version) {
+            throw "unexpected host hello frame: $hello"
+          }
+          Write-Output "octet.exe: $observed"
+          Write-Output "octet-host.exe hello: $hello"
+      - name: Test the native terminal frontend (capabilities, console writer, ConPTY)
+        run: |
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib tui::terminal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --test windows_conpty -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The same ConPTY scenarios against the release binary the artifact ships.
+          $env:OCTET_CONPTY_BINARY = Join-Path $env:GITHUB_WORKSPACE "target\$env:WINDOWS_TARGET\release\octet.exe"
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --test windows_conpty -- --nocapture
+      - name: Test the renderer, private file access, extension launch, and Windows process control
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          cargo test --locked --target $env:WINDOWS_TARGET -p sexy-tui-rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --lib -- `
+            secure_fs `
+            tools::bash::tests `
+            extension_process::tests::python_script_detection_uses_the_extension_or_interpreter_line `
+            extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter `
+            extension_process::tests::compaction_strategy_negotiates_and_renders_through_host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test windows_process_current
+      - name: Test the Python SDK, computer-use extension, and Windows release tooling
+        if: ${{ !cancelled() }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python --version
+          $env:PYTHONPATH = 'sdk/python'
+          python -m unittest discover -s sdk/python/tests
+          if ($LASTEXITCODE -ne 0) { throw 'Python SDK tests failed' }
+          Push-Location extensions/octet-computer-use
+          try {
+            # No Cua Driver is provisioned on the runner: live-driver tests skip
+            # and the no-driver status/fail-closed tests run.
+            $env:PYTHONPATH = '.;vendor;tests'
+            python -m unittest discover -s tests -p 'test_*.py' -v
+            if ($LASTEXITCODE -ne 0) { throw 'computer-use tests failed (flat discovery)' }
+            Remove-Item Env:PYTHONPATH
+            python -m unittest discover -s tests -t .
+            if ($LASTEXITCODE -ne 0) { throw 'computer-use tests failed (package discovery)' }
+            python tests/live_smoke.py --i-have-an-unlocked-desktop
+            if ($LASTEXITCODE -ne 2) { throw 'the attended live smoke must refuse to run in CI' }
+          } finally {
+            Pop-Location
+          }
+          python scripts/test-windows-release.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release tooling tests failed' }
+      # Informational: most of the workspace suite has never run on Windows.
+      # The runner account is an elevated administrator on Windows Server,
+      # whose files are owned by the Administrators group and so fail octet's
+      # owner-only private-file checks, and many tests assume Unix paths,
+      # modes, or signals. The per-target results are published in the job
+      # summary so the backlog stays visible; the gating Windows suites are
+      # the steps above.
+      - name: Workspace test baseline on Windows (not gating)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 60
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'windows-workspace-tests.log'
+          cargo test --workspace --all-targets --profile ci-test --locked --target $env:WINDOWS_TARGET --no-fail-fast 2>&1 |
+            ForEach-Object { "$_" } | Tee-Object -FilePath $log | Out-Null
+          $status = $LASTEXITCODE
+          # Cargo colors its status lines (CARGO_TERM_COLOR), so strip SGR
+          # escapes first. Case-sensitive: `-match` would also take libtest's
+          # "running N tests" line as a target. A failing test's captured
+          # output can hold a nested harness summary, so each target keeps the
+          # last summary printed before the next target starts.
+          $target = $null
+          $result = $null
+          $rows = @(foreach ($raw in Get-Content $log) {
+            $line = $raw -replace '\x1b\[[0-9;]*m', ''
+            if ($line -cmatch '^\s*Running (.+)$') {
+              if ($result) { $result }
+              $target = $Matches[1] -replace '^unittests ', '' -replace ' \(.*[\\/]([^\\/]+?)-[0-9a-f]{16}(\.exe)?\)$', ' ($1)'
+              $result = $null
+              continue
+            }
+            if ($target -and $line -cmatch '^test result: \w+\. (\d+) passed; (\d+) failed') {
+              $result = [pscustomobject]@{ Target = $target; Passed = [int]$Matches[1]; Failed = [int]$Matches[2] }
+            }
+          }
+          if ($result) { $result })
+          $summary = @('### Windows workspace test baseline (not gating)', '',
+            "cargo exit status: $status", '', '| Test target | Passed | Failed |', '| --- | ---: | ---: |')
+          $summary += $rows | Where-Object { $_.Passed + $_.Failed -gt 0 } |
+            ForEach-Object { '| {0} | {1} | {2} |' -f $_.Target, $_.Passed, $_.Failed }
+          $summary += '', ('Total: {0} passed, {1} failed' -f ($rows | Measure-Object Passed -Sum).Sum, ($rows | Measure-Object Failed -Sum).Sum)
+          $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          $summary | Write-Output
+          Select-String -Path $log -Pattern 'test (\S+) \.\.\. FAILED' |
+            ForEach-Object { 'FAILED ' + $_.Matches[0].Groups[1].Value } | Write-Output
+          exit $status
+      - id: artifact
+        name: Assemble the unsigned PR test artifact
+        if: ${{ !cancelled() && steps.smoke.outcome == 'success' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $commit = (git rev-parse HEAD).Trim()
+          $name = "octet-pr-$($commit.Substring(0, 12))-$env:WINDOWS_TARGET"
+          $out = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $release = Join-Path $env:GITHUB_WORKSPACE "target\$env:WINDOWS_TARGET\release"
+          Copy-Item (Join-Path $release 'octet.exe'), (Join-Path $release 'octet-host.exe') $out
+          $sums = Get-ChildItem $out -Filter *.exe | Sort-Object Name | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant(), $_.Name
+          }
+          [IO.File]::WriteAllLines((Join-Path $out 'SHA256SUMS'), [string[]]$sums)
+          $request = '{"protocol_version":1,"request_id":"ci-smoke","command":"hello"}'
+          $info = [ordered]@{
+            kind = 'unsigned pull-request test build; not a release'
+            version = $version
+            target = $env:WINDOWS_TARGET
+            source_commit = $commit
+            run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            rustc = (rustc -V).Trim()
+            linker = ((x86_64-w64-mingw32-gcc --version) | Select-Object -First 1).Trim()
+            runner_os = [Environment]::OSVersion.VersionString
+            version_stdout = (& (Join-Path $out 'octet.exe') --version | Out-String).Trim()
+            hello_stdout = ($request | & (Join-Path $out 'octet-host.exe') | Out-String).Trim()
+          }
+          $info | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $out 'BUILD-INFO.json')
+          Copy-Item docs/windows.md (Join-Path $out 'WINDOWS.md')
+          # The source computer-use bundle, version-matched to these binaries,
+          # for the attended Windows procedure (`--extension-dir .\extensions`).
+          $extensions = New-Item -ItemType Directory -Path (Join-Path $out 'extensions')
+          Copy-Item -Recurse extensions/octet-computer-use $extensions.FullName
+          Get-ChildItem -Recurse -Directory -Filter __pycache__ $extensions.FullName | Remove-Item -Recurse -Force
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "path=$out" >> $env:GITHUB_OUTPUT
+          Get-Content (Join-Path $out 'SHA256SUMS')
+      - name: Run the packaged binaries without the build toolchain on PATH
+        if: ${{ !cancelled() && steps.artifact.outcome == 'success' }}
+        env:
+          ARTIFACT: ${{ steps.artifact.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Only the OS directories: proves no MinGW, Rust, Git, or WSL runtime
+          # is needed to start the executables.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $scratch = Join-Path $env:RUNNER_TEMP 'octet-clean-run'
+          New-Item -ItemType Directory -Path $scratch | Out-Null
+          Push-Location $scratch
+          try {
+            $observed = (& (Join-Path $env:ARTIFACT 'octet.exe') --version | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "packaged octet.exe failed: $observed" }
+            $request = '{"protocol_version":1,"request_id":"clean-path","command":"hello"}'
+            $hello = ($request | & (Join-Path $env:ARTIFACT 'octet-host.exe') | Out-String).Trim()
+            if ((ConvertFrom-Json $hello).type -ne 'hello') { throw "packaged host hello failed: $hello" }
+            Write-Output "clean PATH: $observed"
+          } finally {
+            Pop-Location
+          }
+      - name: Run the packaged binaries as a standard (non-administrator) user
+        if: ${{ !cancelled() && steps.artifact.outcome == 'success' }}
+        env:
+          ARTIFACT: ${{ steps.artifact.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $shared = 'C:\octet-standard-user'
+          New-Item -ItemType Directory -Path $shared | Out-Null
+          Copy-Item (Join-Path $env:ARTIFACT '*.exe') $shared
+          $request = Join-Path $shared 'hello.json'
+          Set-Content -Path $request -Encoding ascii -Value '{"protocol_version":1,"request_id":"standard-user","command":"hello"}'
+          icacls $shared /grant 'Users:(OI)(CI)M' | Out-Null
+          $user = 'octetpr' + (Get-Random -Maximum 99999)
+          # `net user` stops to ask Y/N about passwords longer than 14
+          # characters, which fails non-interactively. This one is 14
+          # characters with all four complexity classes and lives only for
+          # this step.
+          $password = 'Oa1!' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+          net user $user $password /add /expires:never | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "could not create the standard test account $user" }
+          try {
+            if ((net localgroup Administrators) -contains $user) { throw 'test account must not be an administrator' }
+            $credential = [PSCredential]::new($user, (ConvertTo-SecureString $password -AsPlainText -Force))
+            foreach ($case in @(
+                @{ File = 'octet.exe'; Arguments = '--version'; Input = $null; Log = 'version' },
+                @{ File = 'octet-host.exe'; Arguments = ''; Input = $request; Log = 'hello' })) {
+              $stdout = Join-Path $shared "$($case.Log).out"
+              $stderr = Join-Path $shared "$($case.Log).err"
+              $options = @{
+                FilePath = Join-Path $shared $case.File
+                Credential = $credential
+                WorkingDirectory = $shared
+                RedirectStandardOutput = $stdout
+                RedirectStandardError = $stderr
+                LoadUserProfile = $true
+                Wait = $true
+                PassThru = $true
+              }
+              if ($case.Arguments) { $options.ArgumentList = $case.Arguments }
+              if ($case.Input) { $options.RedirectStandardInput = $case.Input }
+              $process = Start-Process @options
+              $output = (Get-Content -Raw $stdout).Trim()
+              Write-Output "$($case.File) as ${user}: exit $($process.ExitCode): $output"
+              if ($process.ExitCode -ne 0) { throw "$($case.File) failed as a standard user: $(Get-Content -Raw $stderr)" }
+            }
+            if ((Get-Content -Raw (Join-Path $shared 'hello.out') | ConvertFrom-Json).type -ne 'hello') {
+              throw 'standard-user host hello did not return a hello frame'
+            }
+          } finally {
+            net user $user /delete | Out-Null
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.artifact.outcome == 'success' }}
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
   msrv:
     runs-on: ubuntu-24.04
     steps:

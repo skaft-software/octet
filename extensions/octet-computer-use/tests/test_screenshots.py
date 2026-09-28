@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
+import sys
 import tempfile
 import threading
 import unittest
@@ -16,6 +18,9 @@ import zlib
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
+from unittest import mock
+
+from octet_computer_use import screenshots
 
 from octet_computer_use.screenshots import (
     ArtifactTransportError,
@@ -585,20 +590,6 @@ class ScreenshotStoreTests(unittest.TestCase):
                 )
             self.assertEqual(relative_error.exception.code, "unsafe_artifact_path")
 
-            symlink = root / "scratch-link"
-            actual = root / "actual"
-            actual.mkdir()
-            symlink.symlink_to(actual, target_is_directory=True)
-            linked = HostArtifactTransport(RecordingPublisher(actual), scratch_directory=symlink, inline_limit=1)
-            with self.assertRaises(ArtifactTransportError) as symlink_error:
-                linked.publish(
-                    mime_type="image/png",
-                    data=FRAME_A,
-                    size=len(FRAME_A),
-                    sha256=hashlib.sha256(FRAME_A).hexdigest(),
-                )
-            self.assertEqual(symlink_error.exception.code, "unsafe_artifact_path")
-
             bad_digest = HostArtifactTransport(RecordingPublisher(root), scratch_directory=root)
             with self.assertRaises(ArtifactTransportError) as digest_error:
                 bad_digest.publish(
@@ -608,6 +599,81 @@ class ScreenshotStoreTests(unittest.TestCase):
                     sha256="0" * 64,
                 )
             self.assertEqual(digest_error.exception.code, "artifact_integrity_failed")
+
+    def _assert_unsafe_scratch(self, publisher_root: Path, scratch: Path) -> None:
+        transport = HostArtifactTransport(RecordingPublisher(publisher_root), scratch_directory=scratch, inline_limit=1)
+        with self.assertRaises(ArtifactTransportError) as error:
+            transport.publish(
+                mime_type="image/png",
+                data=FRAME_A,
+                size=len(FRAME_A),
+                sha256=hashlib.sha256(FRAME_A).hexdigest(),
+            )
+        self.assertEqual(error.exception.code, "unsafe_artifact_path")
+
+    def test_host_artifact_adapter_rejects_a_symlinked_scratch_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            actual = root / "actual"
+            actual.mkdir()
+            symlink = root / "scratch-link"
+            try:
+                symlink.symlink_to(actual, target_is_directory=True)
+            except OSError as error:
+                # Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege.
+                # Junctions, which need neither, are covered below.
+                self.skipTest(f"this account cannot create symlinks: {error}")
+            self._assert_unsafe_scratch(actual, symlink)
+
+    @unittest.skipUnless(sys.platform == "win32", "directory junctions are a Windows reparse point")
+    def test_host_artifact_adapter_rejects_junction_scratch_and_staging_directories(self) -> None:
+        import _winapi
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            actual = root / "actual"
+            actual.mkdir()
+            junction = root / "scratch-junction"
+            _winapi.CreateJunction(str(actual), str(junction))
+            # lstat reports a junction as a directory; it must still be refused.
+            self._assert_unsafe_scratch(actual, junction)
+
+            scratch = root / "scratch"
+            scratch.mkdir()
+            redirected = root / "redirected"
+            redirected.mkdir()
+            _winapi.CreateJunction(str(redirected), str(scratch / HostArtifactTransport._STAGE_DIRECTORY))
+            self._assert_unsafe_scratch(scratch, scratch)
+            self.assertEqual(list(redirected.iterdir()), [])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows staging verifies the opened final path")
+    def test_windows_staging_rejects_a_file_opened_outside_the_expected_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(os.path.realpath(temporary))
+            destination = root / "screen-stage-test.bin"
+            with self.assertRaises(ArtifactTransportError) as error:
+                HostArtifactTransport._write_private(
+                    destination, FRAME_A, expected_path=str(root / "elsewhere" / destination.name)
+                )
+            self.assertEqual(error.exception.code, "unsafe_artifact_path")
+            self.assertFalse(destination.exists(), "a rejected stage must not be left behind")
+
+            HostArtifactTransport._write_private(destination, FRAME_A, expected_path=str(destination))
+            self.assertEqual(destination.read_bytes(), FRAME_A)
+            with self.assertRaises(ArtifactTransportError) as existing:
+                HostArtifactTransport._write_private(destination, FRAME_B, expected_path=str(destination))
+            self.assertEqual(existing.exception.code, "artifact_stage_failed")
+            self.assertEqual(destination.read_bytes(), FRAME_A, "O_EXCL must never reopen an existing name")
+
+    def test_staging_without_nofollow_or_a_verifiable_path_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "screen-stage-test.bin"
+            with mock.patch.object(screenshots.os, "O_NOFOLLOW", 0, create=True), \
+                 mock.patch.object(screenshots, "IS_WINDOWS", False):
+                with self.assertRaises(ArtifactTransportError) as error:
+                    HostArtifactTransport._write_private(destination, FRAME_A)
+            self.assertEqual(error.exception.code, "unsafe_artifact_path")
+            self.assertFalse(destination.exists())
 
     def test_retention_pinning_recovery_compaction_and_settlement_are_bounded(self) -> None:
         clock = ManualClock()

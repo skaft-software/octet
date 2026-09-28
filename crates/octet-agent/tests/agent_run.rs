@@ -417,6 +417,12 @@ async fn handle_responses_connection_limit(
                 .send(WebSocketMessage::Text(event.to_string().into()))
                 .await?;
         }
+        // A limit asks for reconnection; close the handshake cleanly so the
+        // client observes the limit terminal instead of a transport reset.
+        // (An abrupt TCP abort surfaces as RST/10054 on Windows and masks the
+        // already-delivered limit outcome; crash drops are covered by the
+        // disconnect-recovery tests instead.)
+        let _ = socket.close(None).await;
         return Ok(());
     }
 
@@ -431,6 +437,34 @@ async fn handle_responses_connection_limit(
         if request.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
+    }
+    // Drain the request body, if any: closing with unread received data
+    // aborts the connection with RST on Windows, which the client reports
+    // as a transport error instead of reading the response already queued.
+    let head = String::from_utf8_lossy(&request).into_owned();
+    let mut body_remaining = head
+        .lines()
+        .find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                (name.trim().eq_ignore_ascii_case("content-length"))
+                    .then(|| value.trim().parse::<usize>().unwrap_or(0))
+            })
+        })
+        .unwrap_or(0);
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .unwrap_or(request.len());
+    body_remaining = body_remaining.saturating_sub(request.len().saturating_sub(header_end));
+    let mut discard = vec![0_u8; body_remaining.min(64 * 1024)];
+    while body_remaining > 0 {
+        let want = body_remaining.min(discard.len());
+        let read = stream.read(&mut discard[..want]).await?;
+        if read == 0 {
+            break;
+        }
+        body_remaining -= read;
     }
     let attempt = http_requests.fetch_add(1, Ordering::SeqCst);
     let completed_body = concat!(
@@ -6507,6 +6541,17 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     std::fs::write(&external_file, "host secret").unwrap();
     let external_write = external_dir.path().join("must-not-exist.txt");
     let bash_marker = workspace.join("bash-must-not-run.txt");
+    // The shell command carries a literal path: use the non-canonical
+    // spelling with forward slashes. Canonicalization adds a `\\?\`
+    // verbatim prefix shells cannot consume, and Git Bash silently drops
+    // `>` redirects to backslash paths (exit 0, no file created). Both
+    // spellings name the same file.
+    let bash_marker_for_shell = workspace_dir
+        .path()
+        .join("bash-must-not-run.txt")
+        .display()
+        .to_string()
+        .replace('\\', "/");
 
     let calls = vec![
         (
@@ -6527,7 +6572,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
         (
             "call_process",
             "bash",
-            serde_json::json!({"command": format!("printf ran > {}", bash_marker.display())}),
+            serde_json::json!({"command": format!("printf ran > {}", bash_marker_for_shell)}),
         ),
         (
             "call_host_mutation",
@@ -11242,9 +11287,12 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         .iter()
         .map(|contribution| contribution.name.as_str())
         .collect::<Vec<_>>();
+    // `PowerShellTool` registers (with a snippet) on Windows only.
+    let mut expected = vec!["read", "edit", "write", "bash", "search"];
+    #[cfg(windows)]
+    expected.push("powershell");
     assert_eq!(
-        declared,
-        vec!["read", "edit", "write", "bash", "search"],
+        declared, expected,
         "contributions follow wire order for exactly the tools that declare a snippet"
     );
     // Search contributes its own snippet and stays callable. Rendering does

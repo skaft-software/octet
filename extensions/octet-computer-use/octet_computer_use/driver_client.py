@@ -60,6 +60,12 @@ SESSION_ENVIRONMENT: Sequence[str] = (
 )
 
 
+def _frame(message: Mapping[str, Any]) -> bytes:
+    """One MCP stdio message: UTF-8 JSON terminated by exactly one LF."""
+
+    return (json.dumps(message) + "\n").encode("utf-8")
+
+
 class McpError(RuntimeError):
     """The driver violated the protocol or the call failed."""
 
@@ -147,6 +153,10 @@ class DriverClient:
         else:
             arguments = ["mcp", "--direct"]
         try:
+            # Binary pipes with explicit UTF-8 framing: text mode would use the
+            # ANSI code page on Windows, where a window title with an em dash
+            # or curly quote fails to decode and reads as a closed stream, and
+            # would write CRLF line endings.
             self._process = subprocess.Popen(
                 [self._binary, *arguments],
                 cwd=self._cwd,
@@ -154,8 +164,6 @@ class DriverClient:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
             )
         except OSError as error:
             raise McpError(f"failed to start the driver: {error}") from error
@@ -221,7 +229,9 @@ class DriverClient:
                 if not line:
                     sink.put(None)
                     return
-                sink.put(line)
+                # MCP stdio is UTF-8. A malformed line becomes non-JSON and is
+                # skipped by the caller instead of ending the stream.
+                sink.put(line.decode("utf-8", "replace"))
         except (ValueError, OSError):
             sink.put(None)
 
@@ -309,7 +319,7 @@ class DriverClient:
             raise McpError("driver is not running")
         message = {"jsonrpc": "2.0", "method": method, "params": dict(params or {})}
         try:
-            process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.write(_frame(message))
             process.stdin.flush()
         except (BrokenPipeError, ValueError) as error:
             raise McpError("driver stdin closed") from error
@@ -330,7 +340,7 @@ class DriverClient:
                 "params": dict(params),
             }
             try:
-                process.stdin.write(json.dumps(message) + "\n")
+                process.stdin.write(_frame(message))
                 process.stdin.flush()
             except (BrokenPipeError, ValueError) as error:
                 raise McpError("driver stdin closed") from error

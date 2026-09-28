@@ -7,7 +7,8 @@ small and support them with evidence.
 ## Development setup
 
 The octet source supports macOS and Linux and declares Rust 1.86 as its minimum
-supported version. Install Rust through [rustup](https://rustup.rs/) and install
+supported version. A native Windows x64 build (`x86_64-pc-windows-gnu`) is
+built and tested in CI but not yet released; see [Windows](docs/windows.md). Install Rust through [rustup](https://rustup.rs/) and install
 `rg` (ripgrep). Clone the actual repository if you need a checkout:
 
 ```sh
