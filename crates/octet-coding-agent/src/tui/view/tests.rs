@@ -7262,6 +7262,48 @@ fn tool_values_follow_labels_without_a_wide_dead_column() {
 }
 
 #[test]
+fn computer_use_labels_keep_distinct_actions_within_the_width_cap() {
+    let names = [
+        "computer_use_status",
+        "computer_use_setup",
+        "computer_use_installed_apps",
+        "computer_use_windows",
+        "computer_use_window_state",
+        "computer_use_desktop_state",
+        "computer_use_click",
+        "computer_use_type_text",
+        "computer_use_press_key",
+        "computer_use_hotkey",
+        "computer_use_invoke_menu",
+        "computer_use_move_cursor",
+        "computer_use_scroll",
+        "computer_use_launch_app",
+        "computer_use_start_session",
+        "computer_use_end_session",
+        "computer_use_jev_status",
+        "computer_use_jev_choose",
+        "computer_use_jev_use_status",
+        "computer_use_jev_use_cancel",
+        "computer_use_jev_use_setup",
+        "computer_use_jev_use_run",
+        "computer_use_jev_use_choose",
+    ];
+    let labels: HashSet<_> = names
+        .iter()
+        .map(|name| {
+            let label = super::tool_render::tool_display_label(name);
+            assert_eq!(tool_grid_label(&label), label, "{name}");
+            label
+        })
+        .collect();
+    assert_eq!(labels.len(), names.len());
+    assert_eq!(
+        super::tool_render::tool_display_label("computer_use_window_state"),
+        "Window state"
+    );
+}
+
+#[test]
 fn recognized_assistant_diffs_use_the_pretty_diff_renderer() {
     let theme = crate::tui::theme::test_theme();
     let assistant = AssistantBlock::finalized(
