@@ -332,6 +332,21 @@ class _InboundError:
     error: RpcError
 
 
+def _protocol_stream(stream: Any) -> Any:
+    """Configure a process text stream for exact UTF-8, LF-delimited frames.
+
+    Windows text streams otherwise use the ANSI code page when redirected and
+    translate LF to CRLF on output. The stream object itself is kept (rather
+    than its binary buffer) so a reader thread blocked at interpreter shutdown
+    still owns the object that finalization would close.
+    """
+
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(encoding="utf-8", newline="\n")
+    return stream
+
+
 class _SerializedWriter:
     """One bounded queue and one stdout owner for complete JSON-RPC frames."""
 
@@ -1639,11 +1654,11 @@ class Extension:
         if reader is None:
             import sys
 
-            reader = sys.stdin
+            reader = _protocol_stream(sys.stdin)
         if writer is None:
             import sys
 
-            writer = sys.stdout
+            writer = _protocol_stream(sys.stdout)
         self._reset_runtime_state()
         self._transport = JsonRpcTransport(
             reader,
