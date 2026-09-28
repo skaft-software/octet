@@ -1067,7 +1067,24 @@ fn generate_provider_declarations(manifest_dir: &Path, out_dir: &Path) -> io::Re
     fs::write(out_dir.join("provider_declarations.rs"), generated)
 }
 
+/// Windows reserves only 1 MiB for a program's main thread, where Linux and
+/// macOS reserve 8 MiB. Both binaries run their Tokio entry future on that
+/// thread, and native interactive startup overflowed it. Reserve the same
+/// 8 MiB on Windows; the reservation is address space committed on demand.
+fn reserve_windows_main_thread_stack() {
+    const MAIN_THREAD_STACK_BYTES: u32 = 8 * 1024 * 1024;
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/STACK:{MAIN_THREAD_STACK_BYTES}");
+    } else {
+        println!("cargo:rustc-link-arg-bins=-Wl,--stack,{MAIN_THREAD_STACK_BYTES}");
+    }
+}
+
 fn main() -> io::Result<()> {
+    reserve_windows_main_thread_stack();
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR")
             .expect("Cargo must provide CARGO_MANIFEST_DIR to the build script"),

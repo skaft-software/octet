@@ -244,6 +244,10 @@ jobs:
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib tui::terminal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --test windows_conpty -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The same ConPTY scenarios against the release binary the artifact ships.
+          $env:OCTET_CONPTY_BINARY = Join-Path $env:GITHUB_WORKSPACE "target\$env:WINDOWS_TARGET\release\octet.exe"
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --test windows_conpty -- --nocapture
       - name: Test the workspace on Windows
         timeout-minutes: 60
         run: cargo test --workspace --all-targets --profile ci-test --locked --target $env:WINDOWS_TARGET --no-fail-fast

@@ -8,6 +8,9 @@
 //! one and inspects the reconstructed screen, so it is not a visual flicker
 //! measurement; docs/windows.md keeps that manual acceptance checklist.
 //!
+//! `OCTET_CONPTY_BINARY` points the harness at another `octet.exe`, such as
+//! the release build CI packages, instead of the test profile's binary.
+//!
 //! Windows resolves the profile directory through the known-folder API, not an
 //! environment variable, so the child reads the current user's octet
 //! configuration (normally absent on a CI runner, which yields first-run
@@ -488,6 +491,12 @@ impl Scenario {
     }
 }
 
+fn octet_binary() -> std::path::PathBuf {
+    std::env::var_os("OCTET_CONPTY_BINARY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_octet").into())
+}
+
 fn full_width_rule(screen: &str, width: usize, glyph: char) -> bool {
     screen.lines().any(|line| {
         let line = line.trim_end();
@@ -500,9 +509,9 @@ fn full_width_rule(screen: &str, width: usize, glyph: char) -> bool {
 fn interactive_round_trip(environment: &[(&str, &str)], rule: char) {
     let _serial = serial();
     let scenario = Scenario::new();
-    let binary = Path::new(env!("CARGO_BIN_EXE_octet"));
+    let binary = octet_binary();
     let mut console = PseudoConsole::spawn(
-        binary,
+        &binary,
         &scenario.arguments(),
         &scenario.workspace,
         environment,
@@ -580,9 +589,9 @@ fn plain_conhost_console_gets_the_ascii_interactive_frontend() {
 fn redirected_streams_stay_plain_without_terminal_controls() {
     let _serial = serial();
     let scenario = Scenario::new();
-    let binary = Path::new(env!("CARGO_BIN_EXE_octet"));
+    let binary = octet_binary();
 
-    let version = Command::new(binary)
+    let version = Command::new(&binary)
         .arg("--version")
         .stdin(Stdio::null())
         .output()
@@ -593,7 +602,7 @@ fn redirected_streams_stay_plain_without_terminal_controls() {
 
     // Redirected stdin selects print mode. With no prompt it must fail fast
     // and write no terminal control sequences to either stream.
-    let redirected = Command::new(binary)
+    let redirected = Command::new(&binary)
         .args(scenario.arguments())
         .current_dir(&scenario.workspace)
         .env_remove("TERM")
