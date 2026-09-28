@@ -57,11 +57,13 @@ It is not OpenAI's CUA and is not vendored here.
 1. `computer_use_installed_apps` or `computer_use_windows` to find the exact app
    or window. Re-enumerate after the app changes; never reuse a stale target.
 2. `computer_use_window_state` for the target before any indexed action. It
-   returns the accessibility tree and a screenshot together. Element indices
-   are replaced by the next snapshot, so re-snapshot every turn before acting.
-3. Cross-check the tree against the screenshot. The tree lies on some surfaces
-   (Electron echo, null values, off-viewport rows). If the tree looks
-   incomplete, act by pixel from the returned screenshot instead.
+   returns the accessibility tree by default; request `include_screenshot: true`
+   when pixels are needed. Element indices are replaced by the next snapshot,
+   so re-snapshot before each indexed action.
+3. When requested, cross-check the tree against the screenshot. The tree lies
+   on some surfaces (Electron echo, null values, off-viewport rows). If the
+   screenshot cannot be delivered, use the tree if it is sufficient; otherwise
+   stop or retry the observation. An empty filtered query is not a broken tree.
 4. Read the action's effect. A tool that reports it could not verify did not
    necessarily fail; re-observe before assuming.
 5. Re-read state after acting. A correct answer from memory is not evidence the

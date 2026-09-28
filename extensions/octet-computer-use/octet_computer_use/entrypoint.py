@@ -8,6 +8,7 @@ the configured confirmation policy; failed or declined prompts deny dispatch.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import subprocess
 import threading
@@ -30,6 +31,7 @@ from octet_computer_use.jev import (
 )
 from octet_computer_use.jev import sdk_installed
 from octet_computer_use.jev import status as jev_status
+from octet_computer_use.screenshots import HostArtifactTransport
 from octet_computer_use.service import ArgumentError
 
 # Driver tools that never change the desktop. Everything else is gated.
@@ -579,30 +581,37 @@ class ComputerUse:
             arguments["session"] = session
 
         result = client.call(driver_tool, arguments)
-        return self._format_result(driver_tool, result)
+        return self._format_result(driver_tool, result, query=arguments.get("query"))
 
-    def _format_result(self, driver_tool: str, result: Mapping[str, Any]) -> Dict[str, Any]:
+    def _format_result(self, driver_tool: str, result: Mapping[str, Any], *, query: Optional[str] = None) -> Dict[str, Any]:
         summary = service.summarize_result(result)
         text = summary["text"][:RESULT_TEXT_LIMIT]
         parts: List[Mapping[str, Any]] = [text_content(text or "(no text content)")]
         structured = summary.get("structured")
         if isinstance(structured, dict):
-            token_hint = _targeting_hint(structured)
-            if token_hint:
-                if len(token_hint) > RESULT_TEXT_LIMIT:
-                    token_hint = token_hint[:RESULT_TEXT_LIMIT] + "\n[truncated]"
-                parts.insert(0, text_content(token_hint))
+            visible = _visible_targets(driver_tool, structured, query=query)
+            if visible:
+                if len(visible) > RESULT_TEXT_LIMIT:
+                    visible = visible[:RESULT_TEXT_LIMIT - 50] + "\n[truncated; narrow the observation]"
+                parts.insert(0, text_content(visible))
+        transport = HostArtifactTransport(self._extension)
         for block in summary.get("images") or ():
             data = block.get("data")
             mime = str(block.get("mimeType") or block.get("mime_type") or "image/png")
             if not isinstance(data, str) or not data:
                 continue
             try:
-                artifact = self._extension.publish_artifact(mime_type=mime, data=base64.b64decode(data))
+                raw = base64.b64decode(data, validate=True)
+                artifact = transport.publish(
+                    mime_type=mime, data=raw, size=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                )
             except Exception as error:
+                cause = error.__cause__ or error
+                code = getattr(cause, "code", type(cause).__name__)
+                message = str(getattr(cause, "message", cause)).replace("\n", " ")[:200]
                 parts.append(text_content(
                     "[octet] the driver returned a screenshot but it could not be delivered "
-                    f"({type(error).__name__}). Treat this capture as unavailable."
+                    f"({code}: {message}). Treat this capture as unavailable; the tree may still be usable."
                 ))
                 continue
             parts.append(image_content(artifact, mime))
@@ -708,7 +717,7 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         api_version="0.4",
         max_concurrent_requests=4,
         max_pending_requests=16,
-        supported_features=("request_cancellation", "content_parts"),
+        supported_features=("request_cancellation", "content_parts", "artifacts"),
     )
     computer_use = ComputerUse(extension, home=home)
 
@@ -897,30 +906,48 @@ def _render_jev_setup(outcome: Mapping[str, Any]) -> str:
     return "Jev setup skipped. Computer use is unaffected."
 
 
-# How many element rows the inline hint spells out before deferring to the
-# structured payload. This bounds what is *displayed*, never what is known: the
-# complete table stays in structured_content, and the hint states the real
-# total, so the model is never left believing it saw everything.
+# Keep model-visible target lists compact; structured details are not sent to the model.
 _TARGETING_HINT_ROWS = 20
+_LIST_ROWS = 100
 
 
-def _targeting_hint(structured: Mapping[str, Any]) -> str:
-    """Spell out how to address an element in this window.
+def _visible_targets(driver_tool: str, structured: Mapping[str, Any], *, query: Optional[str] = None) -> str:
+    """Project driver handles into text the model can actually read."""
 
-    The driver returns an ``element_token`` per control and a ``snapshot_id`` for
-    the snapshot, but its markdown rendering shows neither. An agent therefore
-    cannot click a button by identity and falls back to coordinates or to
-    reverse-engineering the driver's source. State the contract once, in the tool
-    result the agent is already reading.
+    if driver_tool in {"list_windows", "list_apps"}:
+        collection = "windows" if driver_tool == "list_windows" else "apps"
+        records = structured.get(collection)
+        if not isinstance(records, list):
+            return ""
+        lines = []
+        for record in records[:_LIST_ROWS]:
+            if not isinstance(record, Mapping):
+                continue
+            fields = ("pid", "window_id", "app_name", "title") if collection == "windows" else (
+                "pid", "name", "bundle_id",
+            )
+            lines.append("  " + " ".join(
+                f"{field}={str(record[field])[:100]!r}" if isinstance(record[field], str)
+                else f"{field}={record[field]}"
+                for field in fields if record.get(field) is not None
+            ))
+        shown = len(lines)
+        if len(records) > _LIST_ROWS:
+            guidance = "narrow the window list by pid" if collection == "windows" else "inspect a specific app by name"
+            lines.append(f"  ... {len(records) - _LIST_ROWS} more; {guidance}.")
+        return f"{collection}: {shown} shown of {len(records)} returned\n" + "\n".join(lines)
+    if driver_tool == "get_window_state":
+        return _targeting_hint(structured, query=query)
+    return ""
 
-    Repeating the whole table here is pure duplication -- it is already in
-    ``structured_content`` -- and on a large window 200 rows crowded out the
-    result the model was actually asking for. A short sample plus the true count
-    carries the same information for a fraction of the tokens.
-    """
 
+def _targeting_hint(structured: Mapping[str, Any], *, query: Optional[str] = None) -> str:
     elements = structured.get("elements")
     if not isinstance(elements, list) or not elements:
+        if query:
+            return "No matching accessibility elements. Try another query or omit query."
+        if structured.get("element_count", 0) or structured.get("returned_element_count", 0):
+            return "[octet] Snapshot reported elements but has no usable tree; retry the observation."
         return ""
     lines = [
         "Addressing this window: pass element_token (preferred) or element_index "
@@ -930,20 +957,19 @@ def _targeting_hint(structured: Mapping[str, Any]) -> str:
     if isinstance(snapshot, str) and snapshot:
         lines.append(f"snapshot_id: {snapshot}")
     addressable = [
-        element
-        for element in elements
+        element for element in elements
         if isinstance(element, dict)
         and (element.get("element_token") is not None or element.get("element_index") is not None)
     ]
     for element in addressable[:_TARGETING_HINT_ROWS]:
         lines.append(
             f"  token={element.get('element_token')} index={element.get('element_index')} "
-            f"role={element.get('role')} label={element.get('label')}"
+            f"role={element.get('role')} label={str(element.get('label'))[:100]}"
         )
     if len(addressable) > _TARGETING_HINT_ROWS:
         lines.append(
-            f"  ... {len(addressable) - _TARGETING_HINT_ROWS} more addressable elements; "
-            "the complete table is in structured_content.elements"
+            f"  ... {len(addressable) - _TARGETING_HINT_ROWS} more in this snapshot; "
+            "use an index from the tree above with snapshot_id, or narrow with query."
         )
     return "\n".join(lines)
 

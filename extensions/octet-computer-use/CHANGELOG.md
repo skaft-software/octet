@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## Unreleased (target: v0.8.2)
+
+- Negotiate screenshot artifacts and stage large captures under the host scratch
+  directory instead of exceeding the inline artifact limit. Report bounded
+  publication errors while retaining a usable accessibility tree.
+- Show window/app handles in model-visible text and replace references to hidden
+  structured details with actionable targeting and query guidance.
+
+## Earlier changes
 
 ### Added
 

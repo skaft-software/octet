@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import sys
 import tempfile
@@ -807,13 +808,67 @@ class ResultFidelityTests(unittest.TestCase):
         self.assertEqual(summary["images"][0]["data"], "QUJD")
 
     def test_failed_screenshot_publication_is_visible(self):
-        computer = ComputerUse(RecordingExtension())  # no artifact publisher
+        from octet_extension.protocol import RpcError
+
+        class RejectedPublisher:
+            negotiated_features = {"artifacts"}
+
+            def publish_artifact(self, **kwargs):
+                raise RpcError(-32002, "artifact publication requires a host-owned session context")
+
+        computer = ComputerUse(RejectedPublisher())
         result = computer._format_result("get_window_state", {
             "content": [{"type": "text", "text": "window captured"},
                         {"type": "image", "data": "QUJD", "mimeType": "image/png"}],
         })
-        self.assertTrue(any("could not be delivered" in part.get("text", "")
+        self.assertTrue(any("-32002: artifact publication requires" in part.get("text", "")
                             for part in result["content"]))
+        self.assertFalse(result["is_error"])  # The tree can still be used.
+
+    def test_small_and_large_screenshots_publish_by_inline_and_scratch(self):
+        try:
+            from .test_screenshots import RecordingPublisher, FRAME_A, _png
+        except ImportError:
+            from test_screenshots import RecordingPublisher, FRAME_A, _png
+
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = RecordingPublisher(Path(directory))
+            computer = ComputerUse(publisher)
+            old = os.environ.get("OCTET_EXTENSION_SCRATCH")
+            os.environ["OCTET_EXTENSION_SCRATCH"] = directory
+            try:
+                large = _png(marker=os.urandom(150000).hex().encode())
+                for raw, source in ((FRAME_A, "data"), (large, "path")):
+                    result = computer._format_result("get_window_state", {
+                        "content": [{"type": "image", "data": base64.b64encode(raw).decode(),
+                                     "mimeType": "image/png"}],
+                    })
+                    self.assertFalse(result["is_error"])
+                    self.assertTrue(any(part.get("type") == "image" for part in result["content"]))
+                    self.assertIn(source, publisher.calls[-1])
+                self.assertEqual(publisher.path_bytes, [large])
+                self.assertEqual(list((Path(directory) / "octet-computer-use-screenshots").iterdir()), [])
+            finally:
+                if old is None:
+                    os.environ.pop("OCTET_EXTENSION_SCRATCH", None)
+                else:
+                    os.environ["OCTET_EXTENSION_SCRATCH"] = old
+
+    def test_artifacts_are_negotiated(self):
+        from octet_computer_use.entrypoint import create_extension
+
+        extension, _ = create_extension()
+        try:
+            result = extension._initialize({
+                "api_version": "0.4",
+                "protocol": {"version": "0.4", "required_features": [],
+                             "optional_features": ["artifacts", "content_parts"],
+                             "limits": {"max_concurrent_requests": 1}},
+            })
+            self.assertIn("artifacts", result["protocol"]["features"])
+        finally:
+            if extension._executor is not None:
+                extension._executor.shutdown(wait=True)
 
     def test_structured_payload_survives_the_summary(self):
         from octet_computer_use.service import summarize_result
@@ -948,10 +1003,35 @@ class TargetingHintTests(unittest.TestCase):
         hint = _targeting_hint(structured)
         rows = [line for line in hint.splitlines() if line.startswith("  token=")]
         self.assertEqual(len(rows), _TARGETING_HINT_ROWS)
-        # A truncated sample must never read as the whole table: the model has to
-        # be told what it is not seeing and where the rest is.
-        self.assertIn(f"... 12 more addressable elements", hint)
-        self.assertIn("structured_content.elements", hint)
+        # Hidden structured details are not model-visible. Narrow or use the
+        # markdown tree's index with this snapshot rather than referring to them.
+        self.assertIn("... 12 more in this snapshot", hint)
+        self.assertIn("narrow with query", hint)
+        self.assertNotIn("structured_content.elements", hint)
+
+    def test_empty_query_is_not_reported_as_degraded(self):
+        from octet_computer_use.entrypoint import _targeting_hint
+
+        snapshot = {"element_count": 149, "returned_element_count": 0,
+                    "filtered_element_count": 0, "elements": []}
+        hint = _targeting_hint(snapshot, query="not-a-control")
+        self.assertIn("No matching", hint)
+        self.assertNotIn("degraded", hint)
+        self.assertIn("retry", _targeting_hint(snapshot))
+
+    def test_window_and_app_handles_are_model_visible(self):
+        computer = ComputerUse(RecordingExtension())
+        for tool, collection, record, handle in (
+            ("list_windows", "windows", {"pid": 42, "window_id": 7, "app_name": "Calculator"}, "window_id=7"),
+            ("list_apps", "apps", {"pid": 42, "name": "Calculator", "bundle_id": "com.apple.calculator"}, "com.apple.calculator"),
+        ):
+            with self.subTest(tool=tool):
+                result = computer._format_result(tool, {
+                    "content": [{"type": "text", "text": "Found 1 item(s)."}],
+                    "structuredContent": {collection: [record]},
+                })
+                self.assertTrue(any(handle in part.get("text", "") for part in result["content"]))
+
 
 
 class ObservationScreenshotTests(unittest.TestCase):
