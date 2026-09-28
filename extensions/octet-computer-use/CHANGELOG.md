@@ -4,6 +4,16 @@
 
 ### Added
 
+- Pinned upstream Cua Driver `jev-use` recipe as owner-fenced background jobs:
+  `computer_use_jev_use_status`, `computer_use_jev_use_setup`,
+  `computer_use_jev_use_run`, `computer_use_jev_use_choose`, plus
+  `/computer-use jev-use status|setup|run|status JOB_ID|cancel JOB_ID`.
+  Setup explicitly installs the commit-pinned source and locked Python/optional
+  TypeScript dependencies; runs own a separate MCP session and isolated browser
+  against the local form fixture with independent `/state` readback. Mock by
+  default, live via `/computer-use jev` key, visual path capability-gated.
+  Refused under per-action confirmation policy.
+
 - Bundle 24 MIT-attributed Cua dotLottie cursor themes with an Octet-inspired,
   slightly smaller silhouette and the stable model-adaptive TUI prompt colors.
   `/computer-use setup` installs the compiled themes locally; cursor sessions

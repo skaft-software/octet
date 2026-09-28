@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from octet_extension import Extension, image_content, text_content, tool_result
 
 from octet_computer_use import driver as driver_module
-from octet_computer_use import cursor_theme, service
+from octet_computer_use import cursor_theme, service, jev_use_binding, jev_use_jobs
 from octet_computer_use.driver_client import DriverClient, McpError
 from octet_computer_use.jev import (
     Candidate,
@@ -33,7 +33,9 @@ from octet_computer_use.jev import status as jev_status
 from octet_computer_use.service import ArgumentError
 
 # Driver tools that never change the desktop. Everything else is gated.
-LOCAL_ONLY_TOOLS = frozenset({"read_driver_health", "provision", "jev_status", "jev_choose"})
+LOCAL_ONLY_TOOLS = frozenset({"read_driver_health", "provision", "jev_status", "jev_choose"}) | frozenset(
+    "jev_use_" + operation for operation in jev_use_binding.TOOLS
+)
 
 # Driver tools that address one specific window and therefore need a window_id.
 _WINDOW_SCOPED_TOOLS = frozenset(
@@ -105,6 +107,8 @@ def cursor_session() -> str:
 def _schema_for(driver_tool: str) -> Dict[str, Any]:
     """A bounded input schema matching the runtime sanitizer."""
 
+    if driver_tool.startswith("jev_use_"):
+        return jev_use_binding.TOOLS[driver_tool.removeprefix("jev_use_")][1]
     allowed = service._ARGUMENTS.get(driver_tool, ())
     properties: Dict[str, Any] = {}
     for name in allowed:
@@ -242,6 +246,8 @@ def _output_schema_for(driver_tool: str) -> Optional[Dict[str, Any]]:
     share one permissive object shape; the local tools declare their own.
     """
 
+    if driver_tool.startswith("jev_use_"):
+        return {"type": "object", "additionalProperties": True}
     specific = _OUTPUT_SCHEMAS.get(driver_tool)
     if specific is not None:
         return specific
@@ -708,13 +714,20 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         api_version="0.4",
         max_concurrent_requests=4,
         max_pending_requests=16,
-        supported_features=("request_cancellation", "content_parts"),
+        supported_features=("request_cancellation", "content_parts", "lifecycle_events"),
     )
     computer_use = ComputerUse(extension, home=home)
+    jev_jobs = jev_use_jobs.Jobs(computer_use, extension, home=home)
+    extension.on_lifecycle("session/settled")(jev_jobs.session_settled)
 
     def handler(name: str, arguments: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
         computer_use.select_model(context)
         values = dict(arguments) if isinstance(arguments, Mapping) else {}
+        if name.startswith(jev_use_binding.PREFIX):
+            return jev_jobs.handle(
+                name.removeprefix(jev_use_binding.PREFIX), values, context,
+                gated=confirmations_enabled(),
+            )
         if name == "computer_use_status":
             result = computer_use.status()
             return tool_result(
@@ -762,6 +775,12 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         computer_use.select_model(context)
         parts = [str(part) for part in (arguments or [])]
         action = parts[0] if parts else "status"
+        if action == "jev-use":
+            try:
+                operation, options = jev_use_binding.command_options(parts[1:])
+            except ValueError as error:
+                return tool_result(text_content(str(error)), is_error=True)
+            return jev_jobs.handle(operation, options, context, gated=confirmations_enabled())
         if action == "setup":
             result = computer_use.provision()
             try:
@@ -790,7 +809,7 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
             result = computer_use.publish_status()
         else:
             return tool_result(
-                text_content("Usage: /computer-use [status|setup|jev]"),
+                text_content("Usage: /computer-use [status|setup|jev|jev-use]"),
                 is_error=True,
             )
         return tool_result(
@@ -806,7 +825,11 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         ),
     )(setup_command)
 
-    extension.on_shutdown(computer_use.shutdown)
+    def shutdown() -> None:
+        jev_jobs.shutdown()
+        computer_use.shutdown()
+
+    extension.on_shutdown(shutdown)
     return extension, computer_use
 
 

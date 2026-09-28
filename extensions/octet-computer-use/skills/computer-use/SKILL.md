@@ -93,6 +93,51 @@ It is not OpenAI's CUA and is not vendored here.
 - Prefer `octet-browse` for anything involving a login or a saved session; this
   skill drives the user's real desktop.
 
+## Upstream Jev workflows
+
+For the supported upstream `jev-use` recipe, use `computer_use_jev_use_status`
+without arguments for pinned-source readiness, then explicit
+`computer_use_jev_use_setup` if the user authorizes dependency installation.
+`setup`, `run`, and `choose` are background jobs: they return immediately
+with a `job_id`. Poll with `computer_use_jev_use_status` (`{"job_id": ...}`)
+until `status: finished`, then read the nested `result`; cancel with
+`computer_use_jev_use_cancel`. Do not re-launch while one job is running.
+`computer_use_jev_use_run` runs the bounded observe/choose/act/verify loop
+without a main-model turn for each click. It operates an isolated browser
+and the upstream local form fixture; do not describe it as arbitrary
+native-app or website automation. Its session is separate from manual
+Driver calls. The `/computer-use jev-use` command offers the same
+`status`/`setup`/`run`/`status JOB_ID`/`cancel JOB_ID` flow; the standalone
+chooser is tool-only.
+
+The default run uses mock decisions but still performs real browser actions.
+Use `live: true` only when the user authorizes sending compact task
+observations to TypeSafe and any provider charges. Python is the default;
+`typescript: true` adds the upstream TypeScript checks after TypeScript
+setup. Optional visual perception must already be installed separately.
+`visual_fixture: true` with `require_visual_path: true` requires an actual
+capture-bound visual submission; never claim the semantic fallback
+exercised vision. `expect_visual_status` checks the per-step visual parse
+status (`ok`, `not_installed`, `error`, `unavailable`); with a visual
+fixture and a non-`ok` status, only a logged non-submitting fallback counts
+as complete, never as task-verified. `port` selects the loopback fixture
+port (default picks an unused port); `max_steps` bounds decisions 1..32 and
+`visual_observation` selects `auto`, `always`, or `off`.
+
+Only a complete result with independently checked fixture evidence
+establishes success. Keep proof directories private. Cancellation signals
+the owned job promptly but reports `cleanup_complete: false` and never
+guarantees full process-tree reclamation; timeout, unknown outcome, or
+cancel is not rollback and must not trigger automatic replay. A per-action
+confirmation policy refuses this autonomous runner; use individual actions
+instead, never disable the policy to get a run through.
+
+For another harness, `computer_use_jev_use_choose` exposes the upstream
+`cua.jev_choice_request_v1` / `cua.jev_choice_v1` contract. It selects an offered
+ID but does not execute or verify it. The existing `computer_use_jev_choose`
+remains available with its own simpler schema; the two are not interchangeable.
+Do not send screenshots, credentials, or arbitrary tool arguments to either.
+
 ## Sessions
 
 Wrap multi-step work in `computer_use_start_session` and end it with
