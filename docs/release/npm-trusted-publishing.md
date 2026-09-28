@@ -31,7 +31,8 @@ scripts/package-octet-npm.sh VERSION release-assets npm-assets \
   release-assets/OCTET_SHA256SUMS
 python3 scripts/create-octet-npm-manifest.py VERSION vVERSION \
   SOURCE_COMMIT WORKFLOW_COMMIT release-assets/OCTET_RELEASE_METADATA.json \
-  npm-assets npm-assets/OCTET_NPM_MANIFEST.json npm-assets/OCTET_NPM_SHA256SUMS
+  npm-assets npm-assets/OCTET_NPM_MANIFEST.json npm-assets/OCTET_NPM_SHA256SUMS \
+  --core-workflow-commit CORE_WORKFLOW_COMMIT
 python3 scripts/verify-octet-npm.py VERSION npm-assets
 ```
 
@@ -67,15 +68,18 @@ environment. The workflow uses GitHub OIDC with `npm publish --provenance`, neve
 `NPM_TOKEN`, `NODE_AUTH_TOKEN`, a checked-in `.npmrc`, or another long-lived
 registry credential. The environment is the human approval boundary.
 
-Canonical binary tag runs leave npm publication disabled. Only after all four
-trusted publishers and cryptographic provenance verification are ready, dispatch
-`release-octet.yml` from the exact canonical `vX.Y.Z` tag with `release_tag` set
-to that tag and `publish_npm=true`.
+Canonical binary tag runs leave npm publication disabled. After all four
+trusted publishers are configured, dispatch `release-octet.yml` from protected
+`main` with `release_tag=vX.Y.Z` and `publish_npm=true`. This npm-only path
+verifies and smokes the existing immutable native release; it does not rebuild
+or re-sign its assets. The npm manifest binds the new publication workflow
+commit while separately checking the original native signer commit recorded in
+`OCTET_RELEASE_METADATA.json`. A release-environment approval may be required.
 
 The publication job pins npm CLI `11.5.1` (or a later explicitly reviewed version
 supporting trusted publishing) before requesting OIDC provenance. It:
 
-1. waits for the signed GitHub binary release and published installer smoke;
+1. verifies the signed GitHub binary release and published installer smoke;
 2. verifies immutable release metadata and builds/validates all four tarballs in
    an unprivileged job;
 3. preflights each `name@version` and continues only if an existing package's
