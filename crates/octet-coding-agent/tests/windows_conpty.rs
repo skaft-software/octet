@@ -15,7 +15,9 @@
 //! environment variable, so the child reads the current user's octet
 //! configuration. The interactive scenarios need a profile with no configured
 //! provider, as on a CI runner: they continue through first-run provider setup
-//! without writing provider data. The workspace and session store are
+//! without writing provider data. When the account does have a configured
+//! custom provider they skip themselves (a configured provider opens the model
+//! picker instead of first-run setup). The workspace and session store are
 //! disposable.
 #![cfg(windows)]
 
@@ -50,6 +52,22 @@ const INITIAL: (u16, u16) = (90, 28);
 const RESIZED: (u16, u16) = (120, 32);
 const MARKER: &str = "octetconpty";
 const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+
+/// The persisted custom-provider registry, which the child always reads.
+///
+/// Windows resolves the profile through the known-folder API, so these
+/// scenarios cannot isolate it: a configured provider makes startup open the
+/// model picker instead of first-run setup.
+fn profile_has_configured_provider() -> bool {
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        return false;
+    };
+    std::path::Path::new(&home)
+        .join(".octet")
+        .join("credentials")
+        .join("custom.json")
+        .is_file()
+}
 
 fn serial() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -510,6 +528,13 @@ fn full_width_rule(screen: &str, width: usize, glyph: char) -> bool {
 /// profile selected from the native console rather than from TERM.
 fn interactive_round_trip(environment: &[(&str, &str)], rule: char) {
     let _serial = serial();
+    if profile_has_configured_provider() {
+        eprintln!(
+            "skipping: this account has a configured custom provider; the ConPTY \
+             interactive scenarios require a profile with none"
+        );
+        return;
+    }
     let scenario = Scenario::new();
     let binary = octet_binary();
     let mut console = PseudoConsole::spawn(
