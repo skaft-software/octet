@@ -4,6 +4,11 @@
 //! depth from the terminal's negotiated environment, and translates that
 //! profile for the render-only backend. SSH transport is deliberately not a
 //! color-depth signal.
+//!
+//! Native Windows consoles do not export `TERM`. There, console handles with
+//! virtual-terminal output processing are the negotiated contract, Windows
+//! Terminal is identified by `WT_SESSION`, and a `TERM` exported by an
+//! MSYS/Cygwin shell is trusted only over real console handles.
 #![allow(missing_docs)]
 
 use std::io::IsTerminal;
@@ -73,6 +78,35 @@ struct CapabilityProbe {
     locale: Option<String>,
     no_color: bool,
     explicit_plain: bool,
+    /// Native Windows console facts; `None` on other platforms, where TERM is
+    /// the negotiated terminal contract.
+    windows: Option<WindowsConsole>,
+}
+
+/// Native Windows console facts observed before any control sequence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WindowsConsole {
+    /// Standard input is a console handle that delivers input records.
+    input_console: bool,
+    /// Standard output is a console handle with VT processing enabled.
+    output_vt: bool,
+    /// Windows Terminal hosts the console (`WT_SESSION` is present).
+    windows_terminal: bool,
+}
+
+#[cfg(windows)]
+fn windows_console() -> Option<WindowsConsole> {
+    let console = super::windows_console::probe();
+    Some(WindowsConsole {
+        input_console: console.input_console,
+        output_vt: console.output_vt,
+        windows_terminal: std::env::var_os("WT_SESSION").is_some_and(|value| !value.is_empty()),
+    })
+}
+
+#[cfg(not(windows))]
+fn windows_console() -> Option<WindowsConsole> {
+    None
 }
 
 fn known_terminal(term: &str) -> bool {
@@ -142,6 +176,7 @@ impl TerminalCapabilities {
                 locale,
                 no_color: std::env::var_os("NO_COLOR").is_some(),
                 explicit_plain,
+                windows: windows_console(),
             },
         )
     }
@@ -152,14 +187,36 @@ impl TerminalCapabilities {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let known = known_terminal(&term);
-        let interactive = probe.stdin_tty && probe.stdout_tty && known && !probe.explicit_plain;
+        let (known, console_input, windows_terminal, windows_default_term) = match probe.windows {
+            None => (known_terminal(&term), true, false, false),
+            Some(console) => {
+                // A Windows console never exports TERM; VT output processing
+                // is the contract. An exported TERM (Git Bash, MSYS2, Cygwin)
+                // still needs a VT console output handle: mintty's pty pipes
+                // look like terminals but cannot be driven as a console.
+                let default_term = term.is_empty();
+                let known = console.output_vt && (default_term || known_terminal(&term));
+                (
+                    known,
+                    console.input_console,
+                    known && console.windows_terminal,
+                    known && default_term,
+                )
+            }
+        };
+        let interactive =
+            probe.stdin_tty && probe.stdout_tty && known && console_input && !probe.explicit_plain;
+        // Windows console output is written as UTF-16, so the locale does not
+        // decide encoding there. Windows Terminal renders the renderer's glyph
+        // set; a plain conhost font may not, so it keeps the ASCII profile
+        // unless the shell exported a UTF-8 locale.
         let unicode = !probe.explicit_plain
             && known
-            && probe.locale.as_deref().is_some_and(|locale| {
-                let locale = locale.to_ascii_lowercase();
-                locale.contains("utf-8") || locale.contains("utf8")
-            });
+            && (windows_terminal
+                || probe.locale.as_deref().is_some_and(|locale| {
+                    let locale = locale.to_ascii_lowercase();
+                    locale.contains("utf-8") || locale.contains("utf8")
+                }));
 
         // SSH transports the remote process's terminal environment. It is not
         // itself a colour capability boundary: TERM/COLORTERM remain the
@@ -179,17 +236,23 @@ impl TerminalCapabilities {
         }) || term.contains("ghostty")
             || term.contains("kitty")
             || term.contains("wezterm")
+            || windows_terminal
         {
             ColorDepth::TrueColor
-        } else if term.contains("256color") {
+        } else if term.contains("256color") || windows_default_term {
+            // A VT-enabled Windows console with no TERM supports the xterm
+            // 256-colour palette; truecolour is left to an explicit signal.
             ColorDepth::Ansi256
         } else {
             ColorDepth::Ansi16
         };
 
+        // Windows Terminal renders SGR italics and OSC 8 hyperlinks. A plain
+        // conhost window does neither, so it keeps the conservative profile.
         let rich_terminal = term.contains("ghostty")
             || term.contains("kitty")
             || term.contains("wezterm")
+            || windows_terminal
             || probe.term_program.as_deref().is_some_and(|program| {
                 program == "iTerm.app" || program == "WezTerm" || program == "ghostty"
             });

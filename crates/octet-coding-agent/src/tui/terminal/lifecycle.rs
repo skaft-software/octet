@@ -104,6 +104,13 @@ fn restore_terminal(advance_line: bool) {
         let _ = execute!(out, cursor::MoveToNextLine(1), cursor::MoveToColumn(0));
     }
     let _ = out.flush();
+    // The console output mode changes line-feed and wrapping semantics for
+    // whatever the parent shell writes next, so it is restored only after the
+    // final mode-reset sequences above have reached the console.
+    #[cfg(windows)]
+    if raw_active {
+        super::windows_console::restore();
+    }
     crate::output::end_tui_diagnostics();
 }
 

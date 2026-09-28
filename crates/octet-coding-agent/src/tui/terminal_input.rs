@@ -7,6 +7,11 @@
 //! worth of input. Query/identified-reply state has memory bounds, not an expiry:
 //! a terminal's response can arrive arbitrarily later than the startup wait.
 //!
+//! Windows consoles decode a reply as one key-down and one key-up per byte
+//! (ConPTY synthesizes both). Releases are never reply bytes; they stay with the
+//! held fragment so they neither flush an unconfirmed prefix into the composer
+//! nor survive a recognized reply.
+//!
 //! Before the full OSC 11 header is recognized, legacy Esc/Alt+] is inherently
 //! ambiguous with genuine input. Only that unconfirmed prefix has a 250 ms idle
 //! deadline, after which its original events are replayed. An opener split more
@@ -32,6 +37,8 @@ use tokio::time::Sleep;
 // Only an ambiguous, unconfirmed header is subject to an input-latency bound.
 const PREFIX_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_REPLY_BYTES: usize = 128;
+// Held original events: every reply byte plus, on Windows, its key-up.
+const MAX_HELD_EVENTS: usize = MAX_REPLY_BYTES * 2;
 const OSC11_PREFIX: &str = "\x1b]11;";
 
 #[derive(Default)]
@@ -42,6 +49,8 @@ struct BackgroundReplies {
     held: Vec<Event>,
     ready: VecDeque<Event>,
     color: Option<RgbColor>,
+    /// Key-up still owed by a Windows console for the reply's final byte.
+    trailing_release: Option<(KeyCode, KeyModifiers)>,
 }
 
 impl BackgroundReplies {
@@ -85,6 +94,15 @@ impl BackgroundReplies {
 
     fn push(&mut self, event: Event, now: Instant) {
         self.expire(now);
+        if let Some((code, modifiers)) = self.trailing_release.take() {
+            if matches!(&event, Event::Key(key)
+                if key.kind == KeyEventKind::Release
+                    && key.code == code
+                    && key.modifiers == modifiers)
+            {
+                return;
+            }
+        }
         if !self.pending {
             self.ready.push_back(event);
             return;
@@ -99,6 +117,15 @@ impl BackgroundReplies {
             return;
         }
         let Some(fragment) = reply_fragment(&event) else {
+            if is_key_release(&event) && !self.text.is_empty() {
+                // A Windows key-up for a held reply byte. Keep it in order so a
+                // mismatch replays exactly what arrived and a match discards it.
+                self.held.push(event);
+                if self.held.len() > MAX_HELD_EVENTS {
+                    self.replay();
+                }
+                return;
+            }
             // A bracketed paste or a shortcut can arrive between identified
             // reply fragments. It remains genuine input, not payload, and
             // must not flush terminal-response text into the next owner.
@@ -120,6 +147,9 @@ impl BackgroundReplies {
                 self.color = Some(color);
                 self.pending = false;
                 self.clear_fragment();
+                if let Event::Key(key) = &event {
+                    self.trailing_release = Some((key.code, key.modifiers));
+                }
             }
             Candidate::NotReply => {
                 self.replay();
@@ -134,6 +164,10 @@ impl BackgroundReplies {
             }
         }
     }
+}
+
+fn is_key_release(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
 }
 
 // Do not turn paste text, enhanced key releases/repeats, or arbitrary shortcuts
@@ -450,6 +484,66 @@ mod tests {
                     assert!(replies.held.is_empty());
                 }
             }
+        }
+    }
+
+    /// Windows console decoding: ConPTY turns every reply byte into a key-down
+    /// and a key-up record, and crossterm reports both.
+    fn windows_decoded(bytes: &str) -> Vec<Event> {
+        decoded(bytes, true)
+            .into_iter()
+            .flat_map(|event| {
+                let Event::Key(press) = event else {
+                    unreachable!("the decoder yields key events")
+                };
+                let release = KeyEvent {
+                    kind: KeyEventKind::Release,
+                    ..press
+                };
+                [Event::Key(press), Event::Key(release)]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn osc11_windows_key_releases_do_not_leak_a_reply_into_input() {
+        for ending in ["\x07", "\x1b\\"] {
+            let start = Instant::now();
+            let mut replies = BackgroundReplies::default();
+            assert!(replies.begin_query(start));
+            let wire = format!("\x1b]11;rgb:0c0c/0c0c/0c0c{ending}");
+            for event in windows_decoded(&wire) {
+                replies.push(event, start);
+                assert!(replies.ready.is_empty(), "reply byte escaped: {wire:?}");
+            }
+            assert_eq!(
+                replies.color,
+                Some(RgbColor {
+                    r: 12,
+                    g: 12,
+                    b: 12
+                })
+            );
+            assert!(replies.held.is_empty());
+        }
+    }
+
+    #[test]
+    fn osc11_windows_mismatch_replays_presses_and_releases_in_order() {
+        let start = Instant::now();
+        for wire in ["\x1b]user", "\x1b]10;rgb:11/22/33\x07", "\x1bx"] {
+            let mut replies = BackgroundReplies::default();
+            replies.begin_query(start);
+            let events = windows_decoded(wire);
+            for event in &events {
+                replies.push(event.clone(), start);
+            }
+            replies.expire(start + PREFIX_AMBIGUITY_TIMEOUT);
+            assert_eq!(
+                replies.ready.into_iter().collect::<Vec<_>>(),
+                events,
+                "{wire:?}"
+            );
         }
     }
 

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Stdout, Write};
+use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -148,11 +148,57 @@ fn normalize_line_endings(data: &str, last_was_cr: &mut bool) -> String {
     normalized
 }
 
+/// Destination for complete terminal frames.
+///
+/// The backend hands every flushed batch, normally one synchronized frame, to
+/// exactly one `write_frame` call. Implementations must not split it further
+/// when they can avoid it: a frame divided across writes can be painted half
+/// old and half new by a terminal without synchronized-output support.
+pub trait FrameSink: Write {
+    /// Write one complete frame.
+    fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.write_all(frame)
+    }
+}
+
+impl FrameSink for Vec<u8> {}
+
+impl FrameSink for Stdout {
+    fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            // The standard console writer converts only a few KiB per
+            // WriteConsoleW call. Keep std's buffered bytes ordered before
+            // the frame, then hand the whole frame to one console write.
+            let mut locked = self.lock();
+            locked.flush()?;
+            if let Some(result) = super::windows_console::write_frame(frame) {
+                return result;
+            }
+            locked.write_all(frame)
+        }
+        #[cfg(not(windows))]
+        {
+            self.write_all(frame)
+        }
+    }
+}
+
+/// UTF-16 code units for one console frame, or `None` when the bytes are not
+/// UTF-8 and must use the byte-oriented writer. Frames are built from `str`
+/// rows plus ASCII control sequences, so this is the normal case.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn frame_utf16(frame: &[u8]) -> Option<Vec<u16>> {
+    std::str::from_utf8(frame)
+        .ok()
+        .map(|text| text.encode_utf16().collect())
+}
+
 /// Render-only terminal adapter used by sexy-tui.
 ///
 /// Input is deliberately driven by the application's async crossterm stream;
 /// sexy-tui's blocking `Terminal::start` is never called.
-pub struct OctetTerminal<W: Write = Stdout> {
+pub struct OctetTerminal<W: FrameSink = Stdout> {
     out: W,
     size: TerminalSize,
     last_was_cr: bool,
@@ -200,6 +246,8 @@ impl OctetTerminal<Stdout> {
             return Err(error.into());
         }
         lifecycle::mark_raw_active();
+        #[cfg(windows)]
+        super::windows_console::enter_interactive();
 
         let result = Self::enter_inner(size, capture_mouse, image_store);
         if result.is_err() {
@@ -266,7 +314,7 @@ impl OctetTerminal<Stdout> {
     }
 }
 
-impl<W: Write> OctetTerminal<W> {
+impl<W: FrameSink> OctetTerminal<W> {
     /// Conservative product policy: only Kitty gets live image placement.
     /// iTerm2 has no targetable delete, so replay/destructive replacement would
     /// leave stale pixels behind; the transcript uses semantic fallback instead.
@@ -371,7 +419,7 @@ impl<W: Write> OctetTerminal<W> {
         if self.pending.is_empty() {
             return;
         }
-        let _ = self.out.write_all(&self.pending);
+        let _ = self.out.write_frame(&self.pending);
         let log_failed = self.write_log.as_mut().is_some_and(|log| {
             log.write_all(&self.pending_log)
                 .and_then(|()| log.flush())
@@ -399,14 +447,14 @@ impl<W: Write> OctetTerminal<W> {
     }
 }
 
-impl<W: Write> Drop for OctetTerminal<W> {
+impl<W: FrameSink> Drop for OctetTerminal<W> {
     fn drop(&mut self) {
         self.flush_pending();
         lifecycle::force_restore();
     }
 }
 
-impl<W: Write> sexy_tui_rs::Terminal for OctetTerminal<W> {
+impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
     fn start_events(
         &mut self,
         _on_input: Box<dyn FnMut(sexy_tui_rs::TerminalInput)>,
