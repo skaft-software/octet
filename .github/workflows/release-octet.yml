@@ -746,19 +746,22 @@ jobs:
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
             --certificate-github-workflow-sha "$CORE_WORKFLOW_COMMIT"
           )
-          cosign verify-blob \
-            --bundle OCTET_SHA256SUMS.sigstore.json \
-            "${verify[@]}" \
-            OCTET_SHA256SUMS
-          cosign verify-blob \
-            --bundle OCTET_RELEASE_METADATA.json.sigstore.json \
-            "${verify[@]}" \
-            OCTET_RELEASE_METADATA.json
+          verify_release_blob() {
+            local bundle=$1
+            local artifact=$2
+            (
+              cd ../source
+              cosign verify-blob \
+                --bundle "../release-assets/$bundle" \
+                "${verify[@]}" \
+                "../release-assets/$artifact"
+            )
+          }
+          verify_release_blob OCTET_SHA256SUMS.sigstore.json OCTET_SHA256SUMS
+          verify_release_blob OCTET_RELEASE_METADATA.json.sigstore.json OCTET_RELEASE_METADATA.json
           for artifact in ./*.tar.gz ./install-octet.sh; do
-            cosign verify-blob \
-              --bundle "${artifact}.sigstore.json" \
-              "${verify[@]}" \
-              "$artifact"
+            name=${artifact#./}
+            verify_release_blob "$name.sigstore.json" "$name"
           done
           python3 ../source/scripts/generate-octet-release-metadata.py \
             "$VERSION" \
