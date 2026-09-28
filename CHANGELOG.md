@@ -68,6 +68,16 @@
   idle boundary, so observing a new prompt needs several poll cycles. The outer
   budget is now 15s with a 2s per-attempt slice. The assertions are unchanged:
   the prompt must load and no routine reload notice may appear.
+- Make the source-only `octet-snap-compact` extension launchable and actually
+  tested. Its `extension.py` entrypoint is committed non-executable while every
+  released extension's entrypoint is `100755`, so a fresh checkout could not
+  start the extension; the mode now matches the README. Its suite also built the
+  renderer into `renderer/target/`, which the host's bounded source walk rejects
+  as unverified, so the build now targets a temporary directory like the README
+  documents. Because the renderer needs Rust 1.96 against octet's 1.86 MSRV, the
+  suite skips on older toolchains instead of failing, and CI runs it from a new
+  `extensions/source-catalog.txt` under a 1.96 toolchain. The extension remains
+  unpublished: only its README ships in a release.
 
 ## [0.8.1] - 2026-09-27
 
