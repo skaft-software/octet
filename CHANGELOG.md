@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Target v0.8.2: omit the redundant `computer_use_` prefix from TUI labels so
+  computer-use actions remain distinguishable within the label width cap.
+
 ## [0.8.1] - 2026-09-27
 
 See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.

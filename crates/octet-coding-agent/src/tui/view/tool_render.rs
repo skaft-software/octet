@@ -116,6 +116,10 @@ pub(crate) fn tool_display_label(name: &str) -> String {
         _ if name.starts_with("browser_") => "Browse".to_string(),
         _ if name.starts_with("ssh_") => "SSH".to_string(),
         _ => {
+            let name = name
+                .strip_prefix("computer_use_")
+                .filter(|suffix| !suffix.is_empty())
+                .unwrap_or(name);
             let mut s = name.replace('_', " ");
             if let Some(first) = s.get_mut(0..1) {
                 first.make_ascii_uppercase();

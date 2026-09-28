@@ -384,7 +384,8 @@ discarded by the tool capture.
 
 Tool values begin two cells after their labels (with a six-cell minimum for
 short names), avoiding a wide dead column while keeping each wrapped header's
-value column fixed. A muted vertical `│` joins
+value column fixed. Computer-use labels omit their shared `computer_use_` prefix
+to preserve the action name within the label cap. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
 the output's ownership visible without adding another indentation level.
 
