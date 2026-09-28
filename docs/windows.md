@@ -45,19 +45,18 @@ elevated session, such as a directory made by Explorer, a script, or a test
 harness, is owned by that group. octet refuses such objects rather than
 treating them as private.
 
-Known limitation (blocker): octet publishes file changes with a no-replace
-rename after verifying the target is unchanged. Windows has no atomic exchange
-to complete that check-and-replace safely, so replacing an *existing* file
-fails closed (`atomic conditional file replacement is unavailable`) instead of
-risking an overwrite of a file that changed underneath it. Creating new files
-works. Replacing existing ones does not, which includes:
-
-- the agent's `edit` tool, and `write` to a file that already exists;
-- rewriting existing private state, for example updating a saved
-  custom-provider registry or refreshing a cached model inventory.
-
-The Windows runner confirms the refusal at the file-publication layer; a safe
-Windows replacement primitive is still to be designed.
+Replacing an *existing* file uses a pin, then displace, then publish
+sequence (`secure_fs`): the target is pinned (opened with `DELETE` while
+denying write and delete sharing), re-verified by identity and bytes, renamed
+aside to `.octet-old-*`, and the staged file is published under the target
+name with a no-replace rename. No step overwrites a name it did not vacate
+itself: a writer that recreates the name in the displacement window wins
+(`Changed`, with the original kept under `.octet-old-*`), and readers can
+briefly see the target missing. Replacing a file that a cooperative holder
+keeps open for writing (session and journal descriptors, editors, `tempfile`
+handles) works; holders that do not share delete access report the file as
+in use instead. On-disk spelling (case and 8.3 aliases) and
+read-only/hidden/system attributes carry over to the replacement.
 
 ## Pull-request test builds
 

@@ -34,8 +34,12 @@
   workspace session directory are now created owned by the current user,
   instead of adopting directories an elevated process creates owned by the
   Administrators group.
-- Replacing an existing file still fails closed on Windows, including the
-  `edit` tool; see the known limitation in [Windows](docs/windows.md).
+- Replace existing files on Windows through pin, then displace, then publish:
+  the target is pinned (deny write/delete sharing while holding `DELETE`),
+  re-verified, renamed aside to `.octet-old-*`, and the staged file is
+  published with a no-replace rename. This unblocks the `edit` tool and every
+  rewrite of existing private state (session metadata, auth stores, model
+  caches) beyond first-run writes; see [Windows](docs/windows.md).
 
 ## [0.8.1] - 2026-09-27
 
