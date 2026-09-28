@@ -59,6 +59,15 @@
   published with a no-replace rename. This unblocks the `edit` tool and every
   rewrite of existing private state (session metadata, auth stores, model
   caches) beyond first-run writes; see [Windows](docs/windows.md).
+- Give the live-reload PTY test a budget derived from the reload supervisor's
+  own timing. The test retried `/prompt` until an automatic reload pass exposed a
+  newly written prompt, but its outer deadline and its per-attempt wait were both
+  the 5s `STARTUP_TIMEOUT`, so one slow iteration could outlast the whole budget
+  and the retry loop could never actually retry. The supervisor samples every
+  `DEFAULT_POLL_INTERVAL` (1s) and debounces for 200ms before applying at an
+  idle boundary, so observing a new prompt needs several poll cycles. The outer
+  budget is now 15s with a 2s per-attempt slice. The assertions are unchanged:
+  the prompt must load and no routine reload notice may appear.
 
 ## [0.8.1] - 2026-09-27
 
