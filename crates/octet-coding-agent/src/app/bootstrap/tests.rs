@@ -2202,7 +2202,7 @@ fn session_resume_uses_effective_reasoning_update_not_the_pinned_baseline() {
     let low = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
     let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
     let model = ModelId("codex/gpt-6-sol".into());
-    append_config_if_changed(&mut session, &model, &low, ReasoningMode::Standard).unwrap();
+    append_config_if_changed(&mut session, None, &model, &low, ReasoningMode::Standard).unwrap();
     session
         .append(EntryValue::ResponsesReasoning {
             endpoint: EndpointId(crate::auth::codex::ENDPOINT_ID.into()),
@@ -2219,6 +2219,7 @@ fn session_resume_uses_effective_reasoning_update_not_the_pinned_baseline() {
     // A later explicit selection wins over an older route's cache marker.
     append_config_if_changed(
         &mut session,
+        None,
         &ModelId("gpt-4o-mini".into()),
         &ReasoningConfig::Off,
         ReasoningMode::Standard,
@@ -2246,6 +2247,7 @@ fn gpt6_resume_and_idle_rebuild_honor_explicit_effort_without_replacing_baseline
     let mut session = Session::create(&path).unwrap();
     append_config_if_changed(
         &mut session,
+        None,
         &ModelId("gpt-6-sol".into()),
         &low,
         ReasoningMode::Standard,
@@ -3941,15 +3943,54 @@ fn launch_configuration_parts_returns_the_preopened_resume_session() {
             reasoning,
             reasoning_mode,
         },
+        persisted,
     ) = launch_configuration_parts(&config, &SessionSelection::OpenExisting(path.clone())).unwrap();
 
     assert_eq!(prepared.as_ref().map(Session::path), Some(path.as_path()));
+    assert_eq!(
+        persisted.model,
+        Some(ModelId("gpt-5.4-mini-responses".into()))
+    );
     assert_eq!(model, Some(ModelId("gpt-5.4-mini-responses".into())));
     assert_eq!(
         reasoning,
         Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High))
     );
     assert_eq!(reasoning_mode, ReasoningMode::Standard);
+}
+
+#[test]
+fn prepared_configuration_skips_a_second_scan_and_preserves_provenance() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("resumed.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let model = ModelId("gpt-4o-mini".into());
+    let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    append_config_if_changed(&mut session, None, &model, &high, ReasoningMode::Standard).unwrap();
+    let cached = persisted_session_config(&session).unwrap();
+    let count = session.entries().len();
+    append_config_if_changed(
+        &mut session,
+        Some(&cached),
+        &model,
+        &high,
+        ReasoningMode::Standard,
+    )
+    .unwrap();
+    assert_eq!(session.entries().len(), count);
+    append_config_if_changed(
+        &mut session,
+        Some(&cached),
+        &model,
+        &ReasoningConfig::Off,
+        ReasoningMode::Standard,
+    )
+    .unwrap();
+    assert_eq!(session.entries().len(), count + 1);
+    assert_eq!(
+        persisted_session_config(&session).unwrap().reasoning,
+        Some(ReasoningConfig::Off)
+    );
 }
 
 #[test]
@@ -4062,7 +4103,9 @@ fn explicit_unavailable_tools_report_final_available_names_and_policy_gates() {
         .resolve(config.model.as_ref().unwrap())
         .unwrap();
 
-    let error = validate_explicit_tool_policy(&config, &extensions, &model, false).unwrap_err();
+    let error =
+        validate_explicit_tool_policy(&config, &extensions.tool_definitions(), &model, false)
+            .unwrap_err();
     let message = error.to_string();
     assert!(message.contains("edit, missing-extension"), "{message}");
     assert!(
@@ -4074,8 +4117,13 @@ fn explicit_unavailable_tools_report_final_available_names_and_policy_gates() {
     dynamic_config.tools =
         crate::config::ToolPolicy::only(["read".to_owned(), "missing-extension".to_owned()])
             .unwrap();
-    validate_explicit_tool_policy(&dynamic_config, &extensions, &model, true)
-        .expect("a negotiated live catalog may publish explicitly allowed names later");
+    validate_explicit_tool_policy(
+        &dynamic_config,
+        &extensions.tool_definitions(),
+        &model,
+        true,
+    )
+    .expect("a negotiated live catalog may publish explicitly allowed names later");
 }
 
 #[test]
@@ -4104,7 +4152,13 @@ fn model_without_tool_capability_gets_no_default_surface_and_rejects_explicit_to
     )
     .unwrap();
     assert!(extensions.tool_definitions().is_empty());
-    validate_explicit_tool_policy(&default_config, &extensions, &model, false).unwrap();
+    validate_explicit_tool_policy(
+        &default_config,
+        &extensions.tool_definitions(),
+        &model,
+        false,
+    )
+    .unwrap();
 
     default_config.tools = crate::config::ToolPolicy::only(["read".to_owned()]).unwrap();
     let explicit_session =
@@ -4117,8 +4171,13 @@ fn model_without_tool_capability_gets_no_default_surface_and_rejects_explicit_to
         &boot.sessions,
     )
     .unwrap();
-    let error =
-        validate_explicit_tool_policy(&default_config, &extensions, &model, false).unwrap_err();
+    let error = validate_explicit_tool_policy(
+        &default_config,
+        &extensions.tool_definitions(),
+        &model,
+        false,
+    )
+    .unwrap_err();
     let message = error.to_string();
     assert!(
         message.contains("gpt-4o-mini does not support tools"),
@@ -5547,6 +5606,7 @@ fn openrouter_saved_off_emits_diagnostics_during_build_and_session_rebuild() {
     let mut saved = Session::create(&saved_path).unwrap();
     append_config_if_changed(
         &mut saved,
+        None,
         &model,
         &ReasoningConfig::Off,
         ReasoningMode::Standard,

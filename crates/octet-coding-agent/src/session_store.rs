@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2514,27 +2514,51 @@ impl SessionStore {
     where
         F: Fn(&Path) -> anyhow::Result<TranscriptSummary>,
     {
-        let current_ids = candidates
-            .iter()
-            .filter_map(|candidate| {
-                candidate
-                    .path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .map(str::to_owned)
-            })
-            .collect::<HashSet<_>>();
         let mut catalog = SessionCatalog::open_recovering(&self.dir).ok();
-        if let Some(catalog) = &mut catalog {
-            if let Ok(cached_ids) = catalog.session_ids() {
-                let stale_ids = cached_ids.difference(&current_ids).cloned().collect();
-                let _ = catalog.apply(&[], &stale_ids);
+        // Latest only needs a valid newest entry. Catalog garbage collection
+        // belongs to full listing, not the first-paint resume selector.
+        if !first_only {
+            let current_ids = candidates
+                .iter()
+                .filter_map(|candidate| {
+                    candidate
+                        .path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .map(str::to_owned)
+                })
+                .collect::<HashSet<_>>();
+            if let Some(catalog) = &mut catalog {
+                if let Ok(cached_ids) = catalog.session_ids() {
+                    let stale_ids = cached_ids.difference(&current_ids).cloned().collect();
+                    let _ = catalog.apply(&[], &stale_ids);
+                }
             }
         }
         let mut updates = Vec::new();
         let mut discovered = Vec::new();
-
-        for candidate in candidates {
+        // A latest lookup normally inspects one candidate. Heap construction
+        // is linear, and only rejected newer transcripts pay for another pop;
+        // listing retains its stable newest-first sort and full projection.
+        let order: Box<dyn Iterator<Item = usize>> = if first_only {
+            let mut heap = BinaryHeap::from(
+                candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| (candidate.modified, std::cmp::Reverse(index), index))
+                    .collect::<Vec<_>>(),
+            );
+            Box::new(std::iter::from_fn(move || {
+                heap.pop().map(|(_, _, index)| index)
+            }))
+        } else {
+            Box::new(0..candidates.len())
+        };
+        let mut candidates = candidates.into_iter().map(Some).collect::<Vec<_>>();
+        for index in order {
+            let candidate = candidates[index]
+                .take()
+                .expect("each candidate visited once");
             let Some(id) = candidate
                 .path
                 .file_stem()
@@ -2606,7 +2630,7 @@ impl SessionStore {
 
     /// Return the newest session or an actionable error when none exists.
     pub fn latest(&self) -> anyhow::Result<SessionMeta> {
-        let candidates = self.candidates();
+        let candidates = self.unsorted_candidates().collect::<Vec<_>>();
         if candidates.is_empty() && !SessionCatalog::exists(&self.dir) {
             anyhow::bail!("no sessions for this workspace yet");
         }
@@ -3647,6 +3671,37 @@ mod tests {
             ..SessionUserMetadata::default()
         };
         assert!(store.save_metadata("fork", &invalid).is_err());
+    }
+
+    #[test]
+    fn latest_projection_visits_only_the_newest_resumable_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        for index in 0..32 {
+            let path = store.dir().join(format!("session-{index:02}.jsonl"));
+            let mut session = Session::create(path).unwrap();
+            session
+                .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                    content: vec![UserPart::Text("resumable".into())],
+                })))
+                .unwrap();
+        }
+        let candidates = store.unsorted_candidates().collect::<Vec<_>>();
+        let newest = candidates
+            .iter()
+            .map(|candidate| candidate.modified)
+            .max()
+            .unwrap();
+        let visits = std::cell::Cell::new(0);
+        let result = store.discover_with_summarizer(candidates, true, |path| {
+            visits.set(visits.get() + 1);
+            summarize_catalog_session(path)
+        });
+        assert_eq!(visits.get(), 1);
+        assert_eq!(result[0].modified, newest);
+        assert_eq!(store.latest().unwrap().path, result[0].path);
     }
 
     #[test]

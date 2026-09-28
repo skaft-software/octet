@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Attribute extension source-digest work and startup handshakes separately in
+  `OCTET_STARTUP_TRACE`; do not hash disabled or untrusted extension source trees.
+  Reuse tool definitions, the initial extension host-state projection, and
+  resumed configuration during app construction. Latest-session lookup scans
+  candidates without a full sort, and application-owned resume hydrates a
+  viewport-scaled tail. Defer OSC 11 background-color detection until after
+  the first ready frame, repainting only if the detected theme changes.
+
 ## [0.8.1] - 2026-09-27
 
 See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.

@@ -4,7 +4,7 @@
 //! service containers, or lifecycle callbacks — those can be added as new
 //! `ExtensionHost` methods later without breaking the [`Extension`] trait.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
@@ -452,9 +452,12 @@ pub(crate) struct RegisteredPersistenceMetadataHook {
 
 #[derive(Default)]
 struct DynamicToolRegistry {
-    static_names: BTreeSet<String>,
+    static_names: HashSet<String>,
     groups: Vec<DynamicToolGroup>,
     reservations: Vec<DynamicToolReservationEntry>,
+    // Updated at catalog publication/removal, never by per-tool registration.
+    dynamic_names: HashSet<String>,
+    reserved_names: HashSet<String>,
     next_reservation: u64,
     ready: bool,
     ready_changed: Arc<Notify>,
@@ -463,6 +466,23 @@ struct DynamicToolRegistry {
     /// `None` publishes the full host-policed surface; `Some` publishes only
     /// the intersection of these names with that surface.
     active_names: Option<BTreeSet<String>>,
+}
+
+impl DynamicToolRegistry {
+    fn refresh_name_index(&mut self) {
+        self.dynamic_names = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.tools)
+            .map(|tool| tool.definition().name)
+            .collect();
+        self.reserved_names = self
+            .reservations
+            .iter()
+            .flat_map(|reservation| &reservation.names)
+            .cloned()
+            .collect();
+    }
 }
 
 struct DynamicToolGroup {
@@ -595,6 +615,7 @@ impl DynamicToolRegistration {
             owner: self.owner.clone(),
             names,
         });
+        state.refresh_name_index();
         Ok(DynamicToolReservation {
             id,
             owner: self.owner.clone(),
@@ -615,6 +636,7 @@ impl DynamicToolRegistration {
         registry
             .reservations
             .retain(|reservation| reservation.owner != self.owner);
+        registry.refresh_name_index();
         if registry.groups.len() != previous_len {
             registry.revision = registry.revision.saturating_add(1);
         }
@@ -675,6 +697,7 @@ impl DynamicToolReservation {
                 .sort_by(|left, right| left.owner.cmp(&right.owner));
         }
         registry.reservations.swap_remove(index);
+        registry.refresh_name_index();
         registry.revision = revision;
         Ok((registry.revision, published))
     }
@@ -691,6 +714,7 @@ impl Drop for DynamicToolReservation {
         registry
             .reservations
             .retain(|reservation| reservation.id != self.id || reservation.owner != self.owner);
+        registry.refresh_name_index();
     }
 }
 
@@ -792,16 +816,9 @@ impl ExtensionHost {
             .dynamic_tools
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.tools.iter().any(|t| t.definition().name == name)
-            || dynamic
-                .groups
-                .iter()
-                .flat_map(|group| &group.tools)
-                .any(|registered| registered.definition().name == name)
-            || dynamic
-                .reservations
-                .iter()
-                .any(|reservation| reservation.names.contains(&name))
+        if dynamic.static_names.contains(&name)
+            || dynamic.dynamic_names.contains(&name)
+            || dynamic.reserved_names.contains(&name)
         {
             self.duplicate_tools.push(name);
         } else {
@@ -819,16 +836,7 @@ impl ExtensionHost {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for name in names {
-            if dynamic
-                .groups
-                .iter()
-                .flat_map(|group| &group.tools)
-                .any(|tool| tool.definition().name == name)
-                || dynamic
-                    .reservations
-                    .iter()
-                    .any(|reservation| reservation.names.contains(name))
-            {
+            if dynamic.dynamic_names.contains(name) || dynamic.reserved_names.contains(name) {
                 self.duplicate_tools.push(name.to_owned());
             } else {
                 dynamic.static_names.insert(name.to_owned());
@@ -936,6 +944,7 @@ impl ExtensionHost {
         for group in &mut dynamic.groups {
             group.tools.retain(|tool| keep(&tool.definition().name));
         }
+        dynamic.refresh_name_index();
         dynamic.revision = dynamic.revision.saturating_add(1);
     }
 
@@ -956,6 +965,7 @@ impl ExtensionHost {
         for group in &mut dynamic.groups {
             group.tools.retain(|tool| keep(&tool.definition().name));
         }
+        dynamic.refresh_name_index();
         dynamic.policy = Some(keep);
         dynamic.revision = dynamic.revision.saturating_add(1);
     }
@@ -1217,6 +1227,24 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["read".to_owned(), "search".to_owned(), "write".to_owned()])
         );
+    }
+
+    #[test]
+    fn static_duplicate_index_tracks_dynamic_removal_and_policy_filtering() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        let dynamic = host
+            .dynamic_tools("extension", vec![named_tool("search")])
+            .unwrap();
+        host.tool(NamedTool("search"));
+        assert_eq!(host.duplicate_tools, ["search"]);
+        dynamic.remove();
+        host.tool(NamedTool("search"));
+        assert_eq!(host.tools.len(), 2);
+        host.retain_tools(|name| name != "search");
+        host.tool(NamedTool("search"));
+        assert_eq!(host.tools.len(), 2);
+        assert_eq!(host.duplicate_tools, ["search"]);
     }
 
     #[test]
