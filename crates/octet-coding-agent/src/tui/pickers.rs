@@ -1386,15 +1386,28 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
         } else {
             format!("  {}", metadata.media)
         };
+        // OAuth / subscription models report no pricing (`—`). Showing
+        // `in — out —` on every such row is visual noise; keep the context
+        // column stable with blank padding so priced rows stay tabular.
+        let unknown_pricing = metadata.input_cost == "—" && metadata.output_cost == "—";
+        let description = if unknown_pricing {
+            format!(
+                "{}{} ctx{media}",
+                " ".repeat(11 + input_width + output_width),
+                pad_visible_left(&metadata.context, context_width),
+            )
+        } else {
+            format!(
+                "in {}  out {}  {} ctx{media}",
+                pad_visible_right(&metadata.input_cost, input_width),
+                pad_visible_right(&metadata.output_cost, output_width),
+                pad_visible_left(&metadata.context, context_width),
+            )
+        };
         presentation.ids.push(id);
         presentation.providers.push(provider);
         presentation.labels.push(label);
-        presentation.descriptions.push(Some(format!(
-            "in {}  out {}  {} ctx{media}",
-            pad_visible_right(&metadata.input_cost, input_width),
-            pad_visible_right(&metadata.output_cost, output_width),
-            pad_visible_left(&metadata.context, context_width),
-        )));
+        presentation.descriptions.push(Some(description));
     }
     presentation
 }
@@ -2244,7 +2257,14 @@ mod tests {
             .iter()
             .map(|description| description.as_deref().unwrap())
             .collect::<Vec<_>>();
-        let out_columns = descriptions
+        // Unpriced rows omit `in`/`out` entirely; column stability only
+        // applies to the priced rows that still show both costs.
+        let priced: Vec<&&str> = descriptions
+            .iter()
+            .filter(|description| description.contains("out "))
+            .collect();
+        assert!(!priced.is_empty(), "expected priced builtin models");
+        let out_columns = priced
             .iter()
             .map(|description| {
                 sexy_tui_rs::visible_width(&description[..description.find("out ").unwrap()])
@@ -2288,6 +2308,34 @@ mod tests {
                 && !description.contains("Anthropic")
                 && !description.contains("OpenAI")
         }));
+    }
+
+    #[test]
+    fn model_picker_omits_unknown_pricing_dashes() {
+        let source = ModelCatalog::builtin().unwrap();
+        let template = source.models().next().unwrap().clone();
+        let mut catalog = ModelCatalog::default();
+        let endpoint = source.resolve(&template.id).unwrap().endpoint.clone();
+        catalog.register_endpoint((*endpoint).clone()).unwrap();
+        let mut subscription = template.clone();
+        subscription.id = ModelId("subscription-model".into());
+        subscription.display_name = Some("Subscription Model".into());
+        subscription.pricing = None;
+        catalog.register_model(subscription).unwrap();
+
+        let presentation = model_picker_presentation(&catalog);
+        assert_eq!(presentation.ids.len(), 1);
+        let description = presentation.descriptions[0].as_deref().unwrap();
+        assert!(
+            !description.contains("in "),
+            "unknown pricing should omit `in`: {description:?}"
+        );
+        assert!(
+            !description.contains("out "),
+            "unknown pricing should omit `out`: {description:?}"
+        );
+        assert!(!description.contains('—'), "{description:?}");
+        assert!(description.contains("ctx"), "{description:?}");
     }
 }
 

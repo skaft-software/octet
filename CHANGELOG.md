@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Condense picker chrome for a denser Codex-like read: the model picker omits
+  `in —`/`out —` when pricing is unknown (subscription/OAuth models now show
+  only `272K ctx · vision`), and the resume picker hides `re:<pattern>` /
+  `"phrase"` hints until the filter actually uses them.
+
 ## [0.8.1] - 2026-09-27
 
 See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.
