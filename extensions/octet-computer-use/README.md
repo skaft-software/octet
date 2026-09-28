@@ -258,6 +258,119 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   snapshot, so read state before each indexed action. The bundled skill documents
   the full observe-act-verify loop.
 
+## Upstream Cua Driver `jev-use`
+
+Octet can provision and run the **pinned upstream recipe**, rather than asking
+Octet's main model to supervise every click. The Python or TypeScript runner owns
+its persistent Driver MCP connection and isolated Chromium profile; it observes,
+constructs candidates, asks Jev, executes the selected action, and verifies the
+submitted value against the local fixture's independent `/state` endpoint.
+The existing `computer_use_jev_choose` remains a separate lightweight chooser.
+
+```console
+/computer-use jev-use status
+/computer-use jev-use setup
+/computer-use jev-use run
+/computer-use jev-use run --live
+```
+
+Setup and runs are background jobs because the host RPC deadline (≈30s)
+is shorter than a recipe run. Tools and commands return immediately with a
+`job_id`; poll for the terminal result instead of re-launching:
+
+```console
+/computer-use jev-use status <job-id>
+/computer-use jev-use cancel <job-id>
+```
+
+`computer_use_jev_use_status` without arguments reports pinned-source
+readiness synchronously and never installs anything. With `{"job_id": ...}`
+it reports `running`, `cancelling`, or `finished` for a job owned by the
+same host resource owner; finished jobs nest the tool result under
+`result`. `computer_use_jev_use_cancel` signals the owned job; it is not
+rollback. Only one setup/run/choose job runs at a time; a second launch is
+refused until the first is inspected or cancelled. Jobs are fenced by the
+host `resource_owner` (session, instance, generation); `session/settled`
+cancels that session's jobs. Extension shutdown signals owned subprocesses
+immediately, then joins workers for at most 0.5s (host deadline ≈2s). It
+reports `cleanup_complete: false`: POSIX MCP children run in a separate
+session and already-reparented descendants cannot be reclaimed by PID scan;
+Windows suspended-launch/Job-Object paths are unexercised. Cancellation,
+timeout, or unknown outcome never rolls back browser actions already
+dispatched; inspect retained evidence before retrying.
+
+Preparation, mock proof, live proof, and visual proof are distinct:
+
+- **Preparation** (`setup`, optional `--typescript`) explicitly downloads the
+  commit-pinned, integrity-checked Cua source snapshot and installs its
+  locked dependencies into Octet-owned state. It does not install Driver, a
+  browser, or perception; it does not change OS grants or operate the
+  computer. Install `uv` first. For TypeScript, install Node.js 22+ and npm.
+  Runs never silently install; they require explicit setup first.
+
+```console
+/computer-use jev-use setup --typescript
+/computer-use jev-use run --typescript --live
+```
+
+- **Mock proof** (default `run`) uses the deterministic mock provider but
+  still operates a real isolated browser against the local form fixture; it
+  is not a no-effect dry run. Mock choices prove wiring, not model quality.
+- **Live proof** (`--live`) adds live Jev checks and may incur TypeSafe
+  charges. It uses the key already configured by `/computer-use jev`, never
+  a key in command arguments. Compact observations go to TypeSafe;
+  screenshot pixels do not. The upstream runner strips the provider key from
+  Driver's child environment. The upstream SDK may retry requests, so step
+  and process bounds are not billing caps.
+- **Visual proof** is capability-gated by upstream. Normal runs prefer
+  semantic browser references. With the separately installed Cua perception
+  extension, exercise capture-bound visual clicks with:
+
+```console
+/computer-use jev-use run --visual-fixture --require-visual-path
+```
+
+`--visual-observation auto|always|off` controls observation and `--max-steps
+1..32` bounds each runner's decisions. `--port 0..65535` selects the
+loopback fixture port (default `0` picks an unused port).
+`--expect-visual-status ok|not_installed|error|unavailable` requires every
+attempted visual parse to log that status; with `--visual-fixture` and a
+non-`ok` status the run must log a fallback that never submits
+(`observed: {submitted: null}`, outcome `refuted`/`unknown`/`abstained`/
+`budget_exhausted`) instead of claiming task success. `skipped` steps do
+not count as attempts, but at least one attempt is required.
+`--require-visual-path` needs `--visual-fixture` and an `ok` visual status,
+and fails unless every runner submitted through `click` with the exact
+`capture_id`.
+
+Source status reports the pinned revision and readiness. Each invocation
+retains a new private proof directory; failed or cancelled runs never
+overwrite an earlier proof. Check the returned `complete` flag and
+per-check evidence, not just a process exit code.
+
+| Tool | Purpose |
+| --- | --- |
+| `computer_use_jev_use_status` | Read setup/source readiness without running the recipe. |
+| `computer_use_jev_use_setup` | Explicit source/dependency setup; optional TypeScript. |
+| `computer_use_jev_use_run` | Managed mock/live form workflow with retained verification evidence. |
+| `computer_use_jev_use_choose` | Upstream JSON chooser interface for another harness, Python or TypeScript, mock or live. |
+
+The standalone chooser accepts `cua.jev_choice_request_v1` and returns
+`cua.jev_choice_v1`. Its caller still owns observation, candidate construction,
+execution, and verification. It never executes a selected ID. Use `mock: true`
+for credential-free checks. Requests may include typed visual regions but not
+arbitrary tool calls, screenshot bytes, or environment data.
+
+**Scope and policy:** this runs upstream's fixed local form task, not a universal
+native-app agent or arbitrary-site scraper. New workflows still need their own
+candidate builder and independent verification. The separate, unmerged
+`suggest_action` proposal is not required or enabled. The runner uses a separate
+upstream-owned session, not Octet's manual-action cursor session. Under a per-action
+confirmation policy, Octet refuses the autonomous runner because upstream cannot
+prompt for each action; a whole-workflow approval cannot bypass that policy.
+Use the existing individual tools in that mode. Source tests and mock process
+fixtures are not evidence of live desktop, provider, or cross-platform success.
+
 ## Relationship to octet-browse
 
 `octet-browse` is [deprecated but still installable](../octet-browse/README.md#deprecation).

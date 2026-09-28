@@ -68,6 +68,11 @@ tools = [
   "computer_use_end_session",
   "computer_use_jev_status",
   "computer_use_jev_choose",
+  "computer_use_jev_use_status",
+  "computer_use_jev_use_cancel",
+  "computer_use_jev_use_setup",
+  "computer_use_jev_use_run",
+  "computer_use_jev_use_choose",
 ]
 commands = ["computer-use"]
 ui = ["status"]
