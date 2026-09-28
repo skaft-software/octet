@@ -18,6 +18,9 @@ octet --mode rpc                          # JSONL automation frontend
 | `octet -p "prompt"` / `octet --print "prompt"` | Response-only stdout for shell composition. |
 | `octet --mode rpc` | Pi-compatible JSONL commands and responses over stdin/stdout for automation. |
 
+On native Windows, the console (Windows Terminal or conhost) rather than
+`TERM` selects the frontend; see [Windows](windows.md#terminal).
+
 The interactive, plain, and print frontends share the agent loop, providers,
 sessions, safety policy, and cancellation. Print mode does not remove tool
 authority by itself; use [tool controls](tools.md) when needed. Readiness

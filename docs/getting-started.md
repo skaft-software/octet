@@ -47,9 +47,9 @@ publication. Use the matching binary consistently for the rest of this guide.
 
 There is no published native Windows download or support claim in this release
 snapshot. Do not treat WSL, cross-compilation, or a macOS/Linux check as native
-Windows qualification. Stop at this availability gate and use a separately
-qualified Windows instruction when one is published; do not invent a download
-URL.
+Windows qualification, and do not invent a download URL. Testers can run the
+unsigned native build attached to a pull request's CI run, or build from a
+checkout, as described in [Windows](windows.md); neither is a release.
 
 ## 2. Start in the repository you want to change
 

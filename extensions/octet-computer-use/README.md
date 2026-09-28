@@ -142,6 +142,63 @@ After this, `permissions status` reports `source.attribution: "driver-daemon"` a
 the grants survive respawns and reboots. The extension uses the signed Cua host's
 daemon permission probe and fails closed if the selected host cannot establish them.
 
+## Windows
+
+The bundle runs on native Windows (no WSL). Windows cannot execute a script by
+its `#!` line, so octet starts the bundle with Python 3 from `PATH` (the
+python.org installer's `py` launcher, or `python.exe`); install Python 3 first.
+See [Windows](../../docs/windows.md#extensions).
+
+**What CI verifies.** The Windows CI job runs this bundle's full test suite on
+a native Windows runner **with no Cua Driver installed**: status reports
+`not set up`, every driver tool fails closed without starting a process or
+provisioning anything, and screenshot staging and key storage keep their
+private-file guarantees (junctions and redirected parents are rejected, the
+optional Jev key gets a current-user-only ACL). The suite's live-driver tests
+skip. CI never provisions a driver, grants a permission, or performs a GUI
+action, so it does **not** qualify live Windows computer use.
+
+**Attended setup.** On an unlocked, visible desktop session (not a locked or
+minimized remote session), from the extracted pull-request build, which
+carries this bundle under `extensions\octet-computer-use` (from a checkout,
+use the built `octet.exe` and the checkout's `extensions` directory):
+
+```powershell
+.\octet.exe --extension-dir .\extensions --enable-extension octet-computer-use
+```
+
+Then, inside octet, run `/computer-use setup` (this downloads the published
+`cua-driver` wheel from the configured package index into
+`%USERPROFILE%\.octet\computer-use`, and only when you run it) and
+`/computer-use status`. The driver runs as your user; Windows needs no
+separate grant, but it cannot drive windows of elevated (administrator)
+applications from a non-elevated octet, nor the secure desktop (UAC prompts,
+the lock screen). `--safe-mode` keeps executable extensions stopped, so run
+this without it, inside a boundary you chose, and set `OCTET_CUA_CONFIRM=1`
+to approve each effectful action.
+
+**Opt-in live smoke.** After setup, a person watching the desktop can run a
+scripted observe-act-verify pass through the same extension tools the model
+uses. It launches Notepad, finds its window, types a unique marker into it,
+reads the window state back to verify the marker, deletes it and verifies that,
+then captures a desktop screenshot; Notepad is left open. It never provisions,
+grants permissions, or types credentials, and it refuses to run under `CI`,
+without the confirmation flag, or without an interactive terminal:
+
+```powershell
+cd extensions\octet-computer-use
+python tests\live_smoke.py --i-have-an-unlocked-desktop --report live-smoke.json
+```
+
+`OCTET_CUA_DRIVER_BINARY` can point it at a driver installed elsewhere. Record
+the Windows build, the `cua-driver` version from status, and the report.
+
+**Model-driven check (optional).** With a provider configured and
+`OCTET_CUA_CONFIRM=1`, ask octet: *"Use computer use to open Notepad, type
+'octet windows check', then read the window back and confirm the text is
+there."* Approve each action and confirm the transcript shows an observation
+before and after each effectful call.
+
 ## Confirmation and safe mode
 
 octet's security model ([SECURITY.md](../../SECURITY.md)) is that **full access -
@@ -247,6 +304,14 @@ no local driver is present.
 ```console
 PYTHONPATH=.:vendor:tests python3 -m unittest discover -s tests -p 'test_*.py'
 ```
+
+On Windows (PowerShell), the path separator is `;`:
+
+```powershell
+$env:PYTHONPATH = '.;vendor;tests'; python -m unittest discover -s tests -p 'test_*.py'
+```
+
+`tests/live_smoke.py` is not part of the suite; see [Windows](#windows).
 
 To include the live driver tests, point at an installed binary:
 

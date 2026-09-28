@@ -301,6 +301,11 @@ jobs:
           }
           $info | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $out 'BUILD-INFO.json')
           Copy-Item docs/windows.md (Join-Path $out 'WINDOWS.md')
+          # The source computer-use bundle, version-matched to these binaries,
+          # for the attended Windows procedure (`--extension-dir .\extensions`).
+          $extensions = New-Item -ItemType Directory -Path (Join-Path $out 'extensions')
+          Copy-Item -Recurse extensions/octet-computer-use $extensions.FullName
+          Get-ChildItem -Recurse -Directory -Filter __pycache__ $extensions.FullName | Remove-Item -Recurse -Force
           "name=$name" >> $env:GITHUB_OUTPUT
           "path=$out" >> $env:GITHUB_OUTPUT
           Get-Content (Join-Path $out 'SHA256SUMS')
