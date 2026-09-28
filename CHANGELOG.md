@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Make the source-only `octet-snap-compact` extension launchable and actually
+  tested. Its `extension.py` entrypoint is committed non-executable while every
+  released extension's entrypoint is `100755`, so a fresh checkout could not
+  start the extension; the mode now matches the README. Its suite also built the
+  renderer into `renderer/target/`, which the host's bounded source walk rejects
+  as unverified, so the build now targets a temporary directory like the README
+  documents. Because the renderer needs Rust 1.96 against octet's 1.86 MSRV, the
+  suite skips on older toolchains instead of failing, and CI runs it from a new
+  `extensions/source-catalog.txt` under a 1.96 toolchain. The extension remains
+  unpublished: only its README ships in a release.
+
 ## [0.8.1] - 2026-09-27
 
 See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.

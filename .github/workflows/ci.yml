@@ -132,6 +132,36 @@ jobs:
               (cd "$root" && python3 -m unittest discover -s tests)
             fi
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
+      - name: Test source-only first-party extensions
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          # Source-only extensions are not published, so this job has no Rust
+          # toolchain by default. Install one that can build their renderers and
+          # put it first on PATH; suites that still cannot build skip themselves.
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          shim="$RUNNER_TEMP/source-extension-toolchain"
+          mkdir -p "$shim"
+          # Call the rustup proxy by absolute path: a bare `cargo` would resolve
+          # back to this shim once the shim directory leads PATH.
+          cat > "$shim/cargo" <<SHIM
+          #!/bin/sh
+          exec "$HOME/.cargo/bin/cargo" +1.96.0 "\$@"
+          SHIM
+          chmod 0755 "$shim/cargo"
+          export PATH="$shim:$PATH"
+          while IFS= read -r extension; do
+            [[ -n "$extension" ]] || continue
+            root="extensions/$extension"
+            if [[ -f "$root/tests/__init__.py" ]]; then
+              (cd "$root" && python3 -m unittest discover -s tests -t .)
+            elif [[ -d "$root/tests" ]]; then
+              (cd "$root" && python3 -m unittest discover -s tests)
+            else
+              (cd "$root" && python3 -m unittest discover -s . -p 'test_*.py')
+            fi
+          done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/source-catalog.txt)
 
   extension-api-v03:
     runs-on: ubuntu-24.04
