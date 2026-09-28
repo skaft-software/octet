@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 //! Native Windows pseudoconsole (ConPTY) coverage for the interactive frontend.
 //!
 //! Windows Terminal hosts every shell through ConPTY. This harness drives the
@@ -14,6 +12,7 @@
 //! environment variable, so the child reads the current user's octet
 //! configuration (normally absent on a CI runner, which yields first-run
 //! provider setup). The workspace and session store are disposable.
+#![cfg(windows)]
 
 use std::ffi::{c_void, OsStr, OsString};
 use std::fs::File;
