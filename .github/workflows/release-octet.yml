@@ -695,7 +695,8 @@ jobs:
   package-npm:
     name: Package verified npm artifacts
     needs: [resolve, verify-published]
-    if: (needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries') && inputs.publish_npm == true
+    # The binary publish job is intentionally skipped in npm-only mode.
+    if: always() && needs.resolve.result == 'success' && needs['verify-published'].result == 'success' && needs.resolve.outputs.mode == 'npm'
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -810,7 +811,7 @@ jobs:
   publish-npm:
     name: Publish npm packages with trusted publishing
     needs: [resolve, package-npm]
-    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && needs['package-npm'].result == 'success' && needs.resolve.outputs.mode == 'npm'
     runs-on: ubuntu-24.04
     environment: stable-release-publish
     permissions:
@@ -1048,7 +1049,7 @@ jobs:
   verify-npm-published:
     name: Verify published npm provenance
     needs: [resolve, publish-npm]
-    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && needs['publish-npm'].result == 'success' && needs.resolve.outputs.mode == 'npm'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1130,7 +1131,7 @@ jobs:
   smoke-npm-published:
     name: Smoke published npm package on ${{ matrix.target }}
     needs: [resolve, verify-npm-published]
-    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && needs['verify-npm-published'].result == 'success' && needs.resolve.outputs.mode == 'npm'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
