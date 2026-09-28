@@ -29,9 +29,10 @@
   (`NtSetInformationFile`) instead of the Win32 wrapper, which documents its
   name as a NUL-terminated path. New private files failed to publish on the
   Windows runner with `ERROR_INVALID_PARAMETER`.
-- Start extensions from an elevated Windows session: the host's artifact store
-  now creates its temporary root and per-generation scratch directories owned
-  by the current user, instead of adopting temporary directories owned by the
+- Start extensions and open sessions from an elevated Windows session: the
+  host's artifact store (its temporary root and per-generation scratch) and the
+  workspace session directory are now created owned by the current user,
+  instead of adopting directories an elevated process creates owned by the
   Administrators group.
 - Replacing an existing file still fails closed on Windows, including the
   `edit` tool; see the known limitation in [Windows](docs/windows.md).

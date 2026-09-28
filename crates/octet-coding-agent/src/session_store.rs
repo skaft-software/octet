@@ -1888,7 +1888,10 @@ impl SessionStore {
         let Some(workspace) = self.workspace.as_ref() else {
             anyhow::bail!("store has no workspace to record");
         };
-        std::fs::create_dir_all(&self.dir)?;
+        // The private writer creates missing directories owned by the current
+        // user. A plain `create_dir_all` here would let an elevated Windows
+        // process create the session directory owned by the Administrators
+        // group, which the private checks for the marker and session refuse.
         let marker = self.dir.join(WORKSPACE_MARKER);
         let bytes = format!("{}\n", workspace.display());
         // Only a validated owner-only, no-follow read may skip publication.
