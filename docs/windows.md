@@ -28,19 +28,42 @@ cargo build --release --locked --target x86_64-pc-windows-gnu -p octet-coding-ag
 .\target\x86_64-pc-windows-gnu\release\octet.exe --version
 ```
 
+Clone with `git clone -c core.autocrlf=false …`: Git for Windows converts
+checkouts to CRLF by default, and the repository's test fixtures and golden
+files are LF.
+
 From Linux, `rustup target add x86_64-pc-windows-gnu` plus the `mingw-w64`
 package allows `cargo check`/`cargo build --target x86_64-pc-windows-gnu`. That
 only proves the code compiles for Windows; it runs nothing on Windows.
+
+Run octet from a non-elevated terminal. octet keeps private state in files that
+must be owned by the current user. On Windows Server (and wherever the "default
+owner for objects created by members of the Administrators group" policy is
+set to the Administrators group), files created from an elevated session are
+owned by that group, and octet refuses them rather than treating them as
+private.
 
 ## Pull-request test builds
 
 The CI job `windows (x86_64-pc-windows-gnu)` runs on a native Windows runner. It
 builds both executables, checks `--version`, `--help` and the `octet-host.exe`
-hello handshake, runs the Windows terminal, ConPTY, workspace, Python SDK,
-computer-use (no driver installed) and release-tooling tests, starts the
-packaged executables with only the Windows system directories on `PATH` and as
-a freshly created standard (non-administrator) account, and uploads an artifact
-named `octet-pr-<commit>-x86_64-pc-windows-gnu` for 14 days:
+hello handshake, and gates on the Windows-relevant suites: terminal detection
+and frame writing, ConPTY scenarios against both the test and release
+binaries, the renderer, private file access, Python extension launch, Windows
+Bash process control, the Python SDK, the computer-use extension (no driver
+installed), and release tooling. It starts the packaged executables with only
+the Windows system directories on `PATH` and as a freshly created standard
+(non-administrator) account, and uploads an artifact named
+`octet-pr-<commit>-x86_64-pc-windows-gnu` for 14 days.
+
+The job also runs the whole workspace test suite as a **non-gating baseline**
+and publishes per-target results in the job summary. Most of that suite had
+never run on Windows: the runner account is an elevated administrator on
+Windows Server (see above), and many tests assume Unix paths, file modes, or
+signals. Those failures are recorded, not hidden, and are not yet a Windows
+support claim either way.
+
+The artifact contains:
 
 | File | Contents |
 | --- | --- |
