@@ -201,6 +201,16 @@ class JevKeyStorageTests(unittest.TestCase):
             self.assertFalse(jev.key_path(home).exists())
             self.assertFalse(jev.key_path(home).with_suffix(".tmp").exists())
 
+    def test_dacl_principal_comparison_resolves_sddl_aliases(self):
+        # SDDL prints the built-in Administrator as ``LA`` rather than its
+        # S-1-5-21-... string; the owner-only check must compare principals.
+        self.assertTrue(windows_security.same_sid("S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-500"))
+        self.assertFalse(windows_security.same_sid("S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-501"))
+        if windows_security.IS_WINDOWS:
+            self.assertTrue(windows_security.same_sid("SY", "S-1-5-18"))
+            self.assertFalse(windows_security.same_sid("SY", "S-1-5-19"))
+            self.assertFalse(windows_security.same_sid("not-a-sid", "S-1-5-18"))
+
     def test_environment_key_takes_precedence_over_stored(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

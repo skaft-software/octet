@@ -103,6 +103,10 @@ def _advapi32():
     advapi32.GetTokenInformation.restype = wintypes.BOOL
     advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    advapi32.EqualSid.restype = wintypes.BOOL
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
         wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.ULONG),
     ]
@@ -224,6 +228,38 @@ def describe_dacl(path: os.PathLike | str) -> Optional[str]:
         return None
 
 
+def same_sid(left: str, right: str) -> bool:
+    """Whether two SID strings name the same principal.
+
+    SDDL renders well-known principals as aliases (the built-in Administrator
+    account is ``LA``), so string equality alone is not enough. Both forms are
+    converted to binary SIDs and compared; any conversion failure is a
+    mismatch.
+    """
+
+    if left == right:
+        return True
+    if not IS_WINDOWS:
+        return False
+    try:
+        ctypes, _, advapi32, kernel32 = _advapi32()
+        first = ctypes.c_void_p()
+        second = ctypes.c_void_p()
+        if not advapi32.ConvertStringSidToSidW(left, ctypes.byref(first)):
+            return False
+        try:
+            if not advapi32.ConvertStringSidToSidW(right, ctypes.byref(second)):
+                return False
+            try:
+                return bool(advapi32.EqualSid(first, second))
+            finally:
+                kernel32.LocalFree(second)
+        finally:
+            kernel32.LocalFree(first)
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
 def is_private_to_current_user(path: os.PathLike | str) -> bool:
     """Whether ``path`` has a protected DACL whose only entry grants the
     current user full access."""
@@ -240,7 +276,7 @@ def is_private_to_current_user(path: os.PathLike | str) -> bool:
         return False
     # ace_type;ace_flags;rights;object_guid;inherit_object_guid;account_sid
     fields = entries[0].split(";")
-    return len(fields) == 6 and fields[0] == "A" and fields[2] == "FA" and fields[5] == sid
+    return len(fields) == 6 and fields[0] == "A" and fields[2] == "FA" and same_sid(fields[5], sid)
 
 
 __all__ = [
@@ -253,4 +289,5 @@ __all__ = [
     "opened_at",
     "private_dacl",
     "restrict_to_current_user",
+    "same_sid",
 ]

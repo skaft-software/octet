@@ -399,7 +399,11 @@ jobs:
           Set-Content -Path $request -Encoding ascii -Value '{"protocol_version":1,"request_id":"standard-user","command":"hello"}'
           icacls $shared /grant 'Users:(OI)(CI)M' | Out-Null
           $user = 'octetpr' + (Get-Random -Maximum 99999)
-          $password = [guid]::NewGuid().ToString('N') + 'Aa1!'
+          # `net user` stops to ask Y/N about passwords longer than 14
+          # characters, which fails non-interactively. This one is 14
+          # characters with all four complexity classes and lives only for
+          # this step.
+          $password = 'Oa1!' + [guid]::NewGuid().ToString('N').Substring(0, 10)
           net user $user $password /add /expires:never | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "could not create the standard test account $user" }
           try {

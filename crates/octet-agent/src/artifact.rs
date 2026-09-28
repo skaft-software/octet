@@ -249,14 +249,18 @@ struct ArtifactStoreInner {
 /// artifacts under session or workspace state instead of an OS temporary
 /// directory; it is created owner-only when missing and never removed on drop.
 enum StoreRoot {
-    Temporary(tempfile::TempDir),
+    Temporary {
+        // Removed, with the private root inside it, when the store drops.
+        _directory: tempfile::TempDir,
+        root: PathBuf,
+    },
     Durable(PathBuf),
 }
 
 impl StoreRoot {
     fn path(&self) -> &Path {
         match self {
-            Self::Temporary(directory) => directory.path(),
+            Self::Temporary { root, .. } => root,
             Self::Durable(path) => path,
         }
     }
@@ -298,15 +302,24 @@ impl ArtifactStore {
     /// Creates a temporary host-owned store with explicit bounds.
     pub fn with_limits(limits: ArtifactStoreLimits) -> Result<Self, ArtifactError> {
         validate_limits(limits)?;
-        let root = tempfile::Builder::new()
+        let directory = tempfile::Builder::new()
             .prefix("octet-artifacts-")
             .tempdir()?;
-        create_private_directory_all(root.path())?;
+        // Create the private root inside the temporary directory instead of
+        // adopting it. An elevated Windows process creates the temporary
+        // directory owned by the Administrators group, which private objects
+        // correctly refuse; the secure path creates this child owned by the
+        // current user with an owner-only ACL on every platform.
+        let root = directory.path().join("store");
+        create_private_directory_all(&root)?;
         Ok(Self {
             inner: Arc::new(ArtifactStoreInner {
                 generations: Mutex::new(HashMap::new()),
                 limits,
-                root: StoreRoot::Temporary(root),
+                root: StoreRoot::Temporary {
+                    _directory: directory,
+                    root,
+                },
             }),
         })
     }

@@ -37,11 +37,27 @@ package allows `cargo check`/`cargo build --target x86_64-pc-windows-gnu`. That
 only proves the code compiles for Windows; it runs nothing on Windows.
 
 Run octet from a non-elevated terminal. octet keeps private state in files that
-must be owned by the current user. On Windows Server (and wherever the "default
-owner for objects created by members of the Administrators group" policy is
-set to the Administrators group), files created from an elevated session are
-owned by that group, and octet refuses them rather than treating them as
-private.
+must be owned by the current user. It creates its own private files and
+directories with that owner explicitly, but on Windows Server (and wherever the
+"default owner for objects created by members of the Administrators group"
+policy is set to the Administrators group) anything else created from an
+elevated session, such as a directory made by Explorer, a script, or a test
+harness, is owned by that group. octet refuses such objects rather than
+treating them as private.
+
+Known limitation (blocker): octet publishes file changes with a no-replace
+rename after verifying the target is unchanged. Windows has no atomic exchange
+to complete that check-and-replace safely, so replacing an *existing* file
+fails closed (`atomic conditional file replacement is unavailable`) instead of
+risking an overwrite of a file that changed underneath it. Creating new files
+works. Replacing existing ones does not, which includes:
+
+- the agent's `edit` tool, and `write` to a file that already exists;
+- rewriting existing private state, for example updating a saved
+  custom-provider registry or refreshing a cached model inventory.
+
+The Windows runner confirms the refusal at the file-publication layer; a safe
+Windows replacement primitive is still to be designed.
 
 ## Pull-request test builds
 

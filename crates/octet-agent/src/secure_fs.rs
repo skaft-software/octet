@@ -1934,8 +1934,9 @@ mod imp {
     use std::ptr::{null, null_mut};
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
-        NtCreateFile, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-        FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        FileRenameInformation, NtCreateFile, NtSetInformationFile, FILE_CREATE,
+        FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
+        FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
     };
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, LocalFree, RtlNtStatusToDosError, HANDLE, INVALID_HANDLE_VALUE,
@@ -1955,15 +1956,15 @@ mod imp {
         SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, GetFileInformationByHandle,
+        FileDispositionInfo, FileDispositionInfoEx, GetFileInformationByHandle,
         SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ALL_ACCESS,
         FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
         FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
         FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES,
-        FILE_WRITE_DATA, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+        READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -3141,26 +3142,40 @@ mod imp {
         Ok(handle)
     }
 
+    /// Rename `file` to `name` inside the directory bound by `parent`.
+    ///
+    /// This uses the native call rather than the Win32
+    /// `SetFileInformationByHandle(FileRenameInfo)` wrapper, which documents
+    /// `FileName` as a NUL-terminated path that may be resolved against the
+    /// current directory. `NtSetInformationFile` resolves the length-counted
+    /// name strictly relative to `RootDirectory`, so publication stays bound to
+    /// the parent handle opened by the path walk.
     fn rename_handle(
         file: &File,
         parent: &File,
         name: &OsStr,
         replace: bool,
     ) -> Result<(), SecureFileError> {
+        let invalid = || SecureFileError::InvalidPath(name.to_string_lossy().into_owned());
         let wide = name.encode_wide().collect::<Vec<_>>();
         let name_bytes = wide
             .len()
             .checked_mul(size_of::<u16>())
             .and_then(|length| u32::try_from(length).ok())
-            .ok_or_else(|| SecureFileError::InvalidPath(name.to_string_lossy().into_owned()))?;
-        let offset = offset_of!(FILE_RENAME_INFO, FileName);
+            .ok_or_else(invalid)?;
+        let offset = offset_of!(FILE_RENAME_INFORMATION, FileName);
+        // Keep a trailing NUL, and never pass less than the fixed structure
+        // size that the I/O manager validates for a short name.
         let bytes = offset
             .checked_add(name_bytes as usize)
-            .ok_or_else(|| SecureFileError::InvalidPath(name.to_string_lossy().into_owned()))?;
+            .and_then(|length| length.checked_add(size_of::<u16>()))
+            .map(|length| length.max(size_of::<FILE_RENAME_INFORMATION>()))
+            .ok_or_else(invalid)?;
+        let length = u32::try_from(bytes).map_err(|_| invalid())?;
         let words = bytes.div_ceil(size_of::<usize>());
         let mut buffer = vec![0_usize; words];
-        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        // SAFETY: the aligned buffer is at least offset + name_bytes bytes long.
+        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+        // SAFETY: the zeroed, aligned buffer is at least offset + name_bytes + 2 bytes long.
         unsafe {
             (*info).Anonymous.ReplaceIfExists = replace;
             (*info).RootDirectory = parent.as_raw_handle();
@@ -3171,17 +3186,20 @@ mod imp {
                 name_bytes as usize,
             );
         }
-        // SAFETY: info points to a correctly sized FILE_RENAME_INFO variable-length buffer.
-        if unsafe {
-            SetFileInformationByHandle(
+        let mut io_status = IO_STATUS_BLOCK::default();
+        // SAFETY: info points to a correctly sized FILE_RENAME_INFORMATION
+        // buffer, and both handles stay open for this synchronous call.
+        let status = unsafe {
+            NtSetInformationFile(
                 file.as_raw_handle(),
-                FileRenameInfo,
+                &mut io_status,
                 info.cast(),
-                bytes as u32,
+                length,
+                FileRenameInformation,
             )
-        } == 0
-        {
-            let error = last_error();
+        };
+        if status < 0 {
+            let error = ntstatus_error(status);
             if !replace && error.kind() == std::io::ErrorKind::AlreadyExists {
                 return Err(SecureFileError::Changed);
             }
@@ -3850,15 +3868,32 @@ mod tests {
         let target = workspace.join("slot/new/victim.txt");
         let prepared = PreparedMutation::prepare(&target, true, 1024).unwrap();
 
-        std::fs::rename(workspace.join("slot"), workspace.join("original-slot")).unwrap();
-        std::fs::create_dir_all(workspace.join("slot/new")).unwrap();
-        prepared.commit(b"bound to original parent").unwrap();
+        match std::fs::rename(workspace.join("slot"), workspace.join("original-slot")) {
+            Ok(()) => {
+                std::fs::create_dir_all(workspace.join("slot/new")).unwrap();
+                prepared.commit(b"bound to original parent").unwrap();
 
-        assert!(!target.exists());
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("original-slot/new/victim.txt")).unwrap(),
-            "bound to original parent"
-        );
+                assert!(!target.exists());
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join("original-slot/new/victim.txt"))
+                        .unwrap(),
+                    "bound to original parent"
+                );
+            }
+            // NTFS refuses to rename a directory while a descendant is open,
+            // so the parent handle held by the prepared mutation already pins
+            // the ancestor path and the swap cannot happen.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                prepared.commit(b"bound to original parent").unwrap();
+
+                assert!(!workspace.join("original-slot").exists());
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    "bound to original parent"
+                );
+            }
+            Err(error) => panic!("unexpected ancestor rename failure: {error}"),
+        }
     }
 
     #[cfg(windows)]

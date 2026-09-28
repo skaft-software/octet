@@ -25,6 +25,15 @@
   Windows code page and CRLF.
 - Run the interactive `!` command through Git Bash on Windows with Job Object
   cleanup, matching the bash tool, instead of requiring `sh` on `PATH`.
+- Publish new files on Windows through the directory-relative native rename
+  (`NtSetInformationFile`) instead of the Win32 wrapper, which documents its
+  name as a NUL-terminated path. New private files failed to publish on the
+  Windows runner with `ERROR_INVALID_PARAMETER`.
+- Start extensions from an elevated Windows session: the host's temporary
+  artifact store now creates its private root owned by the current user
+  instead of adopting a temporary directory owned by the Administrators group.
+- Replacing an existing file still fails closed on Windows, including the
+  `edit` tool; see the known limitation in [Windows](docs/windows.md).
 
 ## [0.8.1] - 2026-09-27
 
