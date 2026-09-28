@@ -5,7 +5,9 @@ on the [version-pinned GitHub release](https://github.com/skaft-software/octet/r
 Public-install results are recorded there. See [installation](installation.md) for
 native installation or a source build, and [release notes](releases/v0.8.1.md)
 for changes; the GitHub release records publication verification.
-npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.
+npm is published at `@skaft/octet@0.8.1` (launcher plus three signed platform
+packages, with npm provenance); Homebrew, crates.io and SDK registries remain
+separate, unpublished channels.
 The repository is now `skaft-software/octet`. The immutable v0.7.0 assets retain
 their original `skaft-software/ygg` signing identity; v0.7.1 and later use the new
 identity. Existing clone and release-asset URLs redirect to the same repository.
@@ -73,8 +75,9 @@ The public `v0.8.1` tag must exist before using this command. `cargo install oct
 and registry-based `cargo install octet-coding-agent` are not the supported
 Cargo path.
 
-The npm channel remains unpublished pending functional first-package bootstrap,
-trusted publishers and registry provenance verification. Its future command is:
+The npm channel is published at 0.8.1: four `@skaft/octet*` packages
+(launcher plus three platform packages), built from the verified release
+assets with trusted publishers and registry provenance verification:
 
 ```sh
 npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1
@@ -148,7 +151,7 @@ release alias.
 
 The v0.8.1 version-pinned shell installer targets macOS
 arm64/x64 and GNU/Linux x64. The no-lifecycle npm launcher targets the same
-platforms but remains unavailable through npm. See
+platforms and is published as `@skaft/octet@0.8.1`. See
 the [npm release contract](release/npm-trusted-publishing.md) for platform-first
 publication and provenance checks. Bun is unqualified.
 
