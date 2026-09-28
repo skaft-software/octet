@@ -189,16 +189,19 @@ def build_manifest(
     workflow_commit: str,
     release_metadata_path: pathlib.Path,
     package_directory: pathlib.Path,
+    core_workflow_commit: str | None = None,
 ) -> dict[str, Any]:
     if VERSION_PATTERN.fullmatch(version) is None or tag != f"v{version}":
         fail("version and tag do not identify a stable release")
-    for label, value in (("source", source_commit), ("workflow", workflow_commit)):
+    for label, value in (("source", source_commit), ("workflow", workflow_commit),
+                         ("core workflow", core_workflow_commit or workflow_commit)):
         if COMMIT_PATTERN.fullmatch(value) is None:
             fail(f"{label} commit is malformed")
     if not package_directory.is_dir() or package_directory.is_symlink():
         fail(f"npm package directory must be a real directory: {package_directory}")
     release_metadata = read_release_metadata(
-        release_metadata_path, version, tag, source_commit, workflow_commit
+        release_metadata_path, version, tag, source_commit,
+        core_workflow_commit or workflow_commit
     )
     expected = [name.format(version=version) for name, _, _ in PACKAGES]
     actual = sorted(path.name for path in package_directory.iterdir() if path.name.endswith(".tgz"))
@@ -255,6 +258,7 @@ def main(argv: Sequence[str]) -> int:
     parser.add_argument("package_directory", type=pathlib.Path)
     parser.add_argument("output_manifest", type=pathlib.Path)
     parser.add_argument("output_checksums", type=pathlib.Path)
+    parser.add_argument("--core-workflow-commit", help="commit that signed the native release (defaults to workflow commit)")
     args = parser.parse_args(argv)
     metadata = build_manifest(
         args.version,
@@ -263,6 +267,7 @@ def main(argv: Sequence[str]) -> int:
         args.workflow_commit,
         args.release_metadata,
         args.package_directory,
+        args.core_workflow_commit,
     )
     payload = (json.dumps(metadata, sort_keys=True, indent=2) + "\n").encode("utf-8")
     write_atomic(args.output_manifest, payload)

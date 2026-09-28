@@ -150,6 +150,30 @@ python3 "$script_directory/create-octet-npm-manifest.py" \
     "$output_directory" \
     "$output_directory/OCTET_NPM_MANIFEST.json" \
     "$output_directory/OCTET_NPM_SHA256SUMS" >/dev/null
+# A later npm publication workflow must retain the original native signer identity.
+python3 "$script_directory/create-octet-npm-manifest.py" \
+    "$version" "v$version" \
+    "0123456789abcdef0123456789abcdef01234567" \
+    "fedcba9876543210fedcba9876543210fedcba98" \
+    "$native_directory/OCTET_RELEASE_METADATA.json" "$output_directory" \
+    "$work_directory/resume-manifest.json" "$work_directory/resume-checksums" \
+    --core-workflow-commit "abcdef0123456789abcdef0123456789abcdef01" >/dev/null
+python3 - "$work_directory/resume-manifest.json" <<'PY'
+import json
+import sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+assert manifest["workflow_commit"] == "fedcba9876543210fedcba9876543210fedcba98"
+PY
+if python3 "$script_directory/create-octet-npm-manifest.py" \
+    "$version" "v$version" \
+    "0123456789abcdef0123456789abcdef01234567" \
+    "fedcba9876543210fedcba9876543210fedcba98" \
+    "$native_directory/OCTET_RELEASE_METADATA.json" "$output_directory" \
+    "$work_directory/invalid-manifest.json" "$work_directory/invalid-checksums" \
+    --core-workflow-commit "1111111111111111111111111111111111111111" >/dev/null 2>&1; then
+    echo "mismatched native signer was accepted" >&2
+    exit 1
+fi
 python3 "$script_directory/verify-octet-npm.py" "$version" "$output_directory" --json > "$work_directory/verification.json"
 python3 - "$output_directory/octet-$version.tgz" "$work_directory/registry.json" "$work_directory/attestations.json" "$version" <<'PY'
 import base64

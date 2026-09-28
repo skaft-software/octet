@@ -53,6 +53,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_REQUIRE_PROVIDER_ACCEPTANCE: ${{ inputs.require_provider_acceptance }}
+          INPUT_PUBLISH_NPM: ${{ inputs.publish_npm }}
         run: |
           set -euo pipefail
           mode=binaries
@@ -76,6 +77,13 @@ jobs:
           else
             echo "release_tag is required when this workflow is not running for a tag" >&2
             exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$INPUT_PUBLISH_NPM" == true ]]; then
+            mode=npm
+            if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+              echo "npm publication must be dispatched from the protected main branch" >&2
+              exit 1
+            fi
           fi
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "invalid canonical stable release tag: $tag" >&2
@@ -107,27 +115,34 @@ jobs:
           source_commit=$(git rev-parse "$tag^{commit}")
           workflow_commit=$(git rev-parse "$GITHUB_SHA^{commit}")
           if [[ "$workflow_commit" != "$source_commit" ]]; then
-            if [[ "$GITHUB_EVENT_NAME" != push \
-              || "$GITHUB_REF_TYPE" != tag \
-              || "$GITHUB_REF_NAME" != "$expected_workflow_tag" ]]; then
-              echo "workflow ref $workflow_commit does not match canonical release source $source_commit" >&2
-              echo "tooling-only repairs must use the dedicated $expected_workflow_tag tag" >&2
-              exit 1
-            fi
-            if ! git merge-base --is-ancestor "$source_commit" "$workflow_commit"; then
-              echo "release tooling commit $workflow_commit does not descend from $source_commit" >&2
-              exit 1
-            fi
-            unexpected_paths=$(git diff --name-only "$source_commit" "$workflow_commit" \
-              | grep -Ev '^\.github/workflows/release-(octet|serve)\.yml$' || true)
-            if [[ -n "$unexpected_paths" ]]; then
-              echo "tooling-only repair changes non-release-workflow paths:" >&2
-              printf '%s\n' "$unexpected_paths" >&2
-              exit 1
-            fi
-            if git diff --quiet "$source_commit" "$workflow_commit" -- .github/workflows/release-octet.yml; then
-              echo "tooling-only repair does not change the octet release workflow" >&2
-              exit 1
+            if [[ "$mode" == npm ]]; then
+              if ! git merge-base --is-ancestor "$source_commit" "$workflow_commit"; then
+                echo "npm publication tooling does not descend from $source_commit" >&2
+                exit 1
+              fi
+            else
+              if [[ "$GITHUB_EVENT_NAME" != push \
+                || "$GITHUB_REF_TYPE" != tag \
+                || "$GITHUB_REF_NAME" != "$expected_workflow_tag" ]]; then
+                echo "workflow ref $workflow_commit does not match canonical release source $source_commit" >&2
+                echo "tooling-only repairs must use the dedicated $expected_workflow_tag tag" >&2
+                exit 1
+              fi
+              if ! git merge-base --is-ancestor "$source_commit" "$workflow_commit"; then
+                echo "release tooling commit $workflow_commit does not descend from $source_commit" >&2
+                exit 1
+              fi
+              unexpected_paths=$(git diff --name-only "$source_commit" "$workflow_commit" \
+                | grep -Ev '^\.github/workflows/release-(octet|serve)\.yml$' || true)
+              if [[ -n "$unexpected_paths" ]]; then
+                echo "tooling-only repair changes non-release-workflow paths:" >&2
+                printf '%s\n' "$unexpected_paths" >&2
+                exit 1
+              fi
+              if git diff --quiet "$source_commit" "$workflow_commit" -- .github/workflows/release-octet.yml; then
+                echo "tooling-only repair does not change the octet release workflow" >&2
+                exit 1
+              fi
             fi
             echo "using release tooling $workflow_commit with immutable source $source_commit"
             {
@@ -141,6 +156,15 @@ jobs:
           fi
 
           core_workflow_commit=$workflow_commit
+          if [[ "$mode" == npm ]]; then
+            core_workflow_tag="octet-binaries-$tag"
+            git fetch --force origin "refs/tags/$core_workflow_tag:refs/tags/$core_workflow_tag"
+            core_workflow_commit=$(git rev-parse "$core_workflow_tag^{commit}")
+            if ! git merge-base --is-ancestor "$source_commit" "$core_workflow_commit"; then
+              echo "native release tooling $core_workflow_commit does not descend from $source_commit" >&2
+              exit 1
+            fi
+          fi
           if [[ "$mode" == installer ]]; then
             core_workflow_tag="octet-binaries-$tag"
             git fetch --force origin "refs/tags/$core_workflow_tag:refs/tags/$core_workflow_tag"
@@ -189,7 +213,7 @@ jobs:
             exit 1
           fi
 
-          if [[ "$mode" == binaries ]]; then
+          if [[ "$mode" != installer ]]; then
             if [[ "${INPUT_REQUIRE_PROVIDER_ACCEPTANCE:-false}" == true ]]; then
               environment_name=stable-release-provider-acceptance
               workflow_id=$(gh api \
@@ -582,7 +606,7 @@ jobs:
   verify-published:
     name: Verify binary install on ${{ matrix.target }}
     needs: [resolve, publish]
-    if: needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && (needs.resolve.outputs.mode == 'npm' || (needs.resolve.outputs.mode == 'binaries' && needs.publish.result == 'success'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -671,7 +695,7 @@ jobs:
   package-npm:
     name: Package verified npm artifacts
     needs: [resolve, verify-published]
-    if: needs.resolve.outputs.mode == 'binaries' && inputs.publish_npm == true
+    if: (needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries') && inputs.publish_npm == true
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -695,8 +719,8 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
-          WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
-          WORKFLOW_REF: ${{ github.workflow_ref }}
+          CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
+          CORE_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-${{ needs.resolve.outputs.tag }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -706,8 +730,8 @@ jobs:
             --clobber \
             --pattern 'install-octet.sh' \
             --pattern 'install-octet.sh.sigstore.json' \
-            --pattern 'octet-*.tar.gz' \
-            --pattern 'octet-*.tar.gz.sigstore.json' \
+            --pattern "octet-$VERSION-*.tar.gz" \
+            --pattern "octet-$VERSION-*.tar.gz.sigstore.json" \
             --pattern 'OCTET_SHA256SUMS' \
             --pattern 'OCTET_SHA256SUMS.sigstore.json' \
             --pattern 'OCTET_RELEASE_METADATA.json' \
@@ -715,11 +739,11 @@ jobs:
           cd release-assets
           sha256sum --check OCTET_SHA256SUMS
           verify=(
-            --certificate-identity "https://github.com/$WORKFLOW_REF"
+            --certificate-identity "https://github.com/$CORE_WORKFLOW_REF"
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
             --certificate-github-workflow-name "octet binary release"
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
-            --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
+            --certificate-github-workflow-sha "$CORE_WORKFLOW_COMMIT"
           )
           cosign verify-blob \
             --bundle OCTET_SHA256SUMS.sigstore.json \
@@ -739,8 +763,8 @@ jobs:
             "$VERSION" \
             "$RELEASE_TAG" \
             "$SOURCE_COMMIT" \
-            "$WORKFLOW_COMMIT" \
-            "$WORKFLOW_REF" \
+            "$CORE_WORKFLOW_COMMIT" \
+            "$CORE_WORKFLOW_REF" \
             "$WORKFLOW_REPOSITORY" \
             OCTET_SHA256SUMS \
             "$RUNNER_TEMP/recomputed-release-metadata.json"
@@ -752,6 +776,7 @@ jobs:
           TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
         run: |
           set -euo pipefail
           source_date_epoch=$(git -C source show -s --format=%ct "$SOURCE_COMMIT")
@@ -768,7 +793,8 @@ jobs:
             "$PWD/release-assets/OCTET_RELEASE_METADATA.json" \
             "$RUNNER_TEMP/npm-assets" \
             "$RUNNER_TEMP/npm-assets/OCTET_NPM_MANIFEST.json" \
-            "$RUNNER_TEMP/npm-assets/OCTET_NPM_SHA256SUMS"
+            "$RUNNER_TEMP/npm-assets/OCTET_NPM_SHA256SUMS" \
+            --core-workflow-commit "$CORE_WORKFLOW_COMMIT"
           (cd "$RUNNER_TEMP/npm-assets" && sha256sum --check OCTET_NPM_SHA256SUMS)
           python3 source/scripts/verify-octet-npm.py \
             "$VERSION" \
@@ -784,7 +810,7 @@ jobs:
   publish-npm:
     name: Publish npm packages with trusted publishing
     needs: [resolve, package-npm]
-    if: needs.resolve.outputs.mode == 'binaries'
+    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
     runs-on: ubuntu-24.04
     environment: stable-release-publish
     permissions:
@@ -1022,7 +1048,7 @@ jobs:
   verify-npm-published:
     name: Verify published npm provenance
     needs: [resolve, publish-npm]
-    if: needs.resolve.outputs.mode == 'binaries'
+    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1104,7 +1130,7 @@ jobs:
   smoke-npm-published:
     name: Smoke published npm package on ${{ matrix.target }}
     needs: [resolve, verify-npm-published]
-    if: needs.resolve.outputs.mode == 'binaries'
+    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
