@@ -695,7 +695,8 @@ jobs:
   package-npm:
     name: Package verified npm artifacts
     needs: [resolve, verify-published]
-    if: (needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries') && inputs.publish_npm == true
+    # The binary publish job is intentionally skipped in npm-only mode.
+    if: always() && needs.resolve.result == 'success' && needs['verify-published'].result == 'success' && needs.resolve.outputs.mode == 'npm'
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -716,6 +717,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
@@ -745,19 +747,22 @@ jobs:
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
             --certificate-github-workflow-sha "$CORE_WORKFLOW_COMMIT"
           )
-          cosign verify-blob \
-            --bundle OCTET_SHA256SUMS.sigstore.json \
-            "${verify[@]}" \
-            OCTET_SHA256SUMS
-          cosign verify-blob \
-            --bundle OCTET_RELEASE_METADATA.json.sigstore.json \
-            "${verify[@]}" \
-            OCTET_RELEASE_METADATA.json
+          verify_release_blob() {
+            local bundle=$1
+            local artifact=$2
+            (
+              cd ../source
+              cosign verify-blob \
+                --bundle "../release-assets/$bundle" \
+                "${verify[@]}" \
+                "../release-assets/$artifact"
+            )
+          }
+          verify_release_blob OCTET_SHA256SUMS.sigstore.json OCTET_SHA256SUMS
+          verify_release_blob OCTET_RELEASE_METADATA.json.sigstore.json OCTET_RELEASE_METADATA.json
           for artifact in ./*.tar.gz ./install-octet.sh; do
-            cosign verify-blob \
-              --bundle "${artifact}.sigstore.json" \
-              "${verify[@]}" \
-              "$artifact"
+            name=${artifact#./}
+            verify_release_blob "$name.sigstore.json" "$name"
           done
           python3 ../source/scripts/generate-octet-release-metadata.py \
             "$VERSION" \
@@ -810,7 +815,7 @@ jobs:
   publish-npm:
     name: Publish npm packages with trusted publishing
     needs: [resolve, package-npm]
-    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && needs['package-npm'].result == 'success' && needs.resolve.outputs.mode == 'npm'
     runs-on: ubuntu-24.04
     environment: stable-release-publish
     permissions:
@@ -928,7 +933,7 @@ jobs:
               echo "skipping already verified immutable package $package@$VERSION"
               continue
             fi
-            npm publish "npm-assets/$artifact" --registry "$NPM_REGISTRY" \
+            npm publish "./npm-assets/$artifact" --registry "$NPM_REGISTRY" \
               --access public \
               --provenance \
               --ignore-scripts \
@@ -1001,6 +1006,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
@@ -1048,7 +1054,7 @@ jobs:
   verify-npm-published:
     name: Verify published npm provenance
     needs: [resolve, publish-npm]
-    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && needs['publish-npm'].result == 'success' && needs.resolve.outputs.mode == 'npm'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1130,7 +1136,7 @@ jobs:
   smoke-npm-published:
     name: Smoke published npm package on ${{ matrix.target }}
     needs: [resolve, verify-npm-published]
-    if: needs.resolve.outputs.mode == 'npm' || needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && needs['verify-npm-published'].result == 'success' && needs.resolve.outputs.mode == 'npm'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

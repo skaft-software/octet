@@ -25,7 +25,20 @@ for changes and supported installation channels.
 
 ## Install
 
-**Native installer:** macOS Apple silicon/Intel and GNU/Linux x86-64:
+**npm:** macOS Apple silicon/Intel and GNU/Linux x86-64 (Node.js with npm):
+
+```sh
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1
+octet --version   # octet 0.8.1
+```
+
+The launcher pulls the matching signed platform package
+(`@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`, or
+`@skaft/octet-linux-x64-gnu`) with npm provenance. Availability and
+public-install results are tracked on the
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1).
+
+**Native installer:** same platforms, without npm:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
