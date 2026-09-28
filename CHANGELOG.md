@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
+  `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the
+  verified immutable release assets with trusted publishing and registry
+  provenance. Install with
+  `npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1`.
+  README, installation, distribution, getting-started, and release docs now lead
+  with the npm lane.
+
 ## [0.8.1] - 2026-09-27
 
 See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.

@@ -4,6 +4,23 @@
 
 <a id="binary-availability"></a>
 
+## Install from npm
+
+On macOS Apple silicon/Intel or GNU/Linux x86-64 with Node.js and npm:
+
+```sh
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1
+octet --version   # octet 0.8.1
+```
+
+This installs the `@skaft/octet` launcher plus the matching signed platform
+package (`@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`, or
+`@skaft/octet-linux-x64-gnu`), published with npm provenance from the
+verified release assets. The flags skip lifecycle scripts and metadata noise;
+the launcher has no install-time scripts. Signed checksums, provenance, and
+public-install verification are recorded on the version-pinned
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1).
+
 ## Install native binaries
 
 Native release packages target macOS Apple silicon/Intel and GNU/Linux x86-64.
@@ -19,8 +36,9 @@ octet --version   # octet 0.8.1
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
-untouched; no automatic migration is performed. npm is not published yet;
-Homebrew, crates.io and SDK registries remain separate, unpublished channels.
+untouched; no automatic migration is performed. The npm channel is published
+at `@skaft/octet@0.8.1` (see above); Homebrew, crates.io and SDK registries
+remain separate, unpublished channels.
 Bun is unqualified.
 See [distribution channels](distribution.md) for their exact boundaries.
 [Historical Ygg instructions](reference/historical-installation.md) describe

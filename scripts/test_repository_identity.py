@@ -224,7 +224,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
         self.assertIn(f"/releases/tag/v{PUBLISHED_NATIVE_VERSION}", text)
         self.assertIn(f"distribution is **{version}**", text)
         self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
-        self.assertIn("npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.", text)
+        self.assertIn("npm is published at `@skaft/octet@0.8.1` (launcher plus three signed platform packages, with npm provenance); Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
 
 
 if __name__ == "__main__":
