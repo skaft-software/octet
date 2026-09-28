@@ -12303,8 +12303,15 @@ fn windows_script_launch(
     if !is_python_script(entrypoint, &first_line) {
         return Ok(None);
     }
+    // Only absolute entries: an empty or relative PATH entry would resolve
+    // against the current directory, which is the (possibly untrusted)
+    // workspace. Rust's own Command search excludes it for the same reason.
     let directories: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
+        .map(|path| {
+            std::env::split_paths(&path)
+                .filter(|directory| directory.is_absolute())
+                .collect()
+        })
         .unwrap_or_default();
     let is_store_alias = |path: &Path| {
         path.to_string_lossy()

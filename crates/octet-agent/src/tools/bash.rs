@@ -814,7 +814,9 @@ pub fn resolve_windows_shell(configured: Option<&std::path::Path>) -> Result<Pat
         }
     }
     if let Some(path) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&path) {
+        // An empty or relative entry would resolve against the current
+        // directory, which is the workspace; only absolute entries are used.
+        for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
             candidates.push(directory.join("bash.exe"));
             candidates.push(directory.join("bash"));
         }

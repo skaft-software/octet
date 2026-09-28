@@ -343,7 +343,12 @@ def _protocol_stream(stream: Any) -> Any:
 
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure is not None:
-        reconfigure(encoding="utf-8", newline="\n")
+        try:
+            reconfigure(encoding="utf-8", newline="\n")
+        except (OSError, ValueError):
+            # Input that extension code already started reading cannot change
+            # encoding; keep the stream as it was rather than fail to start.
+            pass
     return stream
 
 
