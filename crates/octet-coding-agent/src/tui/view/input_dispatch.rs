@@ -609,6 +609,9 @@ mod tests {
     #[test]
     fn product_model_cycle_uses_ordered_scope_and_queues_from_last_target() {
         let mut shell = InteractiveShell::test_shell();
+        // Pin the Linux bindings: win32 remaps model-cycle-backward to
+        // `alt+p`, while this test asserts the `ctrl+shift+p` gesture.
+        let _directory = configure(&mut shell, "{}");
         shell.set_identity("fixture", "b", "high");
         shell.set_model_cycle(vec!["c".into(), "b".into(), "a".into(), "c".into()]);
         for expected in ["/model a", "/model c", "/model b"] {

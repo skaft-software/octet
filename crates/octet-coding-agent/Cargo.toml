@@ -87,6 +87,11 @@ getrandom = { version = "0.3", optional = true }
 globset = "0.4"
 octet-serve-backend = { version = "=0.8.1", path = "../../extensions/octet-serve", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# Native console negotiation (VT output, delayed wrap, single-call frame
+# writes) and console control events. Already locked through octet-agent.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [build-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
@@ -98,3 +103,13 @@ url = "2"
 tokio-test = "0.4"
 vt100 = "0.15.2"
 wiremock = "=0.6.4"
+
+[target.'cfg(windows)'.dev-dependencies]
+# ConPTY harness for the native Windows frontend (tests/windows_conpty.rs).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

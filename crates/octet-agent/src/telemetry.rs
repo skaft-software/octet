@@ -176,7 +176,11 @@ impl TelemetryObserver {
             std::fs::create_dir_all(parent)?;
         }
         let mut options = OpenOptions::new();
-        options.create(true).append(true).read(false);
+        // `read(true)` is required on Windows: the writer thread takes an
+        // advisory exclusive lock with `LockFileEx`, which fails with
+        // `ERROR_ACCESS_DENIED` on a pure append-only handle. The handle only
+        // ever appends, so the extra read access changes nothing else.
+        options.create(true).append(true).read(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;

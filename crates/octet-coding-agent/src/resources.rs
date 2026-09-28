@@ -2825,6 +2825,19 @@ Environment:
         let symlink_target = ref_dir.join("symlink.txt");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&secret_file, &symlink_target).unwrap();
+        #[cfg(windows)]
+        match std::os::windows::fs::symlink_file(&secret_file, &symlink_target) {
+            Ok(()) => {}
+            // Standard accounts without Developer Mode lack the symlink
+            // privilege; without a link there is nothing to reject.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                return;
+            }
+            Err(error) => panic!("could not create test symlink: {error}"),
+        }
 
         // Setup SKILL.md
         std::fs::write(

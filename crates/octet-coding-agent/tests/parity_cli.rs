@@ -182,6 +182,7 @@ struct Fixture {
     home: PathBuf,
     workspace: PathBuf,
     sessions: PathBuf,
+    tmp: PathBuf,
 }
 
 impl Fixture {
@@ -191,9 +192,11 @@ impl Fixture {
         let home = canonical.join("home");
         let workspace = canonical.join("workspace");
         let sessions = canonical.join("sessions");
+        let tmp = canonical.join("tmp");
         std::fs::create_dir_all(home.join(".octet/credentials")).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
         if let Some(url) = api {
             let record = serde_json::json!({
                 "base_url": url,
@@ -222,6 +225,7 @@ impl Fixture {
             home,
             workspace,
             sessions,
+            tmp,
         }
     }
 
@@ -284,6 +288,21 @@ impl Fixture {
             .env("PWD", &self.workspace)
             .env("TERM", "dumb")
             .env("LANG", "C.UTF-8");
+        // `env_clear` removes what Windows children need to function:
+        // Winsock/DNS requires `SYSTEMROOT`, and temp files require
+        // `TEMP`/`TMP` (without them `tempfile` falls back to an
+        // unwritable system directory). Home redirection itself is a
+        // separate product gap: `dirs` resolves through the shell on
+        // Windows, so no environment variable isolates the profile.
+        #[cfg(windows)]
+        {
+            command.env("TMP", &self.tmp).env("TEMP", &self.tmp);
+            for key in ["SYSTEMROOT", "WINDIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+        }
         if offline {
             command.arg("--offline");
         }
@@ -1276,14 +1295,27 @@ fn powershell_opt_in_is_additive_and_reports_an_inert_host() {
     // The shared fixture always passes `--no-tools`, which deliberately
     // conflicts with an additive opt-in; exercise the real default allowlist.
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_octet"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_octet"));
+        command
             .current_dir(&fixture.workspace)
             .env_clear()
             .env("HOME", &fixture.home)
             .env("PATH", "/usr/bin:/bin")
             .env("PWD", &fixture.workspace)
             .env("TERM", "dumb")
-            .env("LANG", "C.UTF-8")
+            .env("LANG", "C.UTF-8");
+        // See `Fixture::command_inner`: Windows children need their system
+        // and temp variables restored after `env_clear`.
+        #[cfg(windows)]
+        {
+            command.env("TMP", &fixture.tmp).env("TEMP", &fixture.tmp);
+            for key in ["SYSTEMROOT", "WINDIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+        }
+        command
             .args(["--offline", "--no-context-files", "--color", "never"])
             .arg("--workspace")
             .arg(&fixture.workspace)

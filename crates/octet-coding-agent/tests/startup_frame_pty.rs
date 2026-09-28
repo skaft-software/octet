@@ -1623,9 +1623,11 @@ fn real_octet_model_discovery_keeps_startup_editable() {
             Duration::from_millis(500),
         );
         assert_unbranded_startup(&parser, INITIAL_COLUMNS);
-        assert!(
-            synchronized_frame_end_containing(&octet.pty.output, b"startup draft pasted").is_some()
-        );
+        // The screen can show the edit before the frame's closing CSI 2026
+        // has been read: a frame may reach the PTY in more than one write.
+        octet.wait_until(Duration::from_millis(500), |bytes| {
+            synchronized_frame_end_containing(bytes, b"startup draft pasted").is_some()
+        });
 
         let resized_start = octet.pty.output.len();
         octet.resize(RESIZED_COLUMNS, RESIZED_ROWS);

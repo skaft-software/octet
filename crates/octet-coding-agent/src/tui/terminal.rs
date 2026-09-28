@@ -17,6 +17,8 @@ mod capabilities;
 mod input;
 mod lifecycle;
 mod signal;
+#[cfg(windows)]
+mod windows_console;
 
 pub use backend::OctetTerminal;
 pub(crate) use backend::TerminalImageStore;

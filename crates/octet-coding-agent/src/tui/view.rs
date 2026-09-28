@@ -3569,9 +3569,13 @@ impl InteractiveShell {
         // (measured against Herdr 0.9.0). That is the workspace-teardown case
         // where the pane record must survive so `octet herdr restore` can hand
         // the pane back after Herdr restores the layout; every other exit is
-        // deliberate and drops the record.
+        // deliberate and drops the record. Windows has no SIGHUP; its Herdr
+        // wrapper reports through the CLI and every exit there is deliberate.
+        #[cfg(unix)]
         let keep_for_restore = crate::tui::terminal::received_shutdown_signal()
             .is_some_and(|signal| signal == signal_hook::consts::signal::SIGHUP);
+        #[cfg(not(unix))]
+        let keep_for_restore = false;
         self.herdr.finish(keep_for_restore);
         self.stop_renderer();
         force_restore();

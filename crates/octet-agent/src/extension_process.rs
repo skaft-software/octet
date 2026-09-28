@@ -11725,6 +11725,24 @@ async fn spawn_connection(
         generation,
         armed: true,
     };
+    #[cfg(windows)]
+    let mut command = {
+        let launch = windows_script_launch(&resolved_entrypoint.command).map_err(|error| {
+            ExtensionRuntimeError::Spawn {
+                extension: descriptor.manifest.name.clone(),
+                message: error.to_string(),
+            }
+        })?;
+        match launch {
+            Some((interpreter, arguments)) => {
+                let mut command = Command::new(interpreter);
+                command.args(arguments).arg(&resolved_entrypoint.command);
+                command
+            }
+            None => Command::new(&resolved_entrypoint.command),
+        }
+    };
+    #[cfg(not(windows))]
     let mut command = Command::new(&resolved_entrypoint.command);
     command
         .args(&descriptor.manifest.entrypoint.args)
@@ -12260,6 +12278,84 @@ fn stage_entrypoint(path: &Path) -> std::io::Result<Option<ResolvedEntrypoint>> 
         command: staged,
         _staging: Some(temporary),
     }))
+}
+
+/// Longest first line inspected for a `#!` interpreter line.
+#[cfg(windows)]
+const MAX_SHEBANG_BYTES: usize = 256;
+
+/// Whether an entrypoint is a Python script: a `.py` file or a `#!` line
+/// naming Python (as the bundled `#!/usr/bin/env python3` entrypoints do).
+#[cfg(any(windows, test))]
+fn is_python_script(path: &Path, first_line: &[u8]) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+        || (first_line.starts_with(b"#!") && first_line.windows(6).any(|part| part == b"python"))
+}
+
+/// Interpreter and leading arguments that execute a staged entrypoint.
+///
+/// Unix executes the staged file and the kernel honours its `#!` line.
+/// Windows has no shebang support: `CreateProcess` rejects a script as "not
+/// a valid Win32 application", so no Python extension could start. A Python
+/// script therefore runs through a Python 3 interpreter found the way
+/// `/usr/bin/env python3` finds one, on `PATH`: the `py -3` launcher, then
+/// `python3.exe`/`python.exe`, with Microsoft Store app-execution aliases
+/// (which open the Store when Python is absent) last. Other entrypoints are
+/// executed directly.
+#[cfg(windows)]
+fn windows_script_launch(
+    entrypoint: &Path,
+) -> std::io::Result<Option<(PathBuf, Vec<std::ffi::OsString>)>> {
+    let mut first_line = Vec::with_capacity(MAX_SHEBANG_BYTES);
+    std::fs::File::open(entrypoint)?
+        .take(MAX_SHEBANG_BYTES as u64)
+        .read_to_end(&mut first_line)?;
+    if let Some(end) = first_line.iter().position(|byte| *byte == b'\n') {
+        first_line.truncate(end);
+    }
+    if !is_python_script(entrypoint, &first_line) {
+        return Ok(None);
+    }
+    // Only absolute entries: an empty or relative PATH entry would resolve
+    // against the current directory, which is the (possibly untrusted)
+    // workspace. Rust's own Command search excludes it for the same reason.
+    let directories: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .filter(|directory| directory.is_absolute())
+                .collect()
+        })
+        .unwrap_or_default();
+    let is_store_alias = |path: &Path| {
+        path.to_string_lossy()
+            .to_ascii_lowercase()
+            .replace('/', "\\")
+            .contains("\\microsoft\\windowsapps\\")
+    };
+    let find = |name: &str, allow_store_alias: bool| {
+        directories
+            .iter()
+            .map(|directory| directory.join(name))
+            .find(|candidate| {
+                candidate.is_file() && (allow_store_alias || !is_store_alias(candidate))
+            })
+    };
+    if let Some(launcher) = find("py.exe", false) {
+        return Ok(Some((launcher, vec!["-3".into()])));
+    }
+    for allow_store_alias in [false, true] {
+        for name in ["python3.exe", "python.exe"] {
+            if let Some(interpreter) = find(name, allow_store_alias) {
+                return Ok(Some((interpreter, Vec::new())));
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "this Python extension needs Python 3 on Windows: install it from python.org \
+         (which adds the py launcher) or put python.exe on PATH",
+    ))
 }
 
 fn resolve_entrypoint_command(
@@ -20739,7 +20835,9 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
         ));
     }
 
-    #[cfg(unix)]
+    // Also the Windows proof that a `#!/usr/bin/env python3` entrypoint starts
+    // through a resolved interpreter and completes a protocol round trip.
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn compaction_strategy_negotiates_and_renders_through_host() {
         let temp = TempDir::new().expect("tempdir");
@@ -25072,6 +25170,59 @@ command = "test"
             ),
         )
         .expect("write manifest");
+    }
+
+    /// Windows has no executable bit; a script entrypoint is launched through
+    /// its interpreter instead (see `windows_script_launch`).
+    #[cfg(windows)]
+    fn write_executable_script(path: &Path, source: &str) {
+        std::fs::write(path, source).expect("write fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_python_entrypoints_launch_through_an_interpreter() {
+        let temp = TempDir::new().expect("tempdir");
+        let script = temp.path().join("extension");
+        std::fs::write(&script, "#!/usr/bin/env python3\nprint('ok')\n").expect("script");
+        let (interpreter, arguments) = windows_script_launch(&script)
+            .expect("the Windows runner provides Python 3")
+            .expect("a python shebang is a script");
+        let name = interpreter
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(
+            ["py.exe", "python3.exe", "python.exe"].contains(&name.as_str()),
+            "{interpreter:?}"
+        );
+        if name == "py.exe" {
+            assert_eq!(arguments, vec![std::ffi::OsString::from("-3")]);
+        }
+        let native = temp.path().join("native.exe");
+        std::fs::write(&native, b"MZ\x90\x00").expect("native fixture");
+        assert!(windows_script_launch(&native).expect("inspect").is_none());
+    }
+
+    #[test]
+    fn python_script_detection_uses_the_extension_or_interpreter_line() {
+        assert!(is_python_script(Path::new("extension.py"), b""));
+        assert!(is_python_script(Path::new("EXTENSION.PY"), b""));
+        assert!(is_python_script(
+            Path::new("extension"),
+            b"#!/usr/bin/env python3"
+        ));
+        assert!(is_python_script(
+            Path::new("run"),
+            b"#!C:\\Python312\\python.exe"
+        ));
+        assert!(!is_python_script(Path::new("extension.sh"), b"#!/bin/sh"));
+        assert!(!is_python_script(Path::new("extension.exe"), b"MZ\x90\x00"));
+        assert!(!is_python_script(
+            Path::new("notes"),
+            b"python is mentioned"
+        ));
     }
 
     #[cfg(unix)]

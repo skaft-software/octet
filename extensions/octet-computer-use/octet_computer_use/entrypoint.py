@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import platform
 import subprocess
 import threading
 import time
@@ -74,6 +75,47 @@ RESULT_TEXT_LIMIT = 24_000
 
 # How long one macOS permission answer is reused for the effectful-action gate.
 _PERMISSION_CACHE_SECONDS = 30.0
+
+
+def _host_platform() -> str:
+    """Lowercased `platform.system()`: `windows`, `darwin`, or `linux`."""
+    return platform.system().lower()
+
+
+def _pending_label(status: Mapping[str, Any]) -> str:
+    """Short status-row noun for a not-ready runtime, per host platform.
+
+    One branch point shared with the Linux work (PR #436): macOS names its
+    grants, Windows names its target limits because there is no grant to
+    chase (see README §Windows).
+    """
+    if _host_platform() == "windows":
+        return "a non-elevated target"
+    if status.get("screen_recording") is False:
+        return "Screen Recording"
+    return "macOS permissions"
+
+
+def _not_ready_text() -> str:
+    """Denial text when a missing OS grant holds back an effectful action."""
+    if _host_platform() == "windows":
+        return (
+            "Computer use is not ready: the target window may be elevated "
+            "(administrator) or on the secure desktop (a UAC prompt or the "
+            "lock screen), which Windows does not allow a non-elevated octet "
+            "to drive. Switch to a non-elevated window and retry."
+        )
+    if _host_platform() == "linux":
+        return (
+            "Computer use is not ready: the driver cannot reach a Linux display "
+            "session. Start octet from a terminal inside your graphical session "
+            "(X11, or Wayland such as Hyprland) and retry."
+        )
+    return (
+        "Computer use is not ready: macOS has not allowed Accessibility and "
+        "Screen Recording for the selected Cua runtime. Grant them to the "
+        "selected host and retry."
+    )
 
 # Prefix for the driver session that owns the visible agent cursor. A session
 # name belongs permanently to the transport that created it: the owner may
@@ -616,8 +658,10 @@ class ComputerUse:
 
         if client.requires_confirmation(driver_tool) and confirmations_enabled():
             if self._permissions_block(driver_tool):
-                return tool_result(text_content(_NOT_READY[driver_module.host_platform() == "linux"]),
-                                   is_error=True)
+                return tool_result(
+                    text_content(_not_ready_text()),
+                    is_error=True,
+                )
             description = next((info.description for info in client.tools() if info.name == driver_tool), "")
             try:
                 approved = self._extension.confirm(
@@ -803,11 +847,7 @@ class ComputerUse:
         elif status.get("platform") == "linux":
             label = "computer use · needs a desktop session"
         else:
-            label = "computer use · needs %s" % (
-                "Screen Recording"
-                if status.get("screen_recording") is False
-                else "macOS permissions"
-            )
+            label = "computer use · needs %s" % _pending_label(status)
         try:
             self._extension.set_status(
                 {"state": "active" if granted else "pending", "label": label}
@@ -817,17 +857,6 @@ class ComputerUse:
             # status row is an aid, never authority for actuation.
             pass
         return status
-
-
-# Why an effectful action is held back, indexed by whether the host is Linux.
-_NOT_READY = (
-    "Computer use is not ready: macOS has not allowed Accessibility and "
-    "Screen Recording for the selected Cua runtime. Grant them to the "
-    "selected host and retry.",
-    "Computer use is not ready: the driver cannot reach a Linux display "
-    "session. Start octet from a terminal inside your graphical session "
-    "(X11, or Wayland such as Hyprland) and retry.",
-)
 
 
 # Driver tools that end or destroy user state and are labelled destructive in
@@ -1207,11 +1236,17 @@ def _handle_jev_choose(values: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _render_status(status: Mapping[str, Any]) -> str:
+    windows = _host_platform() == "windows"
     if status.get("runtime") == "unavailable":
+        if windows:
+            grant = ("Pick a non-elevated target on the interactive desktop; "
+                     "elevated windows and the secure desktop are off-limits. ")
+        else:
+            grant = "Grant Accessibility and Screen Recording to that host; "
         return (
             "runtime: unavailable (the required Cua Driver desktop host is not ready). "
             f"{status.get('detail') or 'Install and authorize the selected desktop host.'} "
-            "Grant Accessibility and Screen Recording to that host; "
+            f"{grant}"
             "OCTET_CUA_DESKTOP_HOST=0 explicitly selects cursorless direct mode."
         )
     if not status.get("installed"):
@@ -1240,9 +1275,23 @@ def _render_status(status: Mapping[str, Any]) -> str:
         lines.append("runtime: direct (inherits your terminal's permissions)")
     permissions = status.get("permissions")
     if permissions == "granted":
-        lines.append("macOS permissions: Accessibility and Screen Recording allowed.")
+        if windows:
+            lines.append(
+                "Windows: no separate grant is needed; octet cannot drive "
+                "elevated windows or the secure desktop (UAC prompts, lock screen)."
+            )
+        else:
+            lines.append("macOS permissions: Accessibility and Screen Recording allowed.")
         return "\n".join(lines)
     detail = status.get("permission_detail")
+    if windows:
+        lines.append("Windows limits: %s" % (detail or permissions or "unknown"))
+        lines.append(
+            "Drive a non-elevated window on the interactive desktop. Elevated "
+            "windows and the secure desktop are off-limits to a non-elevated "
+            "octet; see README §Windows."
+        )
+        return "\n".join(lines)
     lines.append("macOS permissions: %s" % (detail or permissions or "unknown"))
     if status.get("runtime") == "desktop-host":
         lines.append(

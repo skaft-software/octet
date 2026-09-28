@@ -1888,7 +1888,10 @@ impl SessionStore {
         let Some(workspace) = self.workspace.as_ref() else {
             anyhow::bail!("store has no workspace to record");
         };
-        std::fs::create_dir_all(&self.dir)?;
+        // The private writer creates missing directories owned by the current
+        // user. A plain `create_dir_all` here would let an elevated Windows
+        // process create the session directory owned by the Administrators
+        // group, which the private checks for the marker and session refuse.
         let marker = self.dir.join(WORKSPACE_MARKER);
         let bytes = format!("{}\n", workspace.display());
         // Only a validated owner-only, no-follow read may skip publication.
@@ -2934,15 +2937,15 @@ impl SessionStore {
                     anyhow::bail!("interrupted session metadata cannot be restored");
                 };
                 std::fs::rename(staged_metadata, &metadata_path)?;
-                std::fs::File::open(&metadata_dir)?.sync_all()?;
+                sync_directory(&metadata_dir)?;
             }
             Err(error) => return Err(error.into()),
         }
 
         remove_staged_deletion_files(&self.dir, id)?;
         remove_staged_deletion_files(&metadata_dir, id)?;
-        std::fs::File::open(&self.dir)?.sync_all()?;
-        std::fs::File::open(metadata_dir)?.sync_all()?;
+        sync_directory(&self.dir)?;
+        sync_directory(&metadata_dir)?;
         Ok(())
     }
 
@@ -2961,8 +2964,8 @@ impl SessionStore {
         remove_staged_deletion_files(&self.dir, id)?;
         let metadata_dir = self.metadata_dir();
         remove_staged_deletion_files(&metadata_dir, id)?;
-        std::fs::File::open(&self.dir)?.sync_all()?;
-        std::fs::File::open(metadata_dir)?.sync_all()?;
+        sync_directory(&self.dir)?;
+        sync_directory(&metadata_dir)?;
         let _ = self.remove_catalog_entry(id);
         Ok(())
     }
@@ -2997,6 +3000,34 @@ fn remove_regular_file_if_exists(path: &Path) -> anyhow::Result<()> {
         Ok(_) => anyhow::bail!("session deletion path is not a regular file"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// Best-effort directory durability sync after a session-store rename.
+///
+/// `File::open` yields a read-only directory handle on Windows, and
+/// `FlushFileBuffers` on it fails with `ERROR_ACCESS_DENIED`. File data is
+/// already synced before these renames, so directory durability stays
+/// best-effort there instead of failing the operation.
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        // `FILE_FLAG_BACKUP_SEMANTICS` (Win32 constant; `windows-sys` is not
+        // available with the Storage feature in this crate).
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let result = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all());
+        let _ = result;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(path)?.sync_all()
     }
 }
 
@@ -5254,12 +5285,16 @@ mod tests {
             "records": [record],
         });
         let path = delegation.join("fleet.json");
-        std::fs::write(&path, fleet.to_string()).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
+        // The host persists the roster owner-only
+        // (`DelegationManager::persist_durable_fleet_locked`); a plain write
+        // would fail the owner-only read on Windows and skew every refusal
+        // to `UnknownWorker`.
+        octet_agent::secure_fs::write_private_atomic(
+            &path,
+            fleet.to_string().as_bytes(),
+            1024 * 1024,
+        )
+        .unwrap();
     }
 
     /// The typed verdict behind one refusal, which is what a frontend branches

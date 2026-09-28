@@ -2152,6 +2152,17 @@ mod tests {
         );
     }
 
+    // No npm platform package is published for this target
+    // (`expected_npm_platform` returns `None`); the layout detection logic
+    // itself is platform-independent and covered on distributed targets.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )),
+        ignore = "no npm platform package is published for this target"
+    )]
     #[test]
     fn detects_only_a_corroborated_global_npm_layout() {
         let root = tempfile::tempdir().unwrap();
@@ -2199,6 +2210,15 @@ mod tests {
         );
     }
 
+    // See `detects_only_a_corroborated_global_npm_layout`.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )),
+        ignore = "no npm platform package is published for this target"
+    )]
     #[test]
     fn rejects_npm_layout_outside_skaft_scope() {
         let root = tempfile::tempdir().unwrap();
@@ -2217,6 +2237,15 @@ mod tests {
         );
     }
 
+    // See `detects_only_a_corroborated_global_npm_layout`.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )),
+        ignore = "no npm platform package is published for this target"
+    )]
     #[test]
     fn rejects_npm_layout_with_wrong_platform_metadata() {
         let root = tempfile::tempdir().unwrap();

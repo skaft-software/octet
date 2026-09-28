@@ -33,6 +33,8 @@ pub mod deferred;
 pub mod durability;
 pub mod summarization;
 
+#[cfg(windows)]
+pub use bash::resolve_windows_shell;
 pub use bash::{
     BashCheckpointPublisher, BashCheckpointStats, BashTool, CheckpointedBashTool,
     BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES, MIN_BASH_CHECKPOINT_INTERVAL,

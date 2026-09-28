@@ -35,6 +35,74 @@ fn synchronized_frame_is_one_atomic_backend_write_even_without_csi_2026_support(
     assert_eq!(backend.out, b"\x1b[?2026hframe\x1b[?2026l");
 }
 
+/// Records each sink call separately; a `Vec<u8>` would hide how many writes
+/// one frame took.
+#[derive(Default)]
+struct RecordingSink {
+    frames: Vec<Vec<u8>>,
+}
+
+impl std::io::Write for RecordingSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.frames.push(bytes.to_vec());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl FrameSink for RecordingSink {
+    fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        self.frames.push(frame.to_vec());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_multi_row_frame_reaches_the_sink_in_one_write() {
+    let mut backend = OctetTerminal {
+        out: RecordingSink::default(),
+        size: Arc::new(Mutex::new((80, 24))),
+        last_was_cr: false,
+        pending: Vec::new(),
+        pending_log: Vec::new(),
+        image_store: TerminalImageStore::default(),
+        write_log: None,
+        in_synchronized_frame_depth: 0,
+    };
+    // The shape of a differential repaint: cursor motion, per-row clears and
+    // text, emitted through many backend calls inside one frame.
+    backend.write(SYNC_OUTPUT_BEGIN);
+    Terminal::move_by(&mut backend, -3);
+    for row in 0..40 {
+        Terminal::clear_line(&mut backend);
+        backend.write(&format!("row {row} \u{2500}\u{1f600}\r\n"));
+    }
+    Terminal::hide_cursor(&mut backend);
+    assert!(
+        backend.out.frames.is_empty(),
+        "nothing may reach the terminal mid-frame"
+    );
+    backend.write(SYNC_OUTPUT_END);
+    assert_eq!(backend.out.frames.len(), 1, "one frame, one terminal write");
+    let frame = String::from_utf8(backend.out.frames.remove(0)).unwrap();
+    assert!(frame.starts_with(SYNC_OUTPUT_BEGIN));
+    assert!(frame.ends_with(SYNC_OUTPUT_END));
+    assert!(frame.contains("row 39"));
+}
+
+#[test]
+fn console_frames_convert_to_utf16_losslessly_or_not_at_all() {
+    let frame = "\x1b[2Kbox \u{2500} emoji \u{1f600}\r\n";
+    let units = frame_utf16(frame.as_bytes()).expect("UTF-8 frame");
+    assert_eq!(String::from_utf16(&units).unwrap(), frame);
+    // A non-UTF-8 batch keeps the byte-oriented writer rather than being
+    // lossily re-encoded.
+    assert!(frame_utf16(b"\xff\xfe").is_none());
+}
+
 #[test]
 fn synchronized_nested_frame_markers_preserve_depth_semantics() {
     let mut backend = terminal();
