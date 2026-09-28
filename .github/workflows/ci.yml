@@ -308,13 +308,24 @@ jobs:
           cargo test --workspace --all-targets --profile ci-test --locked --target $env:WINDOWS_TARGET --no-fail-fast 2>&1 |
             ForEach-Object { "$_" } | Tee-Object -FilePath $log | Out-Null
           $status = $LASTEXITCODE
-          $target = ''
-          $rows = foreach ($line in Get-Content $log) {
-            if ($line -match 'Running (.+)$') { $target = $Matches[1]; continue }
-            if ($line -match 'test result: \w+\. (\d+) passed; (\d+) failed') {
-              [pscustomobject]@{ Target = $target; Passed = [int]$Matches[1]; Failed = [int]$Matches[2] }
+          # Case-sensitive: `-match` would also take libtest's "running N
+          # tests" line as a target. A failing test's captured output can
+          # hold a nested harness summary, so each target keeps the last
+          # summary printed before the next target starts.
+          $target = $null
+          $result = $null
+          $rows = @(foreach ($line in Get-Content $log) {
+            if ($line -cmatch '^\s+Running (.+)$') {
+              if ($result) { $result }
+              $target = $Matches[1] -replace '^unittests ', '' -replace ' \(.*[\\/]([^\\/]+?)-[0-9a-f]{16}(\.exe)?\)$', ' ($1)'
+              $result = $null
+              continue
+            }
+            if ($target -and $line -cmatch '^test result: \w+\. (\d+) passed; (\d+) failed') {
+              $result = [pscustomobject]@{ Target = $target; Passed = [int]$Matches[1]; Failed = [int]$Matches[2] }
             }
           }
+          if ($result) { $result })
           $summary = @('### Windows workspace test baseline (not gating)', '',
             "cargo exit status: $status", '', '| Test target | Passed | Failed |', '| --- | ---: | ---: |')
           $summary += $rows | Where-Object { $_.Passed + $_.Failed -gt 0 } |

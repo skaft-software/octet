@@ -231,7 +231,9 @@ struct StoredArtifact {
 }
 
 struct GenerationState {
-    scratch: tempfile::TempDir,
+    // Removed, with the private scratch directory inside it, on settlement.
+    directory: tempfile::TempDir,
+    scratch: PathBuf,
     artifacts: HashMap<String, StoredArtifact>,
     retained_bytes: usize,
 }
@@ -368,15 +370,19 @@ impl ArtifactStore {
             return Err(ArtifactError::DuplicateGeneration(generation));
         }
         let prefix = format!("generation-{generation}-");
-        let scratch = tempfile::Builder::new()
+        let directory = tempfile::Builder::new()
             .prefix(&prefix)
             .tempdir_in(self.inner.root.path())?;
-        create_private_directory_all(scratch.path())?;
-        let path = scratch.path().to_path_buf();
+        // As for a temporary root, create the private scratch directory
+        // rather than adopting one an elevated Windows process made owned by
+        // the Administrators group.
+        let path = directory.path().join("scratch");
+        create_private_directory_all(&path)?;
         generations.insert(
             generation,
             GenerationState {
-                scratch,
+                directory,
+                scratch: path.clone(),
                 artifacts: HashMap::new(),
                 retained_bytes: 0,
             },
@@ -388,7 +394,7 @@ impl ArtifactStore {
     pub fn scratch_directory(&self, generation: u64) -> Result<PathBuf, ArtifactError> {
         self.generations()?
             .get(&generation)
-            .map(|state| state.scratch.path().to_path_buf())
+            .map(|state| state.scratch.clone())
             .ok_or(ArtifactError::StaleGeneration(generation))
     }
 
@@ -424,7 +430,7 @@ impl ArtifactStore {
                 .get(&generation)
                 .ok_or(ArtifactError::StaleGeneration(generation))?;
             preflight_generation_capacity(state, self.inner.limits, publication.size)?;
-            state.scratch.path().to_path_buf()
+            state.scratch.clone()
         };
 
         let bytes = match publication.source {
@@ -611,7 +617,7 @@ impl ArtifactStore {
             artifacts: state.artifacts.len(),
             bytes: state.retained_bytes,
         };
-        state.scratch.close()?;
+        state.directory.close()?;
         Ok(settlement)
     }
 
