@@ -70,7 +70,14 @@ Bash process control, the Python SDK, the computer-use extension (no driver
 installed), and release tooling. It starts the packaged executables with only
 the Windows system directories on `PATH` and as a freshly created standard
 (non-administrator) account, and uploads an artifact named
-`octet-pr-<commit>-x86_64-pc-windows-gnu` for 14 days.
+`octet-pr-<commit>-x86_64-pc-windows-gnu` for 14 days. For a pull request,
+`<commit>` is the merge commit CI built, which `BUILD-INFO.json` records.
+
+The ConPTY scenarios (`cargo test -p octet-coding-agent --test
+windows_conpty`) read the current account's octet profile, because Windows
+resolves it through the known-folder API rather than an environment variable.
+Run them from an account with no configured provider, as on a CI runner: they
+continue through first-run provider setup without writing provider data.
 
 The job also runs the whole workspace test suite as a **non-gating baseline**
 and publishes per-target results in the job summary. Most of that suite had

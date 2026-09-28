@@ -13,8 +13,10 @@
 //!
 //! Windows resolves the profile directory through the known-folder API, not an
 //! environment variable, so the child reads the current user's octet
-//! configuration (normally absent on a CI runner, which yields first-run
-//! provider setup). The workspace and session store are disposable.
+//! configuration. The interactive scenarios need a profile with no configured
+//! provider, as on a CI runner: they continue through first-run provider setup
+//! without writing provider data. The workspace and session store are
+//! disposable.
 #![cfg(windows)]
 
 use std::ffi::{c_void, OsStr, OsString};
@@ -518,9 +520,30 @@ fn interactive_round_trip(environment: &[(&str, &str)], rule: char) {
         INITIAL,
     );
 
-    // First-run provider setup on a clean profile, or the composer otherwise.
-    let started = console.wait_for("the interactive frontend", |screen| {
-        screen.contains("Set up a provider") || full_width_rule(screen, INITIAL.0.into(), rule)
+    // The composer accepts typing while startup model discovery runs, and
+    // discovery then opens first-run provider setup over it, so input typed
+    // before setup appears would race it. Wait for setup (after first-run
+    // appearance setup on a fresh profile) and continue without a provider,
+    // which writes no provider data, before typing into the composer.
+    let first_run = console.wait_for(
+        "first-run setup (this scenario needs a profile with no configured provider)",
+        |screen| {
+            screen.contains("Choose terminal appearance") || screen.contains("Set up a provider")
+        },
+    );
+    if !first_run.contains("Set up a provider") {
+        console.send(b"\r");
+        console.wait_for("first-run provider setup", |screen| {
+            screen.contains("Set up a provider")
+        });
+    }
+    console.type_text("Continue without");
+    console.send(b"\r");
+    let started = console.wait_for("the composer after provider setup", |screen| {
+        !screen.contains("Set up a provider")
+            && ['-', '─']
+                .into_iter()
+                .any(|glyph| full_width_rule(screen, INITIAL.0.into(), glyph))
     });
     assert!(
         full_width_rule(&started, INITIAL.0.into(), rule),

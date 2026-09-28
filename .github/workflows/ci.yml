@@ -308,14 +308,16 @@ jobs:
           cargo test --workspace --all-targets --profile ci-test --locked --target $env:WINDOWS_TARGET --no-fail-fast 2>&1 |
             ForEach-Object { "$_" } | Tee-Object -FilePath $log | Out-Null
           $status = $LASTEXITCODE
-          # Case-sensitive: `-match` would also take libtest's "running N
-          # tests" line as a target. A failing test's captured output can
-          # hold a nested harness summary, so each target keeps the last
-          # summary printed before the next target starts.
+          # Cargo colors its status lines (CARGO_TERM_COLOR), so strip SGR
+          # escapes first. Case-sensitive: `-match` would also take libtest's
+          # "running N tests" line as a target. A failing test's captured
+          # output can hold a nested harness summary, so each target keeps the
+          # last summary printed before the next target starts.
           $target = $null
           $result = $null
-          $rows = @(foreach ($line in Get-Content $log) {
-            if ($line -cmatch '^\s+Running (.+)$') {
+          $rows = @(foreach ($raw in Get-Content $log) {
+            $line = $raw -replace '\x1b\[[0-9;]*m', ''
+            if ($line -cmatch '^\s*Running (.+)$') {
               if ($result) { $result }
               $target = $Matches[1] -replace '^unittests ', '' -replace ' \(.*[\\/]([^\\/]+?)-[0-9a-f]{16}(\.exe)?\)$', ' ($1)'
               $result = $null
