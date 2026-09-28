@@ -730,8 +730,8 @@ jobs:
             --clobber \
             --pattern 'install-octet.sh' \
             --pattern 'install-octet.sh.sigstore.json' \
-            --pattern 'octet-*.tar.gz' \
-            --pattern 'octet-*.tar.gz.sigstore.json' \
+            --pattern "octet-$VERSION-*.tar.gz" \
+            --pattern "octet-$VERSION-*.tar.gz.sigstore.json" \
             --pattern 'OCTET_SHA256SUMS' \
             --pattern 'OCTET_SHA256SUMS.sigstore.json' \
             --pattern 'OCTET_RELEASE_METADATA.json' \
