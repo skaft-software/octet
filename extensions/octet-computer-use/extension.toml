@@ -19,7 +19,11 @@ network = true
 # reviewed, non-secret session variables. None is a credential, and none is
 # forwarded unless the host and the bundle both declare it. The bundle strips
 # everything else, so provider tokens and arbitrary ambient variables never
-# reach the child.
+# reach the child. The desktop-identity names (XDG_CURRENT_DESKTOP,
+# XDG_SESSION_DESKTOP, DESKTOP_SESSION, KDE_FULL_SESSION) and compositor IPC
+# names (HYPRLAND_INSTANCE_SIGNATURE, SWAYSOCK) let the Linux driver pick its
+# GNOME, KDE, Hyprland, or Sway route and give launched apps their desktop
+# identity. XDG_STATE_HOME locates the driver's own state.
 environment = [
   "DISPLAY",
   "WAYLAND_DISPLAY",
@@ -30,6 +34,13 @@ environment = [
   "XDG_CONFIG_HOME",
   "DBUS_SESSION_BUS_ADDRESS",
   "XAUTHORITY",
+  "XDG_CURRENT_DESKTOP",
+  "XDG_SESSION_DESKTOP",
+  "DESKTOP_SESSION",
+  "XDG_STATE_HOME",
+  "KDE_FULL_SESSION",
+  "HYPRLAND_INSTANCE_SIGNATURE",
+  "SWAYSOCK",
   "APPDATA",
   "LOCALAPPDATA",
   "USERPROFILE",

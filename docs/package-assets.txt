@@ -211,6 +211,7 @@ text docs/getting-started.md
 text docs/herdr.md
 text docs/installation.md
 text docs/instructions.md
+text docs/linux.md
 text docs/maintainers/README.md
 text docs/maintainers/conventions.md
 text docs/maintainers/prompts/cl.md

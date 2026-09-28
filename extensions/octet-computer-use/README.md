@@ -14,8 +14,9 @@ tools as octet tools.
 The driver is a separate open-source project. This bundle does not vendor or
 fork the driver runtime and does not include any part of OpenAI's CUA runtime.
 It includes Cua's MIT-licensed cursor dotLottie source and compiled Octet theme
-variants, with attribution under `themes/`. The driver itself is installed from
-the published `cua-driver` Python distribution.
+variants, with attribution under `themes/`, and Cua's MIT-licensed GNOME Shell
+helper for GNOME on Wayland under `gnome-shell/`. The driver itself is installed
+from the published `cua-driver` Python distribution.
 
 ## Install and use
 
@@ -32,8 +33,14 @@ bundled model-colored cursor themes:
 ```
 
 The `computer_use_setup` agent tool provisions only the driver; it cannot
-install themes. Theme installation is deliberately a trusted local setup
-operation, not an agent tool. The bundle stores the provisioned driver under
+install themes. Theme installation is deliberately a trusted local operation,
+not an agent tool. On Linux, whose driver wheel ships no theme compiler, the
+bundle writes the same reviewed artifacts straight into the driver's theme store
+(`~/.local/share/cua-driver/cursor-themes`), and it also does so the first time
+the cursor starts when they are missing, so model colors work however the
+driver was provisioned. On GNOME Wayland, setup also installs the bundled
+GNOME Shell helper; log out and back in once to load it. The bundle stores the
+provisioned driver under
 `~/.octet/computer-use` and never touches your Python environment or a global
 Python install. Cua Driver stores installed themes in its own per-user registry.
 Setup is idempotent and reports a theme installation failure rather than
@@ -55,11 +62,19 @@ never grants an operating-system permission for you.** Grant it yourself:
   octet and has no agent-cursor overlay. Restart octet after changing grants.
 - **Windows** — the driver runs as your user; some stacks need the process to
   be interactive (an unlocked, visible session).
-- **Linux** — a live display session plus AT-SPI 2 accessibility. X11/XWayland
-  routes more widely than native Wayland.
+- **Linux** — no system permission exists to grant. Run octet from a terminal
+  inside your graphical session so the driver can reach it: X11, or Wayland
+  such as Hyprland on Omarchy. In a Wayland session the bundle enables the
+  driver's native Wayland backend, so native Wayland windows are visible as
+  well as XWayland ones. AT-SPI 2 (`at-spi2-core`) supplies element trees;
+  without it the driver still captures and acts by pixel. See
+  [Linux setup](../../docs/linux.md) for the Omarchy walkthrough.
 
 Until the permission is granted, observation and action calls fail. That is
 expected, and `computer_use_status` will say so along with the runtime in use.
+On Linux, status reports the reachable display session (X11, native Wayland,
+or both) and whether AT-SPI is available instead of macOS grants, and holds
+effectful actions only when no display session is reachable.
 
 ### Runtime modes
 
@@ -68,7 +83,7 @@ expected, and `computer_use_status` will say so along with the runtime in use.
 | Runtime | When it is used | Needs | Agent cursor |
 | --- | --- | --- | --- |
 | `desktop-host` | Default on macOS when signed `/Applications/CuaDriver.app` and its grants are live | Grants given to that Cua Driver app | Yes, after cursor-state verification |
-| `direct` | Non-macOS by default, or macOS only with `OCTET_CUA_DESKTOP_HOST=0` | The grants of the app running octet | No |
+| `direct` | Non-macOS by default, or macOS only with `OCTET_CUA_DESKTOP_HOST=0` | The grants of the app running octet; on Linux, a reachable display session | On Linux (X11, wlroots Wayland such as Hyprland/Sway, or GNOME via its Shell helper); otherwise no |
 | `unavailable` | macOS host is missing or cannot prove live grants while host mode is selected | Install/authorize the signed Cua app, or explicitly opt into direct mode | No |
 
 A missing or unusable macOS host never silently falls back when cursor support
@@ -201,7 +216,12 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   classification and do not prompt; actual permission or capture errors remain
   visible to the caller.
 - **Targeted cursor feedback.** On the macOS host, cursor enablement and motion
-  are verified before any tool call is reported ready. The cursor uses a short,
+  are verified before any tool call is reported ready. On Linux the direct
+  runtime draws the same themed cursor through Cua's X11 or Wayland overlay; it
+  is best-effort there, so a cursor that cannot be shown is reported in status
+  and never blocks an action. On native Wayland, Cua 0.30 cannot read cursor
+  state back, so the setters' acknowledgements confirm it instead. GNOME draws
+  the cursor in its Shell helper, which the bundle pins to the model color. The cursor uses a short,
   straight 80 ms glide without curved turns and hides after 5 seconds of
   inactivity. The public cursor-move tool requires a window target and
   window-local coordinates and cannot move the real OS pointer. The bundled
@@ -220,11 +240,19 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   IDs, element tokens, and coordinates. Screenshots are published as artifacts,
   not inlined as base64.
 - **Least environment.** The driver receives only reviewed, non-secret desktop
-  session variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and the
-  documented equivalents). Provider tokens, `PATH` overrides, and arbitrary
-  ambient variables are not forwarded.
+  session variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
+  `HYPRLAND_INSTANCE_SIGNATURE`, and the documented equivalents). On Linux,
+  where the driver launches apps itself, it also receives the host-sanitized
+  `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, and locale that octet
+  already gives its own tool subprocesses, so launched apps start as they do
+  from the desktop. Provider tokens and arbitrary ambient variables are not
+  forwarded.
 - **No secrets, no silent installs.** The bundle never types credentials for you
   and never downloads a driver outside the standard package install you trigger.
+  Where the host Python cannot create a venv with pip (Debian and Ubuntu
+  without `python3-venv`), that install downloads the same published Linux
+  wheel from the package index, verifies its SHA-256 against the index, and
+  extracts only the driver package.
   OS permissions are always yours to grant.
 - **Re-snapshot before acting.** Element indices are replaced by the next window
   snapshot, so read state before each indexed action. The bundled skill documents

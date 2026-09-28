@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from octet_extension import Extension, image_content, text_content, tool_result
 
 from octet_computer_use import driver as driver_module
-from octet_computer_use import cursor_theme, service
+from octet_computer_use import cursor_theme, gnome_helper, service
 from octet_computer_use.driver_client import DriverClient, McpError
 from octet_computer_use.jev import (
     Candidate,
@@ -192,6 +192,17 @@ _OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "host_app": {"type": ["string", "null"]},
             "cursor_available": {"type": "boolean"},
             "cursor_enabled": {"type": "boolean"},
+            "platform": {"type": "string"},
+            "display_server": {"type": ["string", "null"]},
+            "x11": {"type": "boolean"},
+            "wayland": {"type": "boolean"},
+            "atspi": {"type": "boolean"},
+            "cursor_themes_installed": {"type": "integer"},
+            "cursor_theme": {"type": "string"},
+            "cursor_personalized": {"type": "boolean"},
+            "cursor_detail": {"type": "string"},
+            "gnome_helper": {"type": "string"},
+            "gnome_helper_detail": {"type": "string"},
             "provisioned": {"type": "boolean"},
             "jev_note": {"type": "string"},
         },
@@ -281,6 +292,9 @@ def confirmations_enabled() -> bool:
 class ComputerUse:
     """Owns the driver client, action session, and confirmation boundary."""
 
+    _direct_cursor = False
+    _cursor_failure: Optional[str] = None
+
     def __init__(self, extension: Extension, *, home: Optional[Any] = None) -> None:
         self._extension = extension
         self._paths = driver_module.DriverPaths.for_home(home)
@@ -288,6 +302,12 @@ class ComputerUse:
         self._lock = threading.Lock()
         self._permission_cache: Optional[Tuple[float, bool]] = None
         self._app_daemon = False
+        # Linux's direct runtime draws its own X11/Wayland overlay. Unlike the
+        # macOS host it was never the gate for computer use, so its cursor is
+        # best-effort: a failure is reported, and actions still proceed.
+        self._direct_cursor = False
+        self._cursor_failure: Optional[str] = None
+        self._binary: Optional[Path] = None
         self._cursor_session: Optional[str] = None
         self._cursor_ready = False
         self._theme_lab = "unknown"
@@ -300,6 +320,22 @@ class ComputerUse:
             if lab != self._theme_lab:
                 self._theme_lab = lab
                 self._cursor_ready = False
+                self._cursor_failure = None
+
+    @property
+    def _cursor_runtime(self) -> bool:
+        return self._app_daemon or self._direct_cursor
+
+    def _ensure_cursor(self, client: DriverClient, session: str) -> None:
+        """Bring the cursor up to date before an action, per runtime policy."""
+
+        if self._app_daemon:
+            self._show_cursor(client, session)
+        elif self._direct_cursor and self._cursor_failure is None:
+            try:
+                self._show_cursor(client, session)
+            except Exception as error:
+                self._cursor_failure = str(error)[:300]
 
     _USE_DESKTOP_HOST = 1
 
@@ -313,8 +349,8 @@ class ComputerUse:
     def client(self) -> DriverClient:
         with self._lock:
             if self._client is not None and self._client.started:
-                if self._app_daemon and not self._cursor_ready:
-                    self._show_cursor(self._client, self._cursor_session or cursor_session())
+                if self._cursor_runtime and not self._cursor_ready:
+                    self._ensure_cursor(self._client, self._cursor_session or cursor_session())
                 return self._client
 
             use_host = self.use_desktop_host()
@@ -334,7 +370,13 @@ class ComputerUse:
             client = DriverClient(binary, app_daemon=app_daemon)
             client.start()
             self._client = client
+            self._binary = Path(binary)
             self._app_daemon = app_daemon
+            self._direct_cursor = not app_daemon and driver_module.host_platform() == "linux"
+            self._cursor_failure = None
+            if self._direct_cursor:
+                self._theme_ids = self._linux_theme_ids(Path(binary))
+                self._ensure_cursor(client, self._cursor_session or cursor_session())
             if app_daemon:
                 try:
                     self._theme_ids = cursor_theme.installed_theme_ids(binary)
@@ -375,23 +417,58 @@ class ComputerUse:
         self._cursor_session = session
         self._configure_cursor(client, session)
 
+    @staticmethod
+    def _linux_theme_ids(binary: Path) -> set:
+        """Installed theme IDs, installing the bundled ones first if missing.
+
+        The Linux wheel has no theme compiler, so the bundled artifacts go
+        straight into the driver's own store. Doing it here, not only in
+        ``/computer-use setup``, is what makes model colors work as soon as the
+        driver is provisioned by any route. Only reviewed bundled files are
+        written, and an up-to-date store is left untouched.
+        """
+
+        try:
+            ids = cursor_theme.installed_theme_ids(binary)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            ids = {"cua.default"}
+        wanted = {entry["id"] for entry in cursor_theme.PALETTE.values()}
+        if not wanted <= ids:
+            try:
+                cursor_theme.install_bundled_themes(binary)
+                ids = cursor_theme.installed_theme_ids(binary)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                pass
+        return ids
+
     def _configure_cursor(self, client: DriverClient, session: str) -> None:
         """Enable and verify the overlay on the same session used by actions."""
 
         self._cursor_ready = False
         try:
-            self._checked_call(client, "set_agent_cursor_motion", {"session": session, **CURSOR_MOTION})
+            motion_ack = self._payload(self._checked_call(
+                client, "set_agent_cursor_motion", {"session": session, **CURSOR_MOTION}))
         except Exception as error:
             raise McpError(f"agent cursor motion configuration failed: {error}") from error
         desired = cursor_theme.theme_id(self._theme_lab)
         selected = desired if desired in self._theme_ids else "cua.default"
         try:
-            self._checked_call(client, "set_agent_cursor_theme", {
-                "session": session, "theme_id": selected, "reduced_motion": "auto"})
+            theme_ack = self._payload(self._checked_call(client, "set_agent_cursor_theme", {
+                "session": session, "theme_id": selected, "reduced_motion": "auto"}))
         except Exception as error:
-            raise McpError(f"agent cursor theme selection failed: {error}") from error
+            if not self._direct_cursor or selected == "cua.default":
+                raise McpError(f"agent cursor theme selection failed: {error}") from error
+            # A driver newer than the bundled artifacts may reject them; keep
+            # the Linux cursor on Cua's default rather than losing it.
+            selected = "cua.default"
+            try:
+                theme_ack = self._payload(self._checked_call(client, "set_agent_cursor_theme", {
+                    "session": session, "theme_id": selected, "reduced_motion": "auto"}))
+            except Exception as fallback:
+                raise McpError(f"agent cursor theme selection failed: {fallback}") from fallback
         try:
-            self._checked_call(client, "set_agent_cursor_enabled", {"session": session, "enabled": True})
+            enabled_ack = self._payload(self._checked_call(
+                client, "set_agent_cursor_enabled", {"session": session, "enabled": True}))
         except Exception as error:
             raise McpError(f"agent cursor enablement failed: {error}") from error
         # The overlay applies configuration asynchronously: its first read-back
@@ -412,10 +489,28 @@ class ComputerUse:
             if attempt < 3:
                 time.sleep(0.05)
         else:
-            raise McpError("agent cursor is not enabled with configured motion; refusing to report readiness")
+            # Cua Driver 0.30 answers get_agent_cursor_state from its X11
+            # overlay's state, so on native Wayland it reads back defaults even
+            # though the layer-shell overlay renders the configured cursor. On
+            # Linux, accept the setters' own acknowledgements of exactly what
+            # was requested; macOS keeps requiring the read-back.
+            acknowledged = (
+                self._direct_cursor
+                and enabled_ack.get("enabled") is True
+                and isinstance(motion_ack.get("motion"), Mapping)
+                and all(motion_ack["motion"].get(key) == value for key, value in CURSOR_MOTION.items())
+                and isinstance(theme_ack.get("theme"), Mapping)
+                and theme_ack["theme"].get("id") == selected)
+            if not acknowledged:
+                raise McpError("agent cursor is not enabled with configured motion; refusing to report readiness")
         self._cursor_session = session
         self._selected_theme = selected
         self._cursor_ready = True
+        if self._direct_cursor and gnome_helper.is_gnome_wayland():
+            # GNOME draws the cursor in its Shell helper, which colors it per
+            # session; pin it to the same model color the theme carries.
+            color = cursor_theme.PALETTE.get(self._theme_lab, cursor_theme.PALETTE["unknown"])["color"]
+            gnome_helper.set_theme_color(color)
 
     def _permissions_block(self, driver_tool: str) -> bool:
         """Whether a missing OS grant must hold back this effectful action.
@@ -515,14 +610,8 @@ class ComputerUse:
 
         if client.requires_confirmation(driver_tool) and confirmations_enabled():
             if self._permissions_block(driver_tool):
-                return tool_result(
-                    text_content(
-                        "Computer use is not ready: macOS has not allowed Accessibility and "
-                        "Screen Recording for the selected Cua runtime. Grant them to the "
-                        "selected host and retry."
-                    ),
-                    is_error=True,
-                )
+                return tool_result(text_content(_NOT_READY[driver_module.host_platform() == "linux"]),
+                                   is_error=True)
             description = next((info.description for info in client.tools() if info.name == driver_tool), "")
             try:
                 approved = self._extension.confirm(
@@ -550,6 +639,11 @@ class ComputerUse:
             result = self._checked_call(client, "start_session", start_args)
             self._cursor_session = requested
             self._cursor_ready = False
+            if self._direct_cursor and self._cursor_failure is None:
+                try:
+                    self._configure_cursor(client, requested)
+                except Exception as error:
+                    self._cursor_failure = str(error)[:300]
             if self._app_daemon:
                 try:
                     self._configure_cursor(client, requested)
@@ -574,8 +668,8 @@ class ComputerUse:
                 self._cursor_ready = False
             return self._format_result(driver_tool, result)
 
-        if self._app_daemon and not self._cursor_ready:
-            self._show_cursor(client, self._cursor_session or cursor_session())
+        if self._cursor_runtime and not self._cursor_ready:
+            self._ensure_cursor(client, self._cursor_session or cursor_session())
         session = self._cursor_session
         if driver_tool in service.SESSION_SCOPED_TOOLS and session:
             arguments["session"] = session
@@ -637,6 +731,15 @@ class ComputerUse:
                                "cursor_enabled": self._cursor_ready,
                                "cursor_theme": self._selected_theme,
                                "cursor_personalized": self._selected_theme != "cua.default"})
+            elif self._direct_cursor:
+                report.update({"cursor_available": True,
+                               "cursor_enabled": self._cursor_ready,
+                               "cursor_theme": self._selected_theme,
+                               "cursor_personalized": self._selected_theme != "cua.default"})
+                if self._cursor_failure:
+                    report["cursor_detail"] = self._cursor_failure
+                if gnome_helper.is_gnome_wayland():
+                    report.update(gnome_helper.status())
             else:
                 report["cursor_enabled"] = False
             probe = driver_module.permission_state(client, prompt=prompt)
@@ -648,14 +751,15 @@ class ComputerUse:
             return report
         # A fresh probe supersedes any cached answer.
         self._permission_cache = None
-        report.update(
-            {
-                "permissions": probe["permissions"],
-                "accessibility": probe["accessibility"],
-                "screen_recording": probe["screen_recording"],
-                "permission_detail": probe["detail"],
-            }
-        )
+        # Only report what the probe actually answered: macOS names two grants,
+        # Linux names its display session, and an unanswered field stays absent
+        # rather than becoming a null the declared output shape does not allow.
+        report["permissions"] = probe["permissions"]
+        report["permission_detail"] = probe["detail"]
+        for key in ("accessibility", "screen_recording", "display_server", "x11", "wayland", "atspi"):
+            value = probe.get(key)
+            if value is not None:
+                report[key] = value
         return report
 
     def provision(self, version: str = "") -> Dict[str, Any]:
@@ -690,6 +794,8 @@ class ComputerUse:
             label = "computer use · host unavailable"
         elif status.get("runtime") == "desktop-host" and not status.get("cursor_enabled"):
             label = "computer use · cursor not verified"
+        elif status.get("platform") == "linux":
+            label = "computer use · needs a desktop session"
         else:
             label = "computer use · needs %s" % (
                 "Screen Recording"
@@ -705,6 +811,17 @@ class ComputerUse:
             # status row is an aid, never authority for actuation.
             pass
         return status
+
+
+# Why an effectful action is held back, indexed by whether the host is Linux.
+_NOT_READY = (
+    "Computer use is not ready: macOS has not allowed Accessibility and "
+    "Screen Recording for the selected Cua runtime. Grant them to the "
+    "selected host and retry.",
+    "Computer use is not ready: the driver cannot reach a Linux display "
+    "session. Start octet from a terminal inside your graphical session "
+    "(X11, or Wayland such as Hyprland) and retry.",
+)
 
 
 # Driver tools that end or destroy user state and are labelled destructive in
@@ -782,9 +899,14 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
                     text_content(f"Cua Driver was provisioned, but cursor theme setup failed: {error}"),
                     is_error=True,
                 )
+            if gnome_helper.is_gnome_wayland():
+                # GNOME's compositor exposes window geometry, activation, and
+                # the cursor only to its own Shell extensions.
+                result.update(gnome_helper.install())
             # The user asked for setup, so ask macOS now rather than making
             # them re-run a second command. The dialog is attributed to octet
-            # because the driver runs in the host's responsibility chain.
+            # because the driver runs in the host's responsibility chain. On
+            # Linux this only reads the display session; nothing prompts.
             result.update(computer_use.publish_status(prompt=True))
             jev_outcome = _setup_jev(extension, computer_use)
             result.update(jev_outcome)
@@ -1087,6 +1209,10 @@ def _render_status(status: Mapping[str, Any]) -> str:
             lines.append(f"cursor theme: {status.get('cursor_theme', 'cua.default')}")
             if not status.get("cursor_personalized"):
                 lines.append("Run /computer-use setup locally to install the bundled model-color themes.")
+    elif status.get("platform") == "linux":
+        lines.append("runtime: direct (drives the desktop session octet runs in)")
+        _render_linux_session(status, lines)
+        return "\n".join(lines)
     else:
         lines.append("runtime: direct (inherits your terminal's permissions)")
     permissions = status.get("permissions")
@@ -1107,6 +1233,39 @@ def _render_status(status: Mapping[str, Any]) -> str:
             "that app's grants. octet cannot grant a system permission for you."
         )
     return "\n".join(lines)
+
+
+def _render_linux_session(status: Mapping[str, Any], lines: List[str]) -> None:
+    """Linux has no system grant to name; say which session is reachable."""
+
+    permissions = status.get("permissions")
+    detail = status.get("permission_detail")
+    lines.append("Linux desktop session: %s" % (detail or permissions or "unknown"))
+    if permissions != "granted":
+        lines.append(
+            "Start octet from a terminal inside your graphical session so DISPLAY or "
+            "WAYLAND_DISPLAY, XDG_RUNTIME_DIR, and DBUS_SESSION_BUS_ADDRESS reach the "
+            "driver. There is no system permission to grant on Linux."
+        )
+    elif status.get("atspi") is False:
+        lines.append(
+            "For element trees, install at-spi2-core (Arch/Omarchy: "
+            "`sudo pacman -S at-spi2-core`) and log in again; pixel actions work without it."
+        )
+    if status.get("cursor_available"):
+        if status.get("cursor_enabled"):
+            lines.append(f"agent cursor: on (theme {status.get('cursor_theme', 'cua.default')})")
+        else:
+            lines.append("agent cursor: not shown%s" % (
+                f" ({status['cursor_detail']})" if status.get("cursor_detail") else ""))
+    helper = status.get("gnome_helper")
+    if helper and helper != "active":
+        lines.append("GNOME Shell helper: %s" % (
+            status.get("gnome_helper_detail") or {
+                "missing": "not installed; run /computer-use setup, then log out and back in",
+                "upstream": "an older copy is loaded; run /computer-use setup, then log out and back in",
+                "restart-required": "installed; log out and back in once to load it",
+            }.get(helper, helper)))
 
 
 def main() -> None:

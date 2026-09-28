@@ -11,6 +11,16 @@
   with the npm lane.
 - Target v0.8.2: omit the redundant `computer_use_` prefix from TUI labels so
   computer-use actions remain distinguishable within the label width cap.
+- Make octet and `octet-computer-use` work on Linux desktops: Omarchy
+  (Arch + Hyprland), Sway, GNOME, and KDE on Wayland, and any X11 session. The
+  TUI now copies through `wl-copy`, `xclip`, or `xsel` alongside OSC 52, matching
+  the existing Linux paste helpers. Extensions may declare the Linux
+  desktop-identity and compositor variables (`XDG_CURRENT_DESKTOP`,
+  `XDG_SESSION_DESKTOP`, `DESKTOP_SESSION`, `KDE_FULL_SESSION`,
+  `HYPRLAND_INSTANCE_SIGNATURE`, `SWAYSOCK`, `XDG_STATE_HOME`). Computer use reads
+  Linux display-session readiness instead of macOS grants, enables the driver's
+  native Wayland backend, shows the model-colored agent cursor, and provisions
+  even without `python3-venv`. See the new [Linux setup](docs/linux.md) guide.
 
 ## [0.8.1] - 2026-09-27
 
