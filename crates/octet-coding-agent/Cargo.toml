@@ -102,7 +102,7 @@ url = "2"
 [dev-dependencies]
 tokio-test = "0.4"
 vt100 = "0.15.2"
-wiremock = "=0.6.4"
+wiremock = "=0.6.5"
 
 [target.'cfg(windows)'.dev-dependencies]
 # ConPTY harness for the native Windows frontend (tests/windows_conpty.rs).
