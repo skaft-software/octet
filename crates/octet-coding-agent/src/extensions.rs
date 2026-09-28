@@ -2713,12 +2713,26 @@ impl ExecutableExtensions {
         // Apply execution policy to retained runtimes as well as new starts.
         // Keep the discovered activation above intact for actionable status;
         // catalog ineligibility retires even still-trusted workspace services.
+        crate::app::bootstrap::startup_phase("extensions.digest.begin");
         let catalog = ExtensionRuntimeCatalog::from_descriptors(descriptors.iter().cloned().map(
             |mut descriptor| {
                 descriptor.activation.enabled &= execution_allowed;
                 descriptor
             },
         ));
+        crate::app::bootstrap::startup_phase("extensions.digest.ready");
+        crate::app::bootstrap::startup_count(
+            "extensions.digest.files",
+            catalog.digest_work().files,
+        );
+        crate::app::bootstrap::startup_count(
+            "extensions.digest.bytes",
+            catalog.digest_work().bytes,
+        );
+        crate::app::bootstrap::startup_count(
+            "extensions.digest.inactive",
+            catalog.digest_work().inactive,
+        );
         diagnostics.extend(catalog.diagnostics().iter().map(|diagnostic| {
             format!(
                 "warning: extension {:?}: runtime catalog {}",
@@ -2751,7 +2765,12 @@ impl ExecutableExtensions {
                     .iter()
                     .map(|descriptor| descriptor.manifest.name.clone())
                     .collect::<Vec<_>>();
-                match block_on_runtime(async move {
+                crate::app::bootstrap::startup_count(
+                    "extensions.handshake.requested",
+                    startable_names.len(),
+                );
+                crate::app::bootstrap::startup_phase("extensions.handshake.begin");
+                let activation_result = block_on_runtime(async move {
                     manager.replace_catalog(catalog).await;
                     let binding = manager
                         .bind_session(owner)
@@ -2781,7 +2800,9 @@ impl ExecutableExtensions {
                         })
                         .await;
                     Ok::<_, anyhow::Error>((binding, starts))
-                }) {
+                });
+                crate::app::bootstrap::startup_phase("extensions.handshake.ready");
+                match activation_result {
                     Ok(Ok((binding, activations))) => {
                         runtime_binding = Some(binding);
                         for activation in activations {
@@ -2867,12 +2888,16 @@ impl ExecutableExtensions {
             .into_iter()
             .map(|status| (status.provenance.extension.clone(), status))
             .collect::<BTreeMap<_, _>>();
+        let processes_by_name = processes
+            .iter()
+            .map(|process| (process.descriptor().manifest.name.as_str(), process))
+            .collect::<BTreeMap<_, _>>();
         let summaries = descriptors
             .into_iter()
             .map(|descriptor| {
-                let process = processes
-                    .iter()
-                    .find(|process| process.descriptor().manifest.name == descriptor.manifest.name);
+                let process = processes_by_name
+                    .get(descriptor.manifest.name.as_str())
+                    .copied();
                 let contributions = process.map(ExtensionProcess::contributions);
                 let health = process.map(ExtensionProcess::health_snapshot).or_else(|| {
                     start_failures.get(&descriptor.manifest.name).map(|error| {
@@ -3386,14 +3411,15 @@ impl ExecutableExtensions {
             .into_iter()
             .map(|status| (status.provenance.extension.clone(), status))
             .collect::<BTreeMap<_, _>>();
+        let processes_by_name = self
+            .processes
+            .iter()
+            .map(|process| (process.descriptor().manifest.name.as_str(), process))
+            .collect::<BTreeMap<_, _>>();
         let mut summaries = self.summaries.clone();
         for summary in &mut summaries {
             summary.runtime = runtime_statuses.get(&summary.name).cloned();
-            let Some(process) = self
-                .processes
-                .iter()
-                .find(|process| process.descriptor().manifest.name == summary.name)
-            else {
+            let Some(process) = processes_by_name.get(summary.name.as_str()).copied() else {
                 continue;
             };
             let health = process.health_snapshot();
@@ -3690,7 +3716,6 @@ impl ExecutableExtensions {
         if let Some(bus) = &self.event_bus {
             bus.reset();
         }
-        self.session_id = host_state(session, model, reasoning, sessions).session_id;
         self.resource_owner = Some(session.resource_owner_key());
         let active_owner = self.resource_owner.as_deref();
         self.presentations.retain(|_, view| {
@@ -3703,6 +3728,28 @@ impl ExecutableExtensions {
         self.activate_session_lifecycle_driver();
     }
 
+    /// The launch already projected skills and session metadata for initialize.
+    /// Only a changed final provider view or reasoning needs another projection.
+    pub(crate) fn refresh_initial_host_state(
+        &mut self,
+        session: &Session,
+        model: &Model,
+        reasoning: &ReasoningConfig,
+        sessions: &SessionStore,
+    ) {
+        let initial = self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let unchanged = initial.model.as_deref() == Some(&model.spec.id.0)
+            && initial.model_view == extension_model_view(model)
+            && initial.reasoning == Some(serde_json::Value::String(format!("{reasoning:?}")));
+        drop(initial);
+        if !unchanged {
+            self.refresh_host_state(session, model, reasoning, sessions);
+        }
+    }
+
     pub fn refresh_host_state(
         &mut self,
         session: &Session,
@@ -3711,6 +3758,7 @@ impl ExecutableExtensions {
         sessions: &SessionStore,
     ) {
         let state = host_state(session, model, reasoning, sessions);
+        self.session_id = state.session_id.clone();
         for process in &self.processes {
             if process.descriptor().manifest.runtime.sharing
                 == octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
@@ -7635,6 +7683,41 @@ mod tests {
         assert!(!status.drain_timed_out);
         assert!(extensions.telemetry.is_none());
         extensions.shutdown().await;
+    }
+
+    #[test]
+    fn initial_host_state_reuses_unchanged_projection_and_refreshes_on_reasoning_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let sessions = SessionStore::new(directory.path(), directory.path());
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let mut extensions = ExecutableExtensions::default();
+        let mut initial = host_state(&session, &model, &ReasoningConfig::Off, &sessions);
+        initial
+            .active_skills
+            .push(octet_agent::extension_process::ExtensionActiveSkill {
+                id: "sentinel".into(),
+                name: "sentinel".into(),
+                version: None,
+            });
+        *extensions.host_state.lock().unwrap() = initial.clone();
+        extensions.refresh_initial_host_state(&session, &model, &ReasoningConfig::Off, &sessions);
+        assert_eq!(*extensions.host_state.lock().unwrap(), initial);
+        extensions.refresh_initial_host_state(
+            &session,
+            &model,
+            &ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+            &sessions,
+        );
+        assert!(extensions
+            .host_state
+            .lock()
+            .unwrap()
+            .active_skills
+            .is_empty());
     }
 
     #[test]

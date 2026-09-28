@@ -62,6 +62,8 @@ pub struct Bootstrap {
     /// Session opened while resolving resume provenance. Keeping it here
     /// avoids replaying the same JSONL file a second time in `build_app`.
     prepared_session: RefCell<Option<Session>>,
+    /// Configuration recovered with that replay, reused at the append boundary.
+    prepared_config: RefCell<Option<(PathBuf, PersistedSessionConfig)>>,
     /// Interactive startup can remain useful as a read-only session viewer
     /// when no configured model exists.
     modeless: std::cell::Cell<bool>,
@@ -6685,6 +6687,12 @@ pub(crate) fn startup_phase(phase: &str) {
     crate::output::stderr_line(startup_phase_line(phase, started.elapsed()));
 }
 
+pub(crate) fn startup_count(name: &str, count: usize) {
+    if startup_trace_enabled(std::env::var_os(STARTUP_TRACE_ENV).as_deref()) {
+        crate::output::stderr_line(format!("octet-startup: {name} count={count}"));
+    }
+}
+
 /// Build the runtime model catalog, exposing subscription models only through
 /// their authenticated product-owned registration boundary.
 pub fn model_catalog() -> anyhow::Result<ModelCatalog> {
@@ -6842,6 +6850,7 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         provider_runtime: ExtensionProviderRuntime::default(),
         prestarted_extensions: RefCell::new(None),
         prepared_session: RefCell::new(None),
+        prepared_config: RefCell::new(None),
         modeless: std::cell::Cell::new(false),
         codex_context_notes,
         readiness,
@@ -6892,7 +6901,7 @@ pub fn resolve_model_id(
     cli.or(project).or(global)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PersistedSessionConfig {
     model: Option<ModelId>,
     reasoning: Option<ReasoningConfig>,
@@ -6984,11 +6993,15 @@ fn persisted_session_config(session: &Session) -> anyhow::Result<PersistedSessio
 
 fn append_config_if_changed(
     session: &mut Session,
+    cached: Option<&PersistedSessionConfig>,
     model: &ModelId,
     reasoning: &ReasoningConfig,
     reasoning_mode: ReasoningMode,
 ) -> anyhow::Result<()> {
-    let persisted = persisted_session_config(session)?;
+    let persisted = cached
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| persisted_session_config(session))?;
     if persisted.model.as_ref() == Some(model)
         && persisted.reasoning.as_ref() == Some(reasoning)
         && persisted.reasoning_mode == Some(reasoning_mode)
@@ -7019,7 +7032,7 @@ struct LaunchConfiguration {
 fn launch_configuration_parts(
     config: &Config,
     session: &SessionSelection,
-) -> anyhow::Result<(Option<Session>, LaunchConfiguration)> {
+) -> anyhow::Result<(Option<Session>, LaunchConfiguration, PersistedSessionConfig)> {
     startup_phase("session.resolve");
     let prepared = match session {
         SessionSelection::OpenExisting(path) => {
@@ -7037,12 +7050,15 @@ fn launch_configuration_parts(
     let model = if config.model_explicit {
         config.model.clone()
     } else {
-        persisted.model.or_else(|| config.model.clone())
+        persisted.model.clone().or_else(|| config.model.clone())
     };
     let reasoning = if config.reasoning_explicit {
         config.reasoning.clone()
     } else {
-        persisted.reasoning.or_else(|| config.reasoning.clone())
+        persisted
+            .reasoning
+            .clone()
+            .or_else(|| config.reasoning.clone())
     };
     let reasoning_mode = if config.reasoning_mode_explicit {
         config.reasoning_mode
@@ -7061,6 +7077,7 @@ fn launch_configuration_parts(
             reasoning,
             reasoning_mode,
         },
+        persisted,
     ))
 }
 
@@ -7086,7 +7103,10 @@ fn launch_configuration(
     boot: &Bootstrap,
     session: &SessionSelection,
 ) -> anyhow::Result<LaunchConfiguration> {
-    let (prepared, configuration) = launch_configuration_parts(&boot.config, session)?;
+    let (prepared, configuration, persisted) = launch_configuration_parts(&boot.config, session)?;
+    *boot.prepared_config.borrow_mut() = prepared
+        .as_ref()
+        .map(|session| (session.path().to_owned(), persisted));
     *boot.prepared_session.borrow_mut() = prepared;
     Ok(configuration)
 }
@@ -7228,6 +7248,7 @@ pub async fn resolve_launch_interactive(
             reasoning,
             reasoning_mode,
         },
+        persisted,
     ) = if matches!(&session, SessionSelection::CreateNew(_)) {
         // A fresh launch only copies configuration: no file exists to replay.
         // Avoid cloning the whole Config and dispatching a blocking worker.
@@ -7241,6 +7262,9 @@ pub async fn resolve_launch_interactive(
         .await?
     };
     startup_phase("session.replay");
+    *boot.prepared_config.borrow_mut() = prepared
+        .as_ref()
+        .map(|session| (session.path().to_owned(), persisted));
     *boot.prepared_session.borrow_mut() = prepared;
     // Provider declarations are only needed before launch when no static model
     // can satisfy the restored/explicit selection. Do not start ordinary
@@ -7416,7 +7440,7 @@ fn descriptor_session_path(path: &std::path::Path) -> std::io::Result<PathBuf> {
 
 fn validate_explicit_tool_policy(
     config: &Config,
-    extensions: &ExtensionHost,
+    definitions: &[ToolDef],
     model: &Model,
     has_dynamic_tool_provider: bool,
 ) -> anyhow::Result<()> {
@@ -7431,10 +7455,9 @@ fn validate_explicit_tool_policy(
             requested.join(", "),
         );
     }
-    let registered = extensions
-        .tool_definitions()
-        .into_iter()
-        .map(|definition| definition.name)
+    let registered = definitions
+        .iter()
+        .map(|definition| definition.name.clone())
         .collect::<std::collections::BTreeSet<_>>();
     let missing = requested
         .into_iter()
@@ -7554,13 +7577,12 @@ pub(crate) fn terminal_goal_session_id(session: &Session) -> anyhow::Result<Stri
 
 fn subagents_surface_available(
     executable_extensions: &ExecutableExtensions,
-    extensions: &ExtensionHost,
+    definitions: &[ToolDef],
     model: &Model,
 ) -> bool {
     executable_extensions.has_agent_session_service()
         && model.spec.capabilities.tools
-        && extensions
-            .tool_definitions()
+        && definitions
             .iter()
             .any(|definition| definition.name == "subagent_spawn")
 }
@@ -7673,6 +7695,7 @@ pub(crate) fn build_app_with_runtime_manager(
         provider_runtime,
         prestarted_extensions,
         prepared_session,
+        prepared_config,
         modeless: _,
         mut codex_context_notes,
         mut readiness,
@@ -7693,6 +7716,7 @@ pub(crate) fn build_app_with_runtime_manager(
     let requested_reasoning_mode = launch.reasoning_mode;
     let mut prepared_session = prepared_session.into_inner();
     let mut session = open_launch_session(&mut prepared_session, launch.session)?;
+    let prepared_config = prepared_config.into_inner();
     // Above 272K the whole request is priced differently, so the durable record
     // must mark the route uncertain at launch rather than let a later
     // exact-looking cost claim stand. Sticky, and written at most once.
@@ -7741,7 +7765,13 @@ pub(crate) fn build_app_with_runtime_manager(
     // state exposes only the selected model identity, but refresh both the
     // policy surface and snapshots from the final catalog before any App work.
     apply_extension_tool_policy(&mut extensions, &config, &model);
-    executable_extensions.refresh_host_state(&session, &model, &normalized_reasoning, &sessions);
+    executable_extensions.refresh_initial_host_state(
+        &session,
+        &model,
+        &normalized_reasoning,
+        &sessions,
+    );
+    let definitions = extensions.tool_definitions();
     let compact_model = config
         .compaction
         .compact_model
@@ -7753,7 +7783,7 @@ pub(crate) fn build_app_with_runtime_manager(
     validate_native_compaction_replay(config.compaction.mode, &session, &model)?;
     let service_available = executable_extensions.has_agent_session_service();
     let subagents_available = service_available
-        && subagents_surface_available(&executable_extensions, &extensions, &model);
+        && subagents_surface_available(&executable_extensions, &definitions, &model);
     let (reasoning, reasoning_mode, migration_diagnostic) =
         normalize_reasoning_selection_for_model_with_subagents(
             &requested_reasoning,
@@ -7772,10 +7802,20 @@ pub(crate) fn build_app_with_runtime_manager(
     config.model = Some(model.spec.id.clone());
     config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
-    append_config_if_changed(&mut session, &model.spec.id, &reasoning, reasoning_mode)?;
+    let cached_config = prepared_config
+        .as_ref()
+        .filter(|(path, _)| path == session.path())
+        .map(|(_, persisted)| persisted);
+    append_config_if_changed(
+        &mut session,
+        cached_config,
+        &model.spec.id,
+        &reasoning,
+        reasoning_mode,
+    )?;
     validate_explicit_tool_policy(
         &config,
-        &extensions,
+        &definitions,
         &model,
         executable_extensions.has_dynamic_tool_provider(),
     )?;
@@ -8071,9 +8111,10 @@ pub fn rebuild_app(
         &mut codex_context_notes,
     )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
+    let definitions = extensions.tool_definitions();
     let service_available = executable_extensions.has_agent_session_service();
     let subagents_available = service_available
-        && subagents_surface_available(&executable_extensions, &extensions, &model);
+        && subagents_surface_available(&executable_extensions, &definitions, &model);
     let (reasoning, reasoning_mode, migration_diagnostic) =
         normalize_reasoning_selection_for_model_with_subagents(
             &requested_reasoning,
@@ -8092,10 +8133,16 @@ pub fn rebuild_app(
     config.model = Some(model.spec.id.clone());
     config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
-    append_config_if_changed(&mut session, &model.spec.id, &reasoning, reasoning_mode)?;
+    append_config_if_changed(
+        &mut session,
+        None,
+        &model.spec.id,
+        &reasoning,
+        reasoning_mode,
+    )?;
     validate_explicit_tool_policy(
         &config,
-        &extensions,
+        &definitions,
         &model,
         executable_extensions.has_dynamic_tool_provider(),
     )?;

@@ -69,9 +69,9 @@ Runtime `/resume` and branch checkout use the same restoration behavior.
 Interactive resume follows renderer ownership. Default terminal-owned mode
 hydrates the complete active branch so the complete logical frame can populate
 native scrollback without an impossible later prepend. Explicit application-owned
-mode hydrates only a bounded active-branch tail for first paint; the complete
-branch is materialized when semantic navigation or selection reaches beyond that
-tail.
+mode hydrates a viewport-scaled active-branch tail for first paint (bounded
+between 32 and 512 entries); the complete branch is materialized when
+semantic navigation or selection reaches beyond that tail.
 
 Session discovery uses a workspace-local disposable SQLite projection of
 bounded active-branch titles and message counts keyed by transcript size and

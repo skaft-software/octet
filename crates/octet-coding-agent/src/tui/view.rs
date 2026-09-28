@@ -3236,6 +3236,21 @@ pub(super) fn poll_file_index_scan(state: &mut ShellState) -> bool {
     true
 }
 
+// Application-owned history can prepend later. Size its first-paint tail to
+// the actual viewport; native terminal scrollback still requires full history.
+fn hydration_entry_budget(height: u16) -> usize {
+    usize::from(height).saturating_mul(4).clamp(32, 512)
+}
+
+#[cfg(test)]
+#[test]
+fn application_history_budget_scales_with_viewport() {
+    assert_eq!(hydration_entry_budget(8), 32);
+    assert_eq!(hydration_entry_budget(24), 96);
+    assert_eq!(hydration_entry_budget(120), 480);
+    assert_eq!(hydration_entry_budget(u16::MAX), 512);
+}
+
 /// Full-screen terminal shell. It owns all terminal I/O and no Agent state.
 pub struct InteractiveShell {
     input_dispatch: input_dispatch::InputDispatch,
@@ -7148,9 +7163,7 @@ impl InteractiveShell {
 
     /// Rebuild the visible transcript from the session's active branch.
     pub fn hydrate(&mut self, session: &Session) -> Result<()> {
-        let entry_budget = usize::from(self.state.borrow().size.1)
-            .saturating_mul(4)
-            .clamp(64, 256);
+        let entry_budget = hydration_entry_budget(self.state.borrow().size.1);
         let (items, history_deferred, image_budget) = if self.capture_mouse {
             // Explicit application-owned mode can hydrate older rows when its
             // semantic viewport reaches the bounded first-paint tail.
@@ -7167,6 +7180,10 @@ impl InteractiveShell {
                 None => (Vec::new(), false, ToolImageBudget::default()),
             }
         };
+        crate::app::bootstrap::startup_count("history.tail_budget", entry_budget);
+        crate::app::bootstrap::startup_count("history.items", items.len());
+        crate::app::bootstrap::startup_count("history.total_records", session.entries().len());
+        crate::app::bootstrap::startup_count("history.deferred", usize::from(history_deferred));
         let deferred_snapshot = history_deferred.then(|| DeferredSessionHistory {
             path: session.path().to_owned(),
             head: session
