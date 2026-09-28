@@ -2,14 +2,6 @@
 
 ## Unreleased (target: v0.8.2)
 
-- Negotiate screenshot artifacts and stage large captures under the host scratch
-  directory instead of exceeding the inline artifact limit. Report bounded
-  publication errors while retaining a usable accessibility tree.
-- Show window/app handles in model-visible text and replace references to hidden
-  structured details with actionable targeting and query guidance.
-
-## Earlier changes
-
 ### Added
 
 - Linux support across X11 and Wayland desktops, including Omarchy (Hyprland),
@@ -34,15 +26,6 @@
 - Provision on Debian and Ubuntu without `python3-venv`: when the host Python
   cannot bootstrap pip, install the published Linux wheel directly after
   verifying the package index's SHA-256.
-
-### Fixed
-
-- `/computer-use setup` no longer fails on Linux, whose driver ships no
-  cursor-theme compiler.
-- Status no longer reports null `accessibility`/`screen_recording` fields on
-  hosts that do not have those grants.
-- Desktop-host tests pin Darwin, so their macOS semantics no longer depend on
-  the machine running the suite.
 - Pinned upstream Cua Driver `jev-use` recipe as owner-fenced background jobs:
   `computer_use_jev_use_status`, `computer_use_jev_use_setup`,
   `computer_use_jev_use_run`, `computer_use_jev_use_choose`, plus
@@ -56,6 +39,29 @@
   that refuses to run in CI, without a confirmation flag, or without an
   interactive terminal, and a no-driver status/fail-closed test through the
   real entrypoint. See the README's Windows section.
+
+### Fixed
+
+- Negotiate screenshot artifacts and stage large captures under the host scratch
+  directory instead of exceeding the inline artifact limit. Report bounded
+  publication errors while retaining a usable accessibility tree.
+- Show window/app handles in model-visible text and replace references to hidden
+  structured details with actionable targeting and query guidance.
+- `/computer-use setup` no longer fails on Linux, whose driver ships no
+  cursor-theme compiler.
+- Status no longer reports null `accessibility`/`screen_recording` fields on
+  hosts that do not have those grants.
+- Desktop-host tests pin Darwin, so their macOS semantics no longer depend on
+  the machine running the suite.
+- Stage full-size screenshots on Windows, where `O_NOFOLLOW` does not exist:
+  exclusive creation plus a final-path check against the resolved scratch
+  root replaces it, and junctions are rejected wherever symlinks were. The
+  optional Jev key gets a protected current-user-only ACL on Windows and is
+  not stored if that cannot be applied.
+
+## Earlier changes
+
+### Added
 
 - Bundle 24 MIT-attributed Cua dotLottie cursor themes with an Octet-inspired,
   slightly smaller silhouette and the stable model-adaptive TUI prompt colors.
@@ -100,12 +106,6 @@
   of silently switching to direct mode.
 
 ### Fixed
-
-- Stage full-size screenshots on Windows, where `O_NOFOLLOW` does not exist:
-  exclusive creation plus a final-path check against the resolved scratch
-  root replaces it, and junctions are rejected wherever symlinks were. The
-  optional Jev key gets a protected current-user-only ACL on Windows and is
-  not stored if that cannot be applied.
 
 - `computer_use_setup` honors an explicitly requested driver version. The request
   is validated before any reuse, and an existing install is reused only when it
