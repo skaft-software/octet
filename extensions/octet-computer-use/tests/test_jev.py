@@ -17,7 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from octet_computer_use import jev
+from octet_computer_use import jev, windows_security
 from octet_computer_use.jev import (
     ABSTAIN,
     REOBSERVE,
@@ -180,9 +180,26 @@ class JevKeyStorageTests(unittest.TestCase):
             home = Path(directory)
             path = jev.store_key("ts-secret-value", home=home)
             self.assertIsNotNone(path)
-            mode = path.stat().st_mode & 0o777
-            self.assertEqual(mode, 0o600, "the key file must be owner-only")
+            if windows_security.IS_WINDOWS:
+                # Windows maps mode bits only to the read-only attribute; the
+                # owner-only guarantee is a protected current-user DACL.
+                self.assertTrue(
+                    windows_security.is_private_to_current_user(path),
+                    f"the key file must be owner-only: {windows_security.describe_dacl(path)}",
+                )
+            else:
+                mode = path.stat().st_mode & 0o777
+                self.assertEqual(mode, 0o600, "the key file must be owner-only")
             self.assertEqual(jev.resolve_key(home=home), "ts-secret-value")
+
+    def test_key_is_not_stored_when_windows_privacy_cannot_be_applied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(windows_security, "IS_WINDOWS", True), \
+                 mock.patch.object(windows_security, "restrict_to_current_user", return_value=False):
+                self.assertIsNone(jev.store_key("ts-secret-value", home=home))
+            self.assertFalse(jev.key_path(home).exists())
+            self.assertFalse(jev.key_path(home).with_suffix(".tmp").exists())
 
     def test_environment_key_takes_precedence_over_stored(self):
         with tempfile.TemporaryDirectory() as directory:

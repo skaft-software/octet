@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from octet_computer_use.windows_security import is_link_or_reparse_point
+
 # The published distribution name on PyPI. It is MIT licensed and ships
 # platform-specific wheels containing the driver executable.
 DISTRIBUTION = "cua-driver"
@@ -170,8 +172,9 @@ def _run(
 def _ensure_directories(paths: DriverPaths) -> None:
     paths.root.mkdir(parents=True, exist_ok=True)
     # The runtime and logs live under a user-owned root. Refuse to continue if
-    # the root is a symlink so we never write through an attacker-planted link.
-    if paths.root.is_symlink():
+    # the root is a symlink (or, on Windows, a junction or other reparse point)
+    # so we never write through an attacker-planted link.
+    if paths.root.is_symlink() or is_link_or_reparse_point(paths.root.lstat()):
         raise ProvisionError("computer-use root must not be a symlink")
 
 

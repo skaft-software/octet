@@ -14,8 +14,10 @@ from octet_computer_use.entrypoint import ComputerUse, _DRIVER_TOOLS, _render_st
 from octet_computer_use.service import ArgumentError, sanitize, summarize_result
 
 try:  # the prototype suite discovers tests flat; the bundle suite uses packages
+    from . import live_smoke
     from .helpers import FakeClient, RecordingExtension
 except ImportError:  # pragma: no cover - exercised by the flat discovery mode
+    import live_smoke
     from helpers import FakeClient, RecordingExtension
 
 
@@ -618,7 +620,7 @@ class CursorThemeTests(unittest.TestCase):
             self.assertEqual(run.call_count, 24)
             for args, _ in run.call_args_list:
                 command = args[0]
-                self.assertEqual(command[:3], ["/tmp/cua-driver", "cursor-theme", "install"])
+                self.assertEqual(command[:3], [str(Path("/tmp/cua-driver")), "cursor-theme", "install"])
                 self.assertEqual(Path(command[3]).parent, cursor_theme.THEMES)
             run.return_value.returncode = 1
             run.return_value.stderr = "rejected"
@@ -1278,9 +1280,80 @@ class DesktopHostTests(unittest.TestCase):
 
         os.environ["OCTET_CUA_DAEMON_SOCKET"] = "/tmp/custom.sock"
         try:
-            self.assertEqual(str(daemon_socket()), "/tmp/custom.sock")
+            self.assertEqual(daemon_socket(), Path("/tmp/custom.sock"))
         finally:
             os.environ.pop("OCTET_CUA_DAEMON_SOCKET", None)
+
+
+
+class NoDriverFailClosedTests(unittest.TestCase):
+    """With no provisioned driver, status explains setup and nothing dispatches.
+
+    This is the state of a fresh Windows (or any) install and of every CI
+    runner. It never provisions, prompts, or starts a driver process.
+    """
+
+    def test_status_points_at_setup_and_every_driver_tool_fails_closed(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(os.environ, {"OCTET_CUA_DESKTOP_HOST": "0"}), \
+             mock.patch.object(driver, "desktop_app_binary", return_value=None), \
+             mock.patch.object(entrypoint.DriverClient, "start",
+                               side_effect=AssertionError("no driver process may start")):
+            home = Path(directory)
+            extension, _ = entrypoint.create_extension(home=home)
+            context = {"host": {"model": "claude-sonnet-4"}}
+
+            status = extension._tools["computer_use_status"].handler({}, context)
+            self.assertFalse(status.get("is_error"))
+            self.assertFalse(status["structured_content"]["installed"])
+            self.assertIn("/computer-use setup", status["content"][0]["text"])
+
+            window = {"pid": 4242, "window_id": 4242}
+            for tool, arguments in (
+                ("computer_use_windows", {}),
+                ("computer_use_window_state", dict(window)),
+                ("computer_use_click", {**window, "x": 10, "y": 10}),
+                ("computer_use_type_text", {**window, "text": "never typed"}),
+                ("computer_use_press_key", {**window, "key": "enter"}),
+                ("computer_use_launch_app", {"name": "notepad"}),
+            ):
+                result = extension._tools[tool].handler(arguments, context)
+                self.assertTrue(result.get("is_error"), tool)
+                self.assertIn("not installed", result["content"][0]["text"], tool)
+            # Status and refusals are read-only: nothing was provisioned.
+            self.assertEqual(list(home.iterdir()), [])
+
+
+
+class LiveSmokeGuardTests(unittest.TestCase):
+    """The attended live smoke must never run unattended."""
+
+    def test_refuses_ci_unconfirmed_and_non_interactive_runs(self):
+        self.assertIn("CI", live_smoke.refusal_reason(True, {"CI": "true"}, True))
+        self.assertIn("CI", live_smoke.refusal_reason(True, {"GITHUB_ACTIONS": "true"}, True))
+        self.assertIn(live_smoke.CONFIRMATION_FLAG, live_smoke.refusal_reason(False, {}, True))
+        self.assertIn("interactive", live_smoke.refusal_reason(True, {}, False))
+        self.assertIsNone(live_smoke.refusal_reason(True, {}, True))
+
+    def test_main_refuses_before_touching_the_driver(self):
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"CI": "true"}), \
+             mock.patch.object(live_smoke, "Smoke", side_effect=AssertionError("must not start")):
+            self.assertEqual(live_smoke.main([live_smoke.CONFIRMATION_FLAG]), 2)
+
+    def test_window_lookup_uses_the_bounded_window_projection(self):
+        listing = {"windows": [
+            {"window_id": 11, "pid": 7, "app_name": "Explorer", "title": "Downloads"},
+            {"window_id": 12, "pid": 8, "app_name": "Notepad", "title": "Untitled - Notepad"},
+        ]}
+        self.assertEqual(live_smoke.find_window(listing, "notepad")[:2], (8, 12))
+        self.assertIsNone(live_smoke.find_window(listing, "calculator"))
+        self.assertIsNone(live_smoke.find_window({"windows": [{"pid": "8", "window_id": 12,
+                                                                 "title": "notepad"}]}, "notepad"))
 
 
 if __name__ == "__main__":
