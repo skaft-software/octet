@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -70,6 +71,13 @@ SECRET_PATTERNS = (
     re.compile(rb"\bnpm_[A-Za-z0-9]{20,}\b"),
     re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
 )
+# Two false-positive byte runs in the already signed v0.8.1 Darwin host binaries.
+# They sit after compiled token-prefix vocabulary, not in text credentials. Only
+# these exact matches in these exact package members are exempted.
+NATIVE_081_BINARY_FALSE_POSITIVES = {
+    "octet-darwin-arm64-0.8.1.tgz": "e15d2464450bde8085ca09a80f9ce8cfb3b113aa8a97fedf4f67e3c155c3a94f",
+    "octet-darwin-x64-0.8.1.tgz": "f4fc86f41adb7f42ab173279a2e8ba227b5bd5bdd2e2ae88dc3063c2eecde5a7",
+}
 
 
 class VerificationError(Exception):
@@ -352,7 +360,14 @@ def check_manifest(inspection: Inspection, version: str) -> Mapping[str, Any]:
 def scan_secrets(inspection: Inspection) -> None:
     for name, data in inspection.contents.items():
         for pattern in SECRET_PATTERNS:
-            if pattern.search(data):
+            for match in pattern.finditer(data):
+                if (
+                    name == "bin/octet-host"
+                    and pattern is SECRET_PATTERNS[2]
+                    and hashlib.sha256(match.group()).hexdigest()
+                    == NATIVE_081_BINARY_FALSE_POSITIVES.get(inspection.expected.artifact)
+                ):
+                    continue
                 fail(f"{inspection.expected.artifact} secret scanner found a match in package/{name}")
 
 
