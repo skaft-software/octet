@@ -11,6 +11,8 @@ use anyhow::Context;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{Stream, StreamExt};
 use octet_agent::extension_api_v03::MAX_JSON_RPC_ID_BYTES;
+#[cfg(windows)]
+use octet_agent::extension_process::WindowsProcessLaunch;
 #[cfg(unix)]
 use octet_agent::extension_process::{wait_for_bash_process, BashProcessLaunch};
 use octet_agent::extension_process::{
@@ -7044,8 +7046,28 @@ where
     let shell_id = shell.append_shell_in_progress(command.to_owned());
     shell.render();
 
+    // Windows has no `sh` on PATH by default (Git for Windows adds only its
+    // `cmd` directory); use the bash tool's Bash-compatible resolution.
+    #[cfg(windows)]
+    let program = match octet_agent::tools::resolve_windows_shell(sandbox.shell_path.as_deref()) {
+        Ok(program) => program,
+        Err(error) => {
+            let message = error.message;
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+    #[cfg(not(windows))]
+    let program = std::path::PathBuf::from("sh");
+
     // Spawn the child process with piped output.
-    let mut process = tokio::process::Command::new("sh");
+    let mut process = tokio::process::Command::new(&program);
     process
         .current_dir(workspace)
         .stdout(std::process::Stdio::piped())
@@ -7069,6 +7091,23 @@ where
             });
         }
     };
+    // The child starts suspended and runs only after it is assigned to a
+    // private Job Object, so cancellation reaches its whole process tree.
+    #[cfg(windows)]
+    let launch = match WindowsProcessLaunch::bash(&mut process) {
+        Ok(launch) => launch,
+        Err(error) => {
+            let message = format!("failed to prepare lifecycle supervision: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
     #[cfg(unix)]
     process.arg("-c").arg(launch.source());
     #[cfg(not(unix))]
@@ -7077,6 +7116,23 @@ where
         Ok(child) => child,
         Err(error) => {
             let message = format!("failed to spawn: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+    #[cfg(windows)]
+    let group_guard = match launch.register(&child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let message = format!("failed to register lifecycle supervision: {error}");
             shell.finalize_shell(&shell_id, message.clone(), -1);
             return Ok(ShellEscapeOutcome {
                 output: message.clone(),
@@ -7228,6 +7284,8 @@ where
             group_guard.terminate_now();
         }
         drop(work);
+        #[cfg(windows)]
+        group_guard.terminate_now();
         #[cfg(not(unix))]
         {
             let _ = child.kill().await;
@@ -7268,6 +7326,10 @@ where
     // Releasing the concurrent wait/drain future closes any descriptors
     // retained by an escaped descendant.
     drop(work);
+    #[cfg(windows)]
+    if interrupted || timed_out {
+        group_guard.terminate_now();
+    }
     #[cfg(not(unix))]
     if interrupted || timed_out {
         let _ = child.kill().await;
