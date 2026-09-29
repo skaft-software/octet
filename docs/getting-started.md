@@ -14,23 +14,11 @@ interactive Octet UI, not in your shell.
 
 ## 1. Choose an installation lane
 
-### macOS or GNU/Linux: npm launcher (recommended)
-
-With Node.js and npm installed:
-
-```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1
-octet --version
-```
-
-Expected output includes `octet 0.8.1`. npm resolves the matching signed
-platform package automatically. The release page is authoritative for signed
-assets, provenance, and availability.
-
-### macOS or GNU/Linux x86-64: published native binary
+### macOS or GNU/Linux: published native binary
 
 The current native release supports macOS Apple silicon/Intel and GNU/Linux
-x86-64. Install from the version-pinned release, then check the version:
+x86-64, and needs no Node.js. Install from the version-pinned release, then
+check the version:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -41,6 +29,19 @@ octet --version
 Expected output includes `octet 0.8.1`. The release page is authoritative for
 signed assets and availability; Homebrew, crates.io, and SDK registries are
 separate unpublished channels.
+
+### macOS or GNU/Linux: npm launcher
+
+If you already have Node.js, the same signed platform package is available
+from npm:
+
+```sh
+npm install -g @skaft/octet
+octet --version
+```
+
+Expected output includes `octet 0.8.1`. npm resolves the matching platform
+package automatically.
 
 ### Intentional source checkout: macOS or GNU/Linux
 
