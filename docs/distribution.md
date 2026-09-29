@@ -77,11 +77,16 @@ Cargo path.
 
 The npm channel is published at 0.8.1: four `@skaft/octet*` packages
 (launcher plus three platform packages), built from the verified release
-assets with trusted publishers and registry provenance verification:
+assets with trusted publishers and registry provenance verification. Pin the
+version to reproduce one exact release:
 
 ```sh
 npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1
 ```
+
+`npm install -g @skaft/octet` tracks the `latest` dist-tag instead, which is
+the command published on the front page. Published versions are immutable, so
+a pinned install cannot be silently replaced.
 
 ## Reviewed model metadata
 
