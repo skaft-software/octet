@@ -33,6 +33,9 @@
   Python 3.10+ interpreter even when the bundle runs on macOS's Xcode Python
   3.9. Setup failures, including a missing compatible Python, are now reported
   as actionable errors instead of `internal error` (#457).
+- Target v0.8.2: computer use requires `cua-driver` 0.30.2 or newer. macOS 11
+  and 12, which pip used to resolve silently to 0.11.0, and other unsupported
+  systems now get a clear error that names the supported platforms.
 - Make octet and `octet-computer-use` work on Linux desktops: Omarchy
   (Arch + Hyprland), Sway, GNOME, and KDE on Wayland, and any X11 session. The
   TUI now copies through `wl-copy`, `xclip`, or `xsel` alongside OSC 52, matching

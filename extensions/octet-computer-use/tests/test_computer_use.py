@@ -483,8 +483,8 @@ class VersionSpecTests(unittest.TestCase):
     def test_pip_spec_is_validated(self):
         from octet_computer_use.driver import _pip_spec, ProvisionError
 
-        self.assertEqual(_pip_spec(""), "cua-driver")
-        self.assertEqual(_pip_spec("0.29.1"), "cua-driver==0.29.1")
+        self.assertEqual(_pip_spec(""), "cua-driver>=0.30.2")
+        self.assertEqual(_pip_spec("0.31.1"), "cua-driver==0.31.1")
         for bad in ("--index-url=http://evil", "1.0; rm -rf /", "a b", "1.0 2.0"):
             with self.subTest(bad=bad):
                 with self.assertRaises(ProvisionError):

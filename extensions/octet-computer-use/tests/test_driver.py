@@ -79,6 +79,7 @@ class ProvisionVersionTests(unittest.TestCase):
 
     def test_unpinned_request_reuses_the_installed_driver(self):
         self.request = ""
+        self.versions[self.existing] = "0.30.4"
         recorder, binary = self._install_script([self.existing])
         self.assertEqual(binary, self.existing)
         # Reuse is the whole point of an unpinned request: no venv rebuild, no
@@ -86,25 +87,25 @@ class ProvisionVersionTests(unittest.TestCase):
         self.assertEqual(recorder.calls, [])
 
     def test_pinned_request_reuses_a_matching_install(self):
-        self.request = "0.29.1"
-        self.versions[self.existing] = "0.29.1"
+        self.request = "0.31.1"
+        self.versions[self.existing] = "0.31.1"
         recorder, binary = self._install_script([self.existing])
         self.assertEqual(binary, self.existing)
         self.assertEqual(recorder.calls, [])
 
     def test_abbreviated_pin_matches_the_installed_release(self):
-        # PEP 440 pads release segments, so 0.29 names the same release as the
-        # 0.29.0 the driver reports. Reinstalling here would re-download the
+        # PEP 440 pads release segments, so 0.31 names the same release as the
+        # 0.31.0 the driver reports. Reinstalling here would re-download the
         # same wheel on every call.
-        self.request = "0.29"
-        self.versions[self.existing] = "0.29.0"
+        self.request = "0.31"
+        self.versions[self.existing] = "0.31.0"
         recorder, binary = self._install_script([self.existing])
         self.assertEqual(binary, self.existing)
         self.assertEqual(recorder.calls, [])
 
     def test_pinned_request_reinstalls_on_version_mismatch(self):
-        self.request = "0.29.1"
-        self.versions[self.existing] = "0.30.0"
+        self.request = "0.31.1"
+        self.versions[self.existing] = "0.32.0"
         recorder, binary = self._install_script([self.existing, self.rebuilt])
         self.assertEqual(binary, self.rebuilt)
         # The owned venv is cleared rather than upgraded in place, so the
@@ -113,22 +114,38 @@ class ProvisionVersionTests(unittest.TestCase):
             any(argv[-4:-1] == ["-m", "venv", "--clear"] for argv in recorder.calls),
             recorder.calls,
         )
-        self.assertEqual(recorder.pip_specs, ["cua-driver==0.29.1"])
+        self.assertEqual(recorder.pip_specs, ["cua-driver==0.31.1"])
 
     def test_prefix_version_is_not_treated_as_a_match(self):
-        self.request = "0.29.1"
-        self.versions[self.existing] = "0.29.10"
+        self.request = "0.31.1"
+        self.versions[self.existing] = "0.31.10"
         recorder, binary = self._install_script([self.existing, self.rebuilt])
         self.assertEqual(binary, self.rebuilt)
-        self.assertEqual(recorder.pip_specs, ["cua-driver==0.29.1"])
+        self.assertEqual(recorder.pip_specs, ["cua-driver==0.31.1"])
 
     def test_unverifiable_install_does_not_satisfy_a_pin(self):
         # The binary cannot report a version, so the pin is unconfirmed. Reuse
         # would report a runtime that may be any version at all.
-        self.request = "0.29.1"
+        self.request = "0.31.1"
         recorder, binary = self._install_script([self.existing, self.rebuilt])
         self.assertEqual(binary, self.rebuilt)
-        self.assertEqual(recorder.pip_specs, ["cua-driver==0.29.1"])
+        self.assertEqual(recorder.pip_specs, ["cua-driver==0.31.1"])
+
+    def test_unpinned_request_replaces_an_install_older_than_the_minimum(self):
+        # macOS 11 and 12 once resolved the unpinned request to 0.11.0.
+        self.request = ""
+        self.versions[self.existing] = "0.11.0"
+        recorder, binary = self._install_script([self.existing, self.rebuilt])
+        self.assertEqual(binary, self.rebuilt)
+        self.assertEqual(recorder.pip_specs, ["cua-driver>=0.30.2"])
+
+    def test_pin_below_the_minimum_is_refused(self):
+        with patch.object(driver_module, "_run", _Recorder()) as recorder, patch.object(
+            driver_module, "installed_binary", lambda paths: None
+        ):
+            with self.assertRaisesRegex(ProvisionError, "older than 0.30.2"):
+                driver_module.provision(self.paths, version="0.11.0")
+        self.assertEqual(recorder.calls, [])
 
     def test_malformed_pin_is_rejected_instead_of_reusing(self):
         # The pin must be validated before reuse, or a request carrying pip
@@ -137,7 +154,7 @@ class ProvisionVersionTests(unittest.TestCase):
             driver_module, "installed_binary", lambda paths: self.existing
         ), patch.object(driver_module, "driver_version", self._driver_version):
             with self.assertRaises(ProvisionError):
-                driver_module.provision(self.paths, version="0.29.1 --index-url=http://evil.test")
+                driver_module.provision(self.paths, version="0.31.1 --index-url=http://evil.test")
         self.assertEqual(recorder.calls, [])
 
     def test_blank_pin_is_rejected(self):
@@ -237,6 +254,7 @@ class InterpreterPreflightTests(unittest.TestCase):
                "(from versions: none)\nERROR: No matching distribution found for cua-driver")
         with patch.object(driver_module, "_driver_interpreter",
                           return_value=("/usr/bin/python3.12", (3, 12))), \
+                patch.object(driver_module, "_unsupported_platform", return_value=None), \
                 patch.object(driver_module, "_run", self._runner({}, install_output=pip)), \
                 patch.object(driver_module, "installed_binary", lambda paths: None):
             with self.assertRaises(ProvisionError) as caught:
@@ -301,6 +319,61 @@ class InterpreterPreflightTests(unittest.TestCase):
             self.assertEqual(driver_module._interpreter_candidates(), ["/opt/homebrew/bin/python3"])
 
 
+class PlatformSupportTests(unittest.TestCase):
+    """A no-match install names the platform instead of blaming the index."""
+
+    def _describe(self, system, machine, *, mac="", libc=("glibc", "2.39"), bits=64):
+        maxsize = 2**63 - 1 if bits == 64 else 2**31 - 1
+        with patch.object(driver_module.platform, "system", return_value=system), \
+                patch.object(driver_module.platform, "machine", return_value=machine), \
+                patch.object(driver_module.platform, "mac_ver", return_value=(mac, ("", "", ""), "")), \
+                patch.object(driver_module.platform, "libc_ver", return_value=libc), \
+                patch.object(driver_module, "sys", SimpleNamespace(maxsize=maxsize)):
+            return driver_module._unsupported_platform()
+
+    def test_supported_platforms_are_not_flagged(self):
+        self.assertIsNone(self._describe("Darwin", "arm64", mac="13.6"))
+        self.assertIsNone(self._describe("Darwin", "x86_64", mac="15.1"))
+        self.assertIsNone(self._describe("Linux", "x86_64", libc=("glibc", "2.31")))
+        self.assertIsNone(self._describe("Linux", "aarch64"))
+        self.assertIsNone(self._describe("Windows", "AMD64"))
+        self.assertIsNone(self._describe("Windows", "ARM64"))
+
+    def test_unsupported_platforms_are_described(self):
+        self.assertEqual(self._describe("Darwin", "x86_64", mac="12.7.6"), "macOS 12.7.6 on x86_64")
+        self.assertIn("glibc 2.28", self._describe("Linux", "x86_64", libc=("glibc", "2.28")))
+        self.assertIn("without glibc", self._describe("Linux", "x86_64", libc=("", "")))
+        self.assertIn("armv7l", self._describe("Linux", "armv7l", bits=32))
+        self.assertIn("32-bit", self._describe("Windows", "x86", bits=32))
+        self.assertIn("FreeBSD", self._describe("FreeBSD", "amd64"))
+
+    def test_no_match_on_an_unsupported_platform_names_what_is_supported(self):
+        with tempfile.TemporaryDirectory() as home:
+            paths = DriverPaths.for_home(Path(home))
+            pip = "ERROR: No matching distribution found for cua-driver>=0.30.2"
+
+            def run(argv, **kwargs):
+                return _Completed(returncode=1, stderr=pip) if "install" in argv else _Completed()
+
+            with patch.object(driver_module, "_driver_interpreter",
+                              return_value=("/usr/local/bin/python3", (3, 12))), \
+                    patch.object(driver_module, "_unsupported_platform",
+                                 return_value="macOS 12.7.6 on x86_64"), \
+                    patch.object(driver_module, "_run", run), \
+                    patch.object(driver_module, "installed_binary", lambda paths: None):
+                with self.assertRaises(ProvisionError) as caught:
+                    driver_module.provision(paths)
+        message = str(caught.exception)
+        self.assertIn("not published for this system (macOS 12.7.6 on x86_64)", message)
+        self.assertIn("macOS 13 or newer", message)
+
+    def test_minimum_comparison(self):
+        for version in ("0.30.2", "0.30.4", "0.31", "1.0.0", "0.31.0rc1"):
+            self.assertTrue(driver_module.meets_minimum(version), version)
+        for version in ("0.30.1", "0.29.9", "0.11.0", "", "unknown"):
+            self.assertFalse(driver_module.meets_minimum(version), version)
+
+
 class VersionComparisonTests(unittest.TestCase):
     def test_release_padding(self):
         self.assertTrue(driver_module._versions_match("0.29", "0.29.0"))
@@ -318,8 +391,8 @@ class VersionComparisonTests(unittest.TestCase):
         for candidate in ("0.29.1 --index-url=x", "latest", "0.29.1;python<3", " "):
             with self.subTest(candidate=candidate), self.assertRaises(ProvisionError):
                 driver_module._pip_spec(candidate)
-        self.assertEqual(driver_module._pip_spec("0.29.1"), "cua-driver==0.29.1")
-        self.assertEqual(driver_module._pip_spec(""), "cua-driver")
+        self.assertEqual(driver_module._pip_spec("0.31.1"), "cua-driver==0.31.1")
+        self.assertEqual(driver_module._pip_spec(""), "cua-driver>=0.30.2")
 
 
 class SitePackagesLayoutTests(unittest.TestCase):

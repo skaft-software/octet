@@ -32,6 +32,11 @@ bundled model-colored cursor themes:
 /computer-use setup
 ```
 
+Setup installs `cua-driver` 0.30.2 or newer. It publishes builds for macOS 13
+or newer, Linux with glibc 2.31 or newer on x86_64 or aarch64, and 64-bit
+Windows on x64 or ARM64. On other systems setup stops and says so, and an
+existing older driver is replaced rather than reused.
+
 The driver needs Python 3.10 or newer. When octet runs the bundle with an older
 Python (macOS's Xcode Python is 3.9), setup builds the driver's runtime from a
 compatible `python3` on `PATH` or a standard macOS install (Homebrew or

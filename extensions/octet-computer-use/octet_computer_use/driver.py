@@ -41,6 +41,16 @@ DISTRIBUTION = "cua-driver"
 # assembled from untrusted input by this module.
 DEFAULT_VERSION = ""
 
+# The oldest driver this bundle supports. Unpinned installs request at least
+# this release; otherwise pip falls back to the newest release that still ships
+# a wheel for an older platform (cua-driver 0.11.0 on macOS 11 and 12).
+MINIMUM_DRIVER_VERSION = "0.30.2"
+# Where that release and newer ones publish wheels, named when pip finds none.
+SUPPORTED_PLATFORMS = (
+    "macOS 13 or newer, Linux with glibc 2.31 or newer on x86_64 or aarch64, "
+    "and 64-bit Windows on x64 or ARM64"
+)
+
 # The oldest Python the published driver supports (its Requires-Python). The
 # runtime venv must be built from such an interpreter: pip bundled with an older
 # one (for example macOS's Xcode Python 3.9) reports only "No matching
@@ -356,6 +366,31 @@ def _venv_python_for(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
+def _release_prefix(version: str) -> Optional[Tuple[int, ...]]:
+    """The leading numeric release of a version, ignoring any pre/post marker."""
+
+    digits = ""
+    for character in version.strip():
+        if not (character.isdigit() or character == "."):
+            break
+        digits += character
+    parts = digits.strip(".").split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def meets_minimum(version: str) -> bool:
+    """Whether a driver version is at least :data:`MINIMUM_DRIVER_VERSION`."""
+
+    release = _release_prefix(version)
+    minimum = _release_prefix(MINIMUM_DRIVER_VERSION)
+    if release is None or minimum is None:
+        return False
+    width = max(len(release), len(minimum))
+    return release + (0,) * (width - len(release)) >= minimum + (0,) * (width - len(minimum))
+
+
 def _pip_spec(version: str) -> str:
     if version:
         # Version is caller-supplied; validate it against a strict pattern so it
@@ -366,8 +401,45 @@ def _pip_spec(version: str) -> str:
                 raise ProvisionError(f"invalid driver version: {version!r}")
         if not stripped:
             raise ProvisionError("empty driver version")
+        if not meets_minimum(stripped):
+            raise ProvisionError(
+                f"{DISTRIBUTION} {stripped} is older than {MINIMUM_DRIVER_VERSION}, "
+                "the oldest release this bundle supports"
+            )
         return f"{DISTRIBUTION}=={stripped}"
-    return DISTRIBUTION
+    return f"{DISTRIBUTION}>={MINIMUM_DRIVER_VERSION}"
+
+
+def _unsupported_platform() -> Optional[str]:
+    """Describe this system when the driver publishes no wheel for it, else None.
+
+    Only consulted to explain a failed install; pip still decides what is
+    compatible, so a platform the driver later adds is never blocked here.
+    """
+
+    system = platform.system()
+    machine = platform.machine().lower()
+    bits = 64 if sys.maxsize > 2**32 else 32
+    if system == "Darwin":
+        release = platform.mac_ver()[0]
+        major = release.split(".")[0]
+        if major.isdigit() and int(major) < 13:
+            return f"macOS {release} on {machine}"
+        return None
+    if system == "Linux":
+        glibc = _glibc_version()
+        if machine not in _LINUX_ARCHES or bits == 32:
+            return f"{bits}-bit Linux on {machine}"
+        if glibc is None:
+            return f"Linux on {machine} without glibc (for example musl)"
+        if glibc < _MANYLINUX_GLIBC:
+            return f"Linux on {machine} with glibc {glibc[0]}.{glibc[1]}"
+        return None
+    if system == "Windows":
+        if bits == 32 or machine not in ("amd64", "x86_64", "arm64", "aarch64"):
+            return f"Windows on {machine} with {bits}-bit Python"
+        return None
+    return f"{system or 'an unknown system'} on {machine}"
 
 
 def _release_tuple(version: str) -> Optional[Tuple[int, ...]]:
@@ -415,7 +487,10 @@ def _satisfies_request(binary: Path, requested: str) -> bool:
     """
 
     if not requested:
-        return True
+        # An install from before the minimum (or one that cannot report its
+        # version) is replaced rather than reused.
+        reported = driver_version(binary)
+        return reported is not None and meets_minimum(reported)
     reported = driver_version(binary)
     if reported is None:
         return False
@@ -495,6 +570,12 @@ def provision(
             return _provision_without_pip(paths, requested, environment, timeout, interpreter)
         detail = output.strip()[:400]
         if "No matching distribution" in output or "Could not find a version" in output:
+            unsupported = _unsupported_platform()
+            if unsupported is not None:
+                raise ProvisionError(
+                    f"{DISTRIBUTION} {MINIMUM_DRIVER_VERSION} or newer is not published for "
+                    f"this system ({unsupported}). It supports {SUPPORTED_PLATFORMS}."
+                )
             # The interpreter already meets the driver's minimum, so the index
             # itself found nothing for this platform or request.
             detail += (
@@ -1147,6 +1228,22 @@ def health(paths: DriverPaths) -> Health:
             host_app=str(host) if host else None,
         )
     version = driver_version(binary)
+    if runtime == "direct" and version is not None and not meets_minimum(version):
+        # An install from before the minimum (macOS 11-12 once received 0.11.0)
+        # must be replaced, not dispatched to.
+        return Health(
+            installed=True,
+            version=version,
+            permissions="unknown",
+            doctor_ok=False,
+            detail=(
+                f"{DISTRIBUTION} {version} is older than {MINIMUM_DRIVER_VERSION}; "
+                "set up computer use again to update it"
+            ),
+            runtime=runtime,
+            runtime_binary=str(binary),
+            host_app=None,
+        )
     permissions = _permission_status(binary)
     doctor = _run([str(binary), "doctor", "--json"])
     doctor_ok = False

@@ -42,6 +42,12 @@
 
 ### Fixed
 
+- Require `cua-driver` 0.30.2 or newer. Unpinned setup used to let pip fall
+  back to the newest release with a wheel for the platform, so macOS 11 and 12
+  silently received 0.11.0. Setup now refuses older pins and replaces an older
+  existing install, and status reports it as needing an update. When the
+  driver publishes nothing for the system, setup names the system and the
+  supported platforms instead of blaming the package index.
 - `/computer-use setup` and `computer_use_setup` no longer fail with an opaque
   `internal error` when the bundle runs on a Python older than the driver
   supports. `cua-driver` needs 3.10+, and macOS's Xcode Python is 3.9. Setup
