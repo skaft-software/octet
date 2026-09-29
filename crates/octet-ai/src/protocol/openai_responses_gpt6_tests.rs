@@ -1,5 +1,11 @@
 //! Deterministic GPT-6 wire foundations; these tests do not qualify a live route.
 use super::*;
+use crate::stream::StreamEvent;
+use crate::test_fixtures::base_request;
+use crate::types::{
+    AssistantPart, CacheRetention, Message, Protocol, ReasoningConfig, Request, StopReason,
+    ToolCallId, ToolDef, UserPart,
+};
 use crate::{AssistantMessage, CompatibilityMode, ModelId, UserMessage};
 use crate::{
     ResponsesConfigurationUpdate, ResponsesFeatures, ResponsesInput, ResponsesItem,
@@ -29,23 +35,12 @@ fn model() -> crate::Model {
 
 fn request() -> Request {
     Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("hello".into())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
         reasoning: ReasoningConfig::Effort(crate::ReasoningEffort::Low),
-        reasoning_mode: ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
         output_modalities: crate::OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     }
 }
 
