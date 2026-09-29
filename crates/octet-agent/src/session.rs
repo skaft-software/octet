@@ -2422,6 +2422,36 @@ impl Session {
         &self.usage_records
     }
 
+    /// The one `UsageRecord` shape every `record_*_usage` entry point builds:
+    /// a provider call charged to this session, attributed to one endpoint and
+    /// model, stamped at completion, carrying the exact microdollar total
+    /// derived from its own picodollar cost. Only `kind` — and `stop_reason`,
+    /// which only assistant turns can supply — tells an assistant turn from a
+    /// cache warm, a compaction, a rejected Responses turn, a terminal gate or
+    /// a delegated child. The two session-total fields stay `None` because
+    /// `record_usage` is the single owner of the picodollar carry.
+    fn provider_usage_record(
+        kind: UsageRecordKind,
+        endpoint: EndpointId,
+        model: ModelId,
+        usage: Usage,
+        cost: Option<Cost>,
+        stop_reason: Option<StopReason>,
+    ) -> UsageRecord {
+        UsageRecord {
+            kind,
+            usage,
+            stop_reason,
+            endpoint: Some(endpoint),
+            model: Some(model),
+            completed_at_unix_ms: Some(now_unix_millis()),
+            cost,
+            cost_microdollars: cost.map(|cost| cost.total),
+            session_cost_microdollars: None,
+            session_cost_picodollars_remainder: None,
+        }
+    }
+
     /// Newest provider usage record for an assistant turn on the active
     /// branch. Unlike checkpoint usage, this is one request rather than the
     /// sum of every autonomous tool turn in a submitted prompt.
@@ -2489,18 +2519,14 @@ impl Session {
         if !valid_assistant {
             return Err(SessionError::UnknownEntry(assistant));
         }
-        self.record_usage(UsageRecord {
-            kind: UsageRecordKind::AssistantTurn { assistant },
+        self.record_usage(Self::provider_usage_record(
+            UsageRecordKind::AssistantTurn { assistant },
+            endpoint,
+            model,
             usage,
-            stop_reason,
-            endpoint: Some(endpoint),
-            model: Some(model),
-            completed_at_unix_ms: Some(now_unix_millis()),
             cost,
-            cost_microdollars: cost.map(|cost| cost.total),
-            session_cost_microdollars: None,
-            session_cost_picodollars_remainder: None,
-        })
+            stop_reason,
+        ))
     }
 
     /// Persist root-ledger usage for one bounded delegated child session.
@@ -2522,22 +2548,18 @@ impl Session {
             usage,
             cost,
         } = delegated;
-        self.record_usage(UsageRecord {
-            kind: UsageRecordKind::DelegatedAgent {
+        self.record_usage(Self::provider_usage_record(
+            UsageRecordKind::DelegatedAgent {
                 agent_id,
                 turn_count,
                 tool_call_count,
             },
+            endpoint,
+            model,
             usage,
-            stop_reason: None,
-            endpoint: Some(endpoint),
-            model: Some(model),
-            completed_at_unix_ms: Some(now_unix_millis()),
             cost,
-            cost_microdollars: cost.map(|cost| cost.total),
-            session_cost_microdollars: None,
-            session_cost_picodollars_remainder: None,
-        })
+            None,
+        ))
     }
 
     /// Persist provider-reported usage for one completed cache-warm call.
@@ -2550,18 +2572,14 @@ impl Session {
         usage: Usage,
         cost: Option<Cost>,
     ) -> Result<(), SessionError> {
-        self.record_usage(UsageRecord {
-            kind: UsageRecordKind::CacheWarm,
+        self.record_usage(Self::provider_usage_record(
+            UsageRecordKind::CacheWarm,
+            endpoint,
+            model,
             usage,
-            stop_reason: None,
-            endpoint: Some(endpoint),
-            model: Some(model),
-            completed_at_unix_ms: Some(now_unix_millis()),
             cost,
-            cost_microdollars: cost.map(|cost| cost.total),
-            session_cost_microdollars: None,
-            session_cost_picodollars_remainder: None,
-        })
+            None,
+        ))
     }
 
     /// Append a sanitized cache-warm lifecycle transition. A started attempt
@@ -2619,18 +2637,14 @@ impl Session {
         usage: Usage,
         cost: Option<Cost>,
     ) -> Result<(), SessionError> {
-        self.record_usage(UsageRecord {
-            kind: UsageRecordKind::Compaction,
+        self.record_usage(Self::provider_usage_record(
+            UsageRecordKind::Compaction,
+            endpoint,
+            model,
             usage,
-            stop_reason: None,
-            endpoint: Some(endpoint),
-            model: Some(model),
-            completed_at_unix_ms: Some(now_unix_millis()),
             cost,
-            cost_microdollars: cost.map(|cost| cost.total),
-            session_cost_microdollars: None,
-            session_cost_picodollars_remainder: None,
-        })
+            None,
+        ))
     }
 
     /// Persist usage for a Responses turn whose terminal output could not
@@ -2642,18 +2656,14 @@ impl Session {
         usage: Usage,
         cost: Option<Cost>,
     ) -> Result<(), SessionError> {
-        self.record_usage(UsageRecord {
-            kind: UsageRecordKind::RejectedResponsesTurn,
+        self.record_usage(Self::provider_usage_record(
+            UsageRecordKind::RejectedResponsesTurn,
+            endpoint,
+            model,
             usage,
-            stop_reason: None,
-            endpoint: Some(endpoint),
-            model: Some(model),
-            completed_at_unix_ms: Some(now_unix_millis()),
             cost,
-            cost_microdollars: cost.map(|cost| cost.total),
-            session_cost_microdollars: None,
-            session_cost_picodollars_remainder: None,
-        })
+            None,
+        ))
     }
 
     /// Persist usage for an isolated terminal-gate provider call.
@@ -2665,18 +2675,14 @@ impl Session {
         cost: Option<Cost>,
         returned: Option<bool>,
     ) -> Result<(), SessionError> {
-        self.record_usage(UsageRecord {
-            kind: UsageRecordKind::TerminalGate { returned },
+        self.record_usage(Self::provider_usage_record(
+            UsageRecordKind::TerminalGate { returned },
+            endpoint,
+            model,
             usage,
-            stop_reason: None,
-            endpoint: Some(endpoint),
-            model: Some(model),
-            completed_at_unix_ms: Some(now_unix_millis()),
             cost,
-            cost_microdollars: cost.map(|cost| cost.total),
-            session_cost_microdollars: None,
-            session_cost_picodollars_remainder: None,
-        })
+            None,
+        ))
     }
 
     fn record_usage(&mut self, mut record: UsageRecord) -> Result<(), SessionError> {
