@@ -2,13 +2,19 @@
 //!
 //! Covers the module's observable behaviour and bounds.
 //!
-//! Extracted from `mod.rs` so the implementation reads as pure
+//! Extracted from `client.rs` so the implementation reads as pure
 //! production code and the assertions that pin it can be
 //! navigated separately. This is still a child module of
 //! `crate::client`, so `use super::*` reaches exactly the
 //! private items it reached while the tests were inline.
 
+use super::diagnostics::{
+    lifecycle_from_sse_comment, parse_provider_lifecycle, sanitize_diagnostic,
+    truncate_transport_message, MAX_PROVIDER_DIAGNOSTIC_BYTES, MAX_PROVIDER_LIFECYCLE_DETAIL_BYTES,
+};
+use super::transport::{prepare_request_body, transient_connection_source};
 use super::*;
+use crate::stream::ProviderLifecycleState;
 
 #[tokio::test]
 async fn dropping_a_resumed_receiver_closes_a_quiet_http_body() {
