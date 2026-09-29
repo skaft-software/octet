@@ -36,8 +36,11 @@ pub(crate) use discovery::{
 // stay reachable through this module's glob.
 use discovery::{
     cards_theme_for, compiled_file_theme_for, discover_themes, read_theme_file_bounded,
-    resolved_theme_resource, still_theme_for, theme_file_name,
+    resolved_theme_resource, still_theme_for,
 };
+// Only `available_themes` names it here, and that is test- and serve-only.
+#[cfg(any(test, feature = "serve"))]
+use discovery::theme_file_name;
 #[cfg(test)]
 pub use discovery::{theme_discovery_diagnostics, theme_path};
 
