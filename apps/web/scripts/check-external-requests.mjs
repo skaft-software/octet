@@ -115,7 +115,9 @@ function inspectRuntimeFile(scope, scopeRoot, file) {
     /^http:\/\/www\.w3\.org\//,
     /^https:\/\/react\.dev\/errors\//,
     // Bundled parser diagnostics are inert message text, not request targets.
-    /^https:\/\/github\.com\/syntax-tree\/hast-util-to-jsx-runtime#/,
+    // Newer releases hoist the bare base URL into a constant and append the
+    // `#anchor` when they throw, so accept exactly that base as well.
+    /^https:\/\/github\.com\/syntax-tree\/hast-util-to-jsx-runtime(?:#|$)/,
   ];
   for (const match of source.matchAll(/\b(?:https?|wss?):\/\/[^\s"'`)]+/gi)) {
     if (
