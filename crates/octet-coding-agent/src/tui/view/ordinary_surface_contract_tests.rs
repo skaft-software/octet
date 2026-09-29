@@ -212,14 +212,10 @@ fn hostile_metadata_shell(fixture: ContractFixture) -> InteractiveShell {
         trust: crate::prompts::PromptTrust::UserInstalled,
         content_hash: "hostile".into(),
     }]));
-    shell.set_skill_commands(Arc::from(vec![(
-        "hostile-skill".into(),
-        HOSTILE_METADATA.into(),
-    )]));
-    shell.set_extension_commands(Arc::from(vec![(
-        "hostile-extension".into(),
-        HOSTILE_METADATA.into(),
-    )]));
+    shell.set_skill_commands(Arc::from(vec![
+        ("hostile-skill".into(), HOSTILE_METADATA.into()),
+        ("hostile-workflow".into(), HOSTILE_METADATA.into()),
+    ]));
     set_editor(&mut shell, "/hostile-");
     shell
 }
@@ -650,22 +646,13 @@ fn ordinary_surface_contract_sanitizes_hostile_dynamic_slash_metadata() {
                 super::input_overlays::SlashSuggestionProvenance::Prompt,
                 "prompt provenance must remain typed until rendering"
             );
-            for (name, provenance) in [
-                (
-                    "hostile-skill",
-                    super::input_overlays::SlashSuggestionProvenance::Skill,
-                ),
-                (
-                    "hostile-extension",
-                    super::input_overlays::SlashSuggestionProvenance::Extension,
-                ),
-            ] {
+            for name in ["hostile-skill", "hostile-workflow"] {
                 assert_eq!(
                     suggestions
                         .iter()
                         .find(|suggestion| suggestion.name == name)
                         .map(|suggestion| suggestion.provenance),
-                    Some(provenance),
+                    Some(super::input_overlays::SlashSuggestionProvenance::Skill),
                     "{name} provenance must remain typed until rendering"
                 );
             }
@@ -727,7 +714,7 @@ fn ordinary_surface_contract_sanitizes_hostile_dynamic_slash_metadata() {
         assert!(
             rendered.contains(prompt_fragment)
                 && rendered.contains("hostile-skill")
-                && rendered.contains("hostile-extension"),
+                && rendered.contains("hostile-workflow"),
             "{} did not sanitize and clip hostile metadata deterministically: {rendered:?}",
             fixture.name
         );
@@ -750,7 +737,7 @@ fn ordinary_surface_contract_sanitizes_hostile_dynamic_slash_metadata() {
             );
         }
 
-        for name in ["hostile-prompt", "hostile-skill", "hostile-extension"] {
+        for name in ["hostile-prompt", "hostile-skill", "hostile-workflow"] {
             set_editor(&mut shell, &format!("/{name}"));
             shell.complete_slash_command();
             assert_eq!(

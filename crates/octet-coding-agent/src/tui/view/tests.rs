@@ -1885,25 +1885,6 @@ fn slash_popup_event_path_keeps_arrow_navigation_active() {
 }
 
 #[test]
-fn refreshing_unchanged_slash_catalog_preserves_selection() {
-    let mut shell = InteractiveShell::test_shell();
-    shell.apply_edit(EditAction::Char('/'));
-
-    let commands: Arc<[(String, String)]> = Arc::from(vec![
-        ("extension-one".to_owned(), "first".to_owned()),
-        ("extension-two".to_owned(), "second".to_owned()),
-    ]);
-    shell.set_extension_commands(commands.clone());
-    shell.slash_menu(SlashMenuAction::Next);
-    assert_eq!(shell.state.borrow().slash_selection, 1);
-
-    // The extension polling path republishes an equivalent Arc on every tick.
-    // That refresh must not move the highlighted command back to the first row.
-    shell.set_extension_commands(commands);
-    assert_eq!(shell.state.borrow().slash_selection, 1);
-}
-
-#[test]
 fn login_and_setup_are_discoverable_from_either_partial_query() {
     for query in ["/logi", "/setu"] {
         let mut shell = InteractiveShell::test_shell();
@@ -2247,8 +2228,8 @@ fn dynamic_slash_discovery_contains_only_registered_executable_names() {
         "workspace-review".into(),
         "Review workspace changes".into(),
     )]));
-    shell.set_extension_commands(Arc::from(vec![
-        ("checkpoint".into(), "Save checkpoint".into()),
+    shell.set_skill_commands(Arc::from(vec![
+        ("workspace-review".into(), "Review workspace changes".into()),
         // A dynamic command cannot shadow a working built-in.
         ("status".into(), "Shadow status".into()),
     ]));
@@ -2266,17 +2247,11 @@ fn dynamic_slash_discovery_contains_only_registered_executable_names() {
         .iter()
         .map(|(name, _)| name.as_str())
         .collect::<HashSet<_>>();
-    let extension_names = state
-        .extension_commands
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect::<HashSet<_>>();
     for suggestion in suggestions.iter().filter(|suggestion| {
         matches!(
             suggestion.provenance,
             super::input_overlays::SlashSuggestionProvenance::Prompt
                 | super::input_overlays::SlashSuggestionProvenance::Skill
-                | super::input_overlays::SlashSuggestionProvenance::Extension
         )
     }) {
         let registered = match suggestion.provenance {
@@ -2285,9 +2260,6 @@ fn dynamic_slash_discovery_contains_only_registered_executable_names() {
             }
             super::input_overlays::SlashSuggestionProvenance::Skill => {
                 skill_names.contains(suggestion.name.as_str())
-            }
-            super::input_overlays::SlashSuggestionProvenance::Extension => {
-                extension_names.contains(suggestion.name.as_str())
             }
             super::input_overlays::SlashSuggestionProvenance::Builtin => {
                 unreachable!("only dynamic slash suggestions should reach this registration check")
@@ -2310,10 +2282,6 @@ fn dynamic_slash_discovery_contains_only_registered_executable_names() {
     assert!(suggestions.iter().any(|suggestion| {
         suggestion.name == "workspace-review"
             && suggestion.provenance == super::input_overlays::SlashSuggestionProvenance::Skill
-    }));
-    assert!(suggestions.iter().any(|suggestion| {
-        suggestion.name == "checkpoint"
-            && suggestion.provenance == super::input_overlays::SlashSuggestionProvenance::Extension
     }));
 }
 
@@ -11061,7 +11029,7 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        activity.contains("Subagents · 1 running · /subagents"),
+        activity.contains("Subagents · 1 running · /extensions"),
         "{activity}"
     );
     assert!(
@@ -11248,15 +11216,12 @@ fn subagent_stop_hint_is_visible_only_while_workers_are_active() {
         shell.state.borrow_mut().set_subagent_activity(view.clone());
         let live =
             strip_terminal_sequences(&shell.state.borrow().rendered_transcript(width).join("\n"));
-        assert!(live.contains("/subagents stop all"), "{width}: {live}");
+        assert!(live.contains("/extensions to stop"), "{width}: {live}");
         view.telemetry[0].state = "completed".into();
         shell.state.borrow_mut().set_subagent_activity(view);
         let settled =
             strip_terminal_sequences(&shell.state.borrow().rendered_transcript(width).join("\n"));
-        assert!(
-            !settled.contains("/subagents stop all"),
-            "{width}: {settled}"
-        );
+        assert!(!settled.contains("to stop"), "{width}: {settled}");
     }
 }
 
@@ -11283,7 +11248,9 @@ fn subagent_transcript_row_is_height_bounded_and_points_to_the_inspector() {
                 .subagents
                 .is_empty());
             assert_eq!(
-                rows.iter().filter(|row| row.contains("/subagents")).count(),
+                rows.iter()
+                    .filter(|row| row.contains("/extensions"))
+                    .count(),
                 1
             );
             assert!(rows
@@ -11364,7 +11331,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        block.contains("Subagents · 1 running · 1 failed · /subagents"),
+        block.contains("Subagents · 1 running · 1 failed · /extensions"),
         "{block}"
     );
     assert!(
@@ -12379,7 +12346,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        compact.contains("Subagents · 5 running · 3 completed · /subagents"),
+        compact.contains("Subagents · 5 running · 3 completed · /extensions"),
         "{compact}"
     );
     assert!(
@@ -12428,7 +12395,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        settled.contains("Subagents · 3 completed · /subagents"),
+        settled.contains("Subagents · 3 completed · /extensions"),
         "{settled}"
     );
     assert_eq!(
@@ -16184,7 +16151,7 @@ fn failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcom
         "{frame:?}"
     );
     assert!(
-        frame.contains("Subagents · 1 running · /subagents"),
+        frame.contains("Subagents · 1 running · /extensions"),
         "{frame:?}"
     );
 

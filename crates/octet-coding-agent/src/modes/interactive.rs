@@ -68,7 +68,10 @@ use crate::tui::view::{
     SubagentPanel,
 };
 
+mod extension_menu;
 mod onboarding;
+
+use extension_menu::{extension_options_menu, set_extension_enabled, ExtensionMenuOutcome};
 
 /// Ordered controls sent to the frozen Agent during an active run.
 enum ControlIntent {
@@ -2506,7 +2509,15 @@ where
             }
         }
         Command::Exit => *quit_requested = true,
-        Command::Unknown(text) => shell.error(format!("unknown command: {text}")),
+        Command::Unknown(text) => {
+            let name = split_prompt_invocation(&text).map_or("", |(name, _)| name);
+            match extensions.command_owner(name) {
+                Some(owner) => shell.error(format!(
+                    "/{name} is no longer a command: open /extensions and choose {owner}"
+                )),
+                None => shell.error(format!("unknown command: {text}")),
+            }
+        }
         command => match queue_command(command, queue) {
             Ok(()) => shell.notice("command queued for the next idle boundary"),
             Err(error) => shell.error(error.to_string()),
@@ -2942,10 +2953,10 @@ fn open_active_subagent_document(
 fn show_active_subagent_stop_result(shell: &mut InteractiveShell, result: anyhow::Result<String>) {
     match result {
         Ok(output) => shell.show_extension_output(
-            "subagents",
-            format!("Stop request responded; terminal settlement is not confirmed. Check /subagents.\n\n{output}"),
+            "Subagent stop",
+            format!("Stop request responded; terminal settlement is not confirmed. Check /extensions.\n\n{output}"),
         ),
-        Err(error) => shell.error(format!("subagent stop not confirmed: {error}; check /subagents")),
+        Err(error) => shell.error(format!("subagent stop not confirmed: {error}; check /extensions")),
     }
     shell.render();
 }
@@ -3036,7 +3047,7 @@ where
                 return Ok(settled_outcome.take().expect("settled root outcome"));
             }
             if *quit_requested || shell.close_requested() {
-                shell.error("subagent stop response interrupted by shutdown; check /subagents after restart".into());
+                shell.error("subagent stop response interrupted by shutdown; check /extensions after restart".into());
                 shell.render();
                 return Ok(HostRunOutcome::shutdown());
             }
@@ -3312,6 +3323,33 @@ where
                             shell.set_run_preparing(run_id, "cancelling");
                         }
                         shell.render(); continue;
+                    }
+                    if subagents_open && subagent_document.is_none()
+                        && matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::CONTROL)
+                    {
+                        let target = shell
+                            .selected_subagent_node()
+                            .and_then(|node| subagent_stop_target(executable_extensions, &node));
+                        if let Some(target) = target {
+                            if subagent_stops.len() + usize::from(subagent_stop.is_some()) >= 8 {
+                                shell.error("subagent stop queue is full; retry after a response".into());
+                            } else if aborting || *quit_requested || shell.close_requested() {
+                                shell.error("subagent stop not admitted while closing".into());
+                            } else {
+                                match executable_extensions.subagent_stop_control(target, &inspection.resource_owner) {
+                                    Ok(stop) => {
+                                        subagent_stops.push_back(stop);
+                                        shell.notice("subagent stop queued; waiting for the owner-bound response (not terminal settlement)");
+                                    }
+                                    Err(error) => shell.error(format!("subagent stop not admitted: {error}")),
+                                }
+                            }
+                        } else {
+                            shell.error("the selected worker is not running".into());
+                        }
+                        shell.render();
+                        continue;
                     }
                     if let Some((result, action)) = shell.panel_input(&event) {
                         match (result, action) {
@@ -3609,35 +3647,17 @@ where
                             shell.render();
                             continue;
                         }
-                        if matches!(&command, Command::Unknown(text)
-                            if is_live_subagents_command(text, executable_extensions))
+                        // While workers run, /extensions opens their live list
+                        // (Ctrl+X stops one); the full menu waits for idle.
+                        if matches!(&command, Command::Extensions(commands::ExtensionsSubcommand::Menu))
+                            && active_subagent_snapshot(executable_extensions)
+                                .is_some_and(|snapshot| !snapshot.items.is_empty())
+                            && open_active_subagent_list(shell, executable_extensions)
                         {
-                            subagents_open = open_active_subagent_list(shell, executable_extensions);
+                            subagents_open = true;
                             subagent_document = None;
                             shell.render();
                             continue;
-                        }
-                        if let Command::Unknown(text) = &command {
-                            if let Some(target) = live_subagents_stop_target(text) {
-                                if subagent_stops.len() + usize::from(subagent_stop.is_some()) >= 8 {
-                                    shell.error("subagent stop queue is full; retry after a response".into());
-                                } else if aborting || *quit_requested || shell.close_requested() {
-                                    shell.error("subagent stop not admitted while closing".into());
-                                } else {
-                                    let result = executable_extensions.subagent_stop_control(
-                                        target.to_owned(), &inspection.resource_owner,
-                                    );
-                                    match result {
-                                        Ok(stop) => {
-                                            subagent_stops.push_back(stop);
-                                            shell.notice("subagent stop queued; waiting for the owner-bound response (not terminal settlement)");
-                                        }
-                                        Err(error) => shell.error(format!("subagent stop not admitted: {error}")),
-                                    }
-                                }
-                                shell.render();
-                                continue;
-                            }
                         }
                         let context = run.context_snapshot();
                         if let Err(error) = handle_active_command(
@@ -3988,7 +4008,6 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
             .map(|skill| (format!("skill:{}", skill.id), skill.description.clone()))
             .collect::<Vec<_>>(),
     ));
-    shell.set_extension_commands(Arc::from(app.executable_extensions.command_suggestions()));
     shell.set_context_estimate(context_estimate, context_window(&app.model));
     shell.set_session_telemetry(
         app.agent.session(),
@@ -4052,7 +4071,6 @@ fn apply_extension_background(
     // Extension contributions can arrive (or change) after the initial
     // handshake; keep the composer's slash-command list in step so commands
     // like /subagents are enterable as soon as their owning process is ready.
-    shell.set_extension_commands(Arc::from(executable_extensions.command_suggestions()));
     changed
 }
 
@@ -5068,93 +5086,6 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
         .collect())
 }
 
-const WEB_SEARCH_EXTENSION_NAME: &str = "octet-web-search";
-const WEB_SEARCH_COMMAND_NAME: &str = "web-search";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WebSearchMenuAction {
-    Configured,
-    Disable,
-    Back,
-}
-
-fn web_search_menu_entries(allow_disable: bool) -> (Vec<String>, Vec<Option<String>>) {
-    let mut items = vec![
-        "Brave Search (recommended)".to_owned(),
-        "SearXNG".to_owned(),
-    ];
-    let mut descriptions = vec![
-        Some(
-            "Hosted Brave Search API · setup asks for an API key and provides the signup link"
-                .to_owned(),
-        ),
-        Some("Use an existing self-hosted or public SearXNG JSON endpoint".to_owned()),
-    ];
-    if allow_disable {
-        items.push("Disable octet-web-search".to_owned());
-        descriptions.push(Some("Stop the extension and remove its tools".to_owned()));
-    }
-    (items, descriptions)
-}
-
-async fn web_search_management_menu(
-    app: &mut App,
-    shell: &mut InteractiveShell,
-    input: &mut EventStream,
-    allow_disable: bool,
-) -> anyhow::Result<WebSearchMenuAction> {
-    let (items, descriptions) = web_search_menu_entries(allow_disable);
-    let Some(index) = extension_picker(
-        shell,
-        input,
-        OrdinarySurfaceMetadata::with_purpose(
-            "Select web search provider",
-            "Choose a provider for web search or disable the extension",
-        ),
-        items,
-        descriptions,
-        0,
-    )
-    .await?
-    else {
-        return Ok(WebSearchMenuAction::Back);
-    };
-    if allow_disable && index == 2 {
-        return Ok(WebSearchMenuAction::Disable);
-    }
-    let provider = if index == 0 { "brave" } else { "searxng" };
-    let output = {
-        let dialogs = app.executable_extensions.lifecycle_snapshot();
-        let mut interaction = InteractiveExtensionConfirmations {
-            shell,
-            input,
-            dialogs: &dialogs,
-        };
-        app.executable_extensions
-            .execute_command_with_confirmation(
-                WEB_SEARCH_COMMAND_NAME,
-                vec!["setup".to_owned(), provider.to_owned()],
-                &mut interaction,
-            )
-            .await
-    };
-    match output {
-        Ok(Some(output)) => {
-            if !output.trim().is_empty() {
-                shell.notice(output);
-            }
-            shell.clear_error();
-            request_extension_ui(shell, app);
-        }
-        Ok(None) => shell.error(
-            "octet-web-search is running but its setup command is unavailable; see /extensions status"
-                .to_owned(),
-        ),
-        Err(error) => shell.error(format!("web search provider was not changed: {error}")),
-    }
-    Ok(WebSearchMenuAction::Configured)
-}
-
 async fn extension_management_menu(
     mut app: App,
     shell: &mut InteractiveShell,
@@ -5191,7 +5122,7 @@ async fn extension_management_menu(
             input,
             OrdinarySurfaceMetadata::with_purpose(
                 "Manage extensions",
-                "Enter enables/disables; enabled web search opens provider setup",
+                "Enter opens an extension's options; a disabled one is enabled first",
             ),
             items,
             descriptions,
@@ -5203,18 +5134,21 @@ async fn extension_management_menu(
         };
         selected = index;
         let choice = &choices[index];
-        if choice.enabled
-            && choice.name == WEB_SEARCH_EXTENSION_NAME
-            && app
-                .executable_extensions
-                .command_owner(WEB_SEARCH_COMMAND_NAME)
-                .as_deref()
-                == Some(WEB_SEARCH_EXTENSION_NAME)
-        {
-            match web_search_management_menu(&mut app, shell, input, choice.toggleable).await? {
-                WebSearchMenuAction::Disable => {}
-                WebSearchMenuAction::Configured | WebSearchMenuAction::Back => continue,
+        if choice.enabled {
+            // An enabled extension opens straight into its options; Disable is
+            // its last entry.
+            match extension_options_menu(&mut app, shell, input, &choice.name, choice.toggleable)
+                .await?
+            {
+                ExtensionMenuOutcome::Back => {}
+                ExtensionMenuOutcome::Disable => {
+                    (app, _) = set_extension_enabled(app, shell, input, &choice.name, true).await?;
+                }
             }
+            if shell.close_requested() {
+                return Ok(app);
+            }
+            continue;
         }
         if !choice.toggleable {
             shell.error(format!(
@@ -5223,93 +5157,23 @@ async fn extension_management_menu(
             ));
             continue;
         }
-
-        let authoritative = match crate::cli::extension_activation_menu_authoritative(&app.config) {
-            Ok(authoritative) => authoritative,
-            Err(error) => {
-                shell.error(format!(
-                    "{} was not changed: could not revalidate activation precedence: {error}",
-                    choice.name
-                ));
-                continue;
-            }
-        };
-        if !authoritative {
-            shell.error(format!(
-                "{} was not changed: project, environment, or CLI activation now makes the user config read-only",
-                choice.name
-            ));
-            continue;
-        }
-
-        if refuse_resource_reload(&app, shell) {
-            continue;
-        }
-        let enabled = !choice.enabled;
-        let config_path = crate::cli::global_config_path();
-        let before_config = config_path.as_deref().and_then(configuration_snapshot);
-        let persisted = match crate::cli::persist_extension_enabled(&choice.name, enabled) {
-            Ok(persisted) => persisted,
-            Err(error) => {
-                shell.error(format!(
-                    "{} was not changed: could not update user configuration: {error}",
-                    choice.name
-                ));
-                continue;
-            }
-        };
-        app.config.enabled_extensions = persisted;
-        app = match reload_resources(app, shell, input).await {
-            Ok((app, _)) => app,
-            Err(error) => {
-                let rollback = crate::cli::persist_extension_enabled(&choice.name, choice.enabled);
-                return match rollback {
-                    Ok(_) => Err(error.context(format!(
-                        "{} runtime rebuild failed; the user-config activation change was rolled back",
-                        choice.name
-                    ))),
-                    Err(rollback_error) => Err(error.context(format!(
-                        "{} runtime rebuild failed and user-config rollback also failed: {rollback_error}",
-                        choice.name
-                    ))),
-                };
-            }
-        };
-        observe_configuration_commit(
-            &mut app.executable_extensions,
-            before_config,
-            config_path.as_deref(),
-        )
-        .await;
-        request_extension_ui(shell, &mut app);
-        let summary = app
+        let changed;
+        (app, changed) = set_extension_enabled(app, shell, input, &choice.name, false).await?;
+        let running = app
             .executable_extensions
             .summaries()
             .into_iter()
-            .find(|summary| summary.name == choice.name);
-        let detail = if enabled && summary.as_ref().is_some_and(|summary| !summary.trusted) {
-            "; executable extensions require full access; safe mode keeps them stopped"
-        } else {
-            ""
-        };
-        shell.notice(format!(
-            "{} {}{detail}",
-            choice.name,
-            if enabled { "enabled" } else { "disabled" }
-        ));
-        shell.clear_error();
-        if enabled
-            && choice.name == WEB_SEARCH_EXTENSION_NAME
-            && summary
-                .as_ref()
-                .is_some_and(|summary| summary.running && summary.trusted)
-            && app
-                .executable_extensions
-                .command_owner(WEB_SEARCH_COMMAND_NAME)
-                .as_deref()
-                == Some(WEB_SEARCH_EXTENSION_NAME)
-        {
-            let _ = web_search_management_menu(&mut app, shell, input, false).await?;
+            .any(|summary| summary.name == choice.name && summary.running && summary.trusted);
+        if changed && running {
+            // Enabling is the start of setup: show every option right away.
+            if extension_options_menu(&mut app, shell, input, &choice.name, true).await?
+                == ExtensionMenuOutcome::Disable
+            {
+                (app, _) = set_extension_enabled(app, shell, input, &choice.name, true).await?;
+            }
+            if shell.close_requested() {
+                return Ok(app);
+            }
         }
     }
 }
@@ -5608,29 +5472,35 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
     })
 }
 
-/// Admit only the exact stop verb and one target. Other extension commands
-/// retain the active dispatcher's ordinary unknown-command behavior.
-fn live_subagents_stop_target(text: &str) -> Option<&str> {
-    let mut parts = text.split_whitespace();
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some("/subagents"), Some("stop"), Some(target), None) => Some(target),
-        _ => None,
-    }
-}
-
-/// Whether an unknown-command text is the bare `/subagents` live view owned
-/// by the octet-subagents extension. Only that view is safe to open mid-run:
-/// it reads extension presentation state and never touches the running
-/// agent session.
-fn is_live_subagents_command(
-    text: &str,
+/// The stop target (the worker's agent id) behind a live list node, taken from
+/// the destructive "stop" action the octet-subagents presentation attaches to
+/// that node. A worker without one is not running.
+fn subagent_stop_target(
     extensions: &crate::extensions::ExecutableExtensions,
-) -> bool {
-    let Some(name) = text.strip_prefix('/') else {
-        return false;
-    };
-    name.trim() == "subagents"
-        && extensions.command_owner("subagents").as_deref() == Some("octet-subagents")
+    node_id: &str,
+) -> Option<String> {
+    let view = extensions
+        .presentation_views()
+        .into_iter()
+        .find(|view| view.extension == "octet-subagents")?;
+    let node = view
+        .snapshot
+        .collection
+        .as_ref()?
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)?;
+    node.action_ids.iter().find_map(|action_id| {
+        view.snapshot
+            .actions
+            .iter()
+            .find(|action| &action.id == action_id)
+            .filter(|action| {
+                action.command == "subagents"
+                    && action.arguments.first().map(String::as_str) == Some("stop")
+            })
+            .and_then(|action| action.arguments.get(1).cloned())
+    })
 }
 
 async fn subagents_view(
@@ -8068,100 +7938,55 @@ async fn run_idle_command(
             return run_idle_shell_escape(app, shell, input, escape).await;
         }
         Command::Unknown(text) => {
-            let (extension_name, extension_arguments) = split_prompt_invocation(&text)
-                .map(|(name, arguments)| {
-                    (
-                        name.to_owned(),
-                        arguments
-                            .split_whitespace()
-                            .map(str::to_owned)
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default();
-            let presentation_owner = app.executable_extensions.command_owner(&extension_name);
-            let open_subagents = extension_name == "subagents"
-                && extension_arguments.is_empty()
-                && presentation_owner.as_deref() == Some("octet-subagents");
-            let result = {
-                let dialogs = app.executable_extensions.lifecycle_snapshot();
-                let mut confirmations = InteractiveExtensionConfirmations {
-                    shell,
-                    input,
-                    dialogs: &dialogs,
-                };
-                app.executable_extensions
-                    .execute_command_with_confirmation(
-                        &extension_name,
-                        extension_arguments,
-                        &mut confirmations,
-                    )
-                    .await
-            };
-            match result {
-                Ok(Some(output)) if open_subagents => {
-                    subagents_view(&mut app, shell, input, output).await?;
-                }
-                Ok(Some(output)) => {
-                    let presentation = presentation_owner
-                        .as_deref()
-                        .and_then(|owner| app.executable_extensions.presentation_text_for(owner));
-                    let mut visible_blocks = Vec::new();
-                    if !output.trim().is_empty() {
-                        visible_blocks.push(output);
+            let selection = shell.selected_plain_text();
+            match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {
+                Ok(Some(rendered)) => {
+                    if app.config.debug_prompt {
+                        shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
                     }
-                    visible_blocks.extend(presentation);
-                    let visible = visible_blocks.join("\n\n");
-                    if visible.trim().is_empty() {
-                        shell.notice(format!("/{extension_name} completed"));
-                    } else {
-                        shell.show_extension_output(&extension_name, visible);
-                    }
+                    return Ok(IdleCommandOutcome::Submit {
+                        app: Box::new(app),
+                        input: ComposedInput::from_text(rendered.text),
+                    });
                 }
                 Ok(None) => {
-                    let selection = shell.selected_plain_text();
-                    match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {
-                        Ok(Some(rendered)) => {
-                            if app.config.debug_prompt {
-                                shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
-                            }
-                            return Ok(IdleCommandOutcome::Submit {
-                                app: Box::new(app),
-                                input: ComposedInput::from_text(rendered.text),
-                            });
+                    // Extensions are configured and operated only from
+                    // /extensions; their commands are menu entries there.
+                    let name = split_prompt_invocation(&text)
+                        .map(|(name, _)| name.to_owned())
+                        .unwrap_or_default();
+                    if let Some(owner) = app.executable_extensions.command_owner(&name) {
+                        shell.error(format!(
+                            "/{name} is no longer a command: open /extensions and choose {owner}"
+                        ));
+                    } else {
+                        // A slash command may still name an extension that
+                        // is starting, degraded, or parked. Say so instead of
+                        // a bare unknown.
+                        let not_ready: Vec<String> = app
+                            .executable_extensions
+                            .summaries()
+                            .into_iter()
+                            .filter(|summary| {
+                                summary.enabled
+                                    && (!summary.running
+                                        || summary.health.as_ref().is_some_and(|health| {
+                                            health.state != octet_agent::ExtensionHealthState::Ready
+                                        }))
+                            })
+                            .map(|summary| summary.name)
+                            .collect();
+                        if text.starts_with('/') && !not_ready.is_empty() {
+                            shell.error(format!(
+                                "unknown command: {text} (extensions not ready: {} — see /extensions status)",
+                                not_ready.join(", ")
+                            ));
+                        } else {
+                            shell.error(format!("unknown command: {text}"));
                         }
-                        Ok(None) => {
-                            // A slash command that no running extension
-                            // contributes may still belong to an extension
-                            // that is starting, degraded, or parked. Say so
-                            // instead of a bare unknown.
-                            let not_ready: Vec<String> = app
-                                .executable_extensions
-                                .summaries()
-                                .into_iter()
-                                .filter(|summary| {
-                                    summary.enabled
-                                        && (!summary.running
-                                            || summary.health.as_ref().is_some_and(|health| {
-                                                health.state
-                                                    != octet_agent::ExtensionHealthState::Ready
-                                            }))
-                                })
-                                .map(|summary| summary.name)
-                                .collect();
-                            if text.starts_with('/') && !not_ready.is_empty() {
-                                shell.error(format!(
-                                    "unknown command: {text} (extensions not ready: {} — see /extensions status)",
-                                    not_ready.join(", ")
-                                ));
-                            } else {
-                                shell.error(format!("unknown command: {text}"));
-                            }
-                        }
-                        Err(error) => shell.error(error.to_string()),
                     }
                 }
-                Err(error) => shell.error(format!("extension command failed: {error}")),
+                Err(error) => shell.error(error.to_string()),
             }
         }
     }
@@ -11233,25 +11058,6 @@ mod tests {
             "x".repeat(MAX_JSON_RPC_ID_BYTES)
         );
         assert!(bounded_extension_session_id("x".repeat(MAX_JSON_RPC_ID_BYTES + 1)).is_err());
-    }
-
-    #[test]
-    fn web_search_menu_recommends_brave_and_keeps_searxng_and_disable() {
-        let (items, descriptions) = web_search_menu_entries(true);
-        assert_eq!(
-            items,
-            [
-                "Brave Search (recommended)",
-                "SearXNG",
-                "Disable octet-web-search"
-            ]
-        );
-        assert!(descriptions[0]
-            .as_deref()
-            .is_some_and(|description| description.contains("API key")));
-
-        let (items, _) = web_search_menu_entries(false);
-        assert_eq!(items, ["Brave Search (recommended)", "SearXNG"]);
     }
 
     #[test]
@@ -14375,22 +14181,22 @@ mod tests {
         }
     }
 
-    /// A real registered first-party command goes through the active dispatcher,
-    /// not the idle extension dispatcher, while the root provider is held.
+    /// While the root provider is held, `/extensions` opens the live worker
+    /// list and Ctrl+X stops the selected worker through the owner-bound
+    /// first-party stop path; input and cancellation stay responsive while the
+    /// stop response is pending.
     #[cfg(unix)]
     #[tokio::test]
     async fn active_subagent_stops_are_owned_and_survive_root_completion() {
-        for (target, owner_mode) in [
-            ("all", "owned"),
-            ("worker-one", "owned"),
-            ("all", "slow"),
-            ("all", "cancel"),
-            ("all", "after-completion-abort"),
-            ("all", "missing"),
-            ("all", "wrong"),
-            ("all", "impostor"),
-            ("all extra", "owned"),
-            ("inspect worker-one", "owned"),
+        for (worker, owner_mode) in [
+            ("running", "owned"),
+            ("running", "slow"),
+            ("running", "cancel"),
+            ("running", "after-completion-abort"),
+            ("running", "missing"),
+            ("running", "wrong"),
+            ("running", "impostor"),
+            ("settled", "owned"),
         ] {
             let (server, started, release) = HeldApi::start(text_turn()).await;
             let (_agent_dir, mut agent) =
@@ -14400,6 +14206,7 @@ mod tests {
             let owner = agent.session().resource_owner_key();
             inspection.resource_owner = owner.clone();
             let fixture_dir = tempfile::tempdir().unwrap();
+            let impostor = owner_mode == "impostor";
             let (mut extensions, process, log) =
                 crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
                     fixture_dir.path(),
@@ -14408,7 +14215,7 @@ mod tests {
                         "wrong" => Some("another-session"),
                         _ => Some(&owner),
                     },
-                    if owner_mode == "impostor" {
+                    if impostor {
                         "other-extension"
                     } else {
                         "octet-subagents"
@@ -14420,20 +14227,34 @@ mod tests {
                     },
                 )
                 .await;
-            let command = if target.starts_with("inspect ") {
-                format!("/subagents {target}")
-            } else {
-                format!("/subagents stop {target}")
+            extensions.test_publish_worker_roster(
+                &process,
+                &[(
+                    "worker:one",
+                    "worker-one",
+                    (worker == "running").then_some("worker-one"),
+                )],
+            );
+            let key = |code, modifiers| -> std::io::Result<Event> {
+                Ok(Event::Key(crossterm::event::KeyEvent::new(code, modifiers)))
             };
-            let events = vec![
-                Event::Paste(command),
-                Event::Key(crossterm::event::KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                )),
+            // Another extension's roster never becomes the worker list, so the
+            // menu waits for idle behind a report that the next key dismisses.
+            let opening = vec![
+                Ok(Event::Paste("/extensions".into())),
+                key(KeyCode::Enter, KeyModifiers::NONE),
+                key(KeyCode::Char('x'), KeyModifiers::CONTROL),
             ];
+            let closing = if impostor {
+                vec![key(KeyCode::Char('x'), KeyModifiers::NONE)]
+            } else {
+                vec![
+                    key(KeyCode::Esc, KeyModifiers::NONE),
+                    key(KeyCode::Char('x'), KeyModifiers::NONE),
+                ]
+            };
             let after_completion_abort = owner_mode == "after-completion-abort";
-            let owned = matches!(target, "all" | "worker-one")
+            let owned = worker == "running"
                 && matches!(
                     owner_mode,
                     "owned" | "slow" | "cancel" | "after-completion-abort"
@@ -14442,8 +14263,8 @@ mod tests {
             let (handled_tx, handled) = tokio::sync::oneshot::channel();
             let mut input = ProbedInput {
                 input: tokio_stream::wrappers::ReceiverStream::new(receiver),
-                remaining: events.len()
-                    + 1
+                remaining: opening.len()
+                    + closing.len()
                     + usize::from(owner_mode == "cancel")
                     + 2 * usize::from(after_completion_abort),
                 handled: Some(handled_tx),
@@ -14477,8 +14298,8 @@ mod tests {
             let producer = async {
                 let mut release = Some(release);
                 started.await.unwrap();
-                for event in events {
-                    sender.send(Ok(event)).await.unwrap();
+                for event in opening {
+                    sender.send(event).await.unwrap();
                 }
                 if owned {
                     tokio::time::timeout(Duration::from_secs(2), async {
@@ -14489,28 +14310,18 @@ mod tests {
                     .await
                     .expect("stop request reached the registered extension");
                 }
-                sender
-                    .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                        KeyCode::Char('x'),
-                        KeyModifiers::NONE,
-                    ))))
-                    .await
-                    .unwrap();
+                for event in closing {
+                    sender.send(event).await.unwrap();
+                }
                 if owner_mode == "cancel" {
                     sender
-                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                            KeyCode::Esc,
-                            KeyModifiers::NONE,
-                        ))))
+                        .send(key(KeyCode::Esc, KeyModifiers::NONE))
                         .await
                         .unwrap();
                 }
                 if after_completion_abort {
                     sender
-                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                            KeyCode::Enter,
-                            KeyModifiers::NONE,
-                        ))))
+                        .send(key(KeyCode::Enter, KeyModifiers::NONE))
                         .await
                         .unwrap();
                     release.take().unwrap().send(true).unwrap();
@@ -14522,10 +14333,7 @@ mod tests {
                     .await
                     .expect("root settled before stop response and Ctrl+C");
                     sender
-                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                            KeyCode::Char('c'),
-                            KeyModifiers::CONTROL,
-                        ))))
+                        .send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
                         .await
                         .unwrap();
                 }
@@ -14543,13 +14351,15 @@ mod tests {
             .await
             .expect("active run and stop should settle");
             drop(run);
+            let case = format!("{worker} {owner_mode}");
             assert_eq!(
                 ended.unwrap(),
                 if owner_mode == "cancel" {
                     HostRunOutcome::Aborted
                 } else {
                     HostRunOutcome::Completed
-                }
+                },
+                "{case}"
             );
             if after_completion_abort {
                 assert!(shell.pending().is_empty());
@@ -14559,40 +14369,42 @@ mod tests {
                     "Ctrl+C must revoke dispatch after root settlement"
                 );
             } else {
-                assert_eq!(shell.pending(), "x");
+                assert_eq!(shell.pending(), "x", "{case}");
             }
             assert!(!quit);
-            assert!(pending.is_empty());
+            assert_eq!(
+                pending.len(),
+                usize::from(impostor),
+                "{case}: only an unanswered /extensions waits for idle"
+            );
+            // The open list polls read-only `status`; only stops matter here.
             let wire = std::fs::read_to_string(&log).unwrap_or_default();
+            let commands: Vec<serde_json::Value> = wire
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|command| command["params"]["arguments"][0] != "status")
+                .collect();
             if owned {
-                let commands: Vec<serde_json::Value> = wire
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-                    .collect();
                 assert_eq!(
                     commands.len(),
                     1,
-                    "{owner_mode} {target}: {wire}; error={:?}; frame={:?}; transcript={}",
+                    "{case}: {wire}; error={:?}; frame={:?}; transcript={}",
                     shell.debug_error(),
                     shell.dump_rendered_frame().await,
                     shell.debug_snapshot()
                 );
                 assert_eq!(
                     commands[0]["params"]["arguments"],
-                    serde_json::json!(["stop", target])
+                    serde_json::json!(["stop", "worker-one"])
                 );
                 assert_eq!(
                     commands[0]["params"]["context"]["resource_owner"]["session_id"],
                     owner
                 );
                 let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
-                assert!(frame.contains("not settled"), "{target}: {frame}");
-                assert!(!shell.debug_snapshot().contains("unknown command"));
+                assert!(frame.contains("not settled"), "{case}: {frame}");
             } else {
-                assert!(
-                    wire.is_empty(),
-                    "unexpected command for {owner_mode} {target}: {wire}"
-                );
+                assert!(commands.is_empty(), "unexpected command for {case}: {wire}");
             }
             assert!(process.shutdown().await);
         }

@@ -495,6 +495,7 @@ class Extension:
         self._commands: dict[str, _Command] = {}
         self._hooks: dict[str, Handler] = {}
         self._context_handler: Optional[Handler] = None
+        self._menu_handler: Optional[Handler] = None
         self._status_handlers: dict[str, Handler] = {}
         self._renderer_handlers: dict[str, Handler] = {}
         self._lifecycle_handlers: dict[str, Handler] = {}
@@ -666,6 +667,24 @@ class Extension:
             return self._register_status(surface, handler)
 
         return decorate
+
+    def menu(self, handler: Optional[Handler] = None) -> Any:
+        """Serve this extension's ``/extensions`` options menu.
+
+        The handler receives ``(request, context)`` and returns the complete
+        menu: ``{"title", "status", "detail", "items": [...]}``. Each item is an
+        action (``command`` naming one of this extension's declared commands,
+        with literal ``arguments``) or a submenu (``items``). The manifest must
+        declare ``menu = true``; the host validates and renders it.
+        """
+
+        def decorate(callback: Handler) -> Handler:
+            if self._menu_handler is not None:
+                raise ValueError("duplicate menu handler")
+            self._menu_handler = callback
+            return callback
+
+        return decorate(handler) if handler is not None else decorate
 
     def renderer(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("renderer", name)
@@ -1916,6 +1935,8 @@ class Extension:
             return self._collect_context(params)
         if method == "status/collect":
             return self._collect_status(params)
+        if method == "menu/collect":
+            return self._collect_menu(params)
         if method == "tool/render":
             return self._render_tool(params)
         raise RpcError(-32601, f"unknown method: {method}")
@@ -2007,6 +2028,8 @@ class Extension:
     def _validate_declarations(self) -> None:
         self._require_exact_names("tools", self._declared_names("tools"), self._tools)
         self._require_exact_names("commands", self._declared_names("commands"), self._commands)
+        if self._menu_handler is not None and self._declared.get("menu") is not True:
+            raise RpcError(-32602, "a menu handler requires contributes.menu = true")
 
     def _declared_names(self, key: str) -> list[str]:
         value = self._declared.get(key, _MISSING)
@@ -2141,6 +2164,17 @@ class Extension:
         if handler is None:
             return None
         return self._status_result(self._invoke(handler, request, self._context_from(request)))
+
+    def _collect_menu(self, params: Any) -> dict[str, Any]:
+        request = self._object_params(params, "menu/collect")
+        if self._declared.get("menu") is not True:
+            raise RpcError(-32601, "menu/collect requires contributes.menu = true")
+        if self._menu_handler is None:
+            raise RpcError(-32601, "this extension registered no menu handler")
+        value = self._invoke(self._menu_handler, request, self._context_from(request))
+        if not isinstance(value, Mapping) or not isinstance(value.get("items", []), list):
+            raise RpcError(-32603, "menu handler must return an object with an items array")
+        return dict(value)
 
     def _render_tool(self, params: Any) -> dict[str, Any]:
         request = self._object_params(params, "tool/render")

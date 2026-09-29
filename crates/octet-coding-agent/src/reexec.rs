@@ -299,12 +299,12 @@ pub(crate) mod notice {
                 "session persistence is still in flight".to_owned()
             }
             RefusalReason::BackgroundWorkers(1) => {
-                "1 background worker is active; stop it from the /subagents menu, or reload with the worker-detach opt-in"
+                "1 background worker is active; stop it from /extensions, or reload with the worker-detach opt-in"
                     .to_owned()
             }
             RefusalReason::BackgroundWorkers(count) => {
                 format!(
-                    "{count} background workers are active; stop them from the /subagents menu, or reload with the worker-detach opt-in"
+                    "{count} background workers are active; stop them from /extensions, or reload with the worker-detach opt-in"
                 )
             }
             RefusalReason::NoSessionIdentity => {
@@ -2924,7 +2924,7 @@ mod tests {
                     ..LiveSafetyInputs::default()
                 },
                 RefusalReason::BackgroundWorkers(1),
-                "reload refused · 1 background worker is active; stop it from the /subagents menu, or reload with the worker-detach opt-in",
+                "reload refused · 1 background worker is active; stop it from /extensions, or reload with the worker-detach opt-in",
             ),
             (
                 LiveSafetyInputs {
@@ -2932,7 +2932,7 @@ mod tests {
                     ..LiveSafetyInputs::default()
                 },
                 RefusalReason::BackgroundWorkers(3),
-                "reload refused · 3 background workers are active; stop them from the /subagents menu, or reload with the worker-detach opt-in",
+                "reload refused · 3 background workers are active; stop them from /extensions, or reload with the worker-detach opt-in",
             ),
         ];
         for (inputs, reason, expected) in cases {
@@ -3034,7 +3034,7 @@ mod tests {
         assert_eq!(
             refused.notice(),
             Some(
-                "reload refused · 3 background workers are active; stop them from the /subagents menu, or reload with the worker-detach opt-in"
+                "reload refused · 3 background workers are active; stop them from /extensions, or reload with the worker-detach opt-in"
             )
         );
         assert!(hook_order(&refused_hooks).is_empty());
@@ -3610,7 +3610,7 @@ mod tests {
         );
         assert_eq!(
             notice::refused(RefusalReason::BackgroundWorkers(2)),
-            "reload refused · 2 background workers are active; stop them from the /subagents menu, or reload with the worker-detach opt-in"
+            "reload refused · 2 background workers are active; stop them from /extensions, or reload with the worker-detach opt-in"
         );
         assert_eq!(
             notice::exec_failed(&std::io::Error::other("boom")),

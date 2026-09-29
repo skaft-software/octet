@@ -343,6 +343,46 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(replies[4]["result"]["segments"][0]["text"], "ok")
 
 
+class MenuTests(unittest.TestCase):
+    def _extension(self, messages, output):
+        extension = Extension(
+            stdin=io.StringIO("\n".join(json.dumps(message) for message in messages) + "\n"),
+            stdout=output,
+            stderr=io.StringIO(),
+        )
+
+        @extension.command(name="tool", description="Tool actions")
+        def tool(arguments, context):
+            return {"text": "ok"}
+
+        @extension.menu
+        def menu(request, context):
+            return {
+                "title": "Tool",
+                "items": [{"id": "setup", "label": "Set up", "command": "tool",
+                           "arguments": ["setup"], "recommended": True}],
+            }
+
+        return extension
+
+    def test_a_declared_menu_is_served(self):
+        output = io.StringIO()
+        self._extension(
+            [initialize(commands=["tool"], menu=True),
+             request(2, "menu/collect", {"context": {}})],
+            output,
+        ).run()
+        replies = decode_lines(output)
+        self.assertEqual(replies[1]["result"]["title"], "Tool")
+        self.assertEqual(replies[1]["result"]["items"][0]["arguments"], ["setup"])
+
+    def test_a_menu_handler_needs_the_manifest_declaration(self):
+        output = io.StringIO()
+        self._extension([initialize(commands=["tool"])], output).run()
+        reply = decode_lines(output)[0]
+        self.assertIn("contributes.menu", reply["error"]["message"])
+
+
 class ProcessStdioTests(unittest.TestCase):
     def test_process_streams_carry_exact_utf8_lf_frames(self):
         # Windows text streams encode with the ANSI code page and translate LF

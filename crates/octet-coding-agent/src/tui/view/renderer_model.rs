@@ -442,7 +442,6 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         tool_input_prompt,
         prompt_templates,
         skill_commands,
-        extension_commands,
         subagent_activity,
         subagent_committed_costs,
         slash_selection,

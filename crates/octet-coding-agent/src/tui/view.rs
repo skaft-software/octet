@@ -323,7 +323,7 @@ impl SubagentTranscript {
             } else {
                 "activity recorded · orchestration failed"
             };
-            return format!("Subagents · {outcome} · /subagents");
+            return format!("Subagents · {outcome} · /extensions");
         }
         let mut parts = Vec::new();
         for (count, name) in [
@@ -337,7 +337,7 @@ impl SubagentTranscript {
                 parts.push(format!("{count} {name}"));
             }
         }
-        format!("Subagents · {} · /subagents", parts.join(" · "))
+        format!("Subagents · {} · /extensions", parts.join(" · "))
     }
 
     fn settled_role(&self) -> &'static str {
@@ -1327,7 +1327,6 @@ pub(crate) struct ShellState {
     /// both; Escape dismisses it until the command token changes again.
     prompt_templates: Arc<[crate::prompts::PromptTemplateDescriptor]>,
     skill_commands: Arc<[(String, String)]>,
-    extension_commands: Arc<[(String, String)]>,
     /// Session-scoped live roster, rendered only in composer-adjacent chrome.
     pub(crate) subagent_activity: Option<SubagentActivityView>,
     /// Cumulative child spend already handed off to the root's durable ledger.
@@ -4885,18 +4884,6 @@ impl InteractiveShell {
         state.slash_scroll = 0;
     }
 
-    pub fn set_extension_commands(&mut self, commands: Arc<[(String, String)]>) {
-        let mut state = self.state.borrow_mut();
-        // Background extension polling republishes this snapshot on every tick;
-        // an equivalent catalog must not reset the live popup cursor.
-        if state.extension_commands.as_ref() == commands.as_ref() {
-            return;
-        }
-        state.extension_commands = commands;
-        state.slash_selection = 0;
-        state.slash_scroll = 0;
-    }
-
     #[allow(dead_code)]
     pub fn set_subagent_presentation(
         &mut self,
@@ -5801,6 +5788,26 @@ impl InteractiveShell {
     /// Return clean text for the logical selection and retain it as an
     /// explicit fallback copy buffer. A future/native clipboard transport can
     /// consume this value without ever scraping padded terminal cells.
+    /// The worker node selected in an open live subagent list.
+    pub(crate) fn selected_subagent_node(&self) -> Option<String> {
+        let state = self.state.borrow();
+        let Some(Panel::SelectList {
+            items,
+            descriptions,
+            selected,
+            filter,
+            action,
+            ..
+        }) = state.panel.as_ref()
+        else {
+            return None;
+        };
+        let panel = action.subagent_panel()?;
+        let index =
+            *filtered_indices_for_action(items, descriptions, action, filter).get(*selected)?;
+        panel.node_ids.get(index).cloned()
+    }
+
     pub fn selected_plain_text(&self) -> Option<String> {
         semantic_selected_text(&self.state.borrow())
     }
@@ -5884,11 +5891,11 @@ impl InteractiveShell {
 
     /// Extension slash-command output, framed with heading chrome. The body
     /// is sanitized; only trusted theme styling added here survives.
-    pub fn show_extension_output(&mut self, command: &str, text: String) {
+    pub fn show_extension_output(&mut self, title: &str, text: String) {
         self.close_transcript_navigation();
         let mut state = self.state.borrow_mut();
         state.overlay = Some(ShellOverlay::Text(
-            styled_extension_output(&state.theme, command, &text).into(),
+            styled_extension_output(&state.theme, title, &text).into(),
         ));
     }
 

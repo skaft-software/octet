@@ -78,6 +78,7 @@ pub mod events;
 pub mod extension;
 #[rustfmt::skip]
 pub mod extension_api_v03;
+pub mod extension_menu;
 pub mod extension_policy;
 pub mod extension_presentation;
 pub mod extension_process;
@@ -148,6 +149,12 @@ pub use extension::{
     ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, ToolCallHook,
     MAX_POST_MUTATION_AFFECTED_RESOURCES, MAX_POST_MUTATION_ID_BYTES,
     MAX_POST_MUTATION_RESOURCE_ID_BYTES, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+};
+pub use extension_menu::{
+    ExtensionMenu, ExtensionMenuItem, MAX_EXTENSION_MENU_ARGUMENTS,
+    MAX_EXTENSION_MENU_ARGUMENT_BYTES, MAX_EXTENSION_MENU_BYTES, MAX_EXTENSION_MENU_DEPTH,
+    MAX_EXTENSION_MENU_DESCRIPTION_BYTES, MAX_EXTENSION_MENU_DETAIL_BYTES,
+    MAX_EXTENSION_MENU_ID_BYTES, MAX_EXTENSION_MENU_ITEMS, MAX_EXTENSION_MENU_LABEL_BYTES,
 };
 pub use extension_policy::{
     ExtensionActionIntent, ExtensionAdapterHints, ExtensionApprovalStore, ExtensionApprovalToken,

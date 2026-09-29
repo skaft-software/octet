@@ -728,6 +728,44 @@ pub struct ExtensionSummary {
     pub providers: Vec<ExtensionProviderSummary>,
 }
 
+/// The options menu shown for one extension under `/extensions`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionOptions {
+    /// The extension's own menu, or entries generated from its commands.
+    pub menu: octet_agent::ExtensionMenu,
+    /// Generated entries ask for command arguments before running.
+    pub generated: bool,
+}
+
+fn generated_options(process: &ExtensionProcess) -> ExtensionOptions {
+    let items = process
+        .contributions()
+        .commands
+        .iter()
+        .map(|command| octet_agent::ExtensionMenuItem {
+            id: format!("command:{}", command.name),
+            label: command.name.clone(),
+            description: Some(match &command.usage {
+                Some(usage) => format!("{} · {usage}", command.description),
+                None => command.description.clone(),
+            }),
+            command: Some(command.name.clone()),
+            arguments: Vec::new(),
+            destructive: false,
+            recommended: false,
+            items: None,
+            detail: None,
+        })
+        .collect();
+    ExtensionOptions {
+        menu: octet_agent::ExtensionMenu {
+            items,
+            ..octet_agent::ExtensionMenu::default()
+        },
+        generated: true,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ExtensionPresentationView {
     /// Manifest-bound extension that owns this state.
@@ -3365,16 +3403,6 @@ impl ExecutableExtensions {
         })
     }
 
-    /// Renders one extension's latest host-owned presentation fallback.
-    pub fn presentation_text_for(&mut self, extension: &str) -> Option<String> {
-        let _ = self.drain_events();
-        let view = self
-            .presentation_views()
-            .into_iter()
-            .find(|view| view.extension == extension)?;
-        Some(format_presentation_views(&[view]))
-    }
-
     pub fn status_summary(&self) -> String {
         let ready = self
             .summaries()
@@ -4090,6 +4118,88 @@ impl ExecutableExtensions {
         })
     }
 
+    /// The options menu `/extensions` shows for one running extension: its
+    /// own `menu/collect` answer, or entries generated from its declared
+    /// commands when it offers no menu. `None` when it is not running.
+    pub async fn options_menu(
+        &mut self,
+        extension: &str,
+    ) -> anyhow::Result<Option<ExtensionOptions>> {
+        let _ = self.drain_events();
+        let Some(process) = self
+            .processes
+            .iter()
+            .find(|process| process.descriptor().manifest.name == extension && process.is_running())
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if !process.contributions().menu {
+            return Ok(Some(generated_options(&process)));
+        }
+        let context = extension_execution_context(&process, self.resource_owner.as_deref());
+        let menu = process
+            .collect_menu(context)
+            .await
+            .with_context(|| format!("{extension} could not build its options menu"))?;
+        Ok(Some(ExtensionOptions {
+            menu,
+            generated: false,
+        }))
+    }
+
+    /// Entries generated from a running extension's declared commands, used
+    /// when it offers no menu or its menu could not be built.
+    pub fn generated_options_menu(&self, extension: &str) -> Option<ExtensionOptions> {
+        self.processes
+            .iter()
+            .find(|process| process.descriptor().manifest.name == extension && process.is_running())
+            .map(generated_options)
+    }
+
+    /// Runs one options-menu action: a declared command of `extension`, behind
+    /// a host confirmation when the extension marked it destructive.
+    pub async fn execute_menu_action_with_confirmation<H>(
+        &mut self,
+        extension: &str,
+        label: &str,
+        command: &str,
+        arguments: Vec<String>,
+        destructive: bool,
+        confirmations: &mut H,
+    ) -> anyhow::Result<String>
+    where
+        H: ExtensionConfirmationHandler + ?Sized,
+    {
+        let mut approval_budget = 0;
+        if destructive {
+            let request = ConfirmationRequest {
+                parent_request_id: None,
+                prompt: format!("{label}?"),
+                detail: Some(format!("Offered by extension {extension:?}")),
+                destructive: true,
+                default: false,
+            };
+            if !confirmations.confirm(extension, &request).await? {
+                anyhow::bail!("{label} was cancelled");
+            }
+            approval_budget = 1;
+        }
+        let mut command_confirmations = PreapprovedExtensionConfirmation {
+            inner: confirmations,
+            remaining: approval_budget,
+        };
+        self.execute_command_with_confirmation_scoped(
+            Some(extension),
+            command,
+            arguments,
+            &mut command_confirmations,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("{extension} no longer offers {label:?}"))
+    }
+
+    #[cfg(test)]
     pub async fn execute_command_with_confirmation<H>(
         &mut self,
         name: &str,
@@ -4398,6 +4508,69 @@ commands = ["subagents"]
         extensions.receivers.push(process.subscribe());
         extensions.processes.push(process.clone());
         (extensions, process, log)
+    }
+
+    /// Publishes a worker roster for `process` as its current semantic state.
+    /// Each worker is `(node id, label, stop target)`; one without a target
+    /// carries no stop action, like a settled worker.
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_publish_worker_roster(
+        &mut self,
+        process: &ExtensionProcess,
+        workers: &[(&str, &str, Option<&str>)],
+    ) {
+        let mut nodes = Vec::new();
+        let mut actions = Vec::new();
+        for (node_id, label, stop) in workers {
+            let mut action_ids = Vec::new();
+            if let Some(target) = stop {
+                let id = format!("stop:{node_id}");
+                actions.push(octet_agent::ExtensionPresentationAction {
+                    id: id.clone(),
+                    label: format!("Stop {label}"),
+                    command: "subagents".into(),
+                    arguments: vec!["stop".into(), (*target).to_owned()],
+                    destructive: true,
+                });
+                action_ids.push(id);
+            }
+            nodes.push(octet_agent::ExtensionPresentationNode {
+                id: (*node_id).to_owned(),
+                parent_id: None,
+                state: if stop.is_some() {
+                    octet_agent::ExtensionPresentationState::Running
+                } else {
+                    octet_agent::ExtensionPresentationState::Succeeded
+                },
+                label: (*label).to_owned(),
+                secondary: None,
+                action_ids,
+                references: Vec::new(),
+            });
+        }
+        let name = process.descriptor().manifest.name.clone();
+        self.presentations.insert(
+            name.clone(),
+            ExtensionPresentationView {
+                extension: name,
+                generation: process.health_snapshot().generation,
+                extension_instance_id: process.extension_instance_id().to_owned(),
+                resource_owner: None,
+                snapshot: ExtensionPresentationSnapshot {
+                    revision: 1,
+                    status: None,
+                    activities: Vec::new(),
+                    collection: Some(octet_agent::ExtensionPresentationCollection {
+                        kind: octet_agent::ExtensionPresentationCollectionKind::List,
+                        title: "Subagents".into(),
+                        nodes,
+                        selected_node_id: None,
+                        detail: None,
+                    }),
+                    actions,
+                },
+            },
+        );
     }
 
     /// An owned, single-flight observation request for the active modal loop.

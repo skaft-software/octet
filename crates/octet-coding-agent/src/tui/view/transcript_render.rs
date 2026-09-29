@@ -256,10 +256,9 @@ pub(super) fn render_block_planned_with_rainbow(
             let stop_label = (!summary.hydrated && summary.active_count() > 0)
                 .then(|| {
                     [
-                        format!("{full} · stop: /subagents stop all"),
-                        format!("{full} stop all"),
-                        "Subagents /subagents stop all".to_owned(),
-                        "/subagents stop all".to_owned(),
+                        format!("{full} to stop"),
+                        "Subagents · /extensions to stop".to_owned(),
+                        "/extensions to stop".to_owned(),
                     ]
                     .into_iter()
                     .find(|label| fits(label))
@@ -269,10 +268,10 @@ pub(super) fn render_block_planned_with_rainbow(
                 label
             } else if fits(&full) {
                 full
-            } else if fits("Subagents · /subagents") {
-                "Subagents · /subagents".to_owned()
+            } else if fits("Subagents · /extensions") {
+                "Subagents · /extensions".to_owned()
             } else {
-                "/subagents".to_owned()
+                "/extensions".to_owned()
             };
             let label = sanitize_for_terminal(&label);
             // Outcome tone belongs to the one-cell left margin dot, which

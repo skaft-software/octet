@@ -1959,11 +1959,11 @@ fn select_list_purpose<'a>(
 ) -> Option<&'a str> {
     surface.purpose.as_deref().or_else(|| {
         action.subagent_panel().map(|_| {
-            let full = "Stop: esc, then /subagents stop <name|all>";
+            let full = "Enter inspects · ^x stops the selected worker";
             if usize::from(width) >= visible_width(full) + 2 {
                 full
             } else {
-                "esc, then /subagents stop all"
+                "^x stops the selected worker"
             }
         })
     })
@@ -2652,7 +2652,7 @@ mod subagent_surface_tests {
             assert!(plain.contains("audit-auth"), "{plain}");
             assert!(plain.contains("running"), "{plain}");
             assert!(plain.contains("enter inspect"), "{plain}");
-            assert!(plain.contains("esc, then /subagents stop"), "{plain}");
+            assert!(plain.contains("^x stops the selected worker"), "{plain}");
             assert!(!plain.contains("state · elapsed"), "{plain}");
             assert!(rows.len() <= 20);
             assert!(rows
@@ -2678,7 +2678,7 @@ mod subagent_surface_tests {
                     .all(|row| visible_width(row) <= usize::from(width)));
                 if height >= 4 {
                     assert!(
-                        plain.contains("esc, then /subagents stop"),
+                        plain.contains("^x stops the selected worker"),
                         "{width}x{height}: {plain}"
                     );
                 }

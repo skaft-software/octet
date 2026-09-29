@@ -18,7 +18,6 @@ pub(super) enum SlashSuggestionProvenance {
     Builtin,
     Prompt,
     Skill,
-    Extension,
 }
 
 impl SlashSuggestionProvenance {
@@ -27,7 +26,6 @@ impl SlashSuggestionProvenance {
             Self::Builtin => None,
             Self::Prompt => Some("prompt"),
             Self::Skill => Some("skill"),
-            Self::Extension => Some("extension"),
         }
     }
 }
@@ -95,25 +93,6 @@ pub(super) fn input_slash_suggestions(state: &ShellState) -> Vec<InputSlashSugge
             description: description.clone(),
             argument_hint: None,
             provenance: SlashSuggestionProvenance::Skill,
-            accepts_argument: true,
-        });
-    }
-    for (name, description) in state
-        .extension_commands
-        .iter()
-        .filter(|(name, _)| name.starts_with(query))
-    {
-        if suggestions
-            .iter()
-            .any(|suggestion| suggestion.name == *name)
-        {
-            continue;
-        }
-        suggestions.push(InputSlashSuggestion {
-            name: name.clone(),
-            description: description.clone(),
-            argument_hint: None,
-            provenance: SlashSuggestionProvenance::Extension,
             accepts_argument: true,
         });
     }

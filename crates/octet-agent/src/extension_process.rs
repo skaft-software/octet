@@ -2135,6 +2135,18 @@ impl ExtensionManifest {
                 "semantic presentation requires extension API 0.2".into(),
             ));
         }
+        if self.contributes.menu {
+            if self.api_version == EXTENSION_API_VERSION_0_1 {
+                return Err(ExtensionRuntimeError::InvalidManifest(
+                    "extension menus require extension API 0.2".into(),
+                ));
+            }
+            if self.contributes.commands.is_empty() {
+                return Err(ExtensionRuntimeError::InvalidManifest(
+                    "an extension menu needs at least one declared command to route to".into(),
+                ));
+            }
+        }
         if self.api_version == EXTENSION_API_VERSION_0_1 && !self.contributes.shortcuts.is_empty() {
             return Err(ExtensionRuntimeError::InvalidManifest(
                 "shortcuts require extension API 0.2".into(),
@@ -2369,6 +2381,10 @@ pub struct ManifestContributions {
     /// Whether API `0.2` semantic presentation snapshots may arrive.
     #[serde(default, skip_serializing_if = "is_false")]
     pub presentation: bool,
+    /// Whether the extension answers `menu/collect` with its `/extensions`
+    /// options menu (API `0.2`/`0.4`). Items route to declared commands.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub menu: bool,
     /// Whether this API `0.3` extension may register a lifecycle-owned,
     /// secret-free provider/model catalog.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -3328,6 +3344,9 @@ pub struct ExtensionContributions {
     pub confirmations: bool,
     /// Whether semantic presentation snapshots may arrive from the process.
     pub presentation: bool,
+    /// Whether the process answers `menu/collect` with an options menu.
+    #[serde(default)]
+    pub menu: bool,
     /// Whether the current API 0.3 contract permits provider catalog mutation.
     pub providers: bool,
 }
@@ -5675,6 +5694,8 @@ pub mod methods {
     pub const CONTEXT_COLLECT: &str = "context/collect";
     /// Host request for a semantic status/header/footer contribution.
     pub const STATUS_COLLECT: &str = "status/collect";
+    /// Host request for the extension's `/extensions` options menu.
+    pub const MENU_COLLECT: &str = "menu/collect";
     /// Host request for semantic tool-renderer output.
     pub const TOOL_RENDER: &str = "tool/render";
     /// Graceful lifecycle shutdown request.
@@ -5964,6 +5985,13 @@ pub struct ContextRequest {
 pub struct StatusRequest {
     /// Surface to populate.
     pub surface: ExtensionUiSurface,
+    /// Current execution metadata.
+    pub context: ExtensionExecutionContext,
+}
+
+/// Host request for the extension's `/extensions` options menu.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MenuRequest {
     /// Current execution metadata.
     pub context: ExtensionExecutionContext,
 }
@@ -7203,6 +7231,45 @@ impl ExtensionProcess {
             resource_owner,
         )
         .await
+    }
+
+    /// Collects the extension's complete `/extensions` options menu.
+    ///
+    /// Every action must route to one of this extension's declared commands;
+    /// anything else is a protocol error, never a partially rendered menu.
+    pub async fn collect_menu(
+        &self,
+        context: ExtensionExecutionContext,
+    ) -> Result<crate::ExtensionMenu, ExtensionRuntimeError> {
+        if !self.inner.contributions.menu {
+            return Err(self.undeclared("menu", "menu".to_owned()));
+        }
+        let connection = read_std_lock(&self.inner.connection).clone();
+        let mut context = context;
+        context.resource_owner = context.resource_owner.map(|owner| ExtensionResourceOwner {
+            session_id: owner.session_id,
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: connection.generation,
+        });
+        let resource_owner = context.resource_owner.clone();
+        let menu: crate::ExtensionMenu = self
+            .request_typed_on_connection(
+                connection,
+                methods::MENU_COLLECT,
+                &MenuRequest { context },
+                resource_owner,
+            )
+            .await?;
+        let declared = self
+            .inner
+            .contributions
+            .commands
+            .iter()
+            .map(|command| command.name.clone())
+            .collect::<Vec<_>>();
+        menu.validate(&declared)
+            .map_err(ExtensionRuntimeError::Protocol)?;
+        Ok(menu)
     }
 
     /// Asks an extension to semantically render a declared tool lifecycle.
@@ -12628,6 +12695,7 @@ fn negotiate_api_v03_contributions(
         || manifest.contributes.notifications
         || manifest.contributes.confirmations
         || manifest.contributes.presentation
+        || manifest.contributes.menu
         || !manifest.contributes.shortcuts.is_empty()
     {
         return Err(ExtensionRuntimeError::Protocol(
@@ -12940,6 +13008,7 @@ fn negotiate_contributions_with_host_services(
             notifications: manifest.contributes.notifications,
             confirmations: manifest.contributes.confirmations,
             presentation: manifest.contributes.presentation,
+            menu: manifest.contributes.menu,
             providers: false,
         },
         protocol,
@@ -24711,6 +24780,133 @@ command = "runtime-commands.py"
             .unwrap();
         assert_eq!(output.text, "hello octet");
         assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn declared_menus_are_collected_typed_and_routed_to_declared_commands() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("menu.py");
+        write_executable_script(
+            &script_path,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+
+def receive():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(90)
+    return json.loads(line)
+
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+initialize = receive()
+assert initialize["params"]["contributes"]["menu"] is True, initialize
+send({
+    "jsonrpc": "2.0",
+    "id": initialize["id"],
+    "result": {
+        "api_version": "0.2",
+        "tools": [],
+        "commands": [{"name": "tool", "description": "Tool actions"}],
+        "protocol": {
+            "version": "0.2",
+            "features": ["request_cancellation", "content_parts"],
+            "limits": {"max_concurrent_requests": 1},
+        },
+    },
+})
+
+request = receive()
+assert request["method"] == "menu/collect", request
+assert "context" in request["params"], request
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "title": "Tool",
+    "status": {"state": "active", "label": "Ready"},
+    "items": [
+        {"id": "setup", "label": "Set up", "command": "tool",
+         "arguments": ["setup"], "recommended": True},
+        {"id": "servers", "label": "Servers", "detail": "One server",
+         "items": [{"id": "restart", "label": "Restart", "command": "tool",
+                    "arguments": ["restart", "one"], "destructive": True}]},
+    ],
+}})
+
+request = receive()
+assert request["method"] == "menu/collect", request
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "items": [{"id": "escape", "label": "Escape", "command": "elsewhere"}],
+}})
+
+shutdown = receive()
+assert shutdown["method"] == "shutdown", shutdown
+send({"jsonrpc": "2.0", "id": shutdown["id"], "result": {}})
+"#,
+        );
+        let manifest = ExtensionManifest::parse(
+            r#"name = "menu-fixture"
+version = "0.2.0"
+api_version = "0.2"
+[entrypoint]
+command = "menu.py"
+[contributes]
+commands = ["tool"]
+menu = true
+"#,
+        )
+        .unwrap();
+        let process = ExtensionProcess::start(
+            trusted_descriptor(temp.path(), manifest),
+            ExtensionRuntimeConfig::new(temp.path()),
+        )
+        .await
+        .unwrap();
+        assert!(process.contributions().menu);
+
+        let menu = process
+            .collect_menu(process.current_context())
+            .await
+            .unwrap();
+        assert_eq!(menu.title.as_deref(), Some("Tool"));
+        assert!(menu.items[0].recommended);
+        assert_eq!(menu.items[0].arguments, ["setup"]);
+        let servers = menu.items[1].items.as_ref().unwrap();
+        assert!(servers[0].destructive);
+        assert_eq!(servers[0].arguments, ["restart", "one"]);
+
+        match process.collect_menu(process.current_context()).await {
+            Err(ExtensionRuntimeError::Protocol(message)) => {
+                assert!(message.contains("undeclared command"), "{message}");
+            }
+            other => panic!("expected an undeclared-command rejection, got {other:?}"),
+        }
+        assert!(process.shutdown().await);
+    }
+
+    #[test]
+    fn menus_need_api_0_2_and_a_declared_command() {
+        for (source, expected) in [
+            (
+                "name = \"legacy\"\nversion = \"0.1.0\"\napi_version = \"0.1\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\ncommands = [\"tool\"]\nmenu = true\n",
+                "require extension API 0.2",
+            ),
+            (
+                "name = \"bare\"\nversion = \"0.2.0\"\napi_version = \"0.2\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\nmenu = true\n",
+                "at least one declared command",
+            ),
+        ] {
+            match ExtensionManifest::parse(source) {
+                Err(ExtensionRuntimeError::InvalidManifest(message)) => {
+                    assert!(message.contains(expected), "{message}");
+                }
+                other => panic!("expected {expected:?}, got {other:?}"),
+            }
+        }
     }
 
     #[cfg(unix)]

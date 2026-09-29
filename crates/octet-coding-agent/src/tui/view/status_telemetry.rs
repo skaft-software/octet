@@ -519,18 +519,18 @@ mod tests {
     }
 }
 
-/// Chrome for extension slash-command output. The body is sanitized here, then
+/// Chrome for titled extension output. The body is sanitized here, then
 /// framed with a heading rule and light per-line styling so long extension
 /// reports stay scannable: `label:` prefixes read as headings, `-` bullets get
 /// a quiet marker, and `·` separators stay dim.
-pub(super) fn styled_extension_output(theme: &OctetTheme, command: &str, text: &str) -> String {
+pub(super) fn styled_extension_output(theme: &OctetTheme, title: &str, text: &str) -> String {
     let safe = sanitize_for_terminal(text);
     let rule_width = 28;
     let rule = theme.fg("muted", &theme.glyph("horizontal").repeat(rule_width));
     let heading = format!(
         "{} {}",
         theme.settled_event_dot("neutral", if theme.unicode() { "•" } else { "*" }),
-        theme.bold(&theme.fg("foreground", &format!("/{command}")))
+        theme.bold(&theme.fg("foreground", &sanitize_for_terminal(title)))
     );
     let mut lines = vec![rule.clone(), heading, rule.clone()];
     for line in safe.lines() {
@@ -566,11 +566,11 @@ mod extension_output_tests {
         let theme = crate::tui::theme::test_theme();
         let styled = styled_extension_output(
             &theme,
-            "web-search",
+            "Web search",
             "provider: brave\n- result one\nplain line\nsome:thing: odd",
         );
         let plain = sanitize_for_terminal(&styled);
-        assert!(plain.contains("/web-search"));
+        assert!(plain.contains("Web search"));
         assert!(plain.contains("provider: brave"));
         assert!(plain.contains("- result one"));
         // Styling must survive as trusted ANSI in the overlay text.
@@ -587,8 +587,8 @@ mod extension_output_tests {
                 true,
                 crate::tui::terminal::ColorDepth::None,
             ));
-        let styled = styled_extension_output(&theme, "extensions", "no extensions configured");
+        let styled = styled_extension_output(&theme, "Extensions", "no extensions configured");
         assert!(!styled.contains('\x1b'), "{styled:?}");
-        assert!(styled.contains("/extensions"));
+        assert!(styled.contains("Extensions"));
     }
 }

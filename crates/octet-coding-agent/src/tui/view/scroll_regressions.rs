@@ -409,7 +409,7 @@ fn worker_roster_stays_at_the_live_tail_while_reading_history() {
             .borrow()
             .rendered_transcript(WIDTH)
             .iter()
-            .filter(|line| line.contains("/subagents"))
+            .filter(|line| line.contains("/extensions"))
             .count(),
         1
     );

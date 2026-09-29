@@ -518,7 +518,7 @@ mod tests {
         assert!(
             restored.contains("parent progress")
                 && restored
-                    .contains("Subagents · activity recorded · orchestration failed · /subagents"),
+                    .contains("Subagents · activity recorded · orchestration failed · /extensions"),
             "{restored}"
         );
         assert!(!restored.contains("SECRET"), "{restored}");
@@ -576,7 +576,7 @@ mod tests {
         assert!(summary.hydrated && summary.running == 0 && summary.settled_role() == "muted");
         let text = state.rendered_transcript(120).join("\n");
         assert!(
-            text.contains("Subagents · activity recorded · /subagents"),
+            text.contains("Subagents · activity recorded · /extensions"),
             "{text}"
         );
         assert!(
