@@ -3794,7 +3794,9 @@ async fn run_hosted_pull_request_refresh(
     }
 }
 
-#[cfg(test)]
+// Only the `gh` boundary tests pin an explicit executable, and those bind real
+// processes, so this seam exists on unix test builds only.
+#[cfg(all(test, unix))]
 async fn refresh_pull_request_projection_with_executable(
     plan: &WorkerPlan,
     events: &mpsc::Sender<TimestampedEvent>,

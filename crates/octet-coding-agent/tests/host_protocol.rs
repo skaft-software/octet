@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! Process-boundary tests for the versioned `octet-host` NDJSON contract.
+
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt as _;

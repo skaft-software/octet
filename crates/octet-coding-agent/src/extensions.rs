@@ -686,8 +686,8 @@ impl ExtensionRescanReport {
     }
 }
 
+#[cfg(all(test, unix))]
 impl ExtensionReloadReport {
-    #[cfg(test)]
     fn into_notices(self) -> Vec<String> {
         self.processes
             .into_iter()
@@ -2015,26 +2015,36 @@ struct LifecycleDeliveryTestControl {
 
 #[cfg(test)]
 impl LifecycleDeliveryTestControl {
+    /// Only the lifecycle-delivery suite drives these barriers, and that suite
+    /// runs real extension processes, so it exists on unix builds only. The
+    /// hook itself stays everywhere because the product code that calls
+    /// `wait_before_delivery` is not platform-specific.
+    #[cfg(unix)]
     fn gate_turn_started(&self) {
         self.gate_turn_started.store(true, Ordering::Release);
     }
 
+    #[cfg(unix)]
     fn release_turn_started(&self) {
         self.turn_started_release.notify_one();
     }
 
+    #[cfg(unix)]
     async fn turn_started_entered(&self) {
         self.turn_started_entered.notified().await;
     }
 
+    #[cfg(unix)]
     fn gate_turn_settled(&self) {
         self.gate_turn_settled.store(true, Ordering::Release);
     }
 
+    #[cfg(unix)]
     fn release_turn_settled(&self) {
         self.turn_settled_release.notify_one();
     }
 
+    #[cfg(unix)]
     async fn turn_settled_entered(&self) {
         self.turn_settled_entered.notified().await;
     }
@@ -2518,16 +2528,11 @@ fn apply_experimental_streamable_http_mcp_gate(
 impl ExecutableExtensions {
     /// Discovers and starts extensions with a fresh ordinary-host runtime manager.
     ///
-    /// Product bootstrap uses [`Self::discover_and_start_with_runtime_manager`]
+    /// Product bootstrap uses [`Self::discover_and_start_with_provider_runtime`]
     /// to retain compatible workspace services across an App rebuild. This
-    /// wrapper preserves the direct construction seam used by focused tests.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the direct construction seam is exercised only by unit tests"
-        )
-    )]
+    /// wrapper preserves the direct construction seam used by focused tests,
+    /// which all drive real extension processes.
+    #[cfg(all(test, unix))]
     pub fn discover_and_start(
         config: &Config,
         session: &Session,
@@ -2543,6 +2548,10 @@ impl ExecutableExtensions {
 
     /// Discovers a static catalog, binds the current session, and activates
     /// eager lifecycle profiles through the supplied durable manager.
+    ///
+    /// Reached from the `discover_and_start` test seam and from the
+    /// process-startup suite, so it shares that suite's platform gate.
+    #[cfg(all(test, unix))]
     pub fn discover_and_start_with_runtime_manager(
         config: &Config,
         session: &Session,
@@ -4888,7 +4897,10 @@ commands = ["subagents"]
     /// Dry-run scanners must never invoke this method. A committing ingestion
     /// path must have a safely bound extension owner, pass the same stable ID
     /// on retry, and call this only after commit or a completed rollback.
-    #[cfg(test)]
+    ///
+    /// The post-mutation hook suite that exercises it drives real extension
+    /// processes, so this exists on unix test builds only.
+    #[cfg(all(test, unix))]
     pub async fn notify_migration_ingested(
         &mut self,
         mutation_id: impl Into<String>,
@@ -5152,7 +5164,9 @@ commands = ["subagents"]
 
     // Compatibility convenience for in-crate lifecycle tests; production
     // callers retain typed reload outcomes and report problems separately.
-    #[cfg(test)]
+    // Every caller drives real extension processes, so this exists on unix
+    // test builds only.
+    #[cfg(all(test, unix))]
     pub async fn reload(&mut self) -> Vec<String> {
         self.reload_report().await.into_notices()
     }

@@ -522,7 +522,11 @@ fn copy_archive_file<R: Read>(
     destination: &Path,
     expected_size: u64,
 ) -> anyhow::Result<()> {
+    // Read on every platform so a header whose mode field cannot be decoded
+    // fails identically everywhere; only the unix branches below consult it.
     let mode = entry.header().mode()?;
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]

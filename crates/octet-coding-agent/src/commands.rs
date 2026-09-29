@@ -1207,7 +1207,9 @@ impl ShellEscapeRecord {
         &self.output
     }
 
-    #[cfg(test)]
+    /// Read by the one shell-escape test that drives a real `!` command, so it
+    /// exists only where that process boundary does.
+    #[cfg(all(test, unix))]
     pub fn exit_code(&self) -> i32 {
         self.exit_code
     }

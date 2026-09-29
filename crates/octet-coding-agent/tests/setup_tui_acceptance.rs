@@ -1,11 +1,11 @@
-#![cfg(unix)]
-
 //! Real-binary VT100 coverage for the first-run provider setup journey.
 //!
 //! Every process owns a disposable HOME, workspace, and session directory. The
 //! only endpoint used by the online cases is a fresh loopback listener. The
 //! tests never submit an inference request, use live credentials, or retain a
 //! secret in a fixture.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

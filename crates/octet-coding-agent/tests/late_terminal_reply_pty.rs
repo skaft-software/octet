@@ -1,8 +1,8 @@
-#![cfg(unix)]
-
 //! OSC 11 input regressions against the actual crossterm parser and octet binary.
 //! Isolated HOME/workspace, --offline, no tools/context files, no submitted
 //! prompt, and only an inert loopback provider record; no live credentials.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
