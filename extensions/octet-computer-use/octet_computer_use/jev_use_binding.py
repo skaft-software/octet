@@ -132,7 +132,8 @@ def dispatch(operation: str, values: Mapping[str, Any], *, computer: Any,
             live = options.get("live", False) if operation == "run" else not options.get("mock", False)
             key = resolve_key() if live else None
             if live and not key:
-                return _error("Live Jev requires a configured key. Run /computer-use jev first.")
+                return _error("Live Jev requires a configured key. Set up Jev first: open /extensions, "
+                              "choose octet-computer-use, then Jev.")
             if operation == "choose":
                 request = options.pop("request")
                 report = jev_use.choose(request, home=home, cancellation=cancellation,
@@ -170,7 +171,10 @@ def command_options(parts: list[str]) -> tuple[str, dict]:
     if operation in {"status", "cancel"} and len(parts) == 2 and not parts[1].startswith("--"):
         return operation, {"job_id": parts[1]}
     if operation not in {"status", "setup", "run"}:
-        raise ValueError("Usage: /computer-use jev-use [status [JOB_ID]|setup|run|cancel JOB_ID] [--typescript] [--live] [--visual-fixture] [--require-visual-path] [--visual-observation auto|always|off] [--max-steps 1..32] [--port 0..65535] [--expect-visual-status ok|not_installed|error|unavailable]")
+        raise ValueError("Unknown jev-use operation: use status [JOB_ID], setup, run, or cancel JOB_ID with "
+                         "[--typescript] [--live] [--visual-fixture] [--require-visual-path] "
+                         "[--visual-observation auto|always|off] [--max-steps 1..32] [--port 0..65535] "
+                         "[--expect-visual-status ok|not_installed|error|unavailable]")
     options: dict = {}
     index = 1
     while index < len(parts):

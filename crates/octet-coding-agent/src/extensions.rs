@@ -137,6 +137,12 @@ const POST_MUTATION_RPC_DEADLINE: Duration = Duration::from_millis(250);
 const MAX_SEEN_POST_MUTATION_IDS: usize = 256;
 const MAX_PENDING_POST_MUTATION_RESCANS: usize = 256;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
+/// An options-menu action runs while a person watches its live progress and
+/// can cancel it, so installs and downloads may take this long.
+const MENU_ACTION_DEADLINE: Duration = Duration::from_secs(30 * 60);
+/// Building an options menu must stay interactive; a slower extension gets
+/// generated entries instead.
+const MENU_COLLECT_DEADLINE: Duration = Duration::from_secs(5);
 const BACKGROUND_UPDATE_CAPACITY: usize = 64;
 const SHORTCUT_TASK_CONCURRENCY: usize = 8;
 const EVENT_DRAIN_BUDGET: usize = 64;
@@ -4062,6 +4068,7 @@ impl ExecutableExtensions {
             &action.command,
             action.arguments,
             &mut command_confirmations,
+            None,
         )
         .await?
         .ok_or_else(|| {
@@ -4138,9 +4145,10 @@ impl ExecutableExtensions {
             return Ok(Some(generated_options(&process)));
         }
         let context = extension_execution_context(&process, self.resource_owner.as_deref());
-        let menu = process
-            .collect_menu(context)
+        let menu = tokio::time::timeout(MENU_COLLECT_DEADLINE, process.collect_menu(context))
             .await
+            .map_err(|_| anyhow::anyhow!("timed out after {MENU_COLLECT_DEADLINE:?}"))
+            .and_then(|menu| menu.map_err(anyhow::Error::from))
             .with_context(|| format!("{extension} could not build its options menu"))?;
         Ok(Some(ExtensionOptions {
             menu,
@@ -4189,11 +4197,14 @@ impl ExecutableExtensions {
             inner: confirmations,
             remaining: approval_budget,
         };
+        // The person started this action and watches its progress, and can
+        // cancel it, so it may outlast the ordinary request deadline.
         self.execute_command_with_confirmation_scoped(
             Some(extension),
             command,
             arguments,
             &mut command_confirmations,
+            Some(MENU_ACTION_DEADLINE),
         )
         .await?
         .ok_or_else(|| anyhow::anyhow!("{extension} no longer offers {label:?}"))
@@ -4209,7 +4220,7 @@ impl ExecutableExtensions {
     where
         H: ExtensionConfirmationHandler + ?Sized,
     {
-        self.execute_command_with_confirmation_scoped(None, name, arguments, confirmations)
+        self.execute_command_with_confirmation_scoped(None, name, arguments, confirmations, None)
             .await
     }
 
@@ -4219,6 +4230,7 @@ impl ExecutableExtensions {
         name: &str,
         arguments: Vec<String>,
         confirmations: &mut H,
+        attended_deadline: Option<Duration>,
     ) -> anyhow::Result<Option<String>>
     where
         H: ExtensionConfirmationHandler + ?Sized,
@@ -4249,14 +4261,26 @@ impl ExecutableExtensions {
             let mut operation = None;
             let cancellation_token = CancellationToken::default();
             let (progress_sink, mut progress_rx) = ToolProgressSink::bounded_channel();
-            let mut execution = Box::pin(process.execute_command_controlled_with_progress(
-                name.to_owned(),
-                arguments,
-                execution_context,
-                cancellation_token.clone(),
-                progress_sink,
-                request_started,
-            ));
+            let mut execution: Pin<Box<dyn Future<Output = _> + Send + '_>> =
+                match attended_deadline {
+                    Some(deadline) => Box::pin(process.execute_attended_command_with_progress(
+                        name.to_owned(),
+                        arguments,
+                        execution_context,
+                        cancellation_token.clone(),
+                        progress_sink,
+                        request_started,
+                        deadline,
+                    )),
+                    None => Box::pin(process.execute_command_controlled_with_progress(
+                        name.to_owned(),
+                        arguments,
+                        execution_context,
+                        cancellation_token.clone(),
+                        progress_sink,
+                        request_started,
+                    )),
+                };
             let mut events_open = true;
             let result = loop {
                 // The cancellation future and confirmation UI borrow the same

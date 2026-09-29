@@ -6871,8 +6871,16 @@ impl ExtensionProcess {
         arguments: Vec<String>,
         context: ExtensionExecutionContext,
     ) -> Result<CommandOutput, ExtensionRuntimeError> {
-        self.execute_command_inner(name.into(), arguments, context, None, None, None)
-            .await
+        self.execute_command_inner(
+            name.into(),
+            arguments,
+            context,
+            None,
+            None,
+            None,
+            self.inner.config.request_timeout,
+        )
+        .await
     }
 
     /// Invokes a manifest-declared slash command and reports the exact
@@ -6891,6 +6899,7 @@ impl ExtensionProcess {
             Some(request_started),
             None,
             None,
+            self.inner.config.request_timeout,
         )
         .await
     }
@@ -6918,6 +6927,34 @@ impl ExtensionProcess {
             Some(request_started),
             Some(cancellation),
             Some(progress),
+            self.inner.config.request_timeout,
+        )
+        .await
+    }
+
+    /// Like [`Self::execute_command_controlled_with_progress`], for a command
+    /// a person started and is watching. It may run until `deadline` instead
+    /// of the ordinary request timeout, because its progress is on screen and
+    /// the person can cancel it at any time.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_attended_command_with_progress(
+        &self,
+        name: impl Into<String>,
+        arguments: Vec<String>,
+        context: ExtensionExecutionContext,
+        cancellation: CancellationToken,
+        progress: ToolProgressSink,
+        request_started: oneshot::Sender<ExtensionOperationToken>,
+        deadline: Duration,
+    ) -> Result<CommandOutput, ExtensionRuntimeError> {
+        self.execute_command_inner(
+            name.into(),
+            arguments,
+            context,
+            Some(request_started),
+            Some(cancellation),
+            Some(progress),
+            deadline,
         )
         .await
     }
@@ -6931,6 +6968,7 @@ impl ExtensionProcess {
         request_started: Option<oneshot::Sender<ExtensionOperationToken>>,
         cancellation: Option<CancellationToken>,
         progress: Option<ToolProgressSink>,
+        timeout: Duration,
     ) -> Result<CommandOutput, ExtensionRuntimeError> {
         if !self
             .inner
@@ -6962,7 +7000,7 @@ impl ExtensionProcess {
                     .request_with_command_progress(
                         methods::COMMAND_EXECUTE,
                         params,
-                        self.inner.config.request_timeout,
+                        timeout,
                         cancellation,
                         progress,
                         resource_owner,
@@ -6975,7 +7013,7 @@ impl ExtensionProcess {
                     .request_with_operation(
                         methods::COMMAND_EXECUTE,
                         params,
-                        self.inner.config.request_timeout,
+                        timeout,
                         resource_owner,
                         request_started,
                     )
@@ -6986,7 +7024,7 @@ impl ExtensionProcess {
                     .request_with_resource_owner(
                         methods::COMMAND_EXECUTE,
                         params,
-                        self.inner.config.request_timeout,
+                        timeout,
                         resource_owner,
                     )
                     .await?
@@ -24885,6 +24923,105 @@ menu = true
             }
             other => panic!("expected an undeclared-command rejection, got {other:?}"),
         }
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn attended_commands_may_outlast_the_ordinary_request_deadline() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("slow.py");
+        write_executable_script(
+            &script_path,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+
+
+def receive():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
+
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+initialize = receive()
+send({
+    "jsonrpc": "2.0",
+    "id": initialize["id"],
+    "result": {
+        "api_version": "0.2",
+        "tools": [],
+        "commands": [{"name": "tool", "description": "Slow setup"}],
+        "protocol": {
+            "version": "0.2",
+            "features": ["request_cancellation", "content_parts", "request_progress"],
+            "limits": {"max_concurrent_requests": 2},
+        },
+    },
+})
+while True:
+    message = receive()
+    if message.get("method") == "command/execute":
+        time.sleep(0.8)
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"text": "installed"}})
+    elif message.get("method") == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        break
+"#,
+        );
+        let manifest = ExtensionManifest::parse(
+            r#"name = "slow-fixture"
+version = "0.2.0"
+api_version = "0.2"
+[entrypoint]
+command = "slow.py"
+[contributes]
+commands = ["tool"]
+"#,
+        )
+        .unwrap();
+        let mut config = ExtensionRuntimeConfig::new(temp.path());
+        config.request_timeout = Duration::from_millis(300);
+        let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), config)
+            .await
+            .unwrap();
+
+        let (started, _) = oneshot::channel();
+        let ordinary = process
+            .execute_command_controlled_with_progress(
+                "tool",
+                Vec::new(),
+                process.current_context(),
+                CancellationToken::default(),
+                ToolProgressSink::null(),
+                started,
+            )
+            .await;
+        assert!(
+            matches!(ordinary, Err(ExtensionRuntimeError::Timeout { .. })),
+            "{ordinary:?}"
+        );
+
+        let (started, _) = oneshot::channel();
+        let attended = process
+            .execute_attended_command_with_progress(
+                "tool",
+                Vec::new(),
+                process.current_context(),
+                CancellationToken::default(),
+                ToolProgressSink::null(),
+                started,
+                Duration::from_secs(20),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attended.text, "installed");
         assert!(process.shutdown().await);
     }
 

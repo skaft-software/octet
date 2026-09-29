@@ -4,6 +4,17 @@
 
 ### Added
 
+- An options menu under `/extensions` replaces the `/computer-use` slash
+  command in the terminal UI. **Set up computer use** does the whole setup and
+  shows each step live: the driver, cursor themes, the GNOME Shell helper, the
+  permission check, and the optional Jev offer. **Check status** re-runs the
+  self-check. **Jev (optional)** sets Jev up, enters or replaces the API key
+  (asked as a secret), and forgets a stored key. **jev-use recipe (advanced)**
+  checks readiness, installs the recipe, runs the mock, live, TypeScript and
+  visual demos, and lists your jobs to check or cancel. The menu's header shows
+  the last status without starting the driver. The web UI keeps the
+  `/computer-use` command for now.
+
 - Linux support across X11 and Wayland desktops, including Omarchy (Hyprland),
   Sway and other wlroots compositors, GNOME, and KDE Plasma. Status and the
   action gate read the driver's Linux session report (X11, native Wayland,
@@ -21,19 +32,19 @@
   model switch recoloring the cursor.
 - GNOME Wayland: bundle Cua's MIT-licensed WinRects GNOME Shell helper from
   the matching driver release, with a `SetThemeColor` pin for the model color.
-  `/computer-use setup` installs and enables it; status reports when a login is
-  still needed.
+  Setup installs and enables it; status reports when a login is still needed.
 - Provision on Debian and Ubuntu without `python3-venv`: when the host Python
   cannot bootstrap pip, install the published Linux wheel directly after
   verifying the package index's SHA-256.
 - Pinned upstream Cua Driver `jev-use` recipe as owner-fenced background jobs:
   `computer_use_jev_use_status`, `computer_use_jev_use_setup`,
-  `computer_use_jev_use_run`, `computer_use_jev_use_choose`, plus
-  `/computer-use jev-use status|setup|run|status JOB_ID|cancel JOB_ID`.
+  `computer_use_jev_use_run`, `computer_use_jev_use_choose`, plus matching
+  entries in the `/extensions` options menu.
   Setup explicitly installs the commit-pinned source and locked Python/optional
   TypeScript dependencies; runs own a separate MCP session and isolated browser
   against the local form fixture with independent `/state` readback. Mock by
-  default, live via `/computer-use jev` key, visual path capability-gated.
+  default, live with the key configured under Jev, visual path
+  capability-gated.
   Refused under per-action confirmation policy.
 - An attended, opt-in live observe-act-verify smoke (`tests/live_smoke.py`)
   that refuses to run in CI, without a confirmation flag, or without an
@@ -48,7 +59,7 @@
   existing install, and status reports it as needing an update. When the
   driver publishes nothing for the system, setup names the system and the
   supported platforms instead of blaming the package index.
-- `/computer-use setup` and `computer_use_setup` no longer fail with an opaque
+- Computer-use setup (the menu action and `computer_use_setup`) no longer fails with an opaque
   `internal error` when the bundle runs on a Python older than the driver
   supports. `cua-driver` needs 3.10+, and macOS's Xcode Python is 3.9. Setup
   now builds the runtime venv from a compatible `python3` on `PATH` or a
@@ -61,7 +72,7 @@
   publication errors while retaining a usable accessibility tree.
 - Show window/app handles in model-visible text and replace references to hidden
   structured details with actionable targeting and query guidance.
-- `/computer-use setup` no longer fails on Linux, whose driver ships no
+- Computer-use setup no longer fails on Linux, whose driver ships no
   cursor-theme compiler.
 - Status no longer reports null `accessibility`/`screen_recording` fields on
   hosts that do not have those grants.

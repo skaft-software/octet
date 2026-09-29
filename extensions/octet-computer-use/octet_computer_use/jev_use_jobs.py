@@ -64,6 +64,19 @@ class Jobs:
                            structured_content={'job_id': job.identifier, 'status': 'cancelling' if job.token.cancelled else 'running',
                                                'operation': job.operation})
 
+    def owned(self, context):
+        """This owner's jobs, newest first, as ``(job_id, operation, state)``."""
+        try:
+            owner = _owner(context)
+        except ValueError:
+            return []
+        with self.lock:
+            jobs = [job for job in self.jobs.values() if job.owner == owner]
+            return [(job.identifier, job.operation,
+                     'finished' if job.result is not None
+                     else 'cancelling' if job.token.cancelled else 'running')
+                    for job in reversed(jobs)]
+
     def handle(self, operation, values, context, *, gated=False):
         if operation == 'status' and not values:
             return binding.dispatch(operation, values, computer=self.computer, extension=self.extension, home=self.home, gated=gated)

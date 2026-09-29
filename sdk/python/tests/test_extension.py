@@ -382,6 +382,15 @@ class MenuTests(unittest.TestCase):
         reply = decode_lines(output)[0]
         self.assertIn("contributes.menu", reply["error"]["message"])
 
+    def test_a_host_that_declares_nothing_never_collects_the_menu(self):
+        output = io.StringIO()
+        bare = initialize()
+        del bare["params"]["contributes"]
+        self._extension([bare, request(2, "menu/collect", {"context": {}})], output).run()
+        replies = decode_lines(output)
+        self.assertIn("result", replies[0])
+        self.assertIn("contributes.menu", replies[1]["error"]["message"])
+
 
 class ProcessStdioTests(unittest.TestCase):
     def test_process_streams_carry_exact_utf8_lf_frames(self):

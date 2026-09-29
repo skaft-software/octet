@@ -1861,7 +1861,12 @@ class Extension:
     def _validate_declarations(self) -> None:
         self._require_exact_names("tools", self._declared_names("tools"), self._tools)
         self._require_exact_names("commands", self._declared_names("commands"), self._commands)
-        if self._menu_handler is not None and self._declared.get("menu") is not True:
+        # A host that declares contributions must declare the menu it serves.
+        if (
+            self._menu_handler is not None
+            and self._declared
+            and self._declared.get("menu") is not True
+        ):
             raise RpcError(-32602, "a menu handler requires contributes.menu = true")
 
     def _declared_names(self, key: str) -> list[str]:

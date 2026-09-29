@@ -36,8 +36,10 @@ permissions; if status says `runtime: unavailable`, do not switch silently to a
 cursorless direct runtime. octet refuses this skill invocation unless every
 declared computer-use tool above and built-in `read` are registered.
 
-If the driver is not installed, run `computer_use_setup` once (or `/computer-use`)
-after the user agrees to a download from the package index. If the selected host
+If the driver is not installed, run `computer_use_setup` once after the user
+agrees to a download from the package index, or point the user to `/extensions`
+→ octet-computer-use → **Set up computer use**, which also installs the cursor
+themes and desktop helpers. If the selected host
 lacks an OS permission, `computer_use_status` will say so: the user must grant
 Accessibility/Screen Recording (macOS), an interactive session (Windows), or
 run octet inside a live X11 or Wayland display session (Linux, including
@@ -115,9 +117,9 @@ until `status: finished`, then read the nested `result`; cancel with
 without a main-model turn for each click. It operates an isolated browser
 and the upstream local form fixture; do not describe it as arbitrary
 native-app or website automation. Its session is separate from manual
-Driver calls. The `/computer-use jev-use` command offers the same
-`status`/`setup`/`run`/`status JOB_ID`/`cancel JOB_ID` flow; the standalone
-chooser is tool-only.
+Driver calls. The user can run the same status/setup/run flow, and check or
+cancel their jobs, from `/extensions` → octet-computer-use → **jev-use recipe
+(advanced)**; the standalone chooser is tool-only.
 
 The default run uses mock decisions but still performs real browser actions.
 Use `live: true` only when the user authorizes sending compact task

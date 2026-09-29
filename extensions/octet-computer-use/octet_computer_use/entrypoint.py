@@ -96,6 +96,25 @@ def _pending_label(status: Mapping[str, Any]) -> str:
     return "macOS permissions"
 
 
+def _readiness(status: Mapping[str, Any]) -> Tuple[bool, str]:
+    """Whether effectful tools may run, and the short readiness label."""
+
+    granted = (status.get("permissions") == "granted"
+               and status.get("runtime") != "unavailable"
+               and (status.get("runtime") != "desktop-host" or status.get("cursor_enabled") is True))
+    if not status.get("installed"):
+        return False, "not set up"
+    if granted:
+        return True, "ready"
+    if status.get("runtime") == "unavailable":
+        return False, "host unavailable"
+    if status.get("runtime") == "desktop-host" and not status.get("cursor_enabled"):
+        return False, "cursor not verified"
+    if status.get("platform") == "linux":
+        return False, "needs a desktop session"
+    return False, "needs %s" % _pending_label(status)
+
+
 def _not_ready_text() -> str:
     """Denial text when a missing OS grant holds back an effectful action."""
     if _host_platform() == "windows":
@@ -361,6 +380,10 @@ class ComputerUse:
         self._theme_lab = "unknown"
         self._selected_theme = "cua.default"
         self._theme_ids = {"cua.default"}
+        # The last full status probe, and whether a driver was found, for the
+        # options menu, which must answer without starting the driver.
+        self._last_status: Optional[Dict[str, Any]] = None
+        self._installed_hint: Optional[bool] = None
 
     def select_model(self, context: Mapping[str, Any]) -> None:
         lab = cursor_theme.theme_for_host(context)
@@ -471,7 +494,7 @@ class ComputerUse:
 
         The Linux wheel has no theme compiler, so the bundled artifacts go
         straight into the driver's own store. Doing it here, not only in
-        ``/computer-use setup``, is what makes model colors work as soon as the
+        computer-use setup, is what makes model colors work as soon as the
         driver is provisioned by any route. Only reviewed bundled files are
         written, and an up-to-date store is left untouched.
         """
@@ -812,9 +835,12 @@ class ComputerUse:
                 report[key] = value
         return report
 
-    def provision(self, version: str = "") -> Dict[str, Any]:
+    def provision(self, version: str = "", *, progress: Optional[Any] = None) -> Dict[str, Any]:
         self.shutdown()
-        binary = driver_module.provision(self._paths, version=version)
+        binary = driver_module.provision(self._paths, version=version, progress=progress)
+        with self._lock:
+            self._installed_hint = True
+            self._last_status = None
         # The next call starts a fresh session against the provisioned runtime.
         return {
             "provisioned": True,
@@ -833,30 +859,42 @@ class ComputerUse:
         """
 
         status = self.status(prompt=prompt)
-        granted = (status.get("permissions") == "granted"
-                   and status.get("runtime") != "unavailable"
-                   and (status.get("runtime") != "desktop-host" or status.get("cursor_enabled") is True))
-        if not status.get("installed"):
-            label = "computer use · not set up"
-        elif granted:
-            label = "computer use · ready"
-        elif status.get("runtime") == "unavailable":
-            label = "computer use · host unavailable"
-        elif status.get("runtime") == "desktop-host" and not status.get("cursor_enabled"):
-            label = "computer use · cursor not verified"
-        elif status.get("platform") == "linux":
-            label = "computer use · needs a desktop session"
-        else:
-            label = "computer use · needs %s" % _pending_label(status)
+        granted, readiness = _readiness(status)
+        with self._lock:
+            self._last_status = dict(status)
+            self._installed_hint = bool(status.get("installed"))
         try:
             self._extension.set_status(
-                {"state": "active" if granted else "pending", "label": label}
+                {"state": "active" if granted else "pending",
+                 "label": "computer use · " + readiness}
             )
         except Exception:
             # A host without the status surface still gets the report; the
             # status row is an aid, never authority for actuation.
             pass
         return status
+
+    def menu_state(self) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Whether a driver is installed, and the last full status probe.
+
+        Cheap enough for the options menu: it never starts the driver, and
+        only looks for an installed driver once per provisioning.
+        """
+
+        with self._lock:
+            last = dict(self._last_status) if self._last_status is not None else None
+            installed = self._installed_hint
+        if last is not None:
+            return bool(last.get("installed")), last
+        if installed is None:
+            try:
+                installed = (driver_module.installed_binary(self._paths) is not None
+                             or driver_module.desktop_app() is not None)
+            except Exception:  # noqa: BLE001 - the menu reports, never fails
+                installed = False
+            with self._lock:
+                self._installed_hint = installed
+        return installed, None
 
 
 # Driver tools that end or destroy user state and are labelled destructive in
@@ -869,7 +907,10 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         api_version="0.4",
         max_concurrent_requests=4,
         max_pending_requests=16,
-        supported_features=("request_cancellation", "content_parts", "artifacts", "lifecycle_events"),
+        supported_features=(
+            "request_cancellation", "content_parts", "artifacts", "lifecycle_events",
+            "request_progress",
+        ),
     )
     computer_use = ComputerUse(extension, home=home)
     jev_jobs = jev_use_jobs.Jobs(computer_use, extension, home=home)
@@ -891,7 +932,10 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
             )
         if name == "computer_use_setup":
             try:
-                result = computer_use.provision(values.get("version", "") or "")
+                result = computer_use.provision(
+                    values.get("version", "") or "",
+                    progress=lambda message: _progress(extension, message),
+                )
             except (driver_module.ProvisionError, OSError) as error:
                 return _setup_failed(error)
             return tool_result(text_content(_render_status(computer_use.status())), structured_content=result)
@@ -903,9 +947,9 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
                 detail += " (key from environment)" if source == "environment" else " (key stored)"
                 detail += "."
             elif not report["sdk_installed"]:
-                detail = "Jev is optional; its SDK is not installed. Run /computer-use jev."
+                detail = f"Jev is optional; its SDK is not installed. To add it, {JEV_HINT}."
             elif not report["api_key_configured"]:
-                detail = "Jev is optional; no API key yet. Run /computer-use jev to add one."
+                detail = f"Jev is optional; no API key yet. To add one, {JEV_HINT}."
             else:
                 detail = "Jev is not usable."
             return tool_result(text_content(detail), structured_content=report)
@@ -939,57 +983,31 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
             except ValueError as error:
                 return tool_result(text_content(str(error)), is_error=True)
             return jev_jobs.handle(operation, options, context, gated=confirmations_enabled())
-        if action == "setup":
-            try:
-                result = computer_use.provision()
-            except (driver_module.ProvisionError, OSError) as error:
-                return _setup_failed(error)
-            try:
-                result["cursor_themes_installed"] = cursor_theme.install_bundled_themes(
-                    Path(result["binary"]))
-                computer_use._theme_ids = {entry["id"] for entry in cursor_theme.PALETTE.values()}
-            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                return tool_result(
-                    text_content(f"Cua Driver was provisioned, but cursor theme setup failed: {error}"),
-                    is_error=True,
-                )
-            if gnome_helper.is_gnome_wayland():
-                # GNOME's compositor exposes window geometry, activation, and
-                # the cursor only to its own Shell extensions.
-                result.update(gnome_helper.install())
-            # The user asked for setup, so ask macOS now rather than making
-            # them re-run a second command. The dialog is attributed to octet
-            # because the driver runs in the host's responsibility chain. On
-            # Linux this only reads the display session; nothing prompts.
-            result.update(computer_use.publish_status(prompt=True))
-            jev_outcome = _setup_jev(extension, computer_use)
-            result.update(jev_outcome)
-            result["jev_note"] = _render_jev_setup(jev_outcome)
-        elif action == "jev":
-            outcome = _setup_jev(extension, computer_use, dedicated=True)
-            return tool_result(
-                text_content(_render_jev_setup(outcome)),
-                structured_content=outcome,
-            )
-        elif action == "status":
+        if action == "setup" and len(parts) == 1:
+            return _run_setup(extension, computer_use)
+        if action == "jev" and len(parts) <= 2:
+            return _run_jev(extension, computer_use, parts[1] if len(parts) == 2 else "setup")
+        if action == "status" and len(parts) == 1:
+            _progress(extension, "Running the driver self-check and permission probe…")
             result = computer_use.publish_status()
-        else:
-            return tool_result(
-                text_content("Usage: /computer-use [status|setup|jev|jev-use]"),
-                is_error=True,
-            )
+            return tool_result(text_content(_render_status(result)), structured_content=result)
         return tool_result(
-            text_content(_render_status(result)),
-            structured_content=result,
+            text_content(f"Unknown computer-use action. {driver_module.SETUP_HINT[0].upper()}"
+                         f"{driver_module.SETUP_HINT[1:]}."),
+            is_error=True,
         )
 
     extension.command(
         name="computer-use",
         description=(
-            "Provision and report the Cua Driver used for native computer use, "
-            "and optionally set up Jev."
+            "Set up, check, and configure native computer use (Cua Driver, "
+            "optional Jev and the jev-use recipe)."
         ),
     )(setup_command)
+
+    @extension.menu
+    def options_menu(_request: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
+        return _options_menu(computer_use, jev_jobs, context)
 
     def shutdown() -> None:
         jev_jobs.shutdown()
@@ -1012,6 +1030,75 @@ def _setup_failed(error: BaseException) -> Dict[str, Any]:
     return tool_result(text_content(f"Cua Driver setup failed: {error}"), is_error=True)
 
 
+#: Where a person configures the optional Jev integration.
+JEV_HINT = "open /extensions, choose octet-computer-use, then Jev"
+
+
+def _progress(extension: Any, message: str) -> None:
+    """Show one setup step live; without request progress it is skipped."""
+
+    try:
+        extension.progress(message=message)
+    except Exception:  # noqa: BLE001 - progress is an aid, never a failure
+        pass
+
+
+def _run_setup(extension: Any, computer_use: "ComputerUse") -> Dict[str, Any]:
+    """Everything computer use needs, in order, reporting each step live."""
+
+    step = lambda message: _progress(extension, message)  # noqa: E731
+    try:
+        result = computer_use.provision(progress=step)
+    except (driver_module.ProvisionError, OSError) as error:
+        return _setup_failed(error)
+    step("Installing the model-colored cursor themes…")
+    try:
+        result["cursor_themes_installed"] = cursor_theme.install_bundled_themes(
+            Path(result["binary"]))
+        computer_use._theme_ids = {entry["id"] for entry in cursor_theme.PALETTE.values()}
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return tool_result(
+            text_content(f"Cua Driver was provisioned, but cursor theme setup failed: {error}"),
+            is_error=True,
+        )
+    if gnome_helper.is_gnome_wayland():
+        # GNOME's compositor exposes window geometry, activation, and the
+        # cursor only to its own Shell extensions.
+        step("Installing the GNOME Shell helper…")
+        result.update(gnome_helper.install())
+    # The user asked for setup, so ask macOS now rather than making them run a
+    # second step. The dialog is attributed to octet because the driver runs in
+    # the host's responsibility chain. On Linux this only reads the session.
+    step("Checking permissions; macOS may ask you to allow access…"
+         if _host_platform() == "darwin" else "Checking the desktop session…")
+    result.update(computer_use.publish_status(prompt=True))
+    jev_outcome = _setup_jev(extension, computer_use)
+    result.update(jev_outcome)
+    result["jev_note"] = _render_jev_setup(jev_outcome)
+    return tool_result(
+        text_content(_render_status(result) + "\n\n" + result["jev_note"]),
+        structured_content=result,
+    )
+
+
+def _run_jev(extension: Any, computer_use: "ComputerUse", action: str) -> Dict[str, Any]:
+    """Set up Jev, replace its stored key, or forget it."""
+
+    if action == "setup":
+        outcome = _setup_jev(extension, computer_use, dedicated=True)
+    elif action == "key":
+        outcome = _ask_for_jev_key(extension)
+    elif action == "forget":
+        clear_key()
+        outcome = {"jev_setup": "forgotten", "jev": jev_status()}
+    else:
+        return tool_result(text_content(f"Unknown Jev action. To configure Jev, {JEV_HINT}."),
+                           is_error=True)
+    failed = outcome.get("jev_setup") in {"sdk_unavailable", "store_failed"}
+    return tool_result(text_content(_render_jev_setup(outcome)),
+                       structured_content=outcome, is_error=failed)
+
+
 def _setup_jev(
     extension: Any,
     computer_use: "ComputerUse",
@@ -1020,32 +1107,37 @@ def _setup_jev(
 ) -> Dict[str, Any]:
     """Offer the optional Jev setup, once, without ever blocking setup on it.
 
-    Jev is optional. The user is asked a single yes/no question; a "no", a
-    cancelled prompt, or a frontend with no input surface all leave computer use
-    exactly as it was. The API key is requested as a secret, so it is never
-    echoed, logged, or placed in a command argument, and it is stored 0600 under
-    octet's own state.
+    Jev is optional. Within computer-use setup the user is asked a single
+    yes/no question first; choosing Jev setup itself (``dedicated``) skips it.
+    A "no", a cancelled prompt, or a frontend with no input surface all leave
+    computer use exactly as it was. The API key is requested as a secret, so it
+    is never echoed, logged, or placed in a command argument, and it is stored
+    0600 under octet's own state.
     """
 
-    try:
-        offer = extension.confirm(
-            "Set up Jev for computer use?",
-            detail=(
-                "Jev (TypeSafe) can choose which offered action to take next, "
-                "instead of relying only on the model. It is optional and needs "
-                "a TypeSafe API key."
-            ),
-            destructive=False,
-            default=False,
-        )
-    except Exception:
-        # No confirmation surface, or the request failed: stay optional.
-        return {"jev_setup": "skipped"}
+    if not dedicated:
+        if jev_status()["usable"]:
+            return {"jev_setup": "already", "jev": jev_status()}
+        try:
+            offer = extension.confirm(
+                "Set up Jev for computer use?",
+                detail=(
+                    "Jev (TypeSafe) can choose which offered action to take next, "
+                    "instead of relying only on the model. It is optional and needs "
+                    "a TypeSafe API key."
+                ),
+                destructive=False,
+                default=False,
+            )
+        except Exception:
+            # No confirmation surface, or the request failed: stay optional.
+            return {"jev_setup": "skipped"}
 
-    if offer is not True:
-        return {"jev_setup": "declined"}
+        if offer is not True:
+            return {"jev_setup": "declined"}
 
     # Install the optional SDK into the same octet-owned venv as the driver.
+    _progress(extension, "Installing the optional Jev SDK…")
     try:
         installed = driver_module.provision_jev(computer_use._paths)  # noqa: SLF001
     except Exception:  # noqa: BLE001 - JEV must never break setup
@@ -1056,6 +1148,11 @@ def _setup_jev(
     # Use a key already present in the environment, or ask for one.
     if os.environ.get("TYPESAFE_API_KEY", "").strip():
         return {"jev_setup": "environment", "jev": jev_status()}
+    return _ask_for_jev_key(extension)
+
+
+def _ask_for_jev_key(extension: Any) -> Dict[str, Any]:
+    """Ask for a TypeSafe key as a secret and store it privately."""
 
     try:
         entered = extension.request_input(
@@ -1083,10 +1180,16 @@ def _render_jev_setup(outcome: Mapping[str, Any]) -> str:
     state = outcome.get("jev_setup")
     if state == "configured":
         return "Jev is configured (API key stored)."
+    if state == "already":
+        return "Jev is already configured."
+    if state == "forgotten":
+        if (outcome.get("jev") or {}).get("api_key_source") == "environment":
+            return "Forgot the stored Jev API key; TYPESAFE_API_KEY from your environment is still used."
+        return "Forgot the stored Jev API key."
     if state == "environment":
         return "Jev is using the TYPESAFE_API_KEY from your environment."
     if state == "sdk_only":
-        return "Jev SDK installed, but no API key was set. Run /computer-use jev to add one."
+        return f"Jev SDK installed, but no API key was set. To add one, {JEV_HINT}."
     if state == "sdk_unavailable":
         return "Jev SDK could not be installed. Computer use is unaffected."
     if state == "store_failed":
@@ -1094,6 +1197,155 @@ def _render_jev_setup(outcome: Mapping[str, Any]) -> str:
     if state == "declined":
         return "Jev setup declined. Computer use is unaffected."
     return "Jev setup skipped. Computer use is unaffected."
+
+
+def _action(item_id: str, label: str, description: str, *arguments: str,
+            recommended: bool = False, destructive: bool = False) -> Dict[str, Any]:
+    item: Dict[str, Any] = {
+        "id": item_id,
+        "label": label,
+        "description": description,
+        "command": "computer-use",
+        "arguments": list(arguments),
+    }
+    if recommended:
+        item["recommended"] = True
+    if destructive:
+        item["destructive"] = True
+    return item
+
+
+def _options_menu(computer_use: "ComputerUse", jobs: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
+    """Computer use's options under /extensions, from cached state only."""
+
+    installed, last = computer_use.menu_state()
+    if last is not None:
+        ready, readiness = _readiness(last)
+        status = {"state": "active" if ready else "pending",
+                  "label": readiness[:1].upper() + readiness[1:]}
+        detail = _render_status(last)
+    elif installed:
+        ready = False
+        status = {"state": "pending", "label": "Installed"}
+        detail = "Check status runs the driver self-check and reads what your desktop allows."
+    else:
+        ready = False
+        status = {"state": "pending", "label": "Not set up"}
+        detail = ("Set up installs Cua Driver into octet's private environment, adds the "
+                  "cursor themes and desktop helpers, and checks what your desktop needs.")
+    items = [
+        _action(
+            "setup",
+            "Set up again" if installed else "Set up computer use",
+            ("Update Cua Driver if needed, reinstall the helpers, and re-check permissions"
+             if installed else
+             "Install Cua Driver, cursor themes and desktop helpers, then check permissions"),
+            "setup",
+            recommended=not installed or (last is not None and not ready),
+        ),
+        _action("status", "Check status", "Run the driver self-check and permission probe",
+                "status", recommended=installed and last is None),
+        _jev_menu(),
+        _jev_use_menu(jobs, context),
+    ]
+    return {"title": "Computer use", "status": status, "detail": detail, "items": items}
+
+
+def _jev_menu() -> Dict[str, Any]:
+    report = jev_status()
+    if report["usable"]:
+        state = ("Configured (key from your environment)"
+                 if report.get("api_key_source") == "environment" else "Configured")
+    elif report["sdk_installed"]:
+        state = "SDK installed, no API key"
+    else:
+        state = "Not set up"
+    items = []
+    if not report["usable"]:
+        items.append(_action("setup", "Set up Jev",
+                             "Install the Jev SDK and enter your TypeSafe API key",
+                             "jev", recommended=True))
+    if report["sdk_installed"]:
+        items.append(_action("key", "Replace API key" if report["api_key_configured"] else "Enter API key",
+                             "Store a TypeSafe API key privately; it is never logged", "jev", "key"))
+    if report.get("api_key_source") == "stored" or (
+            report.get("api_key_source") == "environment" and _stored_jev_key()):
+        items.append(_action("forget", "Forget stored API key",
+                             "Delete the key octet stored for Jev", "jev", "forget",
+                             destructive=True))
+    return {
+        "id": "jev",
+        "label": "Jev (optional)",
+        "description": state,
+        "detail": ("Jev (TypeSafe) can choose which offered action computer use takes next, "
+                   "instead of relying only on the model. It is optional and needs a TypeSafe "
+                   "API key.\n\nStatus: " + state),
+        "items": items,
+    }
+
+
+def _stored_jev_key() -> bool:
+    try:
+        from octet_computer_use.jev import key_path  # noqa: PLC0415
+        return key_path().is_file()
+    except OSError:
+        return False
+
+
+def _jev_use_menu(jobs: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
+    items = [
+        _action("status", "Check readiness", "Report whether the pinned recipe is installed",
+                "jev-use", "status"),
+        _action("setup", "Install the recipe",
+                "Download the pinned Cua source and its locked Python dependencies",
+                "jev-use", "setup"),
+        _action("setup-typescript", "Install with TypeScript support",
+                "Also install the recipe's TypeScript dependencies",
+                "jev-use", "setup", "--typescript"),
+        _action("run-mock", "Run the demo with mock Jev",
+                "Drive the local form fixture in an isolated browser without calling TypeSafe",
+                "jev-use", "run"),
+        _action("run-live", "Run the demo with live Jev",
+                "Sends compact synthetic state to TypeSafe and may incur charges",
+                "jev-use", "run", "--live", destructive=True),
+        {
+            "id": "more",
+            "label": "More run options",
+            "description": "The TypeScript runner and the visual path",
+            "items": [
+                _action("typescript", "Run with the TypeScript runner",
+                        "Needs the recipe installed with TypeScript support",
+                        "jev-use", "run", "--typescript"),
+                _action("typescript-live", "Run with the TypeScript runner and live Jev",
+                        "Sends compact synthetic state to TypeSafe and may incur charges",
+                        "jev-use", "run", "--typescript", "--live", destructive=True),
+                _action("visual", "Run the visual path",
+                        "Needs the separately installed Cua perception extension",
+                        "jev-use", "run", "--visual-fixture", "--require-visual-path"),
+            ],
+        },
+    ]
+    for job_id, operation, state in jobs.owned(context)[:8]:
+        job_items = [_action("check", "Check job", "Show this job's state or result",
+                             "jev-use", "status", job_id)]
+        if state == "running":
+            job_items.append(_action("cancel", "Cancel job",
+                                     "Signal the job to stop; this is not a rollback",
+                                     "jev-use", "cancel", job_id, destructive=True))
+        items.append({
+            "id": "job:" + job_id,
+            "label": f"Job {job_id[:8]} · {operation} · {state}",
+            "items": job_items,
+        })
+    return {
+        "id": "jev-use",
+        "label": "jev-use recipe (advanced)",
+        "description": "Upstream Cua demo where Jev fills a local test form",
+        "detail": ("The pinned upstream jev-use recipe runs as a background job in its own "
+                   "isolated browser against a local form fixture. It cannot ask before each "
+                   "action, so runs are refused while per-action confirmation is on."),
+        "items": items,
+    }
 
 
 # Keep model-visible target lists compact; structured details are not sent to the model.
@@ -1267,8 +1519,8 @@ def _render_status(status: Mapping[str, Any]) -> str:
         )
     if not status.get("installed"):
         return (
-            "Cua Driver is not installed. Run the /computer-use setup command or "
-            "the computer_use_setup tool to provision it from the package index."
+            f"Cua Driver is not installed. To install it, {driver_module.SETUP_HINT} "
+            "(or ask for the computer_use_setup tool)."
         )
     lines = [
         f"Cua Driver {status.get('version') or 'unknown'} is installed.",
@@ -1282,7 +1534,7 @@ def _render_status(status: Mapping[str, Any]) -> str:
         if status.get("cursor_enabled"):
             lines.append(f"cursor theme: {status.get('cursor_theme', 'cua.default')}")
             if not status.get("cursor_personalized"):
-                lines.append("Run /computer-use setup locally to install the bundled model-color themes.")
+                lines.append(f"To install the bundled model-color themes, {driver_module.SETUP_HINT}.")
     elif status.get("platform") == "linux":
         lines.append("runtime: direct (drives the desktop session octet runs in)")
         _render_linux_session(status, lines)
@@ -1350,8 +1602,8 @@ def _render_linux_session(status: Mapping[str, Any], lines: List[str]) -> None:
     if helper and helper != "active":
         lines.append("GNOME Shell helper: %s" % (
             status.get("gnome_helper_detail") or {
-                "missing": "not installed; run /computer-use setup, then log out and back in",
-                "upstream": "an older copy is loaded; run /computer-use setup, then log out and back in",
+                "missing": "not installed; set up computer use from /extensions, then log out and back in",
+                "upstream": "an older copy is loaded; set up computer use from /extensions, then log out and back in",
                 "restart-required": "installed; log out and back in once to load it",
             }.get(helper, helper)))
 

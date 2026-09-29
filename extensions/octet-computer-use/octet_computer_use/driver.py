@@ -28,13 +28,16 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from octet_computer_use.windows_security import is_link_or_reparse_point
 
 # The published distribution name on PyPI. It is MIT licensed and ships
 # platform-specific wheels containing the driver executable.
 DISTRIBUTION = "cua-driver"
+
+# Where a person sets computer use up: its options menu under /extensions.
+SETUP_HINT = "open /extensions, choose octet-computer-use, and pick Set up computer use"
 
 # We track the newest release by default. Callers may request an exact version
 # for a reproducible install; the value is passed straight to pip and is never
@@ -329,7 +332,7 @@ def _driver_interpreter(environment: Mapping[str, str]) -> Tuple[str, Tuple[int,
         f"octet's computer-use extension runs on Python {_version_text(current)} "
         f"({sys.executable or 'unknown interpreter'}) and no compatible python3 was "
         f"found. Install Python {_version_text(MINIMUM_PYTHON)} or newer ({hint}), "
-        "then run /computer-use setup again."
+        f"then {SETUP_HINT} again."
     )
 
 
@@ -502,6 +505,7 @@ def provision(
     *,
     version: str = DEFAULT_VERSION,
     timeout: int = INSTALL_TIMEOUT_SECONDS,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Path:
     """Provision the driver into the octet-owned venv and return its binary.
 
@@ -511,29 +515,35 @@ def provision(
     version installed, so a stale or mismatched runtime is never silently
     returned. The install performs a network download from the configured
     package index; the caller is responsible for having obtained user consent
-    for that network access.
+    for that network access. ``progress`` receives one short line per phase.
     """
 
+    report = progress or _no_progress
     _ensure_directories(paths)
     # Validate the request before anything else. An explicit pin must be checked
     # against what is installed, never satisfied by whatever happens to be
     # present, and a malformed pin must not be reported as a successful reuse.
     spec = _pip_spec(version)
     requested = version.strip()
+    report(f"Checking the installed {DISTRIBUTION}…")
     existing = installed_binary(paths)
     if existing is not None and _satisfies_request(existing, requested):
+        report(f"{DISTRIBUTION} {driver_version(existing) or ''} is already installed".replace("  ", " "))
         return existing
 
     # Choose a compatible interpreter before touching the venv, so a missing
     # one leaves any existing runtime as it was.
+    report(f"Finding Python {_version_text(MINIMUM_PYTHON)} or newer…")
     environment = _install_environment()
     interpreter, interpreter_version = _driver_interpreter(environment)
+    report(f"Using Python {_version_text(interpreter_version)} ({interpreter})")
 
     # A mismatch between the request and what is installed re-enters the owned
     # venv from scratch, so a version switch cannot leave a half-upgraded
     # runtime behind.
     paths.venv.mkdir(parents=True, exist_ok=True)
 
+    report("Creating the driver's private Python environment…")
     create = _run(
         [interpreter, "-m", "venv", "--clear", str(paths.venv)],
         env=environment,
@@ -544,12 +554,15 @@ def provision(
         # interpreter cannot bootstrap pip into a venv. Install the published
         # wheel directly instead of asking the user to install a system package.
         if _direct_wheel_supported():
-            return _provision_without_pip(paths, requested, environment, timeout, interpreter)
+            return _provision_without_pip(
+                paths, requested, environment, timeout, interpreter, progress=report
+            )
         raise ProvisionError(
             f"failed to create runtime venv: {(create.stderr or create.stdout or '').strip()[:400]}"
         )
 
     python = _venv_python_for(paths.venv)
+    report(f"Downloading and installing {spec} (this can take a minute)…")
     install = _run(
         [
             str(python),
@@ -567,7 +580,9 @@ def provision(
     if install.returncode != 0:
         output = (install.stderr or install.stdout or "")
         if "No module named pip" in output and _direct_wheel_supported():
-            return _provision_without_pip(paths, requested, environment, timeout, interpreter)
+            return _provision_without_pip(
+                paths, requested, environment, timeout, interpreter, progress=report
+            )
         detail = output.strip()[:400]
         if "No matching distribution" in output or "Could not find a version" in output:
             unsupported = _unsupported_platform()
@@ -588,7 +603,12 @@ def provision(
     binary = installed_binary(paths)
     if binary is None:
         raise ProvisionError(f"{spec} installed but no driver executable was found")
+    report(f"Installed {DISTRIBUTION} {driver_version(binary) or ''}".rstrip())
     return binary
+
+
+def _no_progress(_message: str) -> None:
+    pass
 
 
 # The wheel-only fallback reads the package index's JSON API and downloads the
@@ -646,6 +666,8 @@ def _provision_without_pip(
     environment: Mapping[str, str],
     timeout: int,
     interpreter: str,
+    *,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Path:
     """Install the published Linux wheel into a pip-less venv.
 
@@ -655,6 +677,8 @@ def _provision_without_pip(
     package index's published digest.
     """
 
+    report = progress or _no_progress
+    report("This Python has no pip; installing the published wheel directly…")
     arch = _LINUX_ARCHES[platform.machine().lower()]
     glibc = _glibc_version()
     if glibc is None or glibc < _MANYLINUX_GLIBC:
@@ -684,6 +708,9 @@ def _provision_without_pip(
         with urllib.request.urlopen(wheel["url"], timeout=timeout) as response, \
                 open(archive, "wb") as sink:
             size = 0
+            reported = -1
+            total = _content_length(response)
+            report(f"Downloading {wheel['filename']}…")
             while True:
                 chunk = response.read(1 << 20)
                 if not chunk:
@@ -693,6 +720,10 @@ def _provision_without_pip(
                     raise ProvisionError(f"{wheel['filename']} exceeds the download ceiling")
                 digest.update(chunk)
                 sink.write(chunk)
+                if total and size * 10 // total > reported:
+                    reported = size * 10 // total
+                    report(f"Downloaded {size >> 20} of {total >> 20} MB")
+        report("Verifying the download against its published SHA-256…")
         if digest.hexdigest() != wheel["digests"]["sha256"]:
             raise ProvisionError(f"{wheel['filename']} does not match its published SHA-256")
         site.mkdir(parents=True, exist_ok=True)
@@ -717,7 +748,15 @@ def _provision_without_pip(
     binary = installed_binary(paths)
     if binary is None:
         raise ProvisionError(f"{wheel['filename']} installed but no driver executable was found")
+    report(f"Installed {DISTRIBUTION} {driver_version(binary) or ''}".rstrip())
     return binary
+
+
+def _content_length(response: Any) -> int:
+    try:
+        return max(0, int(response.headers.get("Content-Length") or 0))
+    except (AttributeError, TypeError, ValueError):
+        return 0
 
 
 #: The optional TypeSafe SDK, installed into the same octet-owned venv as the

@@ -77,3 +77,4 @@ tools = [
 commands = ["computer-use"]
 ui = ["status"]
 confirmations = true
+menu = true

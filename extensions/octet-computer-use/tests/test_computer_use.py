@@ -883,7 +883,153 @@ class StatusRowTests(unittest.TestCase):
         self.assertNotIn("cannot grant a system permission", text)
 
     def test_not_installed_points_at_setup(self):
-        self.assertIn("/computer-use setup", _render_status({"installed": False}))
+        text = _render_status({"installed": False})
+        self.assertIn("/extensions", text)
+        self.assertIn("Set up computer use", text)
+        self.assertNotIn("/computer-use", text)
+
+
+def _menu_items(items, depth=1):
+    """Walk a menu and check the invariants the host enforces."""
+    ids = set()
+    recommended = 0
+    for item in items:
+        assert item["id"] not in ids, item
+        ids.add(item["id"])
+        recommended += bool(item.get("recommended"))
+        assert ("command" in item) != ("items" in item), item
+        if "command" in item:
+            assert item["command"] == "computer-use", item
+            yield depth, item
+        else:
+            assert not item.get("destructive") and not item.get("arguments"), item
+            yield from _menu_items(item["items"], depth + 1)
+    assert recommended <= 1, items
+    assert depth <= 4
+
+
+class OptionsMenuTests(unittest.TestCase):
+    OWNER = {"resource_owner": {"session_id": "session", "extension_instance_id": "instance",
+                                "process_generation": 1}}
+
+    def menu(self, computer, extension):
+        from unittest import mock
+        with mock.patch.object(entrypoint, "jev_status", return_value={
+                "sdk_installed": False, "api_key_configured": False,
+                "api_key_source": None, "usable": False}):
+            return extension._menu_handler({}, self.OWNER)
+
+    def test_a_fresh_install_recommends_setup_and_routes_every_action(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(driver, "installed_binary", return_value=None), \
+             mock.patch.object(driver, "desktop_app", return_value=None):
+            menu = self.menu(computer, extension)
+        self.assertEqual(menu["status"]["label"], "Not set up")
+        self.assertEqual(menu["items"][0]["arguments"], ["setup"])
+        self.assertTrue(menu["items"][0]["recommended"])
+        actions = {tuple(item["arguments"]): item for _, item in _menu_items(menu["items"])}
+        for arguments in (("setup",), ("status",), ("jev",), ("jev-use", "status"),
+                          ("jev-use", "setup"), ("jev-use", "run"), ("jev-use", "run", "--live")):
+            self.assertIn(arguments, actions)
+        self.assertTrue(actions[("jev-use", "run", "--live")]["destructive"])
+
+    def test_the_menu_reports_the_last_probe_without_starting_the_driver(self):
+        from unittest import mock
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(computer, "status", return_value={
+                "installed": True, "version": "0.31.0", "doctor_ok": True,
+                "permissions": "granted", "runtime": "direct", "platform": "darwin"}):
+            computer.publish_status()
+        with mock.patch.object(entrypoint.DriverClient, "start",
+                               side_effect=AssertionError("the menu must not start the driver")):
+            menu = self.menu(computer, extension)
+        self.assertEqual(menu["status"], {"state": "active", "label": "Ready"})
+        self.assertIn("0.31.0", menu["detail"])
+        self.assertEqual(menu["items"][0]["label"], "Set up again")
+        self.assertFalse(any(item.get("recommended") for item in menu["items"]))
+
+    def test_owned_jev_use_jobs_can_be_checked_and_cancelled(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(driver, "installed_binary", return_value=None), \
+             mock.patch.object(driver, "desktop_app", return_value=None), \
+             mock.patch.object(entrypoint.jev_use_jobs.Jobs, "owned", return_value=[
+                 ("a" * 32, "run", "running"), ("b" * 32, "setup", "finished")]):
+            menu = self.menu(computer, extension)
+        jev_use = next(item for item in menu["items"] if item["id"] == "jev-use")
+        running, finished = [item for item in jev_use["items"] if item["id"].startswith("job:")]
+        self.assertEqual([tuple(action["arguments"]) for action in running["items"]],
+                         [("jev-use", "status", "a" * 32), ("jev-use", "cancel", "a" * 32)])
+        self.assertTrue(running["items"][1]["destructive"])
+        self.assertEqual([tuple(action["arguments"]) for action in finished["items"]],
+                         [("jev-use", "status", "b" * 32)])
+
+    def test_setup_reports_each_step_as_live_progress(self):
+        from unittest import mock
+        from octet_computer_use import cursor_theme, gnome_helper
+
+        extension, computer = entrypoint.create_extension()
+        steps = []
+
+        def provision(version="", *, progress=None):
+            progress("Downloading and installing cua-driver>=0.30.2 (this can take a minute)…")
+            return {"provisioned": True, "binary": "/tmp/cua-driver", "version": "0.31.0"}
+
+        with mock.patch.object(extension, "progress",
+                               side_effect=lambda message=None, **_: steps.append(message)), \
+             mock.patch.object(computer, "provision", side_effect=provision), \
+             mock.patch.object(computer, "publish_status", return_value={
+                "installed": True, "permissions": "granted", "runtime": "direct",
+                "platform": "linux"}), \
+             mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "declined"}), \
+             mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24), \
+             mock.patch.object(gnome_helper, "is_gnome_wayland", return_value=True), \
+             mock.patch.object(gnome_helper, "install", return_value={"gnome_helper": "active"}):
+            result = extension._commands["computer-use"].handler(["setup"], {})
+        self.assertFalse(result.get("is_error"))
+        self.assertEqual(steps[0], "Downloading and installing cua-driver>=0.30.2 (this can take a minute)…")
+        self.assertIn("Installing the model-colored cursor themes…", steps)
+        self.assertIn("Installing the GNOME Shell helper…", steps)
+        self.assertIn("Jev setup declined", result["content"][0]["text"])
+
+    def test_progress_is_optional(self):
+        extension, _ = entrypoint.create_extension()
+        # Outside a request with negotiated progress the step is dropped.
+        entrypoint._progress(extension, "Checking…")
+
+    def test_jev_keys_are_entered_as_secrets_replaced_and_forgotten(self):
+        from unittest import mock
+        from octet_computer_use import jev
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(os.environ, {"OCTET_STATE_DIR": directory}), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TYPESAFE_API_KEY", None)
+            extension, _ = entrypoint.create_extension()
+            command = extension._commands["computer-use"].handler
+            with mock.patch.object(extension, "request_input", return_value="sk-test") as ask:
+                stored = command(["jev", "key"], {})
+            ask.assert_called_once()
+            self.assertTrue(ask.call_args.kwargs["secret"])
+            self.assertFalse(stored.get("is_error"))
+            self.assertNotIn("sk-test", str(stored))
+            self.assertEqual(jev.key_path().read_text(encoding="utf-8"), "sk-test")
+            forgotten = command(["jev", "forget"], {})
+            self.assertIn("Forgot the stored Jev API key", forgotten["content"][0]["text"])
+            self.assertFalse(jev.key_path().exists())
+            self.assertTrue(command(["jev", "unknown"], {})["is_error"])
+
+    def test_unknown_actions_point_at_the_menu(self):
+        extension, _ = entrypoint.create_extension()
+        result = extension._commands["computer-use"].handler(["bogus"], {})
+        self.assertTrue(result["is_error"])
+        self.assertIn("/extensions", result["content"][0]["text"])
 
 
 
@@ -2086,7 +2232,7 @@ class NoDriverFailClosedTests(unittest.TestCase):
             status = extension._tools["computer_use_status"].handler({}, context)
             self.assertFalse(status.get("is_error"))
             self.assertFalse(status["structured_content"]["installed"])
-            self.assertIn("/computer-use setup", status["content"][0]["text"])
+            self.assertIn("Set up computer use", status["content"][0]["text"])
 
             window = {"pid": 4242, "window_id": 4242}
             for tool, arguments in (

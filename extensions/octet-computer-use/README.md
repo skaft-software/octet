@@ -25,12 +25,17 @@ octet extension install octet-computer-use
 octet --enable-extension octet-computer-use
 ```
 
-Then run the local setup command to provision the driver **and** install the
-bundled model-colored cursor themes:
+Then open `/extensions`, choose **octet-computer-use** (choosing a disabled
+extension enables it first), and pick **Set up computer use**. Setup shows each
+step live as it runs and does everything computer use needs: it provisions the
+driver, installs the bundled model-colored cursor themes, installs the GNOME
+Shell helper on GNOME Wayland, checks your permissions (macOS asks you to allow
+access), and at the end offers the optional Jev setup. **Check status** re-runs
+the driver self-check and permission probe, and the menu's header shows the
+result. Esc cancels a running step.
 
-```console
-/computer-use setup
-```
+The web UI has no options menu yet; there the same actions run as the
+`/computer-use` command (`setup`, `status`, `jev`, and `jev-use …`).
 
 Setup installs `cua-driver` 0.30.2 or newer. It publishes builds for macOS 13
 or newer, Linux with glibc 2.31 or newer on x86_64 or aarch64, and 64-bit
@@ -192,10 +197,10 @@ use the built `octet.exe` and the checkout's `extensions` directory):
 .\octet.exe --extension-dir .\extensions --enable-extension octet-computer-use
 ```
 
-Then, inside octet, run `/computer-use setup` (this downloads the published
-`cua-driver` wheel from the configured package index into
-`%USERPROFILE%\.octet\computer-use`, and only when you run it) and
-`/computer-use status`. The driver runs as your user; Windows needs no
+Then, inside octet, open `/extensions`, choose octet-computer-use, and pick
+**Set up computer use** (this downloads the published `cua-driver` wheel from
+the configured package index into `%USERPROFILE%\.octet\computer-use`, and
+only when you run it), then **Check status**. The driver runs as your user; Windows needs no
 separate grant, but it cannot drive windows of elevated (administrator)
 applications from a non-elevated octet, nor the secure desktop (UAC prompts,
 the lock screen). `--safe-mode` keeps executable extensions stopped, so run
@@ -334,21 +339,16 @@ constructs candidates, asks Jev, executes the selected action, and verifies the
 submitted value against the local fixture's independent `/state` endpoint.
 The existing `computer_use_jev_choose` remains a separate lightweight chooser.
 
-```console
-/computer-use jev-use status
-/computer-use jev-use setup
-/computer-use jev-use run
-/computer-use jev-use run --live
-```
+All of it is under `/extensions` → octet-computer-use → **jev-use recipe
+(advanced)**: **Check readiness**, **Install the recipe** (optionally **with
+TypeScript support**), **Run the demo with mock Jev** or **with live Jev**, and
+**More run options** for the TypeScript runner and the visual path.
 
 Setup and runs are background jobs because the host RPC deadline (≈30s)
-is shorter than a recipe run. Tools and commands return immediately with a
-`job_id`; poll for the terminal result instead of re-launching:
-
-```console
-/computer-use jev-use status <job-id>
-/computer-use jev-use cancel <job-id>
-```
+is shorter than a recipe run. Tools and menu actions return immediately with a
+`job_id`; poll for the terminal result instead of re-launching. Your jobs are
+listed in the same menu, where each can be checked and a running one
+cancelled.
 
 `computer_use_jev_use_status` without arguments reports pinned-source
 readiness synchronously and never installs anything. With `{"job_id": ...}`
@@ -375,38 +375,34 @@ Preparation, mock proof, live proof, and visual proof are distinct:
   computer. Install `uv` first. For TypeScript, install Node.js 22+ and npm.
   Runs never silently install; they require explicit setup first.
 
-```console
-/computer-use jev-use setup --typescript
-/computer-use jev-use run --typescript --live
-```
+  The menu's **Install with TypeScript support** and **More run options** →
+  **Run with the TypeScript runner and live Jev** are the TypeScript variants.
 
 - **Mock proof** (default `run`) uses the deterministic mock provider but
   still operates a real isolated browser against the local form fixture; it
   is not a no-effect dry run. Mock choices prove wiring, not model quality.
 - **Live proof** (`--live`) adds live Jev checks and may incur TypeSafe
-  charges. It uses the key already configured by `/computer-use jev`, never
+  charges. It uses the key already configured under **Jev (optional)**, never
   a key in command arguments. Compact observations go to TypeSafe;
   screenshot pixels do not. The upstream runner strips the provider key from
   Driver's child environment. The upstream SDK may retry requests, so step
   and process bounds are not billing caps.
 - **Visual proof** is capability-gated by upstream. Normal runs prefer
   semantic browser references. With the separately installed Cua perception
-  extension, exercise capture-bound visual clicks with:
+  extension, exercise capture-bound visual clicks with **More run options** →
+  **Run the visual path**.
 
-```console
-/computer-use jev-use run --visual-fixture --require-visual-path
-```
-
-`--visual-observation auto|always|off` controls observation and `--max-steps
-1..32` bounds each runner's decisions. `--port 0..65535` selects the
+For finer control, the `computer_use_jev_use_run` tool takes these options.
+`visual_observation` (`auto`, `always` or `off`) controls observation and
+`max_steps` (1–32) bounds each runner's decisions. `port` (0–65535) selects the
 loopback fixture port (default `0` picks an unused port).
-`--expect-visual-status ok|not_installed|error|unavailable` requires every
-attempted visual parse to log that status; with `--visual-fixture` and a
-non-`ok` status the run must log a fallback that never submits
-(`observed: {submitted: null}`, outcome `refuted`/`unknown`/`abstained`/
+`expect_visual_status` (`ok`, `not_installed`, `error` or `unavailable`)
+requires every attempted visual parse to log that status; with
+`visual_fixture` and a non-`ok` status the run must log a fallback that never
+submits (`observed: {submitted: null}`, outcome `refuted`/`unknown`/`abstained`/
 `budget_exhausted`) instead of claiming task success. `skipped` steps do
 not count as attempts, but at least one attempt is required.
-`--require-visual-path` needs `--visual-fixture` and an `ok` visual status,
+`require_visual_path` needs `visual_fixture` and an `ok` visual status,
 and fails unless every runner submitted through `click` with the exact
 `capture_id`.
 

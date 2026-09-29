@@ -319,6 +319,33 @@ class InterpreterPreflightTests(unittest.TestCase):
             self.assertEqual(driver_module._interpreter_candidates(), ["/opt/homebrew/bin/python3"])
 
 
+    def test_a_fresh_install_reports_each_phase_as_it_starts(self):
+        binaries = iter([None, Path("/tmp/cua-driver")])
+        steps = []
+        with patch.object(driver_module, "_driver_interpreter",
+                          return_value=("/usr/bin/python3.12", (3, 12))), \
+                patch.object(driver_module, "_run", self._runner({})), \
+                patch.object(driver_module, "installed_binary", lambda paths: next(binaries)), \
+                patch.object(driver_module, "driver_version", return_value="0.31.0"):
+            driver_module.provision(self.paths, progress=steps.append)
+        self.assertEqual(steps, [
+            "Checking the installed cua-driver…",
+            "Finding Python 3.10 or newer…",
+            "Using Python 3.12 (/usr/bin/python3.12)",
+            "Creating the driver's private Python environment…",
+            "Downloading and installing cua-driver>=0.30.2 (this can take a minute)…",
+            "Installed cua-driver 0.31.0",
+        ])
+
+    def test_reusing_an_install_says_so(self):
+        steps = []
+        with patch.object(driver_module, "installed_binary", lambda paths: Path("/tmp/cua-driver")), \
+                patch.object(driver_module, "driver_version", return_value="0.31.0"):
+            driver_module.provision(self.paths, progress=steps.append)
+        self.assertEqual(steps, ["Checking the installed cua-driver…",
+                                 "cua-driver 0.31.0 is already installed"])
+
+
 class PlatformSupportTests(unittest.TestCase):
     """A no-match install names the platform instead of blaming the index."""
 

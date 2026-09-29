@@ -12,7 +12,8 @@ table, and test commands.
 - The driver is third-party software installed from the standard package index
   into `~/.octet/computer-use`. It is not vendored, not forked, and contains no
   part of OpenAI's CUA runtime. This bundle never downloads a driver outside the
-  user-triggered `computer_use_setup` / `/computer-use` provisioning step, and
+  user-triggered `computer_use_setup` tool or **Set up computer use** menu
+  action (under `/extensions`), and
   never runs a piped remote install script.
 - The bundle **never grants an operating-system permission**. macOS
   Accessibility/Screen Recording, a Windows interactive session, and Linux
@@ -78,7 +79,7 @@ table, and test commands.
   reported and never blocks an action. The bundled themes are written into
   the driver's theme store directly (the wheel has no theme compiler), at setup
   and on first cursor use. GNOME Wayland uses the bundled, Octet-patched Cua
-  WinRects Shell helper (installed by `/computer-use setup`, loaded at the next
+  WinRects Shell helper (installed by computer-use setup, loaded at the next
   login), which draws the cursor itself and is pinned to the model color over
   D-Bus. KDE Plasma's KWin helper must be built against the local KWin, so it
   is not bundled; KDE Wayland works through AT-SPI and portal input.
