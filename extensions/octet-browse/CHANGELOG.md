@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- An options menu under `/extensions` replaces the `/browse` slash command in
+  the terminal UI. It shows the setup and browser state and offers only what
+  applies: **Set up the browser** (or **Follow setup progress**), **Open the
+  browser** or **Close the browser**, **Check status**, and **Reset the browser
+  profile**. Setup now reports each step live, including Chromium's download
+  percentage; only the percentage and size are read back from the install log.
+  Esc stops following while the install continues. The web UI keeps the
+  `/browse` command for now.
+
 ### Deprecated
 
 - Deprecate this bundle in favour of the computer-use extension, which drives a

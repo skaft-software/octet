@@ -255,6 +255,16 @@ class BrowsePresentation:
         with self._lock:
             return self._snapshot_locked()
 
+    def browser_summary(self, owner: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        """Whether ``owner``'s browser is open and its tab count, cached only."""
+        with self._lock:
+            if owner is None or self._resource_owner != dict(owner):
+                return {"open": False, "tab_count": 0}
+            return {
+                "open": bool(self._browser.get("open")),
+                "tab_count": int(self._browser.get("tab_count", 0)),
+            }
+
     def compact_status(self) -> str:
         """Owner-scoped presentation status, used only inside snapshots."""
         with self._lock:

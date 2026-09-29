@@ -41,28 +41,25 @@ trust and keeps executable processes stopped even with explicit grants: startup
 still requires `unsafe_host` and the independent process gate. An admitted
 extension has the current user's OS authority, not an OS sandbox.
 
-After the extension is running:
+After the extension is running, open `/extensions`, choose octet-browse, pick **Set up the browser**, then **Open the browser**, and load the skill with `/skills load octet-browse`.
 
-```text
-/browse setup
-/browse status
-/browse open
-/skills load octet-browse
-```
+**Set up the browser** explains the download location, asks for explicit confirmation, and starts a background installation. The menu action then follows the installation step by step, including Chromium's download percentage; attended menu actions may outlast the normal 30-second extension RPC deadline. Esc stops following, not the install. In the web UI, `/browse setup` returns as soon as the installation starts. Do not activate the skill until the menu's status says **Ready**. Installed bundle skills remain inactive until explicitly loaded, and explicit invocation fails closed if any declared browser tool or built-in `read` is unavailable.
 
-`/browse setup` explains the download location, asks for explicit confirmation, starts a background installation, and returns before the normal 30-second extension RPC deadline. Do not activate the skill until `/browse status` says `ready`. Installed bundle skills remain inactive until explicitly loaded, and explicit invocation fails closed if any declared browser tool or built-in `read` is unavailable.
+## Options menu
 
-## Commands
+| Menu entry | Web UI command | Behavior |
+|---|---|---|
+| Check status | `/browse` or `/browse status` | Bounded setup/browser/profile health and install-log location; never log contents |
+| Set up the browser | `/browse setup` | Confirm, then install pinned dependencies in the background; the menu follows each step (`setup --wait`) |
+| Open the browser | `/browse open` | Launch the always-headful isolated persistent browser |
+| Close the browser | `/browse close` | Close the owning browser context and invalidate tab state |
+| Reset the browser profile | `/browse reset-profile` | Destructive confirmation, close, lock/sentinel verification, then remove only the isolated profile |
 
-| Command | Behavior |
-|---|---|
-| `/browse` or `/browse status` | Bounded setup/browser/profile health and install-log location; never log contents |
-| `/browse setup` | Confirm, then install pinned dependencies in the background |
-| `/browse open` | Launch the always-headful isolated persistent browser |
-| `/browse close` | Close the owning browser context and invalidate tab state |
-| `/browse reset-profile` | Destructive confirmation, close, lock/sentinel verification, then remove only the isolated profile |
+The menu shows only what applies: setup until the runtime is ready (or
+**Follow setup progress** while it installs), then open or close depending on
+this session's browser.
 
-Repeated `/browse open` and `browser_launch` requests reuse the currently open
+Repeated **Open the browser** and `browser_launch` requests reuse the currently open
 context and do not create a new browser process. A context close/crash is
 reported as degraded closed state and its Playwright/profile resources are
 released when the owner worker observes it. Only a subsequent explicit open
@@ -206,7 +203,7 @@ Fixture results do not qualify live-browser behavior:
 python3 -m compileall -q extensions/octet-browse
 ```
 
-Opt-in local HTTP integration tests use only the isolated pinned runtime installed by `/browse setup`; they never contact an external site or shared browser profile:
+Opt-in local HTTP integration tests use only the isolated pinned runtime installed by **Set up the browser**; they never contact an external site or shared browser profile:
 
 ```console
 cd extensions/octet-browse

@@ -41,3 +41,4 @@ commands = ["browse"]
 ui = ["status"]
 confirmations = true
 presentation = true
+menu = true

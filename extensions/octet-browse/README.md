@@ -50,18 +50,13 @@ octet --enable-extension octet-browse
 For a reviewed source checkout instead, add `--extension-dir ./extensions` to
 the launch command from the repository root.
 
-Then, in octet:
-
-```text
-/browse setup
-/browse status
-/browse open
-/skills load octet-browse
-```
-
-Setup asks before downloading pinned Playwright dependencies and runs in the
-background. Wait for status to say `ready` before opening the browser and loading
-the skill. For example, ask: “Open https://example.com and summarize the visible
+Then, in octet, open `/extensions`, choose **octet-browse** (choosing a disabled
+extension enables it first), and pick **Set up the browser**. Setup asks before
+downloading the pinned Playwright dependencies and Chromium, then shows each
+step live, including the Chromium download. Esc stops watching; the install
+keeps running in the background and the menu shows its state. When the menu
+says **Ready**, pick **Open the browser**, then load the skill with
+`/skills load octet-browse`. For example, ask: “Open https://example.com and summarize the visible
 page. Do not submit forms.”
 
 The bundle stays disabled until explicitly enabled. Default full access
@@ -113,8 +108,11 @@ the tool behavior.
   page-created popups can still take focus; physical focus preservation is not
   yet qualified (see [qualification](QUALIFICATION.md)).
 
-Use `/browse close` when finished. `/browse reset-profile` separately confirms
-before removing only the locked, sentinel-verified isolated profile.
+Pick **Close the browser** in the same menu when finished. **Reset the browser
+profile** separately confirms before removing only the locked, sentinel-verified
+isolated profile. The web UI has no options menu yet; there the same actions
+run as the `/browse` command (`setup`, `status`, `open`, `close`,
+`reset-profile`).
 
 ## Reference
 

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Dict, Mapping, Optional
+import time
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from .adapters import AdapterRegistry, BrowserConnector, TargetSelection
 from .artifacts import ArtifactStore, ScreenshotRecord
@@ -11,7 +12,7 @@ from .paths import BrowsePaths, PLAYWRIGHT_VERSION
 from .presentation import BrowsePresentation
 from .profile import ProfileManager
 from .safety import BrowseError, ResourceOwner, bounded_text
-from .setup import SetupManager
+from .setup import SETUP_HINT, SetupManager
 from .snapshot import UNTRUSTED_BEGIN, UNTRUSTED_END
 from .worker import (
     CONFIRMATION_OPERATION_TIMEOUT,
@@ -23,6 +24,10 @@ from .worker import (
 
 
 Confirmation = Callable[[str, Optional[str], bool], bool]
+Progress = Callable[[str], None]
+USAGE = "Unknown browse action; use setup [--wait], status, open, close, or reset-profile."
+# How often a followed setup re-reads its state.
+SETUP_POLL_SECONDS = 0.5
 
 
 class BrowseController:
@@ -80,12 +85,11 @@ class BrowseController:
         confirmation: Confirmation,
         *,
         cancellation: Any = None,
+        progress: Optional[Progress] = None,
     ) -> str:
-        if not isinstance(arguments, list) or len(arguments) > 1:
-            raise BrowseError(
-                "invalid_command",
-                "Usage: /browse [setup|status|open|close|reset-profile]",
-            )
+        follow = arguments == ["setup", "--wait"]
+        if not isinstance(arguments, list) or (len(arguments) > 1 and not follow):
+            raise BrowseError("invalid_command", USAGE)
         action = arguments[0] if arguments else "status"
         command_owner = self._optional_owner(context)
         command_owner_payload = (
@@ -101,7 +105,7 @@ class BrowseController:
             )
             confirmed = confirmation(
                 "Download pinned Playwright 1.57.0 and its Chromium browser?",
-                "Dependencies will be installed only under ~/.octet/browse/. Setup continues in the background.",
+                "Dependencies will be installed only under ~/.octet/browse/.",
                 False,
             )
             if not confirmed:
@@ -115,9 +119,12 @@ class BrowseController:
                 return "Browser setup was denied or no interactive confirmation was available."
             status = self.setup.start()
             self._on_setup_state(status.as_dict())
+            if follow:
+                return self._follow_setup(progress, cancellation)
             return (
                 f"{status.detail}\nStatus: {status.state}\nInstall log: {status.log_path}\n"
-                "Use /browse status; log contents are never returned to the model."
+                "Its state shows in octet-browse's options under /extensions; log "
+                "contents are never returned to the model."
             )
         if action == "status":
             return self._status_text(command_owner, cancellation=cancellation)
@@ -191,10 +198,98 @@ class BrowseController:
                 if removed
                 else "Closed octet Browse; its isolated profile was already absent."
             )
-        raise BrowseError(
-            "invalid_command",
-            "Usage: /browse [setup|status|open|close|reset-profile]",
+        raise BrowseError("invalid_command", USAGE)
+
+    def _follow_setup(self, progress: Optional[Progress], cancellation: Any) -> str:
+        """Report a running setup's steps until it ends.
+
+        Cancelling stops only the reporting: the install keeps running in the
+        background, and its state stays visible in the options menu.
+        """
+        reported = None
+        while True:
+            status = self.setup.status()
+            if status.state != "installing":
+                break
+            line = self.setup.phase() or status.detail
+            download = self.setup.download_progress()
+            if download:
+                line = f"{line} · {download}"
+            if progress is not None and line != reported:
+                progress(line)
+                reported = line
+            if cancellation is not None:
+                cancellation.wait(SETUP_POLL_SECONDS)
+                cancellation.raise_if_cancelled()
+            else:
+                time.sleep(SETUP_POLL_SECONDS)
+        self.presentation.update_setup(status.as_dict())
+        if status.state == "ready":
+            return (
+                f"Playwright {PLAYWRIGHT_VERSION} and Chromium are ready. "
+                "Choose Open the browser to start it."
+            )
+        return f"{status.detail}\nInstall log: {status.log_path}"
+
+    def menu(self, context: Mapping[str, Any]) -> Dict[str, Any]:
+        """Browse's options under /extensions, from local state only."""
+        setup = self.setup.status()
+        owner = self._optional_owner(context)
+        browser = self.presentation.browser_summary(
+            owner.as_dict() if owner is not None else None
         )
+        tabs = int(browser.get("tab_count", 0))
+        if setup.state == "ready" and browser.get("open"):
+            status = {
+                "state": "active",
+                "label": f"Open · {tabs} tab{'s' if tabs != 1 else ''}",
+            }
+        else:
+            status = {
+                "ready": {"state": "active", "label": "Ready"},
+                "installing": {"state": "loading", "label": "Setting up"},
+                "not_set_up": {"state": "empty", "label": "Not set up"},
+            }.get(setup.state, {"state": "degraded", "label": "Needs attention"})
+        items: List[Dict[str, Any]] = []
+
+        def action(item_id: str, label: str, description: str, *arguments: str,
+                   recommended: bool = False, destructive: bool = False) -> None:
+            item: Dict[str, Any] = {
+                "id": item_id,
+                "label": label,
+                "description": description,
+                "command": "browse",
+                "arguments": list(arguments),
+            }
+            if recommended:
+                item["recommended"] = True
+            if destructive:
+                item["destructive"] = True
+            items.append(item)
+
+        if setup.state == "installing":
+            action("setup", "Follow setup progress", "Setup is running; watch it finish",
+                   "setup", "--wait", recommended=True)
+        elif setup.state != "ready":
+            action("setup", "Set up the browser",
+                   f"Download pinned Playwright {PLAYWRIGHT_VERSION} and Chromium into "
+                   "~/.octet/browse", "setup", "--wait", recommended=True)
+        elif browser.get("open"):
+            action("close", "Close the browser", "Close every tab of the isolated browser",
+                   "close")
+        else:
+            action("open", "Open the browser", "Launch the visible isolated browser",
+                   "open", recommended=True)
+        action("status", "Check status", "Setup, browser, tab and profile health", "status")
+        action("reset", "Reset the browser profile",
+               "Close the browser and delete its isolated profile: cookies, logins and "
+               "history", "reset-profile", destructive=True)
+        return {
+            "title": "Browser",
+            "status": status,
+            "detail": setup.detail,
+            "items": items,
+        }
 
     def browser_status(
         self, owner: ResourceOwner, *, cancellation: Any = None
@@ -576,7 +671,7 @@ class BrowseController:
             )
             if degraded:
                 self.presentation.mark_degraded(
-                    "Visible isolated browser runtime is degraded; inspect /browse status and the local install log.",
+                    "Visible isolated browser runtime is degraded; check its status in /extensions and the local install log.",
                     resource_owner=presentation_owner,
                 )
             self.presentation.activity(

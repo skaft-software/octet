@@ -316,6 +316,7 @@ class PackageTests(unittest.TestCase):
                         "ui": ["status"],
                         "confirmations": True,
                         "presentation": True,
+                        "menu": True,
                     },
                     "host": {},
                     "protocol": {

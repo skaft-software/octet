@@ -567,7 +567,7 @@ class BrowserEngine:
                 raise
             raise BrowseError(
                 "launch_failed",
-                "The visible isolated Chromium browser could not be launched; check /browse status.",
+                "The visible isolated Chromium browser could not be launched; check its status in /extensions.",
             ) from error
 
     def tabs(self, operation: OperationContext, owner: ResourceOwner) -> Dict[str, Any]:
@@ -1018,7 +1018,7 @@ class BrowserEngine:
             if site_resolved not in module_path.parents:
                 raise BrowseError(
                     "ambient_playwright_refused",
-                    "An ambient Playwright package was refused; restart octet and use /browse setup.",
+                    "An ambient Playwright package was refused; restart octet and set the browser up from /extensions.",
                 )
         site_text = str(site)
         if site_text not in sys.path:

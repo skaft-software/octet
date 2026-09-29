@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -20,6 +21,11 @@ from .safety import BrowseError, ExclusiveFileLock
 
 
 SETUP_SCHEMA = "octet.browse.setup.v1"
+# Where a person sets the browser up: its options menu under /extensions.
+SETUP_HINT = "open /extensions, choose octet-browse, and pick Set up the browser"
+# Playwright's non-interactive download progress, e.g. "43% of 172.1 MiB".
+_DOWNLOAD_PROGRESS = re.compile(rb"(\d{1,3})% of (\d+(?:\.\d+)? ?[KMG]i?B)")
+_LOG_TAIL_BYTES = 8192
 INSTALL_SENTINEL = ".octet-browse-installing.json"
 COMPLETION_MARKER = ".octet-browse-complete.json"
 MAX_STATE_BYTES = 8192
@@ -56,6 +62,37 @@ class SetupManager:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._process: Optional[subprocess.Popen[Any]] = None
+        self._phase: Optional[str] = None
+
+    def phase(self) -> Optional[str]:
+        """The running install step, for live progress; never log text."""
+        with self._mutex:
+            return self._phase
+
+    def _set_phase(self, phase: Optional[str]) -> None:
+        with self._mutex:
+            self._phase = phase
+
+    def download_progress(self) -> Optional[str]:
+        """Chromium's download percentage and size while it downloads.
+
+        Only the number and size are read back; the install log itself never
+        leaves this machine.
+        """
+        if self.phase() != "Downloading Chromium":
+            return None
+        try:
+            with open(self.paths.install_log, "rb") as log:
+                log.seek(0, os.SEEK_END)
+                log.seek(max(0, log.tell() - _LOG_TAIL_BYTES))
+                tail = log.read(_LOG_TAIL_BYTES)
+        except OSError:
+            return None
+        matches = _DOWNLOAD_PROGRESS.findall(tail)
+        if not matches:
+            return None
+        percent, size = matches[-1]
+        return f"{int(percent)}% of {size.decode('ascii')}"
 
     def status(self) -> SetupStatus:
         log = self.paths.display(self.paths.install_log)
@@ -76,13 +113,13 @@ class SetupManager:
         if state.get("state") == "installing":
             return SetupStatus(
                 "degraded",
-                "A previous browser setup was interrupted; run /browse setup to retry.",
+                f"A previous browser setup was interrupted; to retry, {SETUP_HINT}.",
                 log,
             )
         if state.get("state") in {"failed", "cancelled"}:
             return SetupStatus(
                 "degraded",
-                "Pinned browser setup did not complete; run /browse setup to retry.",
+                f"Pinned browser setup did not complete; to retry, {SETUP_HINT}.",
                 log,
             )
         if runtime_present:
@@ -248,6 +285,7 @@ class SetupManager:
     def _install_background(self, lock: ExclusiveFileLock) -> None:
         temporary: Optional[Path] = None
         try:
+            self._set_phase("Preparing the browser runtime")
             self._cleanup_stale_temporary_directories()
             temporary = self.paths.runtime_parent / (
                 f".playwright-{PLAYWRIGHT_VERSION}.tmp-{uuid.uuid4().hex}"
@@ -274,6 +312,7 @@ class SetupManager:
                     "playwright_version": PLAYWRIGHT_VERSION,
                 },
             )
+            self._set_phase("Checking the installed browser")
             self.validate_runtime(temporary)
             if self.paths.runtime.exists() or self.paths.runtime.is_symlink():
                 try:
@@ -311,7 +350,7 @@ class SetupManager:
                     "degraded",
                     "Pinned browser setup was cancelled."
                     if cancelled
-                    else "Pinned browser setup failed; run /browse setup to retry.",
+                    else f"Pinned browser setup failed; to retry, {SETUP_HINT}.",
                     self.paths.display(self.paths.install_log),
                 )
             )
@@ -327,6 +366,7 @@ class SetupManager:
             with self._mutex:
                 self._process = None
                 self._thread = None
+                self._phase = None
             lock.release()
 
     def _open_install_log(self, *, append: bool) -> IO[str]:
@@ -350,12 +390,14 @@ class SetupManager:
     def _install_pinned_runtime(self, temporary: Path, log: IO[str]) -> None:
         venv = temporary / "venv"
         base_environment = self._install_environment()
+        self._set_phase("Creating the browser environment")
         self._run_command(
             [self._python, "-m", "venv", str(venv)],
             log,
             env=base_environment,
         )
         python = self._venv_python(venv)
+        self._set_phase(f"Installing Playwright {PLAYWRIGHT_VERSION}")
         self._run_command(
             [
                 str(python),
@@ -373,6 +415,7 @@ class SetupManager:
         environment = dict(base_environment)
         environment["PLAYWRIGHT_BROWSERS_PATH"] = str(temporary / "browsers")
         environment["PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT"] = "120000"
+        self._set_phase("Downloading Chromium")
         self._run_command(
             [str(python), "-m", "playwright", "install", "chromium"],
             log,
