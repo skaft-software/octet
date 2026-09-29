@@ -268,6 +268,7 @@ class Runtime:
         kind: str,
         *,
         searxng_endpoint: Optional[str] = None,
+        replace_endpoint: bool = False,
     ) -> Configuration:
         with self._lock:
             if self._active:
@@ -276,6 +277,7 @@ class Runtime:
                 kind,
                 path=self.config_path,
                 searxng_endpoint=searxng_endpoint,
+                replace_endpoint=replace_endpoint,
             )
             self._fingerprint = None
             self._refresh_locked()
@@ -315,6 +317,13 @@ class Runtime:
                 "failed",
             ):
                 self._health = "degraded"
+
+    def provider_kind(self) -> Optional[str]:
+        """The configured provider kind, or ``None`` when none is set up."""
+        with self._lock:
+            if self._active == 0:
+                self._refresh_locked()
+            return self._config.provider.kind if self._config is not None else None
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
@@ -913,10 +922,14 @@ def _command_arguments(arguments: Any) -> list[str]:
     return []
 
 
+USAGE = "Usage: /web-search [status|setup brave|setup searxng|endpoint|logout]"
+SEARXNG_ENDPOINT_PROMPT = "SearXNG JSON search endpoint:"
+
+
 @ext.command(
     name="web-search",
     description="Select and configure the web search provider or inspect its status.",
-    usage="/web-search [status|setup brave|setup searxng|logout]",
+    usage="/web-search [status|setup brave|setup searxng|endpoint|logout]",
 )
 def web_search_command(arguments: Any, _context: Mapping[str, Any]) -> Dict[str, Any]:
     parts = _command_arguments(arguments)
@@ -938,8 +951,21 @@ def web_search_command(arguments: Any, _context: Mapping[str, Any]) -> Dict[str,
             if removed
             else "No Brave Search API key was stored."
         }
+    if action == "endpoint" and len(parts) == 1:
+        endpoint = ext.request_input(SEARXNG_ENDPOINT_PROMPT, secret=False)
+        if endpoint is None:
+            return {"text": "SearXNG endpoint unchanged."}
+        try:
+            config = RUNTIME.select_provider(
+                "searxng", searxng_endpoint=endpoint.strip(), replace_endpoint=True
+            )
+        except ConfigError as error:
+            return {"text": "SearXNG endpoint unchanged: %s" % error.safe_message}
+        PRESENTATION.set_status(RUNTIME.status())
+        return {"text": "SearXNG selected with the new endpoint.\nStatus: web · %s"
+                % config.provider.label}
     if action != "setup" or len(parts) != 2 or parts[1] not in ("brave", "searxng"):
-        return {"text": "Usage: /web-search [status|setup brave|setup searxng|logout]"}
+        return {"text": USAGE}
 
     provider_kind = parts[1]
     try:
@@ -969,7 +995,7 @@ def web_search_command(arguments: Any, _context: Mapping[str, Any]) -> Dict[str,
             except ConfigError as error:
                 if "needs a search endpoint URL" not in error.safe_message:
                     raise
-                endpoint = ext.request_input("SearXNG JSON search endpoint:", secret=False)
+                endpoint = ext.request_input(SEARXNG_ENDPOINT_PROMPT, secret=False)
                 if endpoint is None:
                     return {"text": "SearXNG setup cancelled; no configuration changed."}
                 config = RUNTIME.select_provider("searxng", searxng_endpoint=endpoint)
@@ -978,6 +1004,78 @@ def web_search_command(arguments: Any, _context: Mapping[str, Any]) -> Dict[str,
         return {"text": "%s\nStatus: web · %s" % (text, config.provider.label)}
     except ConfigError as error:
         return {"text": "Web search setup failed: %s" % error.safe_message}
+
+
+def _menu_action(item_id: str, label: str, description: str, *arguments: str,
+                 recommended: bool = False, destructive: bool = False) -> Dict[str, Any]:
+    item: Dict[str, Any] = {
+        "id": item_id,
+        "label": label,
+        "description": description,
+        "command": "web-search",
+        "arguments": list(arguments),
+    }
+    if recommended:
+        item["recommended"] = True
+    if destructive:
+        item["destructive"] = True
+    return item
+
+
+def _brave_key_stored() -> bool:
+    try:
+        RUNTIME.brave_api_key()
+    except (CredentialRequired, ConfigError):
+        return False
+    return True
+
+
+@ext.menu
+def web_search_menu(_request: Mapping[str, Any], _context: Mapping[str, Any]) -> Dict[str, Any]:
+    """Provider choice and credentials under /extensions."""
+
+    state = RUNTIME.status()
+    kind = RUNTIME.provider_kind()
+    ready = state.get("state") == "ready"
+    status = {
+        "ready": {"state": "active", "label": "Using %s" % state.get("provider")},
+        "unconfigured": {"state": "pending", "label": "Brave Search needs an API key"},
+        "disabled": {"state": "empty", "label": "Not set up"},
+    }.get(state.get("state"), {"state": "degraded", "label": state["text"].removeprefix("web · ")})
+    brave = kind == "brave"
+    searxng = kind == "searxng"
+    items = [
+        _menu_action(
+            "brave",
+            "Use Brave Search" if not (brave and ready) else "Brave Search (selected)",
+            "Recommended. Asks for your Brave Search API key the first time",
+            "setup", "brave",
+            recommended=not ready,
+        ),
+        _menu_action(
+            "searxng",
+            "Use SearXNG" if not (searxng and ready) else "SearXNG (selected)",
+            "Your own SearXNG instance; asks for its JSON endpoint the first time",
+            "setup", "searxng",
+        ),
+        _menu_action("status", "Check status", "Show the provider and its health", "status"),
+    ]
+    if searxng:
+        items.insert(2, _menu_action(
+            "endpoint",
+            "Change the SearXNG endpoint",
+            "Point web search at a different SearXNG JSON endpoint",
+            "endpoint",
+        ))
+    if _brave_key_stored():
+        items.append(_menu_action(
+            "logout", "Log out of Brave Search", "Delete the stored Brave Search API key",
+            "logout", destructive=True,
+        ))
+    menu: Dict[str, Any] = {"title": "Web search", "status": status, "items": items}
+    if not ready:
+        menu["detail"] = "Get a Brave Search API key at %s" % BRAVE_SEARCH_KEY_URL
+    return menu
 
 
 @ext.tool(

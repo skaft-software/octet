@@ -54,6 +54,7 @@ class ReleaseAndFixtureTests(unittest.TestCase):
             'tools = ["web_search", "web_fetch", "web_find"]',
             'commands = ["web-search"]',
             "presentation = true",
+            "menu = true",
             "network = true",
         ):
             self.assertIn(exact, manifest)
@@ -74,6 +75,7 @@ class ReleaseAndFixtureTests(unittest.TestCase):
                     "commands": ["web-search"],
                     "ui": ["status"],
                     "presentation": True,
+                    "menu": True,
                 },
                 "protocol": {
                     "version": "0.4",

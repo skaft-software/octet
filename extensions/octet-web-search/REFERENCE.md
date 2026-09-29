@@ -65,16 +65,19 @@ API `0.4`, exact octet `0.8.0`.
 
 ## Choose a provider
 
-Open `/extensions` and select `octet-web-search`. Enabling a running trusted copy
-opens a second picker using the same interface:
+Open `/extensions` and select `octet-web-search` (a disabled copy is enabled
+first). Its options menu shows the current provider and offers:
 
-1. **Brave Search (recommended)**
-2. **SearXNG**
+1. **Use Brave Search** (recommended)
+2. **Use SearXNG**
+3. **Change the SearXNG endpoint**, once SearXNG is selected
+4. **Check status**
+5. **Log out of Brave Search**, while a key is stored
+6. **Disable octet-web-search**
 
-Selecting an already enabled `octet-web-search` opens that provider picker again
-and also offers to disable the extension. `/web-search status`,
-`/web-search setup brave`, `/web-search setup searxng`, and
-`/web-search logout` provide keyboard/scriptable fallbacks.
+The web UI has no options menu yet; there `/web-search status`,
+`/web-search setup brave`, `/web-search setup searxng`, `/web-search endpoint`,
+and `/web-search logout` do the same.
 
 ### Brave Search (recommended)
 

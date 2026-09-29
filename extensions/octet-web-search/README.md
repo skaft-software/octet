@@ -23,23 +23,21 @@ octet --enable-extension octet-web-search
 For a reviewed source checkout instead, add `--extension-dir ./extensions` to
 the launch command from the repository root.
 
-Then choose a provider and load the optional research skill:
-
-```text
-/web-search setup brave
-/web-search status
-/skills load octet-web-search
-```
+Then open `/extensions`, choose **octet-web-search** (choosing a disabled
+extension enables it first), and pick **Use Brave Search**. Load the optional
+research skill with `/skills load octet-web-search`.
 
 Brave setup shows <https://api.search.brave.com/app/keys> and asks for the key
 through a private input surface. Do not paste a key into a prompt or ordinary
 configuration. For example, ask: “Find the official Python pathlib documentation
 and cite the sources for your summary.”
 
-Use `/web-search setup searxng` instead for SearXNG; its instance must allow
-`format=json`. `/extensions` also provides the provider picker. Selecting the
-already enabled extension lets you switch providers or disable it;
-`/web-search logout` is the scriptable logout command.
+Pick **Use SearXNG** instead for SearXNG; its instance must allow
+`format=json`, and **Change the SearXNG endpoint** points it elsewhere later.
+The same menu shows the current provider, checks its status, logs out of Brave
+Search (deleting the stored key), and disables the extension. The web UI has
+no options menu yet; there the same actions run as the `/web-search` command
+(`status`, `setup brave`, `setup searxng`, `endpoint`, `logout`).
 
 ## What the tools do
 

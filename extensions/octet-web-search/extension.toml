@@ -20,3 +20,4 @@ tools = ["web_search", "web_fetch", "web_find"]
 commands = ["web-search"]
 ui = ["status"]
 presentation = true
+menu = true
