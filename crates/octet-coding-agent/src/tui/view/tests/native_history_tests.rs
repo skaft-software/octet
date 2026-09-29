@@ -1,4 +1,5 @@
 //! Native-reader probes retain actual isolated ShellComponent -> Pi -> VT frames.
+use super::support::*;
 use super::*;
 
 struct NativeReplay {

@@ -83,31 +83,9 @@ fn write_binary(path: &Path, bytes: &[u8]) {
     }
 }
 
-/// Write one fixture file that deliberately has no execute bit.
-fn write_non_executable(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
-}
-
-/// A resolver that answers with one fixed path: the candidate the test owns.
-///
-/// Production resolves `std::env::current_exe()`; a test that relied on that
-/// would be decided by the test harness binary instead of its own fixture.
 fn resolving(path: &Path) -> ExecutableResolver {
     let path = path.to_path_buf();
     let resolve = move || -> std::io::Result<PathBuf> { Ok(path.clone()) };
-    Arc::new(resolve)
-}
-
-/// A resolver that fails the way an update in flight does.
-fn unresolvable(kind: std::io::ErrorKind, detail: &str) -> ExecutableResolver {
-    let detail = detail.to_owned();
-    let resolve =
-        move || -> std::io::Result<PathBuf> { Err(std::io::Error::new(kind, detail.clone())) };
     Arc::new(resolve)
 }
 
@@ -257,17 +235,6 @@ fn replacing_the_image_changes_the_generation() {
 fn missing_executable_cannot_be_captured() {
     let directory = tempfile::tempdir().unwrap();
     assert!(BinaryGeneration::capture(&directory.path().join("absent")).is_err());
-}
-
-/// Sorted entry names of one directory, so a test can prove that a reload
-/// created nothing beside the executable or beside another process's state.
-fn directory_entries(directory: &Path) -> Vec<String> {
-    let mut entries: Vec<String> = std::fs::read_dir(directory)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    entries.sort();
-    entries
 }
 
 #[test]
