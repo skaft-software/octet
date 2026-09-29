@@ -9,7 +9,7 @@
 //! private items it reached while the tests were inline.
 
 use super::*;
-use crate::test_fixtures::base_request;
+use crate::test_fixtures::{base_request, reasoning_capability};
 use crate::types::{AssistantMessage, Message, ModalitySet, ToolCall, ToolCallId, UserMessage};
 
 fn dummy_caps(
@@ -40,16 +40,7 @@ fn dummy_caps(
         tools,
         parallel_tool_calls: tools,
         reasoning: if reasoning {
-            Some(crate::types::ReasoningCapability {
-                options: None,
-                control: crate::types::ReasoningControl::Effort,
-                exposes_text: true,
-                preserves_state: true,
-                effort_budgets: None,
-                openai_chat_mode: crate::types::OpenAiChatReasoningMode::Standard,
-                min_effort: crate::types::ReasoningEffort::Minimal,
-                max_effort: crate::types::ReasoningEffort::High,
-            })
+            Some(reasoning_capability())
         } else {
             None
         },

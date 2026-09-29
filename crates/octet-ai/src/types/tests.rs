@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::pricing::TokenRate;
-use crate::test_fixtures::base_request;
+use crate::test_fixtures::{base_request, reasoning_capability};
 use std::time::SystemTime;
 
 #[test]
@@ -136,14 +136,8 @@ fn test_model_spec_serde_round_trip() {
             tools: true,
             parallel_tool_calls: true,
             reasoning: Some(ReasoningCapability {
-                options: None,
-                control: ReasoningControl::Effort,
-                exposes_text: true,
                 preserves_state: false,
-                effort_budgets: None,
-                openai_chat_mode: OpenAiChatReasoningMode::Standard,
-                min_effort: ReasoningEffort::Minimal,
-                max_effort: ReasoningEffort::High,
+                ..reasoning_capability()
             }),
             responses_lite: false,
             agent_delegation: None,

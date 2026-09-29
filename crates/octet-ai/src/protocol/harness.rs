@@ -17,9 +17,10 @@ use crate::error::AiError;
 use crate::pricing::Pricing;
 use crate::protocol::sse::{SseDecoder, SseEvent};
 use crate::stream::{guard, ResponseBuilder, StreamEvent};
+use crate::test_fixtures::reasoning_capability;
 use crate::types::{
     Capabilities, Endpoint, EndpointId, Modality, ModalitySet, ModelId, ModelLimits, ModelSpec,
-    Protocol, ReasoningCapability, ReasoningControl, Response, ToolDef,
+    Protocol, Response, ToolDef,
 };
 
 /// A codec's per-event streaming decoder.
@@ -46,16 +47,7 @@ pub(crate) fn model(protocol: Protocol, pricing: Option<Pricing>) -> Model {
             output_modalities: output,
             tools: true,
             parallel_tool_calls: true,
-            reasoning: Some(ReasoningCapability {
-                options: None,
-                control: ReasoningControl::Effort,
-                exposes_text: true,
-                preserves_state: true,
-                effort_budgets: None,
-                openai_chat_mode: crate::types::OpenAiChatReasoningMode::Standard,
-                min_effort: crate::types::ReasoningEffort::Minimal,
-                max_effort: crate::types::ReasoningEffort::High,
-            }),
+            reasoning: Some(reasoning_capability()),
             responses_lite: false,
             agent_delegation: None,
             structured_output: true,

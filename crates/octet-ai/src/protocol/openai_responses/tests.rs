@@ -20,7 +20,7 @@ use crate::error::AiError;
 use crate::protocol::sse::SseEvent;
 use crate::protocol::HttpRequestParts;
 use crate::stream::{ResponseBuilder, StreamEvent};
-use crate::test_fixtures::base_request;
+use crate::test_fixtures::{base_request, reasoning_capability};
 use crate::types::{
     AssistantPart, CacheRetention, Protocol, ReasoningState, ReasoningStateKind, ToolCallId,
     ToolDef, ToolResultPart,
@@ -65,16 +65,7 @@ fn make_test_model(reasoning: bool) -> Model {
             tools: true,
             parallel_tool_calls: true,
             reasoning: if reasoning {
-                Some(crate::types::ReasoningCapability {
-                    options: None,
-                    control: crate::types::ReasoningControl::Effort,
-                    exposes_text: true,
-                    preserves_state: true,
-                    effort_budgets: None,
-                    openai_chat_mode: crate::types::OpenAiChatReasoningMode::Standard,
-                    min_effort: crate::types::ReasoningEffort::Minimal,
-                    max_effort: crate::types::ReasoningEffort::High,
-                })
+                Some(reasoning_capability())
             } else {
                 None
             },

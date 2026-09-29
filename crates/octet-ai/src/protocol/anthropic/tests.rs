@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::catalog::Model;
-use crate::test_fixtures::base_request;
+use crate::test_fixtures::{base_request, token_budget_capability};
 use crate::types::{
     Capabilities, Endpoint, EndpointId, ImageMedia, ImageSource, Media, Message, ModalitySet,
     ModelId, ModelLimits, ModelSpec, OutputFormat, ReasoningConfig, ReasoningPart, Request,
@@ -33,23 +33,7 @@ fn make_test_model(reasoning: bool) -> Model {
             tools: true,
             parallel_tool_calls: true,
             reasoning: if reasoning {
-                Some(crate::types::ReasoningCapability {
-                    options: None,
-                    control: crate::types::ReasoningControl::TokenBudget,
-                    exposes_text: true,
-                    preserves_state: true,
-                    effort_budgets: Some(crate::types::ReasoningEffortBudgets {
-                        minimal: 1024,
-                        low: 2048,
-                        medium: 4096,
-                        high: 8192,
-                        xhigh: 16384,
-                        max: 32768,
-                    }),
-                    openai_chat_mode: crate::types::OpenAiChatReasoningMode::Standard,
-                    min_effort: crate::types::ReasoningEffort::Minimal,
-                    max_effort: crate::types::ReasoningEffort::High,
-                })
+                Some(token_budget_capability())
             } else {
                 None
             },

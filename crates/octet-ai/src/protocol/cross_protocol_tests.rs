@@ -1,13 +1,12 @@
 use std::sync::Arc;
 use url::Url;
 
-use crate::test_fixtures::base_request;
+use crate::test_fixtures::{base_request, reasoning_capability, token_budget_capability};
 use crate::{
     AssistantMessage, AssistantPart, Auth, Capabilities, CompatibilityMode::Lossy, Endpoint,
     EndpointId, ImageMedia, ImageSource, Media, Message, Modality, ModalitySet, Model, ModelId,
-    ModelLimits, ModelSpec, Protocol, ReasoningCapability, ReasoningControl,
-    ReasoningEffortBudgets, ReasoningPart, ReasoningState, ReasoningStateKind, Request, ToolCall,
-    ToolCallId, ToolResult, ToolResultPart, UserMessage, UserPart,
+    ModelLimits, ModelSpec, Protocol, ReasoningPart, ReasoningState, ReasoningStateKind, Request,
+    ToolCall, ToolCallId, ToolResult, ToolResultPart, UserMessage, UserPart,
 };
 
 fn make_model(
@@ -44,30 +43,12 @@ fn make_model(
             tools: true,
             parallel_tool_calls: true,
             reasoning: if reasoning {
-                Some(ReasoningCapability {
-                    options: None,
-                    control: if protocol == Protocol::AnthropicMessages {
-                        ReasoningControl::TokenBudget
-                    } else {
-                        ReasoningControl::Effort
-                    },
-                    exposes_text: true,
-                    preserves_state: true,
-                    effort_budgets: if protocol == Protocol::AnthropicMessages {
-                        Some(ReasoningEffortBudgets {
-                            minimal: 1024,
-                            low: 2048,
-                            medium: 4096,
-                            high: 8192,
-                            xhigh: 16384,
-                            max: 32768,
-                        })
-                    } else {
-                        None
-                    },
-                    openai_chat_mode: crate::OpenAiChatReasoningMode::Standard,
-                    min_effort: crate::types::ReasoningEffort::Minimal,
-                    max_effort: crate::types::ReasoningEffort::High,
+                // Anthropic's route selects reasoning by token budget; every
+                // other protocol under test selects it by portable effort.
+                Some(if protocol == Protocol::AnthropicMessages {
+                    token_budget_capability()
+                } else {
+                    reasoning_capability()
                 })
             } else {
                 None
