@@ -1386,12 +1386,10 @@ pub(crate) struct ShellState {
     copy_buffer: Option<String>,
     pub(crate) context_estimate: Option<(u64, u64)>,
     pub(crate) last_turn_usage: Option<Usage>,
-    /// Measured output-generation rate for the most recently completed model
-    /// turn. This deliberately excludes provider wait time and tool execution.
+    /// Client-observed output tokens per second from request start to accepted
+    /// completion for the latest model attempt, including wait/hidden reasoning.
     pub(crate) last_turn_tokens_per_second: Option<f64>,
-    /// Measured generation duration and output-token delta backing the final
-    /// throughput value. Kept for the detailed `/status` provenance view.
-    pub(crate) last_turn_generation_elapsed: Option<Duration>,
+    /// Provider-reported output tokens backing the final throughput value.
     pub(crate) last_turn_generated_tokens: Option<u64>,
     /// Start of the visible model-generation portion of the current turn.
     pub(crate) turn_generation_started_at: Option<Instant>,
@@ -2005,7 +2003,6 @@ impl ShellState {
     fn clear_turn_telemetry(&mut self) {
         self.last_turn_usage = None;
         self.last_turn_tokens_per_second = None;
-        self.last_turn_generation_elapsed = None;
         self.last_turn_generated_tokens = None;
         self.turn_generation_started_at = None;
         self.turn_requested_at = None;
@@ -3854,11 +3851,10 @@ impl InteractiveShell {
                 if *channel == OutputChannel::Text && !text.is_empty() {
                     state.seal_activity_group();
                 }
-                if state.turn_generation_started_at.is_none() {
+                if !text.is_empty() && state.turn_generation_started_at.is_none() {
                     state.turn_generation_started_at = Some(Instant::now());
                     state.turn_streamed_output_bytes = 0;
                     state.last_turn_tokens_per_second = None;
-                    state.last_turn_generation_elapsed = None;
                     state.last_turn_generated_tokens = None;
                     // Live output belongs only to this provider request. The
                     // prior turn remains in the prompt/context, not in this
@@ -4051,6 +4047,12 @@ impl InteractiveShell {
                 // the request is opened immediately after this event, so
                 // this moment anchors the attempt's first-token latency.
                 state.turn_requested_at = Some(Instant::now());
+                state.turn_generation_started_at = None;
+                state.turn_streamed_output_bytes = 0;
+                state.last_turn_tokens_per_second = None;
+                state.last_turn_generated_tokens = None;
+                state.last_turn_provider_elapsed = None;
+                state.last_turn_first_token = None;
             }
             AgentEvent::ToolStarted { id, name, args } => {
                 state.close_streaming_blocks();
@@ -4244,18 +4246,23 @@ impl InteractiveShell {
                 } else {
                     Vec::new()
                 };
-                let requested_at = state.turn_requested_at;
-                if let Some(started_at) = state.turn_generation_started_at.take() {
-                    let elapsed = started_at.elapsed();
-                    state.last_turn_tokens_per_second =
-                        output_tokens_per_second(turn_usage.output_tokens, elapsed);
-                    state.last_turn_generation_elapsed = Some(elapsed);
-                    state.last_turn_generated_tokens = Some(turn_usage.output_tokens);
-                    state.last_turn_first_token = requested_at
-                        .map(|requested| started_at.saturating_duration_since(requested));
-                }
-                state.last_turn_provider_elapsed = requested_at
-                    .map(|requested| Instant::now().saturating_duration_since(requested));
+                // Usage includes hidden reasoning and buffered output produced
+                // before the first delta. Never divide it by visible streaming
+                // time: use the matching request-to-completion interval instead.
+                let finished_at = Instant::now();
+                let requested_at = state.turn_requested_at.take();
+                state.last_turn_first_token = state
+                    .turn_generation_started_at
+                    .take()
+                    .zip(requested_at)
+                    .map(|(first, requested)| first.saturating_duration_since(requested));
+                state.last_turn_provider_elapsed =
+                    requested_at.map(|requested| finished_at.saturating_duration_since(requested));
+                state.last_turn_tokens_per_second =
+                    state.last_turn_provider_elapsed.and_then(|elapsed| {
+                        output_tokens_per_second(turn_usage.output_tokens, elapsed)
+                    });
+                state.last_turn_generated_tokens = Some(turn_usage.output_tokens);
                 // Provider usage is authoritative at this boundary. Prompt
                 // cache buckets all occupy context, while reasoning is already
                 // a subset of output, so canonical total_tokens is exactly the
@@ -7275,7 +7282,6 @@ impl InteractiveShell {
         state.jump_to_tail();
         state.last_turn_usage = checkpoint_usage;
         state.last_turn_tokens_per_second = None;
-        state.last_turn_generation_elapsed = None;
         state.last_turn_generated_tokens = None;
         state.turn_generation_started_at = None;
         state.turn_streamed_output_bytes = 0;
