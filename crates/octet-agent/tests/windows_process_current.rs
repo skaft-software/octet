@@ -71,7 +71,7 @@ async fn explicit_windows_bash_preserves_bash_c_and_cwd_semantics() {
     sandbox.allow_shell = true;
     sandbox.shell_path = Some(shell);
     sandbox.bash_timeout = Duration::from_secs(5);
-    let output = BashTool::default()
+    let output = BashTool
         .execute(
             json!({
                 "command": "printf 'brace-%s\\n' brace-{one,two}; test -d .",
@@ -105,7 +105,7 @@ async fn windows_job_cleanup_bounds_an_infinite_bash_command() {
     sandbox.bash_timeout = Duration::from_secs(5);
 
     let started = Instant::now();
-    let error = BashTool::default()
+    let error = BashTool
         .execute(
             json!({
                 "command": "while true; do :; done",

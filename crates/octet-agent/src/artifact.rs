@@ -1027,7 +1027,10 @@ mod tests {
     #[test]
     fn traversal_absolute_and_link_paths_fail_closed() {
         let store = ArtifactStore::new().unwrap();
-        let scratch = store.begin_generation(1).unwrap();
+        // Publishing resolves every scratch path against the live generation's
+        // scratch directory, so both halves of this test start from a real one.
+        // Only the symlink half reads the directory back out.
+        let _scratch = store.begin_generation(1).unwrap();
         for path in [
             PathBuf::from("../escape.png"),
             PathBuf::from("/tmp/escape.png"),
@@ -1041,13 +1044,14 @@ mod tests {
             ));
         }
 
+        // Symlink resolution is POSIX-only; the traversal checks above are not.
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
 
             let outside = tempfile::NamedTempFile::new().unwrap();
             fs::write(outside.path(), PNG).unwrap();
-            symlink(outside.path(), scratch.join("linked.png")).unwrap();
+            symlink(outside.path(), _scratch.join("linked.png")).unwrap();
             assert!(matches!(
                 store.publish(
                     1,

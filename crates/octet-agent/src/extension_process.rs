@@ -582,10 +582,21 @@ static REGISTERED_PROCESS_GROUPS: LazyLock<StdMutex<BTreeMap<i32, RegisteredProc
 static PROCESS_SNAPSHOT_REFRESH: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 static NEXT_PROCESS_GROUP_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A registered Windows job: the kind of process it supervises and a weak
+/// handle, so a job that has already been torn down drops out of the registry
+/// on the next retention sweep.
 #[cfg(windows)]
-static WINDOWS_PROCESS_JOBS: LazyLock<
-    StdMutex<BTreeMap<u64, (RegisteredProcessKind, Weak<WindowsJob>)>>,
-> = LazyLock::new(|| StdMutex::new(BTreeMap::new()));
+type RegisteredWindowsJob = (RegisteredProcessKind, Weak<WindowsJob>);
+
+/// Live Windows job objects, keyed by the registration id handed back to the
+/// owning [`ProcessGroupGuard`]. This is the Windows counterpart of the Unix
+/// `REGISTERED_PROCESS_GROUPS` map; see [`WindowsJob::terminate`].
+#[cfg(windows)]
+type WindowsJobRegistry = StdMutex<BTreeMap<u64, RegisteredWindowsJob>>;
+
+#[cfg(windows)]
+static WINDOWS_PROCESS_JOBS: LazyLock<WindowsJobRegistry> =
+    LazyLock::new(|| StdMutex::new(BTreeMap::new()));
 
 #[cfg(windows)]
 #[link(name = "ntdll")]
@@ -17665,12 +17676,12 @@ fn extension_process_group_id(child: &Child) -> u64 {
     child.id().map(u64::from).unwrap_or(0)
 }
 
-#[cfg(not(unix))]
-fn extension_process_group_id(_child: &Child) -> u64 {
-    0
-}
-
-#[cfg(not(unix))]
+/// Termination stub for targets that have no group signalling primitive.
+/// It is only ever reached from the non-Unix arm of
+/// [`terminate_registered_process_group`], which is itself `cfg(not(windows))`,
+/// so this stub exists for exactly one platform shape: neither Unix nor Windows.
+/// Windows is covered by job objects; Unix by `#[cfg(unix)]` signalling.
+#[cfg(all(not(unix), not(windows)))]
 fn kill_process_group(_process_group_id: u64) {}
 
 fn validate_shortcut_definitions(definitions: &[ShortcutDefinition]) -> Result<(), String> {
@@ -25597,6 +25608,9 @@ command = "{command}"
         }
     }
 
+    /// POSIX shell fixture exercising the API `0.1` transport: tool
+    /// registration, notifications, a confirmation round trip, and shutdown.
+    #[cfg(unix)]
     fn protocol_fixture_script() -> &'static str {
         r#"#!/bin/sh
 IFS= read -r initialize

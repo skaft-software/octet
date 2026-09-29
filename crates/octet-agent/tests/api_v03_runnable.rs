@@ -1,5 +1,13 @@
+//! Runnable conformance fixtures for executable-extension API `0.3` and later.
+//!
+//! These drive a real child process against the shipped protocol rather than a
+//! mock, so they pin the parts of the contract a host cannot fake: negotiated
+//! capability unions, cooperative request cancellation, the canonical refusal
+//! for a theme selection the host does not implement, and the initialize/shutdown
+//! handshake for both the bundled canonical extensions and the officially
+//! feature-negotiated bundles. Kept in its own integration target because each
+//! case spawns real subprocesses and is slow enough to dwarf a unit test.
 #![cfg(unix)]
-#![allow(missing_docs)]
 
 use std::path::Path;
 use std::time::Duration;
