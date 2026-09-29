@@ -23,7 +23,12 @@ const MAX_CREATED_AT_BYTES: usize = 64;
 const MAX_TURN_BUDGET: u32 = 100_000;
 /// Maximum number of continuation turns accepted by the durable store.
 pub const MAX_GOAL_TURN_BUDGET: u32 = MAX_TURN_BUDGET;
+/// POSIX mode bits for the private goal directory. Windows ACLs are applied by
+/// [`crate::secure_fs`] instead, so these are Unix-only.
+#[cfg(unix)]
 const GOAL_DIRECTORY_MODE: u32 = 0o700;
+/// POSIX mode bits for the private goal file. See [`GOAL_DIRECTORY_MODE`].
+#[cfg(unix)]
 const GOAL_FILE_MODE: u32 = 0o600;
 
 /// Maximum UTF-8 bytes accepted for a persistent objective.

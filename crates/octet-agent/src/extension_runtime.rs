@@ -2650,13 +2650,17 @@ fn activation_outcome(error: ExtensionRuntimeManagerError) -> ExtensionRuntimeAc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::io::Write as _;
-
+    // Every fixture in this module launches a POSIX shell script, so the
+    // helpers and manifest types they build are Unix-only.
+    #[cfg(unix)]
     use crate::extension_process::{
         ExtensionActivation, ExtensionEntrypoint, ExtensionManifest, ExtensionSource,
         ManifestContributions,
     };
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::io::Write as _;
 
     #[cfg(unix)]
     fn write_script(path: &Path, source: &str) {

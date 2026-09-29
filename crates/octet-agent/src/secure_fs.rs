@@ -1994,7 +1994,7 @@ mod imp {
     };
     use windows_sys::Win32::Security::Authorization::{
         GetSecurityInfo, SetEntriesInAclW, SetSecurityInfo, EXPLICIT_ACCESS_W, SET_ACCESS,
-        SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+        SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::{
         AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
@@ -2188,17 +2188,21 @@ mod imp {
         sid: PSID,
         directory: bool,
     ) -> Result<PrivateSecurityDescriptor, SecureFileError> {
-        let mut entry = EXPLICIT_ACCESS_W::default();
-        entry.grfAccessPermissions = FILE_ALL_ACCESS;
-        entry.grfAccessMode = SET_ACCESS;
-        entry.grfInheritance = if directory {
-            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
-        } else {
-            0
+        let entry = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_ALL_ACCESS,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: if directory {
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            } else {
+                0
+            },
+            Trustee: TRUSTEE_W {
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: sid.cast(),
+                ..Default::default()
+            },
         };
-        entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-        entry.Trustee.TrusteeType = TRUSTEE_IS_USER;
-        entry.Trustee.ptstrName = sid.cast();
         let mut acl: *mut ACL = null_mut();
         // SAFETY: entry and output pointers are valid; no old ACL is supplied.
         let status = unsafe { SetEntriesInAclW(1, &entry, null(), &mut acl) };

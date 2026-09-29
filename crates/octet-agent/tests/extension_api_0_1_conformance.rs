@@ -1,5 +1,14 @@
+//! Conformance fixtures pinning the executable-extension wire contract.
+//!
+//! Three layers live here. The golden-wire test replays a recorded API `0.1`
+//! transcript so a protocol regression is visible as a byte-level diff. The
+//! end-to-end tests run the real Python SDK against the Rust host at API `0.1`,
+//! `0.2`, and `0.4` to prove the host, not just the recorder, honours each
+//! feature set. The adversarial test asserts that a raw child over-declaring
+//! tools or commands is rejected, which is the guard that keeps the
+//! capability-declaration check meaningful. A separate integration target keeps
+//! the Python/subprocess fixtures out of the unit-test build.
 #![cfg(unix)]
-#![allow(missing_docs)]
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;

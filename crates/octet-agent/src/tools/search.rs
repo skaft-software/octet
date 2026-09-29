@@ -611,6 +611,8 @@ mod tests {
     use crate::ToolProgressSink;
     use serde_json::json;
     use std::path::PathBuf;
+    // Only the Unix process-liveness helpers below use deadlines.
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     struct Fixture {
