@@ -320,8 +320,16 @@ pub(super) async fn extension_options_menu(
             path.push(item.id);
             continue;
         }
-        run_extension_menu_action(app, shell, input, extension, &title, &item, options.generated)
-            .await?;
+        run_extension_menu_action(
+            app,
+            shell,
+            input,
+            extension,
+            &title,
+            &item,
+            options.generated,
+        )
+        .await?;
         if shell.close_requested() {
             return Ok(ExtensionMenuOutcome::Back);
         }

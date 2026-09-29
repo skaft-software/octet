@@ -13,6 +13,8 @@ from .presentation import format_server_detail
 
 # Servers listed in the menu; the host bounds a whole menu at 256 entries.
 MAX_MENU_SERVERS = 24
+# Each server's submenu detail stays short; Show details has the full text.
+MAX_SERVER_DETAIL_BYTES = 2048
 GATE_NOTE = (
     "Remote (Streamable HTTP) servers need octet started with "
     "--experimental-streamable-http-mcp."
@@ -42,6 +44,20 @@ def _enabled(server: Mapping[str, Any], action_id: str) -> bool:
         and action.get("enabled") is True
         for action in server.get("actions", [])
     )
+
+
+def _bounded_detail(text: str) -> str:
+    if len(text.encode("utf-8")) <= MAX_SERVER_DETAIL_BYTES:
+        return text
+    kept: list[str] = []
+    size = 0
+    for line in text.splitlines():
+        size += len(line.encode("utf-8")) + 1
+        if size > MAX_SERVER_DETAIL_BYTES - 64:
+            break
+        kept.append(line)
+    kept.append("… Show details lists every tool.")
+    return "\n".join(kept)
 
 
 def build_menu(
@@ -150,7 +166,7 @@ def build_menu(
             "id": "server:" + server_id,
             "label": str(server.get("label") or server_id),
             "description": description,
-            "detail": format_server_detail(snapshot, server_id),
+            "detail": _bounded_detail(format_server_detail(snapshot, server_id)),
             "items": entries,
         })
 

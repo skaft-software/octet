@@ -264,7 +264,12 @@ class MenuTests(unittest.TestCase):
                 self.assertEqual(item["command"], "mcp")
 
     def test_a_full_bridge_stays_within_the_hosts_menu_bounds(self):
-        servers = [self.server(f"server-{index:02d}") for index in range(32)]
+        tools = [
+            {"id": f"mcp_tool_{index:03d}_" + "x" * 40, "name": f"mcp_tool_{index:03d}_" + "x" * 40,
+             "schemaSummary": {"propertyCount": 3}, "approval": "unknown"}
+            for index in range(128)
+        ]
+        servers = [self.server(f"server-{index:02d}", tools=tools) for index in range(32)]
         menu = build_menu(
             self.snapshot(servers),
             user_servers={server["id"]: {} for server in servers},
@@ -274,6 +279,10 @@ class MenuTests(unittest.TestCase):
         entries = list(walk(menu["items"]))
         self.assertLessEqual(len(entries), 256)
         self.assertLessEqual(max(depth for depth, _ in entries), 4)
+        self.assertLessEqual(len(json.dumps(menu).encode("utf-8")), 256 * 1024)
+        for _depth, item in entries:
+            self.assertLessEqual(len(item.get("detail", "").encode("utf-8")), 16 * 1024)
+        self.assertIn("Show details lists every tool", menu["items"][1]["detail"])
         self.assertIn(f"{32 - MAX_MENU_SERVERS} more", menu["detail"])
 
     def test_a_configuration_that_did_not_load_offers_only_status(self):
