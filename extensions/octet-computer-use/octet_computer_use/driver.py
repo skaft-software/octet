@@ -41,6 +41,18 @@ DISTRIBUTION = "cua-driver"
 # assembled from untrusted input by this module.
 DEFAULT_VERSION = ""
 
+# The oldest Python the published driver supports (its Requires-Python). The
+# runtime venv must be built from such an interpreter: pip bundled with an older
+# one (for example macOS's Xcode Python 3.9) reports only "No matching
+# distribution found", so the version is checked before anything is installed.
+MINIMUM_PYTHON = (3, 10)
+# Well-known interpreters outside a GUI-launched PATH, checked after PATH.
+_MACOS_PYTHONS = (
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3",
+    "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
+)
+
 # Ceilings so a hostile or broken index response cannot make provisioning run
 # unbounded. They are generous relative to the ~70 MiB wheel.
 INSTALL_TIMEOUT_SECONDS = 900
@@ -232,6 +244,85 @@ def installed_binary(paths: DriverPaths) -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+def _version_text(version: Sequence[int]) -> str:
+    return ".".join(str(part) for part in version)
+
+
+def _interpreter_version(
+    python: str, environment: Mapping[str, str]
+) -> Optional[Tuple[int, int]]:
+    """The ``(major, minor)`` of an interpreter that can create a venv, or None."""
+
+    try:
+        probe = _run(
+            [python, "-c", "import sys, venv; sys.stdout.write('%d.%d' % sys.version_info[:2])"],
+            env=environment,
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except ProvisionError:
+        return None
+    if probe.returncode != 0:
+        return None
+    parts = (probe.stdout or "").strip().split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def _interpreter_candidates() -> List[str]:
+    """Other interpreters to try when octet's own Python is too old.
+
+    The user's ``python3`` comes first, then versioned names newest first, then
+    (on macOS) the standard install locations a GUI-launched PATH often omits.
+    """
+
+    names = ["python3"] + [f"python3.{minor}" for minor in range(20, MINIMUM_PYTHON[1] - 1, -1)]
+    if platform.system() == "Windows":
+        names.append("python")
+    found = [path for path in (shutil.which(name) for name in names) if path]
+    if platform.system() == "Darwin":
+        found.extend(path for path in _MACOS_PYTHONS if os.path.isfile(path))
+    unique: List[str] = []
+    seen = {os.path.realpath(sys.executable)} if sys.executable else set()
+    for path in found:
+        real = os.path.realpath(path)
+        if real not in seen:
+            seen.add(real)
+            unique.append(path)
+    return unique
+
+
+def _driver_interpreter(environment: Mapping[str, str]) -> Tuple[str, Tuple[int, int]]:
+    """Choose the interpreter that builds the runtime venv.
+
+    octet's own interpreter is used when it meets :data:`MINIMUM_PYTHON`;
+    otherwise the first compatible candidate is. With none, provisioning stops
+    before the venv is touched, naming the minimum version.
+    """
+
+    current = (sys.version_info[0], sys.version_info[1])
+    if sys.executable and current >= MINIMUM_PYTHON:
+        return sys.executable, current
+    for candidate in _interpreter_candidates():
+        version = _interpreter_version(candidate, environment)
+        if version is not None and version >= MINIMUM_PYTHON:
+            return candidate, version
+    system = platform.system()
+    if system == "Darwin":
+        hint = "for example `brew install python@3.12`, or the installer from python.org"
+    elif system == "Windows":
+        hint = "for example from python.org"
+    else:
+        hint = "for example your distribution's python3.12 package"
+    raise ProvisionError(
+        f"{DISTRIBUTION} needs Python {_version_text(MINIMUM_PYTHON)} or newer, but "
+        f"octet's computer-use extension runs on Python {_version_text(current)} "
+        f"({sys.executable or 'unknown interpreter'}) and no compatible python3 was "
+        f"found. Install Python {_version_text(MINIMUM_PYTHON)} or newer ({hint}), "
+        "then run /computer-use setup again."
+    )
+
+
 def _venv_python_for(venv: Path) -> Path:
     if platform.system() == "Windows":
         return venv / "Scripts" / "python.exe"
@@ -331,14 +422,18 @@ def provision(
     if existing is not None and _satisfies_request(existing, requested):
         return existing
 
+    # Choose a compatible interpreter before touching the venv, so a missing
+    # one leaves any existing runtime as it was.
+    environment = _install_environment()
+    interpreter, interpreter_version = _driver_interpreter(environment)
+
     # A mismatch between the request and what is installed re-enters the owned
     # venv from scratch, so a version switch cannot leave a half-upgraded
     # runtime behind.
     paths.venv.mkdir(parents=True, exist_ok=True)
-    environment = _install_environment()
 
     create = _run(
-        [sys.executable, "-m", "venv", "--clear", str(paths.venv)],
+        [interpreter, "-m", "venv", "--clear", str(paths.venv)],
         env=environment,
         timeout=timeout,
     )
@@ -347,7 +442,7 @@ def provision(
         # interpreter cannot bootstrap pip into a venv. Install the published
         # wheel directly instead of asking the user to install a system package.
         if _direct_wheel_supported():
-            return _provision_without_pip(paths, requested, environment, timeout)
+            return _provision_without_pip(paths, requested, environment, timeout, interpreter)
         raise ProvisionError(
             f"failed to create runtime venv: {(create.stderr or create.stdout or '').strip()[:400]}"
         )
@@ -370,10 +465,17 @@ def provision(
     if install.returncode != 0:
         output = (install.stderr or install.stdout or "")
         if "No module named pip" in output and _direct_wheel_supported():
-            return _provision_without_pip(paths, requested, environment, timeout)
-        raise ProvisionError(
-            f"failed to install {spec}: {output.strip()[:400]}"
-        )
+            return _provision_without_pip(paths, requested, environment, timeout, interpreter)
+        detail = output.strip()[:400]
+        if "No matching distribution" in output or "Could not find a version" in output:
+            # The interpreter already meets the driver's minimum, so the index
+            # itself found nothing for this platform or request.
+            detail += (
+                f" (the runtime uses Python {_version_text(interpreter_version)}; check that "
+                "the configured package index is reachable and publishes "
+                f"{DISTRIBUTION} for this platform)"
+            )
+        raise ProvisionError(f"failed to install {spec}: {detail}")
 
     binary = installed_binary(paths)
     if binary is None:
@@ -431,7 +533,11 @@ def _safe_member(name: str) -> bool:
 
 
 def _provision_without_pip(
-    paths: DriverPaths, version: str, environment: Mapping[str, str], timeout: int
+    paths: DriverPaths,
+    version: str,
+    environment: Mapping[str, str],
+    timeout: int,
+    interpreter: str,
 ) -> Path:
     """Install the published Linux wheel into a pip-less venv.
 
@@ -448,7 +554,7 @@ def _provision_without_pip(
             f"{DISTRIBUTION} needs GNU libc {_MANYLINUX_GLIBC[0]}.{_MANYLINUX_GLIBC[1]} or newer"
         )
     create = _run(
-        [sys.executable, "-m", "venv", "--clear", "--without-pip", str(paths.venv)],
+        [interpreter, "-m", "venv", "--clear", "--without-pip", str(paths.venv)],
         env=environment, timeout=timeout,
     )
     if create.returncode != 0:

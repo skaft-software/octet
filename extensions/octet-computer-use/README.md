@@ -32,6 +32,11 @@ bundled model-colored cursor themes:
 /computer-use setup
 ```
 
+The driver needs Python 3.10 or newer. When octet runs the bundle with an older
+Python (macOS's Xcode Python is 3.9), setup builds the driver's runtime from a
+compatible `python3` on `PATH` or a standard macOS install (Homebrew or
+python.org). With none available, it stops and names the version to install.
+
 The `computer_use_setup` agent tool provisions only the driver; it cannot
 install themes. Theme installation is deliberately a trusted local operation,
 not an agent tool. On Linux, whose driver wheel ships no theme compiler, the

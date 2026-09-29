@@ -24,6 +24,10 @@
   with the npm lane.
 - Target v0.8.2: omit the redundant `computer_use_` prefix from TUI labels so
   computer-use actions remain distinguishable within the label width cap.
+- Target v0.8.2: `/computer-use setup` builds the Cua Driver runtime from a
+  Python 3.10+ interpreter even when the bundle runs on macOS's Xcode Python
+  3.9. Setup failures, including a missing compatible Python, are now reported
+  as actionable errors instead of `internal error` (#457).
 - Make octet and `octet-computer-use` work on Linux desktops: Omarchy
   (Arch + Hyprland), Sway, GNOME, and KDE on Wayland, and any X11 session. The
   TUI now copies through `wl-copy`, `xclip`, or `xsel` alongside OSC 52, matching

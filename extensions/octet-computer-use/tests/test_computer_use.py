@@ -929,6 +929,22 @@ class CursorThemeTests(unittest.TestCase):
             self.assertTrue(failed["is_error"])
             self.assertIn("cursor theme setup failed", failed["content"][0]["text"])
 
+    def test_setup_reports_provisioning_failures_instead_of_raising(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        extension, computer = entrypoint.create_extension()
+        failure = driver.ProvisionError(
+            "cua-driver needs Python 3.10 or newer, but octet's computer-use "
+            "extension runs on Python 3.9 (/usr/bin/python3)")
+        with mock.patch.object(computer, "provision", side_effect=failure):
+            for result in (extension._commands["computer-use"].handler(["setup"], {}),
+                           extension._tools["computer_use_setup"].handler({}, {})):
+                self.assertTrue(result["is_error"])
+                text = result["content"][0]["text"]
+                self.assertIn("Cua Driver setup failed", text)
+                self.assertIn("needs Python 3.10 or newer", text)
+
     def test_linux_setup_installs_themes_and_the_gnome_helper(self):
         # The Linux wheel has no cursor-theme compiler, so setup must install
         # the bundled artifacts itself rather than fail.
@@ -1270,6 +1286,8 @@ class PiplessProvisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(driver, "installed_binary", return_value=None), \
                 mock.patch.object(driver, "_run", return_value=failed), \
+                mock.patch.object(driver, "_driver_interpreter",
+                                  return_value=(sys.executable, (3, 12))), \
                 mock.patch.object(driver.platform, "system", return_value="Linux"), \
                 mock.patch.object(driver.platform, "machine", return_value="x86_64"), \
                 mock.patch.object(driver, "_provision_without_pip",
@@ -1288,6 +1306,8 @@ class PiplessProvisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(driver, "installed_binary", return_value=None), \
                 mock.patch.object(driver, "_run", return_value=failed), \
+                mock.patch.object(driver, "_driver_interpreter",
+                                  return_value=(sys.executable, (3, 12))), \
                 mock.patch.object(driver.platform, "system", return_value="Darwin"), \
                 mock.patch.object(driver, "_provision_without_pip") as fallback:
             with self.assertRaisesRegex(driver.ProvisionError, "no venv"):

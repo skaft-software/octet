@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from octet_computer_use import driver as driver_module
@@ -48,6 +49,12 @@ class ProvisionVersionTests(unittest.TestCase):
         self.existing = Path("/tmp/cua-driver-existing")
         self.rebuilt = Path("/tmp/cua-driver-pinned")
         self.versions = {}
+        # Keep these tests independent of the Python that runs them.
+        interpreter = patch.object(
+            driver_module, "_driver_interpreter", return_value=(sys.executable, (3, 12))
+        )
+        interpreter.start()
+        self.addCleanup(interpreter.stop)
 
     def _driver_version(self, binary):
         return self.versions.get(binary)
@@ -157,6 +164,91 @@ class ProvisionVersionTests(unittest.TestCase):
             with self.assertRaises(ProvisionError) as caught:
                 driver_module.provision(self.paths)
         self.assertIn("no driver executable", str(caught.exception))
+
+
+class InterpreterPreflightTests(unittest.TestCase):
+    """The runtime venv is built only from a Python the driver supports."""
+
+    OLD_HOST = SimpleNamespace(version_info=(3, 9, 6), executable="/usr/bin/python3")
+
+    def setUp(self):
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+        self.paths = DriverPaths.for_home(Path(self._home.name))
+        self.calls = []
+
+    def _runner(self, probe_versions, install_output=None):
+        """Answer interpreter probes from a table; succeed or fail pip install."""
+
+        def run(argv, **kwargs):
+            argv = list(argv)
+            self.calls.append(argv)
+            if argv[1:2] == ["-c"] and "venv" in argv[2]:
+                version = probe_versions.get(argv[0])
+                return _Completed(returncode=0 if version else 1, stdout=version or "")
+            if "install" in argv and install_output is not None:
+                return _Completed(returncode=1, stderr=install_output)
+            return _Completed()
+
+        return run
+
+    def test_a_compatible_host_interpreter_is_used_without_probing(self):
+        host = SimpleNamespace(version_info=(3, 12, 1), executable="/usr/bin/python3.12")
+        with patch.object(driver_module, "sys", host), \
+                patch.object(driver_module, "_run", self._runner({})):
+            self.assertEqual(
+                driver_module._driver_interpreter({}), ("/usr/bin/python3.12", (3, 12))
+            )
+        self.assertEqual(self.calls, [])
+
+    def test_an_old_host_builds_the_venv_with_a_compatible_candidate(self):
+        binaries = iter([None, Path("/tmp/cua-driver")])
+        with patch.object(driver_module, "sys", self.OLD_HOST), \
+                patch.object(driver_module, "_interpreter_candidates",
+                             return_value=["/usr/local/bin/python3", "/opt/homebrew/bin/python3"]), \
+                patch.object(driver_module, "_run", self._runner({
+                    "/usr/local/bin/python3": "3.9", "/opt/homebrew/bin/python3": "3.12"})), \
+                patch.object(driver_module, "installed_binary", lambda paths: next(binaries)):
+            self.assertEqual(driver_module.provision(self.paths), Path("/tmp/cua-driver"))
+        create = [argv for argv in self.calls if argv[1:3] == ["-m", "venv"]]
+        self.assertEqual([argv[0] for argv in create], ["/opt/homebrew/bin/python3"])
+
+    def test_no_compatible_interpreter_names_the_minimum_and_leaves_the_venv(self):
+        with patch.object(driver_module, "sys", self.OLD_HOST), \
+                patch.object(driver_module, "_interpreter_candidates",
+                             return_value=["/usr/local/bin/python3"]), \
+                patch.object(driver_module, "_run",
+                             self._runner({"/usr/local/bin/python3": "3.9"})), \
+                patch.object(driver_module, "installed_binary", lambda paths: None):
+            with self.assertRaises(ProvisionError) as caught:
+                driver_module.provision(self.paths)
+        message = str(caught.exception)
+        self.assertIn("needs Python 3.10 or newer", message)
+        self.assertIn("runs on Python 3.9 (/usr/bin/python3)", message)
+        self.assertFalse(any(argv[1:3] == ["-m", "venv"] for argv in self.calls))
+        self.assertFalse(self.paths.venv.exists())
+
+    def test_no_matching_distribution_on_a_compatible_interpreter_points_at_the_index(self):
+        pip = ("ERROR: Could not find a version that satisfies the requirement cua-driver "
+               "(from versions: none)\nERROR: No matching distribution found for cua-driver")
+        with patch.object(driver_module, "_driver_interpreter",
+                          return_value=("/usr/bin/python3.12", (3, 12))), \
+                patch.object(driver_module, "_run", self._runner({}, install_output=pip)), \
+                patch.object(driver_module, "installed_binary", lambda paths: None):
+            with self.assertRaises(ProvisionError) as caught:
+                driver_module.provision(self.paths)
+        message = str(caught.exception)
+        self.assertIn("No matching distribution found for cua-driver", message)
+        self.assertIn("the runtime uses Python 3.12", message)
+        self.assertIn("package index", message)
+
+    def test_macos_candidates_include_install_locations_off_the_gui_path(self):
+        present = {"/opt/homebrew/bin/python3"}
+        with patch.object(driver_module, "sys", self.OLD_HOST), \
+                patch.object(driver_module.platform, "system", return_value="Darwin"), \
+                patch.object(driver_module.shutil, "which", return_value=None), \
+                patch.object(driver_module.os.path, "isfile", side_effect=present.__contains__):
+            self.assertEqual(driver_module._interpreter_candidates(), ["/opt/homebrew/bin/python3"])
 
 
 class VersionComparisonTests(unittest.TestCase):

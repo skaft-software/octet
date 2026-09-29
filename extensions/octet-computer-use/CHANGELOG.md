@@ -42,6 +42,14 @@
 
 ### Fixed
 
+- `/computer-use setup` and `computer_use_setup` no longer fail with an opaque
+  `internal error` when the bundle runs on a Python older than the driver
+  supports. `cua-driver` needs 3.10+, and macOS's Xcode Python is 3.9. Setup
+  now builds the runtime venv from a compatible `python3` on `PATH` or a
+  standard macOS install location. With none available, it stops before
+  touching the venv and names the minimum version. Provisioning failures are
+  reported as tool errors, and a pip no-match on a compatible interpreter
+  points at the package index (#457).
 - Negotiate screenshot artifacts and stage large captures under the host scratch
   directory instead of exceeding the inline artifact limit. Report bounded
   publication errors while retaining a usable accessibility tree.

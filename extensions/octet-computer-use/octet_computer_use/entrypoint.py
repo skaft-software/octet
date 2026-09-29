@@ -890,7 +890,10 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
                 structured_content=result,
             )
         if name == "computer_use_setup":
-            result = computer_use.provision(values.get("version", "") or "")
+            try:
+                result = computer_use.provision(values.get("version", "") or "")
+            except (driver_module.ProvisionError, OSError) as error:
+                return _setup_failed(error)
             return tool_result(text_content(_render_status(computer_use.status())), structured_content=result)
         if name == "computer_use_jev_status":
             report = jev_status()
@@ -937,7 +940,10 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
                 return tool_result(text_content(str(error)), is_error=True)
             return jev_jobs.handle(operation, options, context, gated=confirmations_enabled())
         if action == "setup":
-            result = computer_use.provision()
+            try:
+                result = computer_use.provision()
+            except (driver_module.ProvisionError, OSError) as error:
+                return _setup_failed(error)
             try:
                 result["cursor_themes_installed"] = cursor_theme.install_bundled_themes(
                     Path(result["binary"]))
@@ -994,6 +1000,16 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
 
 
 _DRIVER_TOOLS = {name: driver_tool for name, driver_tool, _ in service.PUBLISHED_TOOLS}
+
+
+def _setup_failed(error: BaseException) -> Dict[str, Any]:
+    """Report a provisioning failure as a tool error, not a JSON-RPC one.
+
+    An escaped exception reaches the host only as "internal error", which hides
+    actionable causes such as an interpreter older than the driver supports.
+    """
+
+    return tool_result(text_content(f"Cua Driver setup failed: {error}"), is_error=True)
 
 
 def _setup_jev(
