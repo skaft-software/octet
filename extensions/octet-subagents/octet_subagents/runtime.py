@@ -734,6 +734,10 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
                 ],
             }
 
+    @extension.menu
+    def subagents_menu(_request: Mapping[str, Any], context: Mapping[str, Any]):
+        return orchestrator.menu(context)
+
     @extension.status("status")
     def subagents_status(_params: Mapping[str, Any], context: Mapping[str, Any]):
         return orchestrator.status_contribution(context)

@@ -213,8 +213,9 @@ The wait is also the explicit parent reattachment surface: its authoritative
 `agent/list`/`agent/wait` reconcile is what lets the owning session pick a
 detached worker back up, so a targeted wait returns
 `reattachment: {state: "detached"|"reattached", ...}` and, for a worker the host
-parked at the approval boundary, an explicit `approval` block. `/subagents wait
-[name-or-id]` performs the same owner-bound wait from the command surface.
+parked at the approval boundary, an explicit `approval` block. **Wait for
+workers** in the options menu (the web UI's `/subagents wait [name-or-id]`)
+performs the same owner-bound wait.
 
 
 ### `subagent_stop`
@@ -339,9 +340,10 @@ an explicit continuation after timeout can renew that deadline.
   diagnostic it wrote earlier (a real host error is preserved). Captured
   summaries, errors, usage, and the complete sibling roster survive the whole
   cycle — that guarantee is deliberate and is covered by tests.
-- **Explicit parent wait.** `/subagents wait [name-or-id]` (and
-  `/subagents reattach [name-or-id]`) performs an owner-bound `agent/wait`, so
-  the operator can force a reattach pass from the command surface. The cached
+- **Explicit parent wait.** **Wait for workers** and **Reattach detached
+  workers** in the options menu (the web UI's `/subagents wait [name-or-id]` and
+  `/subagents reattach [name-or-id]`) perform an owner-bound `agent/wait`, so
+  the operator can force a reattach pass. The cached
   fallback holds no live service client, so it reports the detached set and
   states that no wait was performed — never a silent stall and never a fake
   success. The tool result carries `reattachment: {state: detached|reattached}`
@@ -399,7 +401,7 @@ tool-like **Subagents** transcript block in place while workers are active,
 including between root turns. Its heading counts worker states; up to four
 active child lines show task and input/output tokens. Native
 `AgentEvent::DelegationUpdated` supplies the snapshot; the block does not poll
-`/subagents status`. Ctrl+O retains disclosure. `/subagents` retains the complete
+`/subagents status`. Ctrl+O retains disclosure. The worker list retains the complete
 roster, model, `tools` (tool-call count, not model turns), cost, and failure
 details after the block settles. First-party orchestration calls/results and
 worker state/reason transitions do not append automatic per-worker transcript
@@ -418,10 +420,11 @@ The opaque worker resource reference is stable and owner-scoped.
 Serve opens it only after host-written provenance binds the exact parent session,
 path-free extension principal, and resource owner; the web view is locked and
 read-only. The TUI's live block is host-rendered from semantic activity metrics;
-no extension status or footer contribution is rendered. The no-argument
-`/subagents` command opens a host-owned list: Up/Down moves between workers,
-Enter opens the selected scrollable read-only transcript, and Escape or Left
-returns to the list. The same owner-bound status command used by the live tick
+no extension status or footer contribution is rendered. The options menu's
+**Workers** entry (and `/extensions` while a turn runs) opens a host-owned list:
+Up/Down moves between workers, Enter opens the selected scrollable read-only
+transcript, Ctrl+X stops the selected worker, and Escape or Left returns to the
+list. The same owner-bound status command used by the live tick
 and open panel reconciles authoritative `agent_sessions` state and publishes the
 next complete presentation revision; the frontend keeps focus by stable node ID
 and revalidates the latest owner-scoped reference before opening it.
@@ -442,9 +445,9 @@ Subagents · 1 running · 1 done
 ```
 
 Use `/subagents inspect <name-or-id>` for cached read-only detail. The octet coding
-host binds API `0.4` command requests to their host-derived owner, so an explicit
-`/subagents stop ...` and the generic TUI/Serve stop action use the same
-owner-checked `agent_sessions` path. A host or headless integration that omits
+host binds API `0.4` command requests to their host-derived owner, so the worker
+list's Ctrl+X, **Stop all workers**, the web UI's `/subagents stop ...`, and the
+generic Serve stop action use the same owner-checked `agent_sessions` path. A host or headless integration that omits
 `context.resource_owner` fails closed without issuing a stop. The extension
 never smuggles a stale request ID into a command. A cached list may lag; run
 `subagent_status` from an active model turn to resync.

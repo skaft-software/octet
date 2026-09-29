@@ -100,12 +100,15 @@ generation, and negotiated features. The packaged skill is separately opt-in wit
 
 ## Inspect the work
 
-`/subagents` opens the host-owned worker list. Use Up/Down to select, Enter for a
-scrollable read-only transcript, and Escape or Left to return. A bounded,
+`/extensions` → octet-subagents → **Workers** opens the host-owned worker list;
+while a turn runs, `/extensions` opens it directly. Use Up/Down to select, Enter
+for a scrollable read-only transcript, Ctrl+X to stop the selected worker, and
+Escape or Left to return. The same menu waits for workers, reattaches detached
+ones, and stops them all. A bounded,
 tool-like **Subagents** transcript block updates in place while workers are
 active, including between root turns. Its heading counts worker states; up to
 four active child lines show task and input/output tokens. Ctrl+O retains
-disclosure; `/subagents` exposes all retained workers (up to 32), exact outcomes,
+disclosure; the worker list exposes all retained workers (up to 32), exact outcomes,
 models, tool-call counts (not model turns), cost, and reasons after the block
 settles. Prompts, tool arguments/results, and running model prose stay out of
 the roster.
@@ -116,13 +119,13 @@ notices, live or on replay. Actual failed/stopped or
 approval-parked states, model-visible errors, durable results, and accounting are
 unchanged; ordinary tool/run failures and approval prompts remain visible.
 Serve inspection is also owner-bound and read-only; inspection cannot send a
-prompt. `/subagents inspect <name-or-id>` provides cached detail and
+prompt. In the web UI, `/subagents inspect <name-or-id>` provides cached detail and
 `/extensions inspect agent-session:<digest>` is the explicit-reference fallback.
 
 ## Open the fleet in panes
 
-**Partial — pane execution is blocked.** `/subagents open-all tmux` (or `herdr`)
-refreshes owner-bound `agent/list` and reports bounded plans using opaque
+**Partial — pane execution is blocked.** **Open workers in panes (preview)** in
+the options menu (the web UI's `/subagents open-all tmux` or `herdr`) refreshes owner-bound `agent/list` and reports bounded plans using opaque
 `agent-session:<sha256>` handles. The host can resolve these handles, but even
 `launchable: true` with `live_task: false` is only a snapshot, not exclusive
 ownership. Every worker remains blocked with an explicit reason; otherwise-ready

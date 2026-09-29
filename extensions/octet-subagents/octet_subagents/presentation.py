@@ -322,14 +322,14 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         ownership = (
             "still owned by this parent session but detached at the approval "
             "boundary: it is parked and must not mutate unattended. Approve in an "
-            "interactive octet session, then reattach with /subagents wait or "
+            "interactive octet session, then reattach with Wait for workers or "
             "subagent_continue."
         )
     elif worker.detached:
         ownership = (
             "still owned by this parent session; currently detached from any host "
-            "run (a recoverable state, not a terminal one). Use /subagents wait to "
-            "reattach. /subagents open-all remains Partial: pane execution is "
+            "run (a recoverable state, not a terminal one). Choose Wait for workers "
+            "to reattach. Opening workers in panes remains Partial: pane execution is "
             "blocked until atomic host writer claim/settlement is available."
         )
     else:
