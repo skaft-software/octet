@@ -138,6 +138,10 @@
   candidates without a full sort, and application-owned resume hydrates a
   viewport-scaled tail. Defer OSC 11 background-color detection until after
   the first ready frame, repainting only if the detected theme changes.
+  provenance. Install with `npm install -g @skaft/octet`, or pin
+  `@skaft/octet@0.8.1` to reproduce one exact release. README, installation,
+  getting-started, and release docs document the npm lane alongside the native
+  installer.
 
 ## [0.8.1] - 2026-09-27
 
