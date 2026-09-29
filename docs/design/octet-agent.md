@@ -42,7 +42,7 @@ Lite, and WebSocket availability alone grant nothing. Ordinary routes retain
 synchronous tools and queued steering.
 
 - **Async tools:** only complete, durably committed calls from a wholly eligible
-  batch enter the run-owned registry (at most four). Advertised parallel tools
+  batch enter the run-owned registry (at most one read wave). Advertised parallel tools
   are still checked against exact arguments, the effect broker, and hooks.
   Independent observations may overlap the next response; their results become
   durable in original call order **after** that response, which did not consume
@@ -263,8 +263,13 @@ Workspace-mutation approval creates a random, short-lived capability bound to th
 Sequential, parallel, and crash-recovery dispatch all use this boundary. The
 ordered live read path intersects static `ToolConcurrency::Parallel` with exact
 host classification and explicit policy admission, admitting contiguous,
-model-ordered waves of at most four exact `Pure`, `WorkspaceRead`, or `HostRead`
-calls. `HostRead` is eligible for these live waves but remains non-replayable.
+model-ordered waves of exact `Pure`, `WorkspaceRead`, or `HostRead` calls.
+`HostRead` is eligible for these live waves but remains non-replayable. A wave
+holds one call per CPU the process may use, at least four and at most the
+32-call turn limit (`Agent::set_parallel_read_wave_width` pins it). The width
+bounds resources, not safety: classification alone admits a call to a wave, and
+every other call is a barrier, so a wider wave admits nothing a narrower one
+would refuse.
 Crash replay separately intersects `ReplaySafety::Safe` with exact host
 classification and permits only exact `Pure` and `WorkspaceRead` calls. A broker or argument denial is returned to the provider as a paired tool error before hooks or executable code; a trusted hook may veto an otherwise admitted call before dispatch.
 

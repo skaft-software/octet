@@ -844,6 +844,9 @@ pub struct Agent {
     /// byte-identical system prompt; set through
     /// [`Agent::set_tool_prompt_section_enabled`].
     tool_prompt_section: bool,
+    /// Most independent observations one ordered read wave runs at once. Set
+    /// through [`Agent::set_parallel_read_wave_width`].
+    parallel_read_wave_width: usize,
     /// Opt-in durable partial-output checkpoints for one tool's live calls (row
     /// 4.7). Off by default; set through
     /// [`Agent::enable_partial_output_checkpoints`].
@@ -1703,10 +1706,21 @@ const REASONING_ANSWER_RESERVE: u64 = 1024;
 /// Bound actual tool executions emitted in one assistant turn. Every excess
 /// call still receives a compact error result so provider pairing remains valid.
 const MAX_TOOL_CALLS_PER_TURN: usize = 32;
-/// Bound read fan-out independently of the Tokio worker pool. Consecutive
-/// eligible calls are split into ordered waves of this width; every other
-/// effect is a barrier.
-const MAX_PARALLEL_READ_WAVE_WIDTH: usize = 4;
+/// Smallest default read-wave width: the width on machines with fewer CPUs.
+const MIN_PARALLEL_READ_WAVE_WIDTH: usize = 4;
+
+/// Default width of one ordered read wave: one call per CPU this process may
+/// use, between [`MIN_PARALLEL_READ_WAVE_WIDTH`] and [`MAX_TOOL_CALLS_PER_TURN`].
+///
+/// The width bounds resources, not safety. A call joins a wave only when its
+/// exact host classification makes it an independent observation, and every
+/// other call is a barrier, so a wave of any width admits only calls that may
+/// overlap. Results are still committed in emitted order.
+fn default_parallel_read_wave_width() -> usize {
+    std::thread::available_parallelism()
+        .map_or(MIN_PARALLEL_READ_WAVE_WIDTH, std::num::NonZeroUsize::get)
+        .clamp(MIN_PARALLEL_READ_WAVE_WIDTH, MAX_TOOL_CALLS_PER_TURN)
+}
 /// Number of recent identical calls retained for the generic no-progress hint.
 const MAX_RECENT_TOOL_CALLS: usize = 16;
 /// Do not distract the model for the first two legitimate repeated probes.
@@ -7580,6 +7594,7 @@ impl Agent {
             service_tier: None,
             prompt_model_source: None,
             tool_prompt_section: false,
+            parallel_read_wave_width: default_parallel_read_wave_width(),
             #[cfg(any(unix, windows))]
             partial_output_checkpoints: None,
             prompt_color: None,
@@ -9096,6 +9111,20 @@ impl Agent {
         self.tool_prompt_section = enabled;
     }
 
+    /// Set how many independent observations one ordered read wave may run at
+    /// once, clamped to `1..=32`. A width of one runs every call in turn.
+    ///
+    /// The default follows the CPUs this process may use, never below four.
+    /// Classification, not the width, decides which calls may overlap.
+    pub fn set_parallel_read_wave_width(&mut self, width: usize) {
+        self.parallel_read_wave_width = width.clamp(1, MAX_TOOL_CALLS_PER_TURN);
+    }
+
+    /// How many independent observations one ordered read wave may run at once.
+    pub fn parallel_read_wave_width(&self) -> usize {
+        self.parallel_read_wave_width
+    }
+
     /// Whether the model-visible tool section is enabled.
     pub fn tool_prompt_section_enabled(&self) -> bool {
         self.tool_prompt_section
@@ -9532,6 +9561,7 @@ impl Agent {
         let provider_output_ceiling = self.max_output_tokens;
         let compaction_reserve_tokens = self.compaction_reserve_tokens();
         let effective_reasoning = &mut self.reasoning;
+        let parallel_read_wave_width = self.parallel_read_wave_width;
         let max_session_tokens = self.max_session_tokens;
         let max_session_cost_microdollars = self.max_session_cost_microdollars;
         let tool_schema_budget_bytes = self.tool_schema_budget_bytes;
@@ -9636,7 +9666,7 @@ impl Agent {
             let native_enabled = model.responses_features().steering
                 && model.endpoint.transport == octet_ai::EndpointTransport::WebSocketPreferred
                 && max_session_tokens.is_none() && max_session_cost_microdollars.is_none();
-            let mut background_tools = background_tools::BackgroundTools::default();
+            let mut background_tools = background_tools::BackgroundTools::new(parallel_read_wave_width);
             let background_cancellation = abort.cancellation.clone();
             let mut pending_reasoning = None;
             let mut pending_steer: Vec<ReservedInput> = Vec::new();
@@ -11278,7 +11308,7 @@ impl Agent {
                 // Hard ceilings serialize tool accounting before another request.
                 if model.responses_features().async_tools
                     && max_session_tokens.is_none() && max_session_cost_microdollars.is_none()
-                    && calls.len() <= MAX_PARALLEL_READ_WAVE_WIDTH
+                    && calls.len() <= parallel_read_wave_width
                     && !abort.is_set()
                     && calls.iter().enumerate().all(|(index, call)| {
                         call.async_execution
@@ -11337,7 +11367,7 @@ impl Agent {
                     {
                         let mut wave_end = call_index;
                         while wave_end < calls.len()
-                            && wave_end - call_index < MAX_PARALLEL_READ_WAVE_WIDTH
+                            && wave_end - call_index < parallel_read_wave_width
                             && parallel_read_candidate(
                                 &calls[wave_end],
                                 wave_end,
