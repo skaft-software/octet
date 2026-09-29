@@ -5,10 +5,13 @@
 //! Extracted from `openai_chat.rs` so the implementation reads as pure
 //! production code and the assertions that pin it can be
 //! navigated separately. This is still a child module of
-//! `crate::protocol::openai_chat`, so `use super::*` reaches exactly the
-//! private items it reached while the tests were inline.
+//! `crate::protocol::openai_chat`, so it reaches the same private items the
+//! inline block did. The seam split the implementation into four siblings, so
+//! the frame decoder this suite replays is now named through the sibling that
+//! owns it; the decode counter it asserts on stays in the parent because both
+//! the response and the stream half increment it.
 
-use super::{consume_qwen_xml_content, decode_stream_event};
+use super::{compat::consume_qwen_xml_content, decode_stream_event};
 use crate::error::{AiError, DecodeError};
 use crate::protocol::harness;
 use crate::protocol::sse::SseEvent;
@@ -581,7 +584,7 @@ fn stream_error_fields_keep_permissive_fallbacks_and_precedence() {
         ),
     ] {
         super::CHAT_STREAM_JSON_DECODES.with(|count| count.set(0));
-        let Some(AiError::Provider(error)) = super::decode_chat_chunk(data).err() else {
+        let Some(AiError::Provider(error)) = super::stream::decode_chat_chunk(data).err() else {
             panic!("expected provider error for {data}");
         };
         assert_eq!(error.message, message, "{data}");
@@ -607,13 +610,13 @@ fn malformed_chunk_fields_cannot_hide_a_provider_error() {
         ] {
             super::CHAT_STREAM_JSON_DECODES.with(|count| count.set(0));
             assert!(
-                matches!(super::decode_chat_chunk(&data), Err(AiError::Provider(error)) if error.message == "denied"),
+                matches!(super::stream::decode_chat_chunk(&data), Err(AiError::Provider(error)) if error.message == "denied"),
                 "{data}"
             );
             assert_eq!(super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()), 2);
         }
         assert!(matches!(
-            super::decode_chat_chunk(&format!("{{{malformed}}}")),
+            super::stream::decode_chat_chunk(&format!("{{{malformed}}}")),
             Err(AiError::Decode(DecodeError::Json(_)))
         ));
     }
@@ -623,7 +626,7 @@ fn malformed_chunk_fields_cannot_hide_a_provider_error() {
         "null",
     ] {
         assert!(matches!(
-            super::decode_chat_chunk(data),
+            super::stream::decode_chat_chunk(data),
             Err(AiError::Decode(DecodeError::Json(_)))
         ));
     }
@@ -644,8 +647,8 @@ fn defaulted_chunks_and_malformed_error_metadata_stay_permissive() {
         r#"{"error":{"message":"overwritten"},"error":null}"#,
     ] {
         super::CHAT_STREAM_JSON_DECODES.with(|count| count.set(0));
-        let chunk = super::decode_chat_chunk(data).unwrap();
-        let legacy: super::ChatChunk = serde_json::from_str(data).unwrap();
+        let chunk = super::stream::decode_chat_chunk(data).unwrap();
+        let legacy: super::stream::ChatChunk = serde_json::from_str(data).unwrap();
         assert_eq!(chunk.id, legacy.id, "{data}");
         assert_eq!(chunk.choices.len(), legacy.choices.len(), "{data}");
         assert!(chunk.usage.is_none());
@@ -666,8 +669,8 @@ fn unrepresentable_error_metadata_keeps_the_legacy_chunk_fallback() {
         r#"{"message":1e400,"choices":[]}"#,
         r#"{"error":{"message":"ignored"},"unknown":1e400}"#,
     ] {
-        let legacy: super::ChatChunk = serde_json::from_str(data).unwrap();
-        let chunk = super::decode_chat_chunk(data).unwrap();
+        let legacy: super::stream::ChatChunk = serde_json::from_str(data).unwrap();
+        let chunk = super::stream::decode_chat_chunk(data).unwrap();
         assert_eq!(chunk.id, legacy.id);
         assert_eq!(chunk.choices.len(), legacy.choices.len());
     }
@@ -965,14 +968,15 @@ fn tools_disabled_dense_locked_markers_scan_once_and_compact_once() {
             let suffix = "[tool_out";
             let content = format!(
                 "{}{suffix}",
-                format!("{text}{}", super::TOOL_OUTPUT_LOCKED).repeat(count)
+                format!("{text}{}", super::compat::TOOL_OUTPUT_LOCKED).repeat(count)
             );
             let mut builder =
                 ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, None);
-            super::PENDING_WORK.with(|work| work.set(super::PendingWork::default()));
+            super::compat::PENDING_WORK
+                .with(|work| work.set(super::compat::PendingWork::default()));
             let mut events =
                 decode_stream_event(&model, &content_event(&content), &mut builder).unwrap();
-            let work = super::PENDING_WORK.with(|work| work.get());
+            let work = super::compat::PENDING_WORK.with(|work| work.get());
             assert_eq!(work.scanned_bytes, content.len());
             assert_eq!(work.compactions, 1);
             assert_eq!(work.shifted_bytes, suffix.len());
@@ -1097,10 +1101,10 @@ fn tools_disabled_marker_filter_reserves_before_appending() {
     builder
         .reserve_buffered_content(MAX_RESPONSE_CONTENT_BYTES)
         .unwrap();
-    let error = super::emit_text_without_locked_marker(
+    let error = super::compat::emit_text_without_locked_marker(
         &mut Vec::new(),
         &mut builder,
-        super::TOOL_OUTPUT_LOCKED,
+        super::compat::TOOL_OUTPUT_LOCKED,
     )
     .unwrap_err();
     assert!(matches!(
@@ -1124,8 +1128,9 @@ fn tools_disabled_marker_filter_compacts_released_bytes_on_event_limit() {
             None,
         );
         builder.event_count = MAX_RESPONSE_EVENTS;
-        let error = super::emit_text_without_locked_marker(&mut Vec::new(), &mut builder, content)
-            .unwrap_err();
+        let error =
+            super::compat::emit_text_without_locked_marker(&mut Vec::new(), &mut builder, content)
+                .unwrap_err();
         assert!(matches!(
             error,
             AiError::Decode(DecodeError::TooManyStreamEvents)

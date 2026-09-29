@@ -5,17 +5,25 @@
 //! Extracted from `openai_chat.rs` so the implementation reads as pure
 //! production code and the assertions that pin it can be
 //! navigated separately. This is still a child module of
-//! `crate::protocol::openai_chat`, so `use super::*` reaches exactly the
-//! private items it reached while the tests were inline.
+//! `crate::protocol::openai_chat`, so it reaches the same private items the
+//! inline block did. The seam split the implementation into four siblings, so
+//! the items this suite drives are now named from the sibling that owns them
+//! rather than reached through one flat parent.
 
+use super::compat::parse_compat_tool_calls;
+use super::request::mistral_tool_call_id;
+use super::response::{map_usage, ChatUsage};
 use super::*;
 use crate::catalog::Model;
+use crate::error::{AiError, DecodeError};
+use crate::protocol::sse::SseEvent;
+use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{
-    AssistantMessage, AssistantPart, AudioFormat, AudioOutputOptions, Capabilities, Endpoint,
-    EndpointId, ImageDetail, ImageMedia, ImageSource, Media, Message, ModalitySet, ModelId,
-    ModelLimits, ModelSpec, OpenAiChatReasoningMode, OutputFormat, OutputModalities,
-    ReasoningConfig, ReasoningEffort, ReasoningPart, Request, ToolCall, ToolCallId, ToolChoice,
-    UserMessage, UserPart,
+    AssistantMessage, AssistantPart, AudioFormat, AudioOutputOptions, AudioVoice, Capabilities,
+    Endpoint, EndpointId, ImageDetail, ImageMedia, ImageSource, Media, Message, ModalitySet,
+    ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode, OutputFormat, OutputModalities,
+    Protocol, ReasoningConfig, ReasoningEffort, ReasoningPart, Request, StopReason, ToolCall,
+    ToolCallId, ToolChoice, ToolDef, ToolResultPart, UserMessage, UserPart,
 };
 use crate::CompatibilityMode;
 use std::sync::Arc;
