@@ -951,8 +951,11 @@ impl InteractiveShell {
         if !state.application_viewport_requested {
             return false;
         }
-        let mut nav = state.transcript_navigation.borrow_mut();
-        let frame = nav.frame.filter(|frame| {
+        // Validate the retained frame before taking the mutable navigation
+        // borrow. Threaded geometry validation reads the scrollbar mode via
+        // `transcript_content_width`, which borrows this same RefCell.
+        let frame = state.transcript_navigation.borrow().frame;
+        let frame = frame.filter(|frame| {
             frame.size == state.size
                 && if state.render_threaded {
                     state
@@ -963,6 +966,7 @@ impl InteractiveShell {
                     !cache.dirty && frame.generation == cache.generation
                 }
         });
+        let mut nav = state.transcript_navigation.borrow_mut();
         let Some(frame) = frame else {
             nav.reset_pointer();
             return false;
@@ -1475,6 +1479,32 @@ mod tests {
             .scrollbar
             .is_none());
         assert_eq!(shell.pending(), "preserved draft");
+    }
+
+    #[test]
+    fn threaded_mouse_hit_testing_does_not_reborrow_navigation() {
+        let mut shell = search_shell();
+        shell.set_transcript_scrollbar(TranscriptScrollbar::Always);
+        shell.isolate_native_test_renderer();
+        shell.render();
+
+        let bar_column = {
+            let state = shell.state.borrow();
+            assert!(state.render_threaded);
+            let geometry = state
+                .retained_render_geometry()
+                .expect("the threaded renderer published current geometry");
+            let nav = state.transcript_navigation.borrow();
+            let frame = nav.frame.expect("the threaded renderer published a frame");
+            assert_eq!(geometry.generation, frame.generation);
+            frame
+                .scrollbar
+                .expect("always-visible scrollbar geometry")
+                .column
+        };
+
+        dispatch(&mut shell, mouse(MouseEventKind::Moved, bar_column, 0));
+        assert!(shell.state.borrow().transcript_navigation.borrow().hover);
     }
 
     #[test]
