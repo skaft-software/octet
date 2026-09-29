@@ -285,12 +285,18 @@ pub(crate) fn project_tool_output_images(
     images
 }
 
-/// Activity families presented as one quiet row in Still. A change of family
-/// closes the preceding group even when a model response contains no prose.
+/// Activity families presented as one quiet row in Still. Exploration, edits,
+/// web activity, MCP, and computer-use stay separate; delegation remains on its
+/// existing subagent presentation. A change of family closes the preceding
+/// group even when a model response contains no prose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToolActivityKind {
     Explore,
     Edit,
+    WebSearch,
+    WebFetch,
+    Mcp,
+    ComputerUse,
 }
 
 impl ToolActivityKind {
@@ -298,6 +304,10 @@ impl ToolActivityKind {
         match name {
             "read" | "search" | "bash" | "exec" => Some(Self::Explore),
             "edit" | "write" => Some(Self::Edit),
+            "web_search" => Some(Self::WebSearch),
+            "web_fetch" => Some(Self::WebFetch),
+            name if name.starts_with("mcp_") => Some(Self::Mcp),
+            name if name.starts_with("computer_use_") => Some(Self::ComputerUse),
             _ => None,
         }
     }
@@ -312,6 +322,10 @@ pub(crate) struct ToolActivityGroup {
     pub(crate) searches: usize,
     pub(crate) commands: usize,
     pub(crate) edited_files: usize,
+    pub(crate) web_searches: usize,
+    pub(crate) web_fetches: usize,
+    pub(crate) mcp_calls: usize,
+    pub(crate) computer_use_actions: usize,
     pub(crate) file_paths: Vec<String>,
 }
 
@@ -319,6 +333,14 @@ impl ToolActivityGroup {
     pub(crate) fn kind(&self) -> ToolActivityKind {
         if self.edited_files > 0 {
             ToolActivityKind::Edit
+        } else if self.web_searches > 0 {
+            ToolActivityKind::WebSearch
+        } else if self.web_fetches > 0 {
+            ToolActivityKind::WebFetch
+        } else if self.mcp_calls > 0 {
+            ToolActivityKind::Mcp
+        } else if self.computer_use_actions > 0 {
+            ToolActivityKind::ComputerUse
         } else {
             ToolActivityKind::Explore
         }
@@ -343,6 +365,10 @@ impl ToolActivityGroup {
             }
             "search" => self.searches += 1,
             "bash" | "exec" => self.commands += 1,
+            "web_search" => self.web_searches += 1,
+            "web_fetch" => self.web_fetches += 1,
+            name if name.starts_with("mcp_") => self.mcp_calls += 1,
+            name if name.starts_with("computer_use_") => self.computer_use_actions += 1,
             _ => unreachable!("only activity tools are grouped"),
         }
         self.member_ids.push(id);
@@ -356,11 +382,19 @@ impl ToolActivityGroup {
                 match kind {
                     ToolActivityKind::Explore => self.read_files += 1,
                     ToolActivityKind::Edit => self.edited_files += 1,
+                    ToolActivityKind::WebSearch
+                    | ToolActivityKind::WebFetch
+                    | ToolActivityKind::Mcp
+                    | ToolActivityKind::ComputerUse => {}
                 }
             }
         }
         self.searches += other.searches;
         self.commands += other.commands;
+        self.web_searches += other.web_searches;
+        self.web_fetches += other.web_fetches;
+        self.mcp_calls += other.mcp_calls;
+        self.computer_use_actions += other.computer_use_actions;
         self.member_ids.extend(other.member_ids);
     }
 }
@@ -962,6 +996,44 @@ mod tests {
             (groups[1].read_files, groups[1].searches, groups[1].commands),
             (1, 1, 1)
         );
+    }
+
+    #[test]
+    fn activity_groups_keep_web_mcp_and_computer_use_distinct_from_delegation() {
+        let call = |id: &str, name: &str| {
+            AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
+                id: ToolCallId(id.into()),
+                name: name.into(),
+                arguments_json: "{}".into(),
+                argument_error: None,
+            })
+        };
+        let message = AssistantMessage {
+            content: vec![
+                call("ws1", "web_search"),
+                call("ws2", "web_search"),
+                call("wf1", "web_fetch"),
+                call("wf2", "web_fetch"),
+                call("mcp1", "mcp_fixture_echo"),
+                call("mcp2", "mcp_fixture_write"),
+                call("cu1", "computer_use_click"),
+                call("cu2", "computer_use_window_state"),
+                call("delegate", "delegate"),
+            ],
+            model: ModelId("test".into()),
+            protocol: Protocol::OpenAiChat,
+        };
+        let groups = tool_activity_groups(&message);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0].kind(), ToolActivityKind::WebSearch);
+        assert_eq!(groups[0].web_searches, 2);
+        assert_eq!(groups[1].kind(), ToolActivityKind::WebFetch);
+        assert_eq!(groups[1].web_fetches, 2);
+        assert_eq!(groups[2].kind(), ToolActivityKind::Mcp);
+        assert_eq!(groups[2].mcp_calls, 2);
+        assert_eq!(groups[3].kind(), ToolActivityKind::ComputerUse);
+        assert_eq!(groups[3].computer_use_actions, 2);
     }
 
     #[test]

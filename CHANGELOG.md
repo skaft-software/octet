@@ -163,6 +163,9 @@ See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits
   colour with the compiled default's 16x4 byte that shades from the active model
   family, matching its model-adaptive prompt chevron and composer marker.
 
+- Extend Still's quiet activity grouping to web search/fetch, MCP, and
+  computer-use calls, with concise family summaries. Delegations keep their
+  existing subagent presentation; `Ctrl+O` still reveals individual call details.
 - Group Still's successive exploration and edit/write calls into distinct-file
   summaries. `Ctrl+O` retains paths and commands, and failures stay visible.
 - Remove `Still`'s 112-column cap so its transcript, splash, composer text,

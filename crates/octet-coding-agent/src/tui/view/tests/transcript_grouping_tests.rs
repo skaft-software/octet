@@ -459,6 +459,36 @@ fn ctrl_o_toggles_all_expandable_transcript_blocks() {
 }
 
 #[test]
+fn still_activity_labels_are_quiet_for_web_mcp_and_computer_use() {
+    use crate::hydrate::{ToolActivityGroup, ToolActivityKind};
+
+    let mut group = ToolActivityGroup::default();
+    group.web_searches = 5;
+    assert_eq!(
+        activity_group_label(&group, &[], ToolActivityKind::WebSearch),
+        "Searched web · 5 queries"
+    );
+    group = ToolActivityGroup::default();
+    group.web_fetches = 3;
+    assert_eq!(
+        activity_group_label(&group, &[], ToolActivityKind::WebFetch),
+        "Fetched 3 pages"
+    );
+    group = ToolActivityGroup::default();
+    group.mcp_calls = 2;
+    assert_eq!(
+        activity_group_label(&group, &[], ToolActivityKind::Mcp),
+        "Used MCP · 2 calls"
+    );
+    group = ToolActivityGroup::default();
+    group.computer_use_actions = 4;
+    assert_eq!(
+        activity_group_label(&group, &[], ToolActivityKind::ComputerUse),
+        "Used computer · 4 actions"
+    );
+}
+
+#[test]
 fn live_exploration_groups_follow_turn_finished_and_keep_failures_visible() {
     let theme = crate::tui::theme::test_theme_from_source(
         "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
