@@ -275,7 +275,8 @@ pub(super) fn read_layer(
     };
 
     let mut unknown_keys = Vec::new();
-    let deserializer = toml::Deserializer::new(&source);
+    let deserializer = toml::Deserializer::parse(&source)
+        .map_err(|error| anyhow::anyhow!("invalid config {}: {error}", path.display()))?;
     let values = serde_ignored::deserialize(deserializer, |path| {
         let mut segments = Vec::new();
         ignored_config_path(&path, &mut segments);
