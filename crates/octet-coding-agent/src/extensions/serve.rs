@@ -1030,6 +1030,29 @@ enum PullRequestObservation {
     Unavailable,
 }
 
+/// Serving binds a project directory to a host identity, and that binding is
+/// only sound when the directory identity can be read back the same way on the
+/// next start. Unix gives that for free through inode and device numbers;
+/// everywhere else this crate has no stable identity to compare, so the host
+/// refuses to start rather than serve a directory it cannot recognise later.
+///
+/// This lives in its own function so the guard reads as an ordinary fallible
+/// precondition. An inline `bail!` under `#[cfg(not(unix))]` left the rest of
+/// the constructor unreachable on non-unix targets, which hid the rest of the
+/// body from the compiler's reachability analysis on those platforms.
+#[cfg(unix)]
+fn require_stable_directory_identity() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// See the unix definition for why this exists.
+#[cfg(not(unix))]
+fn require_stable_directory_identity() -> anyhow::Result<()> {
+    anyhow::bail!(
+        "octet serve project trust is unavailable on this platform because stable directory identity checks are not implemented"
+    )
+}
+
 impl OctetHost {
     #[cfg(test)]
     fn new(config: Config) -> anyhow::Result<Self> {
@@ -1037,10 +1060,7 @@ impl OctetHost {
     }
 
     fn new_with_session_name(config: Config, session_name: Option<String>) -> anyhow::Result<Self> {
-        #[cfg(not(unix))]
-        anyhow::bail!(
-            "octet serve project trust is unavailable on this platform because stable directory identity checks are not implemented"
-        );
+        require_stable_directory_identity()?;
         let startup_session_name = startup::normalize_startup_session_name(session_name)?;
         let boot = crate::app::bootstrap::bootstrap(config.clone())?;
         let models = graphical_model_catalog(&boot.catalog, &config);
