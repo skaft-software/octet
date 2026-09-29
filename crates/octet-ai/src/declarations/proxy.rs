@@ -177,6 +177,7 @@ pub fn proxy_env_value<'a>(env: &'a BTreeMap<String, String>, name: &str) -> Opt
 pub(crate) struct ProxyEnvironment(BTreeMap<String, String>);
 
 impl ProxyEnvironment {
+    /// Each variable's lower- and upper-case names, in pairs.
     pub(crate) const NAMES: [&'static str; 8] = [
         "http_proxy",
         "HTTP_PROXY",
@@ -193,11 +194,20 @@ impl ProxyEnvironment {
         Self(env)
     }
 
+    /// Applies a request-local overlay. Setting a variable in either letter
+    /// case replaces the whole variable: the base value in the other case
+    /// would otherwise outrank it, because the lower-case name wins lookups.
     pub(crate) fn overlay(&self, values: &BTreeMap<String, String>) -> Self {
         let mut env = self.0.clone();
-        for name in Self::NAMES {
-            if let Some(value) = values.get(name) {
-                env.insert(name.into(), value.clone());
+        for variable in Self::NAMES.chunks(2) {
+            if !variable.iter().any(|name| values.contains_key(*name)) {
+                continue;
+            }
+            for name in variable {
+                env.remove(*name);
+                if let Some(value) = values.get(*name) {
+                    env.insert((*name).into(), value.clone());
+                }
             }
         }
         Self(env)

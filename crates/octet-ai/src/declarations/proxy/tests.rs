@@ -168,3 +168,41 @@ fn env_lookup_prefers_lowercase() {
     assert_eq!(proxy_env_value(&env, "HTTPS_PROXY"), Some("http://lower:1"));
     assert_eq!(proxy_env_value(&env, "http_proxy"), None);
 }
+
+#[test]
+fn an_overlay_replaces_both_cases_of_the_variables_it_sets() {
+    // The ambient environment uses lower-case names, as many Linux machines do.
+    let base = ProxyEnvironment::new(BTreeMap::from([
+        ("no_proxy".to_owned(), "localhost".to_owned()),
+        ("https_proxy".to_owned(), "http://machine:1".to_owned()),
+        ("http_proxy".to_owned(), "http://machine:2".to_owned()),
+    ]));
+    let overlaid = base.overlay(&BTreeMap::from([
+        ("NO_PROXY".to_owned(), ".internal.example".to_owned()),
+        ("HTTPS_PROXY".to_owned(), "http://provider:3".to_owned()),
+    ]));
+    let target = |url: &str| url::Url::parse(url).unwrap();
+    assert_eq!(
+        overlaid
+            .resolve(&target("http://api.internal.example/"))
+            .unwrap(),
+        None,
+        "the request's NO_PROXY must win over the ambient no_proxy"
+    );
+    assert_eq!(
+        overlaid
+            .resolve(&target("https://api.example.com/"))
+            .unwrap()
+            .map(|proxy| proxy.to_string()),
+        Some("http://provider:3/".to_owned()),
+        "the request's HTTPS_PROXY must win over the ambient https_proxy"
+    );
+    assert_eq!(
+        overlaid
+            .resolve(&target("http://api.example.com/"))
+            .unwrap()
+            .map(|proxy| proxy.to_string()),
+        Some("http://machine:2/".to_owned()),
+        "variables the overlay does not set keep their ambient value"
+    );
+}
