@@ -186,7 +186,7 @@ jobs:
           node sdk/typescript/tests/api_v03_conformance.mjs
           node sdk/typescript/tests/package_conformance.mjs
           npm ci --prefix apps/web
-          apps/web/node_modules/.bin/tsc -p sdk/typescript/tsconfig.json
+          node apps/web/node_modules/typescript7/bin/tsc -p sdk/typescript/tsconfig.json
 
   test:
     strategy:
