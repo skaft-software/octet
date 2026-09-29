@@ -30,6 +30,7 @@ class ReleaseSmokeTests(unittest.TestCase):
         self.assertTrue(manifest["capabilities"]["network"])
         self.assertTrue(manifest["contributes"]["presentation"])
         self.assertEqual(manifest["contributes"]["commands"], ["mcp"])
+        self.assertTrue(manifest["contributes"]["menu"])
 
     def test_release_catalog_and_executable_include_the_self_contained_runtime(self):
         catalog = (ROOT.parent / "release-catalog.txt").read_text(encoding="utf-8").splitlines()

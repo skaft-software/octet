@@ -300,8 +300,8 @@ pub(super) async fn extension_options_menu(
             .or_else(|| items.iter().position(|item| item.recommended))
             .unwrap_or(0);
         let surface = match menu_purpose(menu, detail.as_deref()) {
-            Some(purpose) => OrdinarySurfaceMetadata::with_purpose(title, purpose),
-            None => OrdinarySurfaceMetadata::new(title),
+            Some(purpose) => OrdinarySurfaceMetadata::with_purpose(title.clone(), purpose),
+            None => OrdinarySurfaceMetadata::new(title.clone()),
         };
         let Some(index) =
             extension_picker(shell, input, surface, labels, descriptions, preselected).await?
@@ -320,7 +320,8 @@ pub(super) async fn extension_options_menu(
             path.push(item.id);
             continue;
         }
-        run_extension_menu_action(app, shell, input, extension, &item, options.generated).await?;
+        run_extension_menu_action(app, shell, input, extension, &title, &item, options.generated)
+            .await?;
         if shell.close_requested() {
             return Ok(ExtensionMenuOutcome::Back);
         }
@@ -360,11 +361,13 @@ fn not_running_options() -> crate::extensions::ExtensionOptions {
 }
 
 /// Runs one menu action with live progress, then shows what it reported.
+/// `place` names the menu it was chosen from, for confirmations.
 async fn run_extension_menu_action(
     app: &mut App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     extension: &str,
+    place: &str,
     item: &octet_agent::ExtensionMenuItem,
     generated: bool,
 ) -> anyhow::Result<()> {
@@ -393,6 +396,7 @@ async fn run_extension_menu_action(
             .execute_menu_action_with_confirmation(
                 extension,
                 &item.label,
+                place,
                 &command,
                 arguments,
                 item.destructive,

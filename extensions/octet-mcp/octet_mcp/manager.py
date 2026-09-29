@@ -115,7 +115,16 @@ class BridgeManager:
 
     def _owner_required(self, state: _ServerState) -> None:
         state.state = "parked"
-        self._set_error(state, "resource_owner_required", "Remote MCP requires a host-owned /mcp command before connecting")
+        self._set_error(
+            state,
+            "resource_owner_required",
+            "Remote MCP connects after an owner-bound action; choose Restart for it in /extensions",
+        )
+
+    def bind_owner(self, context: Mapping[str, Any]) -> bool:
+        """Bind remote sessions to the host owner of an explicit user action."""
+
+        return self._bind_remote_owner(context)
 
     def _bind_remote_owner(self, context: Mapping[str, Any]) -> bool:
         owner = ResourceOwner.from_context(context)
@@ -231,6 +240,56 @@ class BridgeManager:
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
 
+    def apply_config(
+        self,
+        config: BridgeConfig,
+        *,
+        credential_provider: Optional[CredentialProvider] = None,
+    ) -> dict[str, list[str]]:
+        """Adopt an edited configuration without restarting the bridge.
+
+        Removed and changed servers are stopped and their tools unpublished;
+        added and changed servers start again when enabled. Untouched servers
+        keep their sessions. Bridge-wide limits apply to servers started from
+        now on.
+        """
+
+        with self._lock:
+            if self._shutting_down:
+                raise RuntimeError("MCP manager is shutting down")
+            wanted = {server.id: server for server in config.servers}
+            removed = sorted(set(self._servers) - set(wanted))
+            added = sorted(set(wanted) - set(self._servers))
+            changed = sorted(
+                server_id
+                for server_id in set(wanted) & set(self._servers)
+                if self._servers[server_id].config != wanted[server_id]
+            )
+        for server_id in removed + changed:
+            self.stop_server(server_id)
+        with self._lock:
+            self.config = config
+            self.config_error = None
+            if credential_provider is not None:
+                self._credential_provider = credential_provider
+            for server_id in removed:
+                del self._servers[server_id]
+            for server_id in added + changed:
+                server = wanted[server_id]
+                self._servers[server_id] = _ServerState(
+                    config=server,
+                    state="configured" if server.enabled else "stopped",
+                )
+            start = [
+                server_id
+                for server_id in added + changed
+                if self._started and wanted[server_id].enabled
+            ]
+        for server_id in start:
+            self._submit(self._start_server, server_id, False)
+        self._presentation_changed()
+        return {"added": added, "changed": changed, "removed": removed}
+
     def request_action(self, action: str, server_id: Optional[str] = None) -> Future[Any]:
         """Route one declared safe user action; model tool text never selects it."""
 
@@ -337,6 +396,11 @@ class BridgeManager:
             self._presentation_changed()
             return True
 
+    def domain_snapshot(self) -> dict[str, Any]:
+        """Package-internal records, as the options menu reads them."""
+
+        return self._domain_snapshot()
+
     def _domain_snapshot(self) -> dict[str, Any]:
         """Build package-internal records used to derive one generic snapshot."""
 
@@ -409,7 +473,7 @@ class BridgeManager:
             except ValueError as error:
                 return {"text": f"MCP action rejected: {error}"}
             scope = target or "all connected servers"
-            text = f"MCP {action} requested for {scope}. Use /mcp status to inspect progress."
+            text = f"MCP {action} requested for {scope}. Its state shows in the octet-mcp menu under /extensions."
         else:
             text = self.command_usage()
         return {"text": text, "notifications": [], "context": []}

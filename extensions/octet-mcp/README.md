@@ -11,8 +11,22 @@ separately. The bridge never discovers or installs server software for you.
 
 ## Connect a local server
 
-Put this in `~/.octet/mcp.json`, replacing the executable and working-directory
-paths with your reviewed local paths. Protect the file with `chmod 600`.
+In octet, open `/extensions`, choose **octet-mcp** (choosing a disabled
+extension enables it first), and pick **Add a server**. The guided form asks for
+a name, the command that starts the server, its arguments, any environment
+variables (hidden as you type), and a display name, then shows the complete
+command and asks before it adds and starts the server. Nothing is written if you
+cancel or the result fails the same trust and schema checks as a launch.
+
+Each server then has its own entry in that menu: **Show details**, **Refresh
+tools**, **Restart** (or **Start**), **Stop**, **Enable** or **Disable**,
+**Edit**, and **Remove** (confirmed first). Changes apply at once: only the
+edited server restarts. Servers from a trusted project file are listed with
+their lifecycle actions only; edit them in the project.
+
+The menu writes `~/.octet/mcp.json` as a private (`0600`) file. You can also
+write it yourself, replacing the executable and working-directory paths with
+your reviewed local paths, and protect it with `chmod 600`:
 
 ```json
 {
@@ -52,20 +66,14 @@ processes still require `unsafe_host`. This does not change MCP server trust or
 tool-call policy. If the configuration file is absent, it stays healthy with zero
 servers.
 
-Inspect and manage the connection in any frontend:
-
-```text
-/mcp status
-/mcp list
-/mcp show local-example
-/mcp refresh local-example
-/mcp restart local-example
-/mcp stop local-example
-```
-
 Refresh rereads the tool catalog without relaunching. Restart replaces the
-connection; stop removes its tools and closes it. `/mcp snapshot` returns the
-same semantic state used by the TUI and Serve.
+connection; stop removes its tools and closes it.
+
+The web UI has no options menu yet; there the same actions run as the `/mcp`
+command: `status`, `list`, `show <server>`, `refresh [server]`,
+`restart <server>`, `stop <server>`, `add stdio`, `add http`, `edit <server>`,
+`enable <server>`, `disable <server>`, and `remove <server>`. `/mcp snapshot`
+returns the same semantic state used by the TUI and Serve.
 
 ## Connect a desktop server
 

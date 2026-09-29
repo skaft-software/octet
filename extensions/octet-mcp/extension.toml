@@ -37,3 +37,4 @@ commands = ["mcp"]
 ui = ["status"]
 presentation = true
 confirmations = true
+menu = true

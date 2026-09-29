@@ -4166,11 +4166,14 @@ impl ExecutableExtensions {
     }
 
     /// Runs one options-menu action: a declared command of `extension`, behind
-    /// a host confirmation when the extension marked it destructive.
+    /// a host confirmation when the extension marked it destructive. `place`
+    /// names the menu the action was chosen from.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_menu_action_with_confirmation<H>(
         &mut self,
         extension: &str,
         label: &str,
+        place: &str,
         command: &str,
         arguments: Vec<String>,
         destructive: bool,
@@ -4184,7 +4187,7 @@ impl ExecutableExtensions {
             let request = ConfirmationRequest {
                 parent_request_id: None,
                 prompt: format!("{label}?"),
-                detail: Some(format!("Offered by extension {extension:?}")),
+                detail: Some(format!("{place} · offered by {extension}")),
                 destructive: true,
                 default: false,
             };
