@@ -8,8 +8,10 @@
 //! exchange the names atomically and roll back if the displaced object is not
 //! the one observed; Windows, which has no exchange, pins the verified object
 //! against writers and deleters, renames it aside, and publishes with a
-//! no-replace rename. Platforms without descriptor-relative primitives fail
-//! closed.
+//! no-replace rename. On Unix, octet's own conditional mutations of one file
+//! also serialize on an advisory lock of that file, so a writer with a stale
+//! snapshot fails its check before publishing anything. Platforms without
+//! descriptor-relative primitives fail closed.
 
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -587,11 +589,43 @@ mod imp {
     use rustix::fd::OwnedFd;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use rustix::fs::RenameFlags;
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags};
     use rustix::io::Errno;
     use std::ffi::{OsStr, OsString};
     use std::io::Write as _;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    /// Longest wait for another conditional mutation of the same file.
+    const TARGET_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// Takes an exclusive advisory lock on the object `name` currently names,
+    /// serializing octet's conditional mutations of one file across threads
+    /// and processes. Holding it across the `unchanged` check and publication
+    /// means only a writer whose snapshot is current can publish, so a stale
+    /// writer never swaps its bytes in and then has to roll them back.
+    ///
+    /// Best effort: a missing or unreadable target, an unsupported lock, or a
+    /// holder that outlasts `TARGET_LOCK_WAIT` (an external tool) returns
+    /// `None`, and the caller continues with the unlocked checks alone.
+    fn lock_current_target(parent: &OwnedFd, name: &OsStr) -> Option<OwnedFd> {
+        let target = rustix::fs::openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?;
+        let deadline = std::time::Instant::now() + TARGET_LOCK_WAIT;
+        loop {
+            match rustix::fs::flock(&target, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => return Some(target),
+                Err(Errno::WOULDBLOCK | Errno::INTR) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
 
     fn io_error(error: Errno) -> std::io::Error {
         std::io::Error::from_raw_os_error(error.raw_os_error())
@@ -1703,6 +1737,7 @@ mod imp {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         pub(super) fn remove(self) -> Result<(), SecureFileError> {
             let expected = self.original_identity.ok_or(SecureFileError::Changed)?;
+            let _target_lock = lock_current_target(&self.parent, &self.name);
             if !self.unchanged()? {
                 return Err(SecureFileError::Changed);
             }
@@ -1769,8 +1804,10 @@ mod imp {
 
         /// Atomically swap the staged file with an existing destination, then
         /// verify that the displaced object is still the one observed during
-        /// preparation. If it is not, restore the displaced object only while
-        /// the destination still names our staged file.
+        /// preparation. Displacing exactly that object is the commit point,
+        /// even if another writer has since replaced our file. If it is not,
+        /// restore the displaced object only while the destination still names
+        /// our staged file.
         fn publish_existing(
             &self,
             temp_name: &OsStr,
@@ -1798,7 +1835,7 @@ mod imp {
                     if bytes == expected_bytes && same_stable_state(*identity, expected_identity)
             );
 
-            if displaced_is_expected && destination_is_temporary {
+            if displaced_is_expected {
                 let (_, displaced_identity) = displaced.expect("displaced state was checked");
                 unlink_if_still_named(&self.parent, temp_name, displaced_identity);
                 return Ok(());
@@ -1886,6 +1923,12 @@ mod imp {
                     temp_file.sync_all()?;
                 }
                 let temporary_identity = file_identity(&temp_file.metadata()?);
+                // Held through publication; see `lock_current_target`.
+                let _target_lock = self
+                    .original
+                    .is_some()
+                    .then(|| lock_current_target(&self.parent, &self.name))
+                    .flatten();
                 if !self.unchanged()? {
                     return Err(SecureFileError::Changed);
                 }
@@ -4190,6 +4233,26 @@ mod tests {
         remove_private_file_if_unchanged(&private, b"token", 1024).unwrap();
         assert!(!private.exists());
         assert!(directory_names(&root.join("private")).is_empty());
+    }
+
+    /// A foreign advisory lock on the target (an external tool) delays a
+    /// conditional write by the bounded wait at most; it never blocks it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_foreign_lock_on_the_target_delays_but_never_blocks_a_conditional_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap().join("held.txt");
+        std::fs::write(&path, "before").unwrap();
+        let holder = std::fs::File::open(&path).unwrap();
+        fs2::FileExt::lock_exclusive(&holder).unwrap();
+
+        let started = std::time::Instant::now();
+        PreparedMutation::prepare(&path, false, 64)
+            .unwrap()
+            .commit(b"after")
+            .unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
     }
 
     /// Every conditional read-modify-write either commits against the exact

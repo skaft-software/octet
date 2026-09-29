@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Serialize concurrent conditional writes to the same file on Linux and
+  macOS. Parallel writers, such as delegated workers editing one file, could
+  have a write land while it reported a conflict, or lose a committed write
+  into a leftover `.octet-tmp-*` file. Writers now hold an advisory lock on
+  the target from the unchanged check through the exchange. The wait is
+  bounded at 2 s, after which the write falls back to the unlocked checks.
+  Displacing exactly the observed file now counts as success.
 - Raise the minimum supported Rust version from 1.86 to 1.88 for the
   workspace and `octet-serve`. The rust-minor-patch updates that #444 held
   back need it: `image` 0.25.10, `globset` 0.4.20, `ignore` 0.4.33, and
