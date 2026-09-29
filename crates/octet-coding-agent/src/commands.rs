@@ -1020,7 +1020,7 @@ fn effect_policy(policy: octet_agent::EffectPolicy) -> &'static str {
             "controlled (all bash calls need approval; other ambient host effects denied)"
         }
         octet_agent::EffectPolicy::UnsafeHost => {
-            "full access (classified effects use ambient OS authority)"
+            "full access (no sandbox and no approvals: tools and enabled extensions run with your OS permissions)"
         }
     }
 }

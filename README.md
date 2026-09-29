@@ -15,8 +15,13 @@ and lets you add tools through subprocess extensions in any language.
 Extensions add bounded, host-shaped integrations—not an everything-as-extension
 platform or a promise to run unchanged Pi extensions. Browse, MCP, web search,
 and host-owned subagents remain optional integrations; Serve is a separate
-graphical application. The host keeps authority over sessions, approvals,
-lifecycle, and resource limits.
+graphical application. The host keeps authority over sessions, lifecycle, and
+resource limits.
+
+**By default octet has full access and no sandbox.** Commands, file edits, and
+enabled extensions run with your operating-system permissions, and nothing asks
+first. `--safe-mode` asks before every shell call and file change, but it is an
+approval policy, not a sandbox. See [Security](SECURITY.md#permissions).
 
 This is **octet 0.8.1**. See the [release notes](docs/releases/v0.8.1.md)
 for changes and supported installation channels.

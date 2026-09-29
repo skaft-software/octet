@@ -328,11 +328,13 @@ pub struct Cli {
     /// Trust this workspace and load its project config, AGENTS.md, and skills.
     #[arg(long = "workspace-trusted", alias = "trust-workspace")]
     pub workspace_trusted: bool,
-    /// Require approval for every bash call and keep host effects controlled.
+    /// Ask before every bash call and workspace change, and keep executable
+    /// extensions stopped. An approval policy, not a sandbox.
     #[arg(long = "safe-mode", alias = "safe", conflicts_with = "effect_policy")]
     pub safe_mode: bool,
-    /// Host-owned tool-effect admission profile: controlled,
-    /// controlled_bash_approval, or unsafe_host.
+    /// How tool effects are admitted: unsafe_host (the default: full access,
+    /// no sandbox and no approvals), controlled, or controlled_bash_approval.
+    /// The effect broker enforces approvals only under the controlled profiles.
     #[arg(long, value_name = "POLICY")]
     pub effect_policy: Option<String>,
     /// Load only these tools (comma-separated).
