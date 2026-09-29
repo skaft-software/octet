@@ -92,7 +92,7 @@ This checkout targets octet 0.8.1. Check `octet --version` and use matching
 source extension manifests from this checkout. A source build is not a signed
 release artifact and does not replace an installed binary.
 
-On macOS or GNU/Linux, install Rust 1.86+ and
+On macOS or GNU/Linux, install Rust 1.88+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep). From the source checkout:
 
 ```sh

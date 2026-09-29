@@ -14,7 +14,7 @@ manual checks on this page, run by a person at an unlocked desktop.
 | | |
 | --- | --- |
 | Target | `x86_64-pc-windows-gnu`, the target of the opt-in release-candidate packager (`scripts/package-octet-windows-release.py`) and of `scripts/generate-octet-release-metadata.py --include-windows-candidate` |
-| Rust | 1.86.0, the pinned CI toolchain and MSRV |
+| Rust | 1.88.0, the pinned CI toolchain and MSRV |
 | Linker and C compiler | MinGW-w64 GCC (`x86_64-w64-mingw32-gcc`); `ring`, bundled SQLite, zstd, and tree-sitter compile C |
 | Runtime dependencies | None beyond Windows system DLLs: the MinGW runtime is linked statically |
 

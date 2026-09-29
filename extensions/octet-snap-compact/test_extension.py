@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent
-# The renderer is a separate package pinned to Rust 1.96, above octet's 1.86
+# The renderer is a separate package pinned to Rust 1.96, above octet's 1.88
 # MSRV and above the toolchain CI installs, so this suite skips when the
 # available toolchain cannot build it.
 RENDERER_RUST_VERSION = (1, 96)

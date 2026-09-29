@@ -24,6 +24,12 @@ toml = "1.1"
 unicode-segmentation = "=1.13.3"
 unicode-width = "0.2"
 
+[lints.clippy]
+# Clippy 1.88 (the MSRV since octet 0.8.2) warns on positional format
+# arguments by default; the code base uses them consistently, so inlining
+# them is left to a separate style change.
+uninlined_format_args = "allow"
+
 [dev-dependencies]
 tempfile = "3"
 vt100 = "0.15.2"

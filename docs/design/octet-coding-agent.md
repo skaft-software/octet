@@ -12,7 +12,7 @@ and reload contract is documented in [`../resources.md`](../resources.md).
 
 ## Build and dependency boundary
 
-The workspace MSRV is Rust 1.86. `sexy-tui-rs` is vendored as
+The workspace MSRV is Rust 1.88. `sexy-tui-rs` is vendored as
 `crates/sexy-tui-rs`; builds must not depend on a sibling checkout. Its import
 provenance is recorded in `crates/sexy-tui-rs/VENDORED.md`.
 

@@ -65,7 +65,7 @@ canonical release commit. Its metadata generator requires that ref; the
 protected environment must admit the tag without removing required reviewers.
 
 Cargo can build the published canonical tag's exact source
-(Rust 1.86+ and ripgrep):
+(Rust 1.88+ and ripgrep):
 
 ```sh
 cargo install --locked --git https://github.com/skaft-software/octet --tag v0.8.1 --bins octet-coding-agent

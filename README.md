@@ -52,7 +52,7 @@ See [release notes](docs/releases/v0.8.1.md) and
 When moving from Ygg, install octet afresh: older installations and data remain
 separate; no automatic migration is performed.
 
-**From source:** on macOS or GNU/Linux, install Rust 1.86+ and
+**From source:** on macOS or GNU/Linux, install Rust 1.88+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep), then run from this checkout:
 
 ```sh

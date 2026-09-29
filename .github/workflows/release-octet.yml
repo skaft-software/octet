@@ -287,7 +287,7 @@ jobs:
       # Release audits and artifacts intentionally use clean dependency/build
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
       - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
@@ -322,7 +322,7 @@ jobs:
           ref: ${{ needs.resolve.outputs.source_commit }}
           path: source
           fetch-depth: 0
-      # Keep release optimization independent from the workspace's 1.86 MSRV.
+      # Keep release optimization independent from the workspace's 1.88 MSRV.
       # This immutable action revision installs Rust 1.97.1.
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
         with:

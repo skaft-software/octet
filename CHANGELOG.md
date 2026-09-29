@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Raise the minimum supported Rust version from 1.86 to 1.88 for the
+  workspace and `octet-serve`. The rust-minor-patch updates that #444 held
+  back need it: `image` 0.25.10, `globset` 0.4.20, `ignore` 0.4.33, and
+  `wiremock` 0.6.5. CI, the Windows job, the production-panic audit and the
+  `octet-serve` release jobs now pin Rust 1.88.0; octet release binaries are
+  still built with Rust 1.97.1. Source builds need Rust 1.88 or newer.
 - Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
   `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the
   verified immutable release assets with trusted publishing and registry
