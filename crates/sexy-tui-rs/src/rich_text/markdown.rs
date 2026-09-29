@@ -298,6 +298,8 @@ enum InlineKind {
     Emphasis,
     Strong,
     Strikethrough,
+    /// A wrapper whose children stay inline and unstyled.
+    Plain,
 }
 
 struct Builder<'a> {
@@ -462,6 +464,9 @@ impl<'a> Builder<'a> {
             Tag::Emphasis => Frame::Inline(InlineKind::Emphasis, Vec::new()),
             Tag::Strong => Frame::Inline(InlineKind::Strong, Vec::new()),
             Tag::Strikethrough => Frame::Inline(InlineKind::Strikethrough, Vec::new()),
+            // `parser_options` does not enable superscript or subscript; if
+            // it ever does, keep their text inline rather than dropping it.
+            Tag::Superscript | Tag::Subscript => Frame::Inline(InlineKind::Plain, Vec::new()),
             Tag::Link { dest_url, .. } => Frame::Link {
                 target: dest_url.into_string(),
                 label: Vec::new(),
@@ -568,11 +573,16 @@ impl<'a> Builder<'a> {
                     self.append_block(Block::List(List::unordered(vec![item])));
                 }
             }
-            Frame::Inline(kind, content) => self.append_inline(match kind {
-                InlineKind::Emphasis => Inline::Emphasis(content),
-                InlineKind::Strong => Inline::Strong(content),
-                InlineKind::Strikethrough => Inline::Strikethrough(content),
-            }),
+            Frame::Inline(kind, content) => match kind {
+                InlineKind::Emphasis => self.append_inline(Inline::Emphasis(content)),
+                InlineKind::Strong => self.append_inline(Inline::Strong(content)),
+                InlineKind::Strikethrough => self.append_inline(Inline::Strikethrough(content)),
+                InlineKind::Plain => {
+                    for inline in content {
+                        self.append_inline(inline);
+                    }
+                }
+            },
             Frame::Link { target, label } => self.append_inline(Inline::Link { label, target }),
             Frame::Image { target, alt } => {
                 let mut label = vec![Inline::Raw("[image: ".into())];
@@ -801,6 +811,17 @@ mod tests {
             assert!(plain.contains(text), "missing {text:?}: {plain}");
         }
         assert!(!plain.contains("**"));
+    }
+
+    #[test]
+    fn superscript_and_subscript_stay_inline_and_unstyled() {
+        // Not enabled by `parser_options`; this guards the wrapper if they are.
+        let source = "x ^sup^ y ~sub~ z";
+        let options = parser_options() | Options::ENABLE_SUPERSCRIPT | Options::ENABLE_SUBSCRIPT;
+        let parser = Parser::new_ext(source, options).into_offset_iter();
+        let document = Builder::new(source, &[]).build(parser);
+        assert_eq!(document.blocks.len(), 1);
+        assert_eq!(document.plain_text(), "x sup y sub z\n");
     }
 
     #[test]
