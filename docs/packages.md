@@ -61,7 +61,7 @@ process = true
 filesystem = "workspace"
 ```
 
-Validation rules (`crates/octet-coding-agent/src/extension_package.rs:901`):
+Validation rules (`validate_manifest` in `crates/octet-coding-agent/src/extension_package.rs`):
 
 - `schema_version` must be `1`.
 - `target` must equal this binary's target triple.

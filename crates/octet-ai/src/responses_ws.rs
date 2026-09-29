@@ -906,8 +906,8 @@ fn connection_refresh_error(value: &Value) -> bool {
 }
 
 /// The provider no longer knows the `previous_response_id` cursor we sent, e.g.
-/// because the connection that owned it went away. Upstream retries once with
-/// the full local body (`openai-codex-responses.ts:337-339`).
+/// because the connection that owned it went away. Upstream pi's
+/// `openai-codex-responses.ts` provider retries once with the full local body.
 fn stale_continuation_error(value: &Value) -> bool {
     issue_code(value).is_some_and(|code| code == "previous_response_not_found")
 }

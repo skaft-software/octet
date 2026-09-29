@@ -14,8 +14,8 @@ verification or native-app release qualification.
   a resource), and the three source files that referenced the absent module import `OctetServe`
   instead. `swift build` then reports exactly three errors, all in
   `Sources/OctetMacOS/MacOSClientFactory.swift` and all caused by one missing surface:
-  `cannot find type 'ServeClient' in scope` (`:7`), `cannot find 'ServeClientConfiguration' in scope`
-  (`:11`), `cannot find 'ServeClient' in scope` (`:17`).
+  `cannot find type 'ServeClient' in scope`, `cannot find 'ServeClientConfiguration' in scope`, and
+  `cannot find 'ServeClient' in scope`.
 - Missing primitive (nothing was invented here): a shared client module that exports the API this
   target consumes — `ServeClient`, `ServeClientConfiguration`, `ServeClientError`,
   `ServeConnectionState`, `ServeBootstrap`, `ServeCommands`/`ServeCommand`/`ServeCommandResult` and

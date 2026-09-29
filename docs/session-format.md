@@ -14,7 +14,8 @@ Pi session format, and octet does not import arbitrary Pi transcripts
 
 ## Record envelope
 
-Every line is a `type`-tagged object (`crates/octet-agent/src/session.rs:617`):
+Every line is a `type`-tagged object (`SessionRecord` in
+`crates/octet-agent/src/session.rs`):
 
 | `type` | Meaning |
 | --- | --- |
@@ -43,7 +44,7 @@ fail closed. Branch checkout does not erase session-global spending/exposure.
 
 An `entry` has `id`, `parent` (`null` marks a conversation root), optional
 presentation `metadata`, optional `timestamp_unix_ms`, and a `value` object that
-is itself `type`-tagged (`crates/octet-agent/src/session.rs:479`):
+is itself `type`-tagged (`EntryValue` in `crates/octet-agent/src/session.rs`):
 
 | `value.type` | Meaning |
 | --- | --- |

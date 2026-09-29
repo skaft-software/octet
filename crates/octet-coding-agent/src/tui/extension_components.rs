@@ -1,6 +1,6 @@
 //! Host side of the API `0.4` component line-region protocol.
 //!
-//! Pi is the spec (`packages/tui/src/tui.ts` `Component` interface ~line 111):
+//! Pi is the spec (the `Component` interface in `packages/tui/src/tui.ts`):
 //! a component owns `render(width) -> string[]`, optional `handleInput(data)`
 //! and `handleMouse(event)`, and `invalidate()`. Octet's out-of-process bridge
 //! (W4) instantiates the component factories; this module reserves one screen
@@ -37,8 +37,8 @@ pub const MAX_WIDGET_KEY_BYTES: usize = 64;
 /// Wire bound: terminal title bytes.
 pub const MAX_TERMINAL_TITLE_BYTES: usize = 8 * 1024;
 
-/// Pi widget placement (`ExtensionWidgetOptions.placement`,
-/// `core/extensions/types.ts:105`).
+/// Pi widget placement (`ExtensionWidgetOptions.placement` in
+/// `core/extensions/types.ts`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WidgetPlacement {
     /// Default: rendered above the editor.
@@ -490,7 +490,7 @@ pub fn raw_key_data(
     }
 }
 
-/// The pi `TuiMouseEvent` wire shape (`packages/tui/src/tui.ts:25-44`).
+/// The pi `TuiMouseEvent` wire shape (`packages/tui/src/tui.ts`).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TuiMouseWireEvent {
     /// `"press" | "release" | "move" | "drag" | "click" | "wheel"`.
@@ -525,7 +525,7 @@ pub struct TuiMouseWireEvent {
 /// Map one crossterm mouse event into pi's normalized shape with local
 /// coordinates for the region at `(origin_x, origin_y)` sized
 /// `(width, height)`. crossterm coordinates are 1-based cell coordinates;
-/// pi's are zero-based (`tui.ts:24`).
+/// pi's are zero-based (`TuiMouseEvent` in `packages/tui/src/tui.ts`).
 pub fn mouse_wire_event(
     event: &crossterm::event::MouseEvent,
     origin: (u16, u16),

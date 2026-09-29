@@ -216,9 +216,9 @@ provider usage, never invented failed-attempt tokens.
 
 Accepted OAuth rotation with indeterminate completion is not autonomously
 replayed merely to refresh credentials. Generic Connect/DNS/TLS failures have
-only the finite opening allowance, never indefinite outage waiting. Pinned Codex
-`codex-api/src/sse/responses.rs:613` skips malformed frame deserialization and
-`:489` maps malformed completed-response parsing to a retryable stream error.
+only the finite opening allowance, never indefinite outage waiting. Codex's
+Responses SSE reader (`codex-api/src/sse/responses.rs`) skips frames that fail to
+deserialize and maps a malformed completed response to a retryable stream error.
 Octet replaces the unfinished qualified request within its finite stream budget,
 recording unknown usage, rather than continuing an incompletely decoded stream.
 Post-parsing field/resource/state-machine validation remains fail-closed.
