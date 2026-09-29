@@ -5,9 +5,9 @@ use octet_ai::Usage;
 use super::terminal_text::sanitize_for_terminal;
 use super::{OctetTheme, PriceDisplay, ShellState};
 
-/// Calculate a nonzero output-generation rate from a token count and measured
-/// generation interval. Completed turns pass provider-reported tokens; live
-/// rendering passes the explicitly marked character-based estimate.
+/// Client-observed end-to-end rate for a completed provider attempt. The token
+/// count includes reasoning; the interval must start at request start, not the
+/// first visible delta. This is not server-side generation speed.
 pub(super) fn output_tokens_per_second(output_tokens: u64, elapsed: Duration) -> Option<f64> {
     (output_tokens > 0 && !elapsed.is_zero())
         .then(|| output_tokens as f64 / elapsed.as_secs_f64())
@@ -83,15 +83,15 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
     if let (Some(rate), Some(tokens), Some(elapsed)) = (
         state.last_turn_tokens_per_second,
         state.last_turn_generated_tokens,
-        state.last_turn_generation_elapsed,
+        state.last_turn_provider_elapsed,
     ) {
         lines.push(format!(
-            "Throughput     {rate:.1} tok/s final ({tokens} reported tokens / {:.2}s measured)",
+            "Throughput     {rate:.1} tok/s end-to-end, last attempt ({tokens} reported output tokens / {:.2}s request-to-completion; not server speed)",
             elapsed.as_secs_f64()
         ));
-    } else if let Some(started) = state.turn_generation_started_at {
+    } else if let Some(started) = state.turn_requested_at {
         lines.push(format!(
-            "Throughput     awaiting turn completion ({:.2}s generation in progress)",
+            "Throughput     awaiting turn completion ({:.2}s request in progress)",
             now.saturating_duration_since(started).as_secs_f64()
         ));
     } else {
@@ -140,7 +140,7 @@ mod tests {
     use futures_util::StreamExt as _;
 
     #[test]
-    fn output_token_rate_uses_authoritative_usage_and_generation_elapsed_time() {
+    fn output_token_rate_uses_reported_usage_and_request_elapsed_time() {
         assert_eq!(
             output_tokens_per_second(120, Duration::from_secs(2)),
             Some(60.0)

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Fix inflated TUI throughput for hidden reasoning and buffered responses. Use
+  request-to-completion timing and label the latest-turn rate as end-to-end,
+  not server generation speed. Intended for v0.8.2.
+
 - Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
   `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the
   verified immutable release assets with trusted publishing and registry

@@ -35,7 +35,7 @@ fn completion_status_text(
 ) -> String {
     let mut text = format!("{status}{separator}{}", format_duration(elapsed));
     if let Some(rate) = tokens_per_second.filter(|rate| rate.is_finite() && *rate > 0.0) {
-        text.push_str(&format!("{separator}{rate:.0} tok/s"));
+        text.push_str(&format!("{separator}{rate:.0} tok/s E2E (last turn)"));
     }
     text
 }
@@ -192,7 +192,7 @@ mod tests {
             );
         }
         let line = strip_terminal_sequences(&outcome_line(&with_warnings, Some(216.0), &theme));
-        assert_eq!(line, "✓ completed · 1m23s · 216 tok/s");
+        assert_eq!(line, "✓ completed · 1m23s · 216 tok/s E2E (last turn)");
         assert!(!line.to_ascii_lowercase().contains("warning"), "{line}");
 
         // The success glyph and role are the ones the completed line uses; the
@@ -218,7 +218,10 @@ mod tests {
         };
         let plain = rendered(with_warnings);
         assert_eq!(plain, rendered(completed), "{plain:?}");
-        assert_eq!(plain, "✓ completed · 1m23s · 216 tok/s", "{plain:?}");
+        assert_eq!(
+            plain, "✓ completed · 1m23s · 216 tok/s E2E (last turn)",
+            "{plain:?}"
+        );
         assert!(!plain.to_ascii_lowercase().contains("warning"), "{plain:?}");
     }
 
