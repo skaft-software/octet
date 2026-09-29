@@ -8,8 +8,12 @@
 //!
 //! These assertions were extracted from `tui.rs`; each module is a
 //! child of `crate::tui::tests`, so `use super::*` reaches exactly
-//! the private items it reached while the tests were inline.
+//! the private items it reached while the tests were inline. The one
+//! exception is the per-image Kitty delete escape, which moved into
+//! `crate::tui::kitty` with the rest of the placement bookkeeping and
+//! is imported explicitly so the dependency stays visible.
 
+use super::kitty::delete_kitty_image;
 use super::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

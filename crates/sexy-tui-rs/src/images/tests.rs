@@ -6,10 +6,21 @@
 //! production code and the assertions that pin it can be
 //! navigated separately. This is still a child module of
 //! `crate::images`, so `use super::*` reaches exactly the
-//! private items it reached while the tests were inline.
+//! private items it reached while the tests were inline. The PNG
+//! chunk builder is the one exception: its CRC helper now lives with
+//! the container parsers in `crate::images::inspect`, and is imported
+//! explicitly so the dependency stays visible.
 
+use super::inspect::png_crc32;
+use super::transmit::base64_string;
 use super::*;
+use crate::capabilities::CellPixelSize;
 use crate::ColorDepth;
+use crate::TerminalCapabilities;
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+const DEFAULT_QUERY_TIMEOUT: Duration = super::limits::DEFAULT_QUERY_TIMEOUT;
 
 fn push_png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     output.extend_from_slice(&(u32::try_from(data.len()).unwrap()).to_be_bytes());
