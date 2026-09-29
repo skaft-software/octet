@@ -323,6 +323,33 @@ def _driver_interpreter(environment: Mapping[str, str]) -> Tuple[str, Tuple[int,
     )
 
 
+def _venv_site_packages(paths: DriverPaths, environment: Mapping[str, str]) -> Path:
+    """The runtime venv's own site-packages, as its interpreter reports it.
+
+    The venv can be built by a newer Python than the one running this bundle
+    (see :func:`_driver_interpreter`), so the ``lib/pythonX.Y`` directory cannot
+    be derived from this process.
+    """
+
+    probe = _run(
+        [
+            str(paths.venv_python),
+            "-c",
+            "import sys, sysconfig; sys.stdout.write(sysconfig.get_paths()['purelib'])",
+        ],
+        env=environment,
+        timeout=PROBE_TIMEOUT_SECONDS,
+    )
+    reported = (probe.stdout or "").strip()
+    if probe.returncode != 0 or not reported:
+        raise ProvisionError("could not locate the runtime venv's site-packages")
+    site = Path(reported)
+    # Files are extracted here, so the answer must stay inside the owned venv.
+    if paths.venv.resolve() not in site.resolve().parents:
+        raise ProvisionError("the runtime venv reported a site-packages outside the venv")
+    return site
+
+
 def _venv_python_for(venv: Path) -> Path:
     if platform.system() == "Windows":
         return venv / "Scripts" / "python.exe"
@@ -561,6 +588,7 @@ def _provision_without_pip(
         raise ProvisionError(
             f"failed to create runtime venv: {(create.stderr or create.stdout or '').strip()[:400]}"
         )
+    site = _venv_site_packages(paths, environment)
     url = f"{PACKAGE_INDEX_JSON}/{DISTRIBUTION}/{version}/json" if version else \
         f"{PACKAGE_INDEX_JSON}/{DISTRIBUTION}/json"
     try:
@@ -586,7 +614,6 @@ def _provision_without_pip(
                 sink.write(chunk)
         if digest.hexdigest() != wheel["digests"]["sha256"]:
             raise ProvisionError(f"{wheel['filename']} does not match its published SHA-256")
-        site = paths.site_packages
         site.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(archive) as bundle:
             for member in bundle.infolist():

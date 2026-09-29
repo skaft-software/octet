@@ -4,9 +4,13 @@ Every test here is offline: ``_run`` is replaced by a recorder, so no venv is
 created, no pip index is contacted, and no driver binary is executed.
 """
 
+import hashlib
+import io
+import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -241,6 +245,52 @@ class InterpreterPreflightTests(unittest.TestCase):
         self.assertIn("No matching distribution found for cua-driver", message)
         self.assertIn("the runtime uses Python 3.12", message)
         self.assertIn("package index", message)
+
+    def test_direct_wheel_extracts_into_the_venv_interpreters_site_packages(self):
+        # The venv can be built by a newer Python than this process, so the
+        # lib/pythonX.Y directory comes from the venv, not from sys.version_info.
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            bundle.writestr("cua_driver/__init__.py", "")
+        wheel = buffer.getvalue()
+        name = "cua_driver-9.9.9-py3-none-manylinux_2_31_x86_64.whl"
+        wheel_url = "https://files.example/" + name
+        index = json.dumps({"urls": [{
+            "filename": name,
+            "url": wheel_url,
+            "digests": {"sha256": hashlib.sha256(wheel).hexdigest()},
+        }]}).encode()
+        responses = {f"{driver_module.PACKAGE_INDEX_JSON}/cua-driver/json": index, wheel_url: wheel}
+        site = self.paths.venv / "lib" / "python3.12" / "site-packages"
+
+        def run(argv, **kwargs):
+            argv = list(argv)
+            self.calls.append(argv)
+            if argv[1:3] == ["-m", "venv"]:
+                site.mkdir(parents=True, exist_ok=True)
+            if "sysconfig" in argv[-1]:
+                return _Completed(stdout=str(site))
+            return _Completed()
+
+        with patch.object(driver_module, "sys", self.OLD_HOST), \
+                patch.object(driver_module, "_run", run), \
+                patch.object(driver_module, "_glibc_version", return_value=(2, 39)), \
+                patch.object(driver_module.platform, "machine", return_value="x86_64"), \
+                patch.object(driver_module.urllib.request, "urlopen",
+                             side_effect=lambda url, timeout: io.BytesIO(responses[url])), \
+                patch.object(driver_module, "installed_binary",
+                             return_value=Path("/tmp/cua-driver")):
+            driver_module._ensure_directories(self.paths)
+            driver_module._provision_without_pip(
+                self.paths, "", {}, 60, "/usr/bin/python3.12")
+        self.assertTrue((site / "cua_driver" / "__init__.py").is_file())
+        self.assertFalse((self.paths.venv / "lib" / "python3.9").exists())
+
+    def test_venv_site_packages_outside_the_venv_is_refused(self):
+        with patch.object(driver_module, "_run",
+                          return_value=_Completed(stdout="/usr/lib/python3/dist-packages")):
+            with self.assertRaises(ProvisionError):
+                driver_module._venv_site_packages(self.paths, {})
 
     def test_macos_candidates_include_install_locations_off_the_gui_path(self):
         present = {"/opt/homebrew/bin/python3"}
