@@ -10,9 +10,10 @@
 
 use super::*;
 use crate::catalog::Model;
+use crate::test_fixtures::base_request;
 use crate::types::{
     AssistantMessage, Capabilities, Endpoint, EndpointId, ModalitySet, ModelId, ModelLimits,
-    ModelSpec, OutputModalities, ToolCall, ToolCallId, ToolResult, ToolResultPart, UserMessage,
+    ModelSpec, ToolCall, ToolCallId, ToolResult, ToolResultPart, UserMessage,
 };
 
 fn model() -> Model {
@@ -62,26 +63,13 @@ fn model_with_api_name(api_name: &str) -> Model {
 #[test]
 fn maps_structured_output_to_native_json_schema() {
     let mut request = Request {
-        messages: Vec::new(),
-        system: None,
-        tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: Vec::new(),
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: Default::default(),
         output_format: OutputFormat::JsonSchema(crate::types::JsonSchemaFormat {
             name: "answer".to_owned(),
             description: None,
             schema: serde_json::json!({"type": "object"}),
             strict: true,
         }),
-        output_modalities: OutputModalities::Text,
-        session_id: None,
-        cache_retention: Default::default(),
-        compatibility: Default::default(),
-        responses: None,
+        ..base_request()
     };
     let parts = build_request(&model(), &request).unwrap();
     let body: Value = serde_json::from_slice(&parts.body).unwrap();
@@ -134,20 +122,7 @@ fn uses_model_specific_google_tool_call_id_shape() {
                 })],
             }),
         ],
-        system: None,
-        tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: Vec::new(),
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: Default::default(),
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        session_id: None,
-        cache_retention: Default::default(),
-        compatibility: Default::default(),
-        responses: None,
+        ..base_request()
     };
 
     let legacy = build_request(&model(), &request).unwrap();

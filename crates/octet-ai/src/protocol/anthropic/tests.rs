@@ -10,12 +10,12 @@
 
 use super::*;
 use crate::catalog::Model;
+use crate::test_fixtures::base_request;
 use crate::types::{
     Capabilities, Endpoint, EndpointId, ImageMedia, ImageSource, Media, Message, ModalitySet,
-    ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities, ReasoningConfig,
-    ReasoningPart, Request, ToolChoice, ToolDef, UserMessage, UserPart,
+    ModelId, ModelLimits, ModelSpec, OutputFormat, ReasoningConfig, ReasoningPart, Request,
+    ToolChoice, ToolDef, UserMessage, UserPart,
 };
-use crate::CompatibilityMode;
 use std::sync::Arc;
 
 fn make_test_model(reasoning: bool) -> Model {
@@ -90,19 +90,10 @@ fn test_build_request_anthropic_basic() {
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("Hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(1000),
         temperature: Some(0.5),
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
         cache_retention: crate::types::CacheRetention::None,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -150,23 +141,11 @@ fn caller_anthropic_beta_list_is_authoritative_and_deduplicated() {
         );
     }
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("Hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
         cache_retention: crate::types::CacheRetention::None,
-        session_id: None,
+        ..base_request()
     };
     let parts = build_request(&model, &req).unwrap();
     assert_eq!(
@@ -183,23 +162,12 @@ fn caller_anthropic_beta_list_is_authoritative_and_deduplicated() {
 /// A minimal Anthropic Messages request for beta-header tests.
 fn beta_test_request(reasoning: ReasoningConfig) -> Request {
     Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("Hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
         reasoning,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
         cache_retention: crate::types::CacheRetention::None,
-        session_id: None,
+        ..base_request()
     }
 }
 
@@ -325,18 +293,8 @@ fn cache_retention_controls_anthropic_wire_markers() {
             description: "lookup".to_string(),
             parameters: serde_json::json!({"type":"object"}),
         }],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
         session_id: Some("session-123".to_string()),
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -399,18 +357,10 @@ fn warm_breakpoint_covers_reusable_canonical_prefix_not_synthetic_suffix() {
             description: "lookup".into(),
             parameters: serde_json::json!({"type": "object"}),
         }],
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(1),
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
         cache_retention: CacheRetention::WarmShort,
         session_id: Some("same-session".into()),
+        ..base_request()
     };
     req.messages.push(Message::User(UserMessage {
         content: vec![UserPart::Text("Reply with a single period.".into())],
@@ -452,31 +402,19 @@ fn warm_breakpoint_covers_reusable_canonical_prefix_not_synthetic_suffix() {
 fn test_build_request_anthropic_url_image_and_structured_output() {
     let model = make_test_model(false);
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Media(Media::image_url(
                 url::Url::parse("https://example.test/image.png").unwrap(),
                 None,
             ))],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
         output_format: OutputFormat::JsonSchema(crate::types::JsonSchemaFormat {
             name: "answer".to_string(),
             description: None,
             schema: serde_json::json!({"type":"object"}),
             strict: true,
         }),
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let body: serde_json::Value =
         serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
@@ -497,7 +435,6 @@ fn test_build_request_anthropic_thinking_replay() {
     };
 
     let req = Request {
-        system: None,
         messages: vec![
             Message::User(UserMessage {
                 content: vec![UserPart::Text("Hello".to_string())],
@@ -514,19 +451,8 @@ fn test_build_request_anthropic_thinking_replay() {
                 protocol: Protocol::AnthropicMessages,
             }),
         ],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
         reasoning: ReasoningConfig::Effort(crate::types::ReasoningEffort::Medium),
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -559,23 +485,11 @@ fn test_build_request_anthropic_effort_adaptive_max() {
     };
 
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("Hi".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
         reasoning: ReasoningConfig::Effort(crate::types::ReasoningEffort::Max),
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -642,23 +556,10 @@ fn test_build_request_image_input() {
     });
 
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Media(inline_image), UserPart::Media(url_image)],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -682,7 +583,6 @@ fn test_build_request_image_input() {
 
 fn compat_request(tool_choice: ToolChoice) -> Request {
     Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("go".to_string())],
         })],
@@ -699,16 +599,7 @@ fn compat_request(tool_choice: ToolChoice) -> Request {
         }],
         tool_choice,
         max_output_tokens: Some(8192),
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     }
 }
 
@@ -856,7 +747,6 @@ fn empty_thinking_signatures_replay_as_text_unless_the_route_declares_them() {
         },
     };
     let request = || Request {
-        system: None,
         messages: vec![
             Message::User(UserMessage {
                 content: vec![UserPart::Text("Hello".to_string())],
@@ -870,19 +760,7 @@ fn empty_thinking_signatures_replay_as_text_unless_the_route_declares_them() {
                 protocol: Protocol::AnthropicMessages,
             }),
         ],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let (body, _headers) = compat_build(&model, &request());
     // Pi's default: an empty signature becomes plain text for Anthropic.

@@ -18,14 +18,14 @@ use crate::catalog::Model;
 use crate::error::{AiError, DecodeError};
 use crate::protocol::sse::SseEvent;
 use crate::stream::{ResponseBuilder, StreamEvent};
+use crate::test_fixtures::base_request;
 use crate::types::{
     AssistantMessage, AssistantPart, AudioFormat, AudioOutputOptions, AudioVoice, Capabilities,
     Endpoint, EndpointId, ImageDetail, ImageMedia, ImageSource, Media, Message, ModalitySet,
-    ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode, OutputFormat, OutputModalities,
-    Protocol, ReasoningConfig, ReasoningEffort, ReasoningPart, Request, StopReason, ToolCall,
-    ToolCallId, ToolChoice, ToolDef, ToolResultPart, UserMessage, UserPart,
+    ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode, OutputModalities, Protocol,
+    ReasoningConfig, ReasoningEffort, ReasoningPart, Request, StopReason, ToolCall, ToolCallId,
+    ToolDef, ToolResultPart, UserMessage, UserPart,
 };
-use crate::CompatibilityMode;
 use std::sync::Arc;
 
 fn make_test_model(
@@ -125,19 +125,9 @@ fn openrouter_summary_reasoning_never_invents_a_disable() {
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("history".into())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(1024),
-        temperature: None,
-        stop: vec![],
         reasoning: crate::select_auxiliary_reasoning(&model).unwrap(),
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let body = |model: &Model, req: &Request| -> serde_json::Value {
         serde_json::from_slice(&build_request(model, req).unwrap().body).unwrap()
@@ -223,19 +213,8 @@ fn test_build_request_text_only() {
                 UserPart::Text("lo".to_string()),
             ],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
         temperature: Some(0.8),
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -275,19 +254,7 @@ fn omits_tool_choice_when_no_tools_enabled_for_request() {
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("Hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -316,19 +283,8 @@ fn system_message_reasoning_mode_keeps_qwen_compatible_role() {
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
         reasoning: ReasoningConfig::Effort(ReasoningEffort::High),
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -352,19 +308,7 @@ fn always_on_reasoning_uses_provider_default_without_a_control_parameter() {
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     assert!(matches!(
@@ -401,19 +345,7 @@ fn provider_reasoning_values_preserve_literals_but_omit_semantic_default() {
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -474,7 +406,6 @@ fn unsupported_deferred_tool_loading_rejects_instead_of_hiding_schemas() {
         parameters: serde_json::json!({"type": "object"}),
     };
     let request = Request {
-        system: None,
         messages: vec![
             Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
@@ -501,18 +432,7 @@ fn unsupported_deferred_tool_loading_rejects_instead_of_hiding_schemas() {
             make_tool("bash"),
             make_tool("browser_click"),
         ],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     assert!(matches!(
@@ -570,7 +490,6 @@ fn constrained_sampling_emits_strict_and_grammar_custom_tools() {
         .preset
         .supports_openai_grammar_tools = Some(true);
     let request = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("go".into())],
         })],
@@ -605,18 +524,7 @@ fn constrained_sampling_emits_strict_and_grammar_custom_tools() {
                 }),
             },
         ],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -649,7 +557,6 @@ fn required_constrained_sampling_that_cannot_be_honored_is_rejected() {
 
     let model = make_test_model(false, false, false, true, false, false);
     let request = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("go".into())],
         })],
@@ -668,18 +575,7 @@ fn required_constrained_sampling_that_cannot_be_honored_is_rejected() {
                 "oneOf": [{"type": "object"}]
             }),
         }],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     assert!(matches!(
@@ -705,7 +601,6 @@ fn deferred_tool_loading_disabled_keeps_all_schemas() {
         parameters: serde_json::json!({"type": "object"}),
     };
     let request = Request {
-        system: None,
         messages: vec![
             Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
@@ -732,18 +627,7 @@ fn deferred_tool_loading_disabled_keeps_all_schemas() {
             make_tool("bash"),
             make_tool("browser_click"),
         ],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -787,18 +671,8 @@ fn binary_reasoning_default_keeps_qwen_tool_schema_on_the_wire() {
                 "required": ["path"]
             }),
         }],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
         reasoning: ReasoningConfig::On,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -843,19 +717,8 @@ fn deepseek_thinking_toggle_effort_and_tool_reasoning_replay() {
                 protocol: Protocol::OpenAiChat,
             }),
         ],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
         reasoning: ReasoningConfig::Effort(ReasoningEffort::Low),
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -901,7 +764,6 @@ fn mistral_profile_uses_its_bounded_request_contract() {
 
     let canonical_tool_id = "call_with_a_long_non_mistral_id";
     let request = Request {
-        system: None,
         messages: vec![
             Message::Assistant(AssistantMessage {
                 content: vec![
@@ -929,19 +791,9 @@ fn mistral_profile_uses_its_bounded_request_contract() {
                 })],
             }),
         ],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(123),
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
         session_id: Some("mistral-affinity".into()),
+        ..base_request()
     };
 
     let parts = build_request(&model, &request).unwrap();
@@ -970,7 +822,6 @@ fn mistral_profile_uses_its_bounded_request_contract() {
 fn reasoning_only_local_turn_replays_as_assistant_content() {
     let model = make_test_model(false, false, false, false, false, false);
     let request = Request {
-        system: None,
         messages: vec![Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::Reasoning(ReasoningPart {
                 text: Some("I need to inspect the picker first.".into()),
@@ -979,19 +830,7 @@ fn reasoning_only_local_turn_replays_as_assistant_content() {
             model: model.spec.id.clone(),
             protocol: Protocol::OpenAiChat,
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -1008,26 +847,14 @@ fn reasoning_only_local_turn_replays_as_assistant_content() {
 fn test_build_request_audio_out() {
     let model = make_test_model(false, false, true, false, false, false);
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("Say hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
         output_modalities: OutputModalities::TextAndAudio(AudioOutputOptions {
             format: AudioFormat::Wav,
             voice: AudioVoice::Named("alloy".to_string()),
         }),
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -1306,18 +1133,8 @@ fn anthropic_style_chat_cache_markers_cover_system_conversation_and_tools() {
             description: "Read a file".to_string(),
             parameters: serde_json::json!({"type": "object"}),
         }],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
         session_id: Some("stable-session".to_string()),
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -1395,19 +1212,8 @@ fn cache_retention_controls_openai_chat_key() {
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
         session_id: Some("b".repeat(70)),
+        ..base_request()
     };
 
     let body: serde_json::Value =
@@ -1464,23 +1270,12 @@ fn opencode_chat_session_header_is_independent_of_cache_retention() {
         .send_session_affinity_headers = true;
     Arc::make_mut(&mut model.endpoint).id = EndpointId("opencode-go".into());
     let mut req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("hello".into())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
         cache_retention: crate::types::CacheRetention::None,
         session_id: Some("zen-session".into()),
+        ..base_request()
     };
     for retention in [
         crate::types::CacheRetention::None,
@@ -1537,23 +1332,10 @@ fn test_build_request_audio_input() {
         transcript: None,
     };
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Media(crate::types::Media::Audio(audio_media))],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -1586,23 +1368,10 @@ fn test_build_request_image_input() {
     });
 
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Media(inline_image), UserPart::Media(url_image)],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();

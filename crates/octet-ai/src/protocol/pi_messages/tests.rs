@@ -12,6 +12,7 @@ use super::*;
 use std::sync::Arc;
 
 use crate::protocol::harness::{drive, model as harness_model};
+use crate::test_fixtures::base_request;
 use crate::types::{
     AssistantMessage, AssistantPart, ModelId, Protocol, ReasoningPart, ToolCall, ToolDef,
     UserMessage, UserPart,
@@ -32,18 +33,11 @@ fn request() -> Request {
             content: vec![UserPart::Text("hello".to_owned())],
         })],
         tools: tools(),
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(64),
         temperature: Some(0.5),
-        stop: Vec::new(),
         reasoning: ReasoningConfig::Effort(crate::types::ReasoningEffort::High),
-        reasoning_mode: ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: CacheRetention::Short,
         session_id: Some("session-1".to_owned()),
+        ..base_request()
     }
 }
 

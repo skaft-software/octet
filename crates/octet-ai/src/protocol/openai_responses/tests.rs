@@ -20,14 +20,15 @@ use crate::error::AiError;
 use crate::protocol::sse::SseEvent;
 use crate::protocol::HttpRequestParts;
 use crate::stream::{ResponseBuilder, StreamEvent};
+use crate::test_fixtures::base_request;
 use crate::types::{
     AssistantPart, CacheRetention, Protocol, ReasoningState, ReasoningStateKind, ToolCallId,
     ToolDef, ToolResultPart,
 };
 use crate::types::{
     Capabilities, Endpoint, EndpointId, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message,
-    ModalitySet, ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities, ProviderMediaRef,
-    ReasoningConfig, Request, ResponsesRuntimeProfile, ToolChoice, UserMessage, UserPart,
+    ModalitySet, ModelId, ModelLimits, ModelSpec, OutputFormat, ProviderMediaRef, ReasoningConfig,
+    Request, ResponsesRuntimeProfile, ToolChoice, UserMessage, UserPart,
 };
 use crate::CompatibilityMode;
 use std::sync::Arc;
@@ -43,21 +44,9 @@ fn without_structured_output(model: &Model) -> Model {
 
 fn user_req(content: Vec<UserPart>, compatibility: CompatibilityMode) -> Request {
     Request {
-        system: None,
         messages: vec![Message::User(UserMessage { content })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
         compatibility,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     }
 }
 
@@ -126,19 +115,9 @@ fn test_build_request_responses_basic() {
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("Hello".to_string())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(1000),
         temperature: Some(0.5),
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();
@@ -1002,7 +981,6 @@ fn responses_compat_can_disable_standard_session_and_long_retention() {
 fn test_build_request_responses_tool_shape() {
     let model = make_test_model(false);
     let mut req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("hello".to_string())],
         })],
@@ -1014,17 +992,7 @@ fn test_build_request_responses_tool_shape() {
             parameters: serde_json::json!({"type":"object"}),
         }],
         tool_choice: ToolChoice::Named("lookup".to_string()),
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let mut capable = (*model.spec).clone();
     capable.capabilities.tools = true;
@@ -1116,23 +1084,10 @@ fn test_build_request_image_input() {
     });
 
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Media(inline_image), UserPart::Media(url_image)],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = build_request(&model, &req).unwrap();

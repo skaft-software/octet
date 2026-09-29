@@ -10,6 +10,7 @@
 
 use super::{normalize_request_reasoning, validate_request};
 use crate::error::{AiError, UnsupportedError, ValidationError};
+use crate::test_fixtures::base_request;
 use crate::types::{
     AssistantMessage, AssistantPart, AudioFormat, AudioOutputOptions, AudioVoice, Capabilities,
     ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message, Modality, ModalitySet,
@@ -72,33 +73,13 @@ fn limits() -> ModelLimits {
     }
 }
 
-fn base() -> Request {
-    Request {
-        system: None,
-        messages: vec![],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
-    }
-}
-
 fn user(parts: Vec<UserPart>) -> Message {
     Message::User(UserMessage { content: parts })
 }
 
 #[test]
 fn responses_options_fail_closed_on_other_protocols() {
-    let mut req = base();
+    let mut req = base_request();
     req.responses = Some(crate::responses::ResponsesOptions::full_replay(
         crate::responses::ResponsesInput::default(),
     ));
@@ -132,7 +113,7 @@ fn has_code(diags: &[crate::Diagnostic], code: &str) -> bool {
 // --- image input gate ---
 #[test]
 fn image_without_capability() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![user(vec![UserPart::Media(Media::Image(ImageMedia {
         source: ImageSource::Inline(bytes::Bytes::from_static(b"x")),
         media_type: Some("image/png".parse().unwrap()),
@@ -159,7 +140,7 @@ fn image_without_capability() {
 // --- Anthropic documents URL image sources ---
 #[test]
 fn image_url_on_anthropic_is_supported() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![user(vec![UserPart::Media(Media::image_url(
         url::Url::parse("https://example.test/a.png").unwrap(),
         None,
@@ -177,7 +158,7 @@ fn image_url_on_anthropic_is_supported() {
 // --- audio input gate (always fails on Responses & Anthropic) ---
 #[test]
 fn audio_input_rejected_on_responses_and_anthropic() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![user(vec![UserPart::Media(Media::audio_bytes(
         bytes::Bytes::from_static(b"RIFF"),
         AudioFormat::Wav,
@@ -204,7 +185,7 @@ fn audio_input_rejected_on_responses_and_anthropic() {
 // --- Chat audio non-inline format gate ---
 #[test]
 fn chat_audio_non_wav_mp3_rejected() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![user(vec![UserPart::Media(Media::audio_bytes(
         bytes::Bytes::from_static(b"OggS"),
         AudioFormat::Opus,
@@ -224,7 +205,7 @@ fn chat_audio_non_wav_mp3_rejected() {
 // --- audio output on non-audio models / non-Chat protocols ---
 #[test]
 fn audio_output_requires_chat_and_capability() {
-    let mut req = base();
+    let mut req = base_request();
     req.output_modalities = OutputModalities::TextAndAudio(AudioOutputOptions {
         format: AudioFormat::Wav,
         voice: AudioVoice::Named("alloy".into()),
@@ -265,7 +246,7 @@ fn audio_output_rejects_empty_voices() {
         AudioVoice::Named("   ".into()),
         AudioVoice::ProviderRef(String::new()),
     ] {
-        let mut req = base();
+        let mut req = base_request();
         req.output_modalities = OutputModalities::TextAndAudio(AudioOutputOptions {
             format: AudioFormat::Wav,
             voice,
@@ -290,7 +271,7 @@ fn audio_output_rejects_empty_voices() {
 // --- deferred tool loading is not implemented: reject, never hide schemas ---
 #[test]
 fn deferred_tool_loading_is_rejected_instead_of_hiding_schemas() {
-    let req = base();
+    let req = base_request();
     let mut c = caps(false, false, false, true, false, false);
     c.deferred_tool_loading = true;
     assert!(matches!(
@@ -302,7 +283,7 @@ fn deferred_tool_loading_is_rejected_instead_of_hiding_schemas() {
 // --- tools without capability ---
 #[test]
 fn tools_without_capability() {
-    let mut req = base();
+    let mut req = base_request();
     req.tools = vec![ToolDef {
         async_execution: false,
         constrained_sampling: None,
@@ -333,7 +314,7 @@ fn tools_without_capability() {
 // --- tool_choice without capability ---
 #[test]
 fn tool_choice_without_capability() {
-    let mut req = base();
+    let mut req = base_request();
     req.tool_choice = ToolChoice::Required;
     assert!(matches!(
         run(
@@ -357,7 +338,7 @@ fn tool_choice_without_capability() {
 
 #[test]
 fn explicit_reasoning_choices_fail_instead_of_clamping() {
-    let mut req = base();
+    let mut req = base_request();
     let mut capabilities = caps(false, false, false, false, true, false);
     let cap = capabilities.reasoning.as_mut().unwrap();
     cap.min_effort = ReasoningEffort::Low;
@@ -383,7 +364,7 @@ fn explicit_reasoning_choices_fail_instead_of_clamping() {
 
 #[test]
 fn reasoning_budget_must_fit_the_effective_request_output_limit() {
-    let mut req = base();
+    let mut req = base_request();
     req.max_output_tokens = Some(2_000);
     req.reasoning = ReasoningConfig::Budget(3_000);
     let mut capabilities = caps(false, false, false, false, true, false);
@@ -411,7 +392,7 @@ fn reasoning_budget_must_fit_the_effective_request_output_limit() {
 // --- reasoning without capability ---
 #[test]
 fn reasoning_without_capability() {
-    let mut req = base();
+    let mut req = base_request();
     req.reasoning = ReasoningConfig::Effort(ReasoningEffort::High);
     assert!(matches!(
         run(
@@ -433,7 +414,7 @@ fn reasoning_without_capability() {
 // --- reasoning-state protocol/model mismatch ---
 #[test]
 fn reasoning_state_mismatch() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![Message::Assistant(AssistantMessage {
         content: vec![AssistantPart::Reasoning(ReasoningPart {
             text: Some("prior".into()),
@@ -465,7 +446,7 @@ fn reasoning_state_mismatch() {
 // --- structured output without capability ---
 #[test]
 fn structured_output_without_capability() {
-    let mut req = base();
+    let mut req = base_request();
     req.output_format = OutputFormat::JsonObject;
     assert!(matches!(
         run(
@@ -490,7 +471,7 @@ fn structured_output_without_capability() {
 // --- JsonObject on Anthropic (unsupported) ---
 #[test]
 fn json_object_unsupported_on_anthropic() {
-    let mut req = base();
+    let mut req = base_request();
     req.output_format = OutputFormat::JsonObject;
     assert!(matches!(
         run(
@@ -504,7 +485,7 @@ fn json_object_unsupported_on_anthropic() {
 
 #[test]
 fn structured_output_is_unsupported_on_bedrock_even_if_misadvertised() {
-    let mut req = base();
+    let mut req = base_request();
     req.output_format = OutputFormat::JsonObject;
     assert!(matches!(
         run(
@@ -545,7 +526,7 @@ fn structured_output_is_unsupported_on_bedrock_even_if_misadvertised() {
 // --- invalid JSON schema name / non-object schema ---
 #[test]
 fn invalid_schema_name_and_shape() {
-    let mut req = base();
+    let mut req = base_request();
     req.output_format = OutputFormat::JsonSchema(JsonSchemaFormat {
         name: "bad name!".into(),
         description: None,
@@ -583,7 +564,7 @@ fn invalid_schema_name_and_shape() {
 #[test]
 fn max_output_tokens_bounds() {
     let c = caps(false, false, false, false, false, false);
-    let mut req = base();
+    let mut req = base_request();
     req.max_output_tokens = Some(0);
     assert!(matches!(
         run(&req, &c, Protocol::OpenAiChat),
@@ -604,7 +585,7 @@ fn max_output_tokens_bounds() {
 #[test]
 fn temperature_bounds() {
     let c = caps(false, false, false, false, false, false);
-    let mut req = base();
+    let mut req = base_request();
     req.temperature = Some(f32::NAN);
     assert!(matches!(
         run(&req, &c, Protocol::OpenAiChat),
@@ -620,7 +601,7 @@ fn temperature_bounds() {
 // --- tool-result media on Chat (text-only tool results) ---
 #[test]
 fn tool_result_media_rejected() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![user(vec![UserPart::ToolResult(ToolResult {
         tool_call_id: ToolCallId("call_1".into()),
         content: vec![ToolResultPart::Media(Media::image_url(
@@ -660,7 +641,7 @@ fn tool_result_media_rejected() {
 // --- provider media ref: wrong protocol + expired ---
 #[test]
 fn provider_media_ref_mismatch_and_expiry() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![user(vec![UserPart::Media(Media::Image(ImageMedia {
         source: ImageSource::ProviderRef(ProviderMediaRef {
             protocol: Protocol::OpenAiResponses,
@@ -683,7 +664,7 @@ fn provider_media_ref_mismatch_and_expiry() {
     ));
 
     // Expired ref on the matching protocol.
-    let mut req2 = base();
+    let mut req2 = base_request();
     req2.compatibility = Lossy;
     req2.messages = vec![user(vec![UserPart::Media(Media::Image(ImageMedia {
         source: ImageSource::ProviderRef(ProviderMediaRef {
@@ -703,7 +684,7 @@ fn provider_media_ref_mismatch_and_expiry() {
 // --- orphan tool result ---
 #[test]
 fn orphan_tool_result() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![user(vec![UserPart::ToolResult(ToolResult {
         tool_call_id: ToolCallId("nope".into()),
         content: vec![ToolResultPart::Text("r".into())],
@@ -723,7 +704,7 @@ fn orphan_tool_result() {
 // --- missing tool result (paired protocols) ---
 #[test]
 fn missing_tool_result_paired_protocols() {
-    let mut req = base();
+    let mut req = base_request();
     req.messages = vec![
         Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {

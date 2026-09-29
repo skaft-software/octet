@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::protocol::harness::model as harness_model;
+use crate::test_fixtures::base_request;
 use crate::types::UserMessage;
 
 fn native_model(profile: Option<MistralReasoningProfile>) -> Model {
@@ -22,23 +23,11 @@ fn native_model(profile: Option<MistralReasoningProfile>) -> Model {
 
 fn request(reasoning: ReasoningConfig) -> Request {
     Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("go".to_owned())],
         })],
-        tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: Vec::new(),
         reasoning,
-        reasoning_mode: ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     }
 }
 

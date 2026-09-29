@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::pricing::TokenRate;
+use crate::test_fixtures::base_request;
 use std::time::SystemTime;
 
 #[test]
@@ -294,7 +295,6 @@ fn test_tool_call_arguments_value() {
 fn test_request_serde_round_trip() {
     let req = Request {
         system: Some("sys".to_string()),
-        messages: vec![],
         tools: vec![ToolDef {
             async_execution: false,
             constrained_sampling: None,
@@ -302,18 +302,10 @@ fn test_request_serde_round_trip() {
             description: "desc".to_string(),
             parameters: serde_json::json!({"type": "object"}),
         }],
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(10),
         temperature: Some(0.7),
         stop: vec!["\n".to_string()],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let serialized = serde_json::to_string(&req).unwrap();
     let deserialized: Request = serde_json::from_str(&serialized).unwrap();

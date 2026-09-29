@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::protocol::harness;
+use crate::test_fixtures::base_request;
 use crate::types::Request;
 use crate::CompatibilityMode;
 
@@ -225,19 +226,9 @@ fn request_builder_uses_converse_shape() {
         messages: vec![Message::User(crate::types::UserMessage {
             content: vec![UserPart::Text("hello".to_owned())],
         })],
-        tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(64),
-        temperature: None,
-        stop: Vec::new(),
-        reasoning: crate::types::ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: crate::types::OutputFormat::Text,
-        output_modalities: crate::types::OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
         cache_retention: crate::types::CacheRetention::None,
-        session_id: None,
+        ..base_request()
     };
     let parts = build_request(&model, &request).unwrap();
     let body: Value = serde_json::from_slice(&parts.body).unwrap();
@@ -278,7 +269,6 @@ fn thinking_model() -> crate::catalog::Model {
 
 fn thinking_request() -> Request {
     Request {
-        system: None,
         messages: vec![Message::User(crate::types::UserMessage {
             content: vec![UserPart::Text("hello".into())],
         })],
@@ -289,18 +279,10 @@ fn thinking_request() -> Request {
             description: "fixture".into(),
             parameters: json!({"type": "object"}),
         }],
-        tool_choice: ToolChoice::Auto,
         max_output_tokens: Some(4096),
-        temperature: None,
-        stop: Vec::new(),
         reasoning: crate::types::ReasoningConfig::Effort(crate::types::ReasoningEffort::Low),
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: crate::types::OutputFormat::Text,
-        output_modalities: crate::types::OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
         cache_retention: crate::types::CacheRetention::None,
-        session_id: None,
+        ..base_request()
     }
 }
 

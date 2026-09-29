@@ -9,6 +9,7 @@
 //! private items it reached while the tests were inline.
 
 use super::*;
+use crate::test_fixtures::base_request;
 use crate::types::{AssistantMessage, Message, ModalitySet, ToolCall, ToolCallId, UserMessage};
 
 fn dummy_caps(
@@ -69,7 +70,6 @@ fn dummy_limits() -> ModelLimits {
 #[test]
 fn test_orphan_tool_result() {
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::ToolResult(crate::types::ToolResult {
                 tool_call_id: ToolCallId("orphan".to_string()),
@@ -78,19 +78,7 @@ fn test_orphan_tool_result() {
                 added_tool_names: None,
             })],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let caps = dummy_caps(false, false, false, true, false, false);
     let limits = dummy_limits();
@@ -112,7 +100,6 @@ fn test_orphan_tool_result() {
 #[test]
 fn test_missing_tool_result() {
     let req = Request {
-        system: None,
         messages: vec![
             Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
@@ -131,19 +118,7 @@ fn test_missing_tool_result() {
                 protocol: Protocol::OpenAiChat,
             }),
         ],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let caps = dummy_caps(false, false, false, true, false, false);
     let limits = dummy_limits();
@@ -178,26 +153,13 @@ fn test_missing_tool_result() {
 #[test]
 fn test_image_input_gate() {
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Media(Media::image_url(
                 url::Url::parse("https://example.com/a.jpg").unwrap(),
                 None,
             ))],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let caps_no_image = dummy_caps(false, false, false, false, false, false);
     let limits = dummy_limits();
@@ -230,26 +192,13 @@ fn test_image_input_gate() {
 #[test]
 fn test_audio_input_gate() {
     let req = Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Media(Media::audio_bytes(
                 bytes::Bytes::from("wav"),
                 AudioFormat::Flac,
             ))],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     // Anthropic has no audio capability
     let caps_anthropic = dummy_caps(true, false, false, false, false, false);

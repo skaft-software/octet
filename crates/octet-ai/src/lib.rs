@@ -60,6 +60,9 @@ mod validate;
 
 pub(crate) mod protocol;
 
+#[cfg(test)]
+mod test_fixtures;
+
 pub use assistant_frame::{
     reduce_assistant_message_frames, AssistantMessageFrame, AssistantMessageFrameEncoder,
 };
