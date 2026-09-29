@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Fix deleting sessions from the `/resume` picker. Its default delete binding
+  was Ctrl+D, which closes octet from every surface, so it quit octet instead,
+  and Mac keyboards have no forward Delete key. Ctrl+X (or Delete) now asks for
+  a confirmation that names the session, then moves it to the store's
+  recoverable trash (#458).
 - Serialize concurrent conditional writes to the same file on Linux and
   macOS. Parallel writers, such as delegated workers editing one file, could
   have a write land while it reported a conflict, or lose a committed write

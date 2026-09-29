@@ -678,6 +678,85 @@ fn session_picker_rename_and_delete_emit_driver_requests() {
 }
 
 #[test]
+fn session_picker_trashes_by_portable_chord_with_a_named_confirmation() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(100, 24);
+    let mut named = picker_session("one", "First", 1, 9);
+    named.name = Some("Release notes".into());
+    let rows = vec![named, picker_session("two", "Second", 2, 2)];
+    shell.open_panel(Panel::SessionPicker {
+        picker: PickerState::new(rows.clone(), None),
+    });
+    let trash = panel_key_with_modifiers(
+        crossterm::event::KeyCode::Char('x'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    let prompt = |shell: &InteractiveShell| {
+        strip_terminal_sequences(&render_panel(&shell.state.borrow(), 100).join("\n"))
+            .lines()
+            .find(|line| line.contains("to trash?"))
+            .map(str::to_owned)
+    };
+
+    // Ctrl-X works without a forward Delete key; the prompt names the
+    // session, and Esc leaves it untouched.
+    shell.panel_input(&trash);
+    let asked = prompt(&shell).expect("the confirmation should be rendered");
+    assert!(asked.contains("Release notes"), "{asked}");
+    shell.panel_input(&panel_key(crossterm::event::KeyCode::Esc));
+    assert!(shell.drain_panel_requests().is_empty());
+    assert!(prompt(&shell).is_none());
+    assert!(shell.has_panel());
+
+    shell.panel_input(&trash);
+    shell.panel_input(&panel_key(crossterm::event::KeyCode::Enter));
+    assert!(matches!(
+        shell.drain_panel_requests().as_slice(),
+        [PanelRequest::TrashSession { id, .. }] if id == "one"
+    ));
+
+    // The driver refreshes the rows; focus lands on a remaining session and
+    // Enter can only resume that one.
+    shell.refresh_panel_sessions(vec![rows[1].clone()], None);
+    let (result, _) = shell
+        .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+        .expect("a remaining session should be selectable");
+    assert_eq!(result, PanelResult::Select("two".into()));
+}
+
+#[test]
+fn session_picker_trashing_the_last_session_leaves_an_inert_empty_list() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(100, 24);
+    shell.open_panel(Panel::SessionPicker {
+        picker: PickerState::new(vec![picker_session("only", "Only", 1, 1)], None),
+    });
+    let trash = panel_key_with_modifiers(
+        crossterm::event::KeyCode::Char('x'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    shell.panel_input(&trash);
+    shell.panel_input(&panel_key(crossterm::event::KeyCode::Enter));
+    assert!(matches!(
+        shell.drain_panel_requests().as_slice(),
+        [PanelRequest::TrashSession { id, .. }] if id == "only"
+    ));
+
+    shell.refresh_panel_sessions(Vec::new(), None);
+    assert!(shell
+        .panel_input(&panel_key(crossterm::event::KeyCode::Enter))
+        .is_none());
+    shell.panel_input(&trash);
+    let state = shell.state.borrow();
+    let Some(Panel::SessionPicker { picker }) = state.panel.as_ref() else {
+        panic!("session picker should stay open");
+    };
+    assert!(!picker.confirming_delete);
+    drop(state);
+    assert!(shell.drain_panel_requests().is_empty());
+}
+
+#[test]
 fn message_picker_returns_selected_text_through_outbox() {
     let mut shell = InteractiveShell::test_shell();
     shell.open_panel(Panel::MessagePicker {

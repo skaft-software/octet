@@ -620,7 +620,7 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
             state,
             width,
             &inset,
-            Some("Delete session?"),
+            Some(&picker_delete_prompt(state, picker)),
             ("enter", "confirm"),
             &[("esc", "cancel")],
         )
@@ -701,13 +701,40 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
             ("^s", "sort"),
             &[
                 ("^n", "named"),
-                ("del", "trash"),
+                ("^x", "trash"),
                 ("^p", "path on/off"),
                 ("^r", "rename"),
             ],
         )
     };
     (first, second)
+}
+
+/// The trash confirmation, naming the session it acts on.
+fn picker_delete_prompt(state: &ShellState, picker: &PickerState) -> String {
+    let unicode = state.theme.unicode();
+    let Some(meta) = session_picker_ordering(picker)
+        .get(picker.selected)
+        .and_then(|index| picker.active_rows().get(*index))
+    else {
+        return "Move session to trash?".to_owned();
+    };
+    let named = meta.name.as_deref().unwrap_or(&meta.title).trim();
+    let label = if named.is_empty() || is_unreadable_session(meta) {
+        compact_session_id(&meta.id, unicode)
+    } else {
+        sexy_tui_rs::truncate_to_width(
+            &panel_cell(named, unicode),
+            40,
+            Some(state.theme.glyph("ellipsis")),
+        )
+    };
+    let (open, close) = if unicode {
+        ("\u{201c}", "\u{201d}")
+    } else {
+        ("\"", "\"")
+    };
+    format!("Move {open}{label}{close} to trash?")
 }
 
 fn picker_workspace(meta: &crate::session_store::SessionMeta) -> String {

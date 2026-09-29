@@ -44,7 +44,11 @@ and RPC frontends do not set a window title.
 The resume picker supports fuzzy, quoted-phrase, and `re:` regex filtering,
 named-only filtering, recent/title/message-count sorting, and optional paths.
 Tab toggles current/all-workspace scope; Ctrl+S cycles ordering, Ctrl+N filters
-named sessions, Ctrl+P toggles paths, Ctrl+R renames, and Delete moves to trash.
+named sessions, Ctrl+P toggles paths, and Ctrl+R renames. Ctrl+X (or Delete)
+asks to move the selected session to trash, naming it; Enter confirms and Esc
+cancels. Trash is recoverable: the session stays on disk, hidden from the
+picker, and the web UI's trash can restore it. The current session cannot be
+trashed.
 All-workspace browsing is not a cross-workspace transcript index; a differently
 scoped session cannot be resumed into the same live App.
 
