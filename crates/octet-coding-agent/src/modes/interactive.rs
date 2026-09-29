@@ -4959,7 +4959,7 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
         .registered_tool_names()
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
-    Ok(installed
+    let mut choices = installed
         .into_iter()
         .map(|bundle| {
             let summary = summaries.iter().find(|summary| summary.name == bundle.id);
@@ -5083,7 +5083,40 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                 toggleable,
             }
         })
-        .collect())
+        .collect::<Vec<_>>();
+    // A checkout (`--extension-dir`) or the project can supply extensions that
+    // are not installed bundles. Their activation is set where they came from,
+    // but their options live here like any other extension's.
+    for summary in &summaries {
+        if choices.iter().any(|choice| choice.name == summary.name) {
+            continue;
+        }
+        let origin = match summary.source {
+            octet_agent::extension_process::ExtensionSource::Project => "the project",
+            octet_agent::extension_process::ExtensionSource::Explicit => "--extension-dir",
+            octet_agent::extension_process::ExtensionSource::Global => "the extensions directory",
+        };
+        choices.push(InstalledExtensionChoice {
+            name: summary.name.clone(),
+            label: format!(
+                "{} {}",
+                if summary.enabled { "[x]" } else { "[ ]" },
+                summary.name
+            ),
+            description: format!(
+                "{} · {} · from {origin}; enable or disable it there",
+                if summary.running {
+                    "running"
+                } else {
+                    "stopped"
+                },
+                summary.version,
+            ),
+            enabled: summary.enabled,
+            toggleable: false,
+        });
+    }
+    Ok(choices)
 }
 
 async fn extension_management_menu(

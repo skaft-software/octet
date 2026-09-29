@@ -115,9 +115,10 @@ UI or exactly-once inference after a transport interruption.
 ## Extension menu
 
 `/extensions` is the one place to turn extensions on and set them up. It lists
-managed executable bundles, not the separate Serve application. Up/Down selects;
-Enter opens the selected extension's options, enabling it first when it is
-disabled. Each option menu shows the extension's state and offers only what
+installed executable bundles, plus any extension loaded from `--extension-dir`
+or the project (whose activation is changed where it came from), but not the
+separate Serve application. Up/Down selects; Enter opens the selected
+extension's options, enabling an installed one first when it is disabled. Each option menu shows the extension's state and offers only what
 applies, for example:
 
 - **octet-computer-use**: Set up computer use, Check status, Jev (optional), and
