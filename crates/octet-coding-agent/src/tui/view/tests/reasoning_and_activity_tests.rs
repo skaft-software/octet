@@ -160,7 +160,7 @@ fn working_status_persists_below_running_tools_in_default_and_still() {
     for theme in [
         crate::tui::theme::test_theme(),
         crate::tui::theme::test_theme_from_source(include_str!(
-            "../../../../../examples/themes/Still.toml"
+            "../../../../../../examples/themes/Still.toml"
         )),
     ] {
         let mut shell = InteractiveShell::test_shell_with_theme(theme);

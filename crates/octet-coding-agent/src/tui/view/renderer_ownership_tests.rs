@@ -17,6 +17,13 @@ impl InteractiveShell {
             false,
         )));
     }
+
+    /// Render one isolated frame and publish its geometry, as a completed
+    /// terminal write does for the threaded renderer.
+    pub(in crate::tui::view) fn render_written_test_frame(&mut self) {
+        self.render();
+        self.state.frame_written();
+    }
 }
 
 #[test]

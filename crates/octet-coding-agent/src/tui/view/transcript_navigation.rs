@@ -1486,7 +1486,7 @@ mod tests {
         let mut shell = search_shell();
         shell.set_transcript_scrollbar(TranscriptScrollbar::Always);
         shell.isolate_native_test_renderer();
-        shell.render();
+        shell.render_written_test_frame();
 
         let bar_column = {
             let state = shell.state.borrow();
