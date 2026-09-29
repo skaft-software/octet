@@ -84,6 +84,14 @@
   optional Jev key gets a protected current-user-only ACL on Windows and is
   not stored if that cannot be applied.
 
+### Removed
+
+- `code_runtime.py`, the model-code interpreter that never ran. It was not
+  reachable from the extension, and every execution path refused to run
+  without operating-system containment it could not obtain on any platform.
+  The proposed browser and computer-use redesign uses a separate isolate
+  instead.
+
 ## Earlier changes
 
 ### Added

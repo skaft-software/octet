@@ -118,11 +118,12 @@ departure from Codex. It makes approval reuse (below) a design requirement.
     helpers.
   - QuickJS is the fallback only if V8 binary size or build cost fails the #390
     packaging gate. Python is not an option: it cannot provide an isolate.
-  - The existing `code_runtime.py` AST interpreter is retired, not reused.
+  - The earlier `code_runtime.py` AST interpreter is retired, not reused. It
+    was removed in v0.8.2.
 - **Containment, stated honestly.** The isolate is the security claim for
   *model code*. Nested tools still run with their normal authority. This
-  reverses `code_runtime.py`'s fail-closed "no execution without OS
-  containment" stance. It is acceptable because model code has no ambient
+  reverses the removed `code_runtime.py`'s fail-closed "no execution without
+  OS containment" stance. It is acceptable because model code has no ambient
   authority and every effect is a host-dispatched, policy-checked tool call.
   Calling that a "sandbox" is still forbidden (#391).
 - **Budgets per cell** (proposed, tuned in #391):
