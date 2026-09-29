@@ -262,8 +262,8 @@ starts, and is supervised, exactly as on other platforms.
 
 The [computer-use extension](../extensions/octet-computer-use/README.md) drives
 Windows desktop applications through a locally installed Cua Driver. Nothing is
-provisioned, downloaded, or granted automatically: `/computer-use setup`
-installs the driver only when you run it, and CI never provisions a driver or
+provisioned, downloaded, or granted automatically: **Set up computer use**
+(in `/extensions` → octet-computer-use) installs the driver only when you run it, and CI never provisions a driver or
 performs GUI actions. Its
 [Windows procedure](../extensions/octet-computer-use/README.md#windows) covers
 setup, status, and an opt-in live observe-act-verify smoke.

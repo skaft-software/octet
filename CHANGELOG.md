@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- Target v0.8.2: set up and configure every extension from `/extensions`.
+  Choosing an extension opens its options menu (a disabled one is enabled
+  first), which shows its state and offers only what applies. Actions show
+  their steps live and can be cancelled with Esc; confirmations, choices, and
+  hidden key entry appear in place, and destructive actions ask first.
+  - **Computer use**: Set up computer use does the whole setup (driver, cursor
+    themes, GNOME helper, permission check, optional Jev); also Check status,
+    Jev keys, and the jev-use recipe with its jobs.
+  - **Browser**: setup follows the install through Chromium's download; open,
+    close, status, and profile reset.
+  - **Web search**: Brave Search or SearXNG, a new SearXNG endpoint change, and
+    Brave log-out.
+  - **Subagents**: the live worker list (Ctrl+X stops a worker, also mid-run
+    through `/extensions`), wait, reattach, and stop all.
+  - **MCP**: a full server manager. A guided form adds a server; each server
+    can be shown, refreshed, restarted, stopped, enabled or disabled, edited,
+    or removed. Edits are validated like a launch before `~/.octet/mcp.json` is
+    replaced, and apply live without restarting the other servers.
+  Extensions answer the new `menu/collect` request (`contributes.menu = true`,
+  `ext.menu` in the Python SDK); others get an entry per declared command.
+  Extension commands are no longer typed after the slash in the terminal UI,
+  and typing one names the extension to open instead. The web UI keeps them for
+  now. Menu actions may run for up to 30 minutes instead of the 30-second
+  request deadline, so long installs finish.
 - Fix deleting sessions from the `/resume` picker. Its default delete binding
   was Ctrl+D, which closes octet from every surface, so it quit octet instead,
   and Mac keyboards have no forward Delete key. Ctrl+X (or Delete) now asks for
@@ -29,7 +53,7 @@
   with the npm lane.
 - Target v0.8.2: omit the redundant `computer_use_` prefix from TUI labels so
   computer-use actions remain distinguishable within the label width cap.
-- Target v0.8.2: `/computer-use setup` builds the Cua Driver runtime from a
+- Target v0.8.2: computer-use setup builds the Cua Driver runtime from a
   Python 3.10+ interpreter even when the bundle runs on macOS's Xcode Python
   3.9. Setup failures, including a missing compatible Python, are now reported
   as actionable errors instead of `internal error` (#457).

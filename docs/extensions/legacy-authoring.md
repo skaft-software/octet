@@ -187,6 +187,7 @@ tool_renderers = ["git_status"]
 notifications = true
 confirmations = true
 presentation = true # API 0.2 frontend-neutral activity/list/tree/detail snapshots
+menu = true # API 0.2 options menu under /extensions (menu/collect); needs a command
 
 # Optional. Omitting this preserves the legacy isolated resident process.
 [runtime]
@@ -343,6 +344,38 @@ replacements, not rendering code or model results. The
 retain activity/list/tree/detail, action, metrics, state, reference, ownership,
 rate, and byte/count limits.
 
+### Options menu
+
+An API `0.2` manifest declaring `menu = true` (with at least one command)
+answers [`menu/collect`](PROTOCOL-REFERENCE.md#16b-menucollect-api-02) with the
+complete options menu people see when they select the extension under
+`/extensions`: a title, a compact status, and items that each run one of the
+extension's declared commands with literal arguments, or open a submenu. This
+is how people set up and configure an extension in the terminal UI, which no
+longer accepts extension commands after the slash. With the Python SDK:
+
+```python
+@ext.menu
+def options(request, context):
+    return {
+        "title": "Checkpoints",
+        "status": {"state": "active", "label": "3 saved"},
+        "items": [
+            {"id": "save", "label": "Save a checkpoint", "command": "checkpoint",
+             "arguments": ["save"], "recommended": True},
+            {"id": "clear", "label": "Delete all checkpoints", "command": "checkpoint",
+             "arguments": ["clear"], "destructive": True},
+        ],
+    }
+```
+
+Build the menu from cached state; it is requested again after every action.
+Ask for anything else an action needs with `ext.request_input` (hidden with
+`secret=True`) and `ext.confirm` while the command runs, and report long steps
+with `ext.progress(message=...)`, which appear live in place. An extension
+without a menu still appears there, with one entry per declared command that
+asks for its arguments.
+
 Handler-time updates carry `parent_request_id`; the host derives the resource
 owner. Background publishers echo a complete host-issued owner triple accepted
 only if previously issued to that process generation. These fields are mutually
@@ -379,21 +412,22 @@ first-party observed exception is `octet-subagents`: it updates one bounded,
 tool-like **Subagents** transcript block in place from native
 `AgentEvent::DelegationUpdated` telemetry while workers are active, including
 between root turns. Its heading counts worker states and up to four active child
-lines show tasks and input/output tokens; `/subagents` retains the complete
+lines show tasks and input/output tokens; its worker list retains the complete
 roster. Ctrl+O retains disclosure. The host-owned footer adds live priced child
 spend while active, then durable root-session delegated usage after settlement,
 never an extension footer string.
 
-`/extensions` opens the installed-bundle management menu. Enter toggles ordinary
-bundles or opens the enabled first-party web-search provider picker; activation
-does not persist trust grants. Activation is read-only when
+`/extensions` opens the installed-bundle management menu. Enter opens the
+selected extension's options menu, enabling it first when it is disabled;
+activation does not persist trust grants. Activation is read-only when
 project/environment/CLI activation makes user config non-authoritative.
 `/extensions status` is the diagnostic and presentation fallback;
 `/extensions inspect <agent-session:…>` opens a current parent-bound delegated
 transcript; `/extensions action <extension> <action-id>` performs validated
 interactive routing.
 
-The enabled package's no-argument `/subagents` opens a live arrow-key worker list.
+octet-subagents' **Workers** entry (and `/extensions` during a run) opens a live
+arrow-key worker list.
 Owner-bound refresh reconciles authoritative `agent_sessions` state and retains
 focus by stable node ID. Enter revalidates and opens the selected bounded read-only
 transcript; Escape/Left returns to the list.

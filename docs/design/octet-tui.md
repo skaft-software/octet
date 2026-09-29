@@ -202,13 +202,13 @@ Escape or Left returns to the composer.
 Generic presentation snapshots do not create persistent chrome. First-party
 subagent activity occupies one mutable tool-like **Subagents** transcript block,
 including between root turns. Its bold heading counts worker states and points
-to `/subagents`; up to four active child lines show task and `↑input ↓output`
+to `/extensions`; up to four active child lines show task and `↑input ↓output`
 tokens, compacted with `K`/`M`/`B`/`T` suffixes. An inline
-`/subagents stop all` heading hint is shown only for live activity. Input includes
+`/extensions to stop` heading hint is shown only for live activity. Input includes
 uncached, cache-read, and cache-write usage; streamed
 output estimates carry `~` until provider usage settles. Later parent output
 is placed above this tail, and settlement fixes the summary in place without
-per-worker notices. Ctrl+O retains disclosure; `/subagents` exposes the
+per-worker notices. Ctrl+O retains disclosure; the worker list exposes the
 complete roster, exact outcomes/reasons, model, tools, cost, and read-only child
 transcripts. Neither estimates nor UI refresh change billed usage or budgets.
 Raw first-party orchestration calls/results, including errors, stay out of the
@@ -230,11 +230,14 @@ second transcript. The recall affordance is advertised only while at least one
 queued entry is genuinely editable, so the hint never promises a recall that the
 agent-side claim would refuse.
 
-`/extensions` opens an interactive installed-bundle activation panel instead.
-The no-argument `/subagents` command supplied by `octet-subagents` opens a
-frontend-owned worker list; Up/Down moves focus, Enter opens the selected bounded
-read-only transcript, and Escape or Left returns from the transcript to the
-list. While open, the same owner-bound status command reconciles the host's
+`/extensions` opens an interactive installed-bundle panel instead: Enter opens
+the selected extension's options menu (its `menu/collect` answer, or one entry
+per declared command), where every setup and configuration action lives; typed
+extension commands are not accepted. Actions run with live progress and
+in-place confirmation and input dialogs. octet-subagents' **Workers** entry (and
+`/extensions` during a run) opens a frontend-owned worker list; Up/Down moves
+focus, Enter opens the selected bounded read-only transcript, Ctrl+X stops the
+selected worker, and Escape or Left returns from the transcript to the list. While open, the same owner-bound status command reconciles the host's
 authoritative worker state and publishes complete presentation revisions; the
 frontend preserves focus by stable node ID and revalidates the latest typed
 session reference immediately before opening. Transcript panels start at the
@@ -515,10 +518,10 @@ bounded actionable reason.
 - Ctrl+D requests a coordinated close from every input owner, including
   pickers, tool prompts, lifecycle waits, and local shell commands. Active work
   is aborted and settled before the process exits.
-- Safe presentation commands execute immediately. First-party
-  `/subagents stop <name-or-id|all>` also dispatches during an active run through
-  its registered, owner-bound extension command; arbitrary extension commands
-  do not gain active-run admission. Input and run events remain responsive, and
+- Safe presentation commands execute immediately. During an active run,
+  `/extensions` opens the live worker list, and Ctrl+X there stops the selected
+  worker through the registered, owner-bound first-party stop; arbitrary
+  extension commands do not gain active-run admission. Input and run events remain responsive, and
   a stop acknowledgement does not claim terminal worker settlement.
 - Model, reasoning, session, compaction, and reload work is queued in
   order and applied after the active `Run` releases its Agent borrow.

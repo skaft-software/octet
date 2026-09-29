@@ -54,10 +54,9 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/prompt [name] [arguments]` | List/expand named templates; Pi-compatible `/<name> ...` invocation is also supported. |
 | `/skills ...` | List, search, inspect, load, unload, or reload skills; [activation](instructions.md#skills). |
 | `/skill:NAME [arguments]` | Expand an explicit skill as a user prompt at admission, not a local slash command. During a run, Enter or Ctrl+S queues a follow-up so expansion occurs at the next idle prompt boundary. |
-| `/extensions [status\|reload]` | Open installed-bundle enable/disable menu or inspect/reload state. |
+| `/extensions [status\|reload]` | Open the extension menu, where every extension is enabled, set up, and configured, or inspect/reload state. While a run is active, opens the live subagent worker list when workers exist. |
 | `/settings [theme\|images on/off\|default model/reasoning\|transport\|padding]` | Show or change user-level display/default preferences. Defaults, theme, and images persist through the shared config writer; transport and editor padding are reported route/theme facts, and project trust is deliberately not a persisted setting. |
 | `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model cycling scope. Mutations apply to Ctrl+P immediately and persist as an exact ordered pattern list (`models` in the user config); `move <id> <up\|down\|top\|bottom>` reorders it. |
-| `/subagents` | With the trusted, enabled subagents package live, browse workers and read-only transcripts. |
 | `/help [command]` | Local command help and self-documentation. |
 | `/exit` | Exit octet. |
 
@@ -113,15 +112,37 @@ Local main/split-prefix summaries use host-owned retries, reservations and
 accounting; the summary is committed once. This does not promise retry-progress
 UI or exactly-once inference after a transport interruption.
 
-## Extension activation menu
+## Extension menu
 
-`/extensions` lists managed executable bundles, not the separate Serve
-application. Up/Down selects; Enter enables/disables only the selected user
-`enabled_extensions` entry. It never writes a trust grant: full access implicitly
-trusts enabled extensions, while safe mode keeps executable extensions stopped.
-Selecting enabled `octet-web-search` opens the provider picker: Brave Search is recommended,
-SearXNG remains optional, and Brave's key is requested through private input.
-[Web-search setup](../extensions/octet-web-search/README.md#choose-a-provider).
+`/extensions` is the one place to turn extensions on and set them up. It lists
+managed executable bundles, not the separate Serve application. Up/Down selects;
+Enter opens the selected extension's options, enabling it first when it is
+disabled. Each option menu shows the extension's state and offers only what
+applies, for example:
+
+- **octet-computer-use**: Set up computer use, Check status, Jev (optional), and
+  the jev-use recipe.
+- **octet-browse**: Set up the browser, Open or Close the browser, Check status,
+  and Reset the browser profile.
+- **octet-web-search**: Use Brave Search (recommended), Use SearXNG, Change the
+  SearXNG endpoint, and Log out of Brave Search.
+- **octet-subagents**: Workers, Wait for workers, Reattach detached workers,
+  Stop all workers, and Open workers in panes (preview).
+- **octet-mcp**: Add a server, then per server Show details, Refresh tools,
+  Restart or Start, Stop, Enable or Disable, Edit, and Remove.
+
+Every menu also offers **Disable**. An action shows its steps live while it
+runs (Esc cancels), and its prompts (confirmations, choices, keys entered as
+hidden input) appear in place. Actions the extension marks destructive ask
+first. A third-party extension without its own menu gets one entry per command
+it declares, which asks for that command's arguments.
+
+Extension commands are no longer typed after the slash in the terminal UI;
+typing one, such as `/computer-use setup`, names the extension to open instead.
+The web UI keeps extension commands for now.
+
+The menu never writes a trust grant: full access implicitly trusts enabled
+extensions, while safe mode keeps executable extensions stopped.
 
 Project/environment/CLI activation makes the menu read-only with the source
 boundary shown. Shadowed or alternate sources cannot be silently substituted.
@@ -153,7 +174,7 @@ extension processes stopped. [Discovery and trust](resources.md).
 
 [Resume picker keys](sessions.md#resume-and-branch) and
 [subagent navigation](../extensions/octet-subagents/README.md#tui-and-serve-presentation)
-are contextual. Keyboard ownership and native mouse history are explained in
+(Ctrl+X stops the selected worker) are contextual. Keyboard ownership and native mouse history are explained in
 [terminal scrolling](terminal.md#scrolling-and-rendering).
 
 Follow-ups remain local until dispatch, one per settled run in FIFO order.

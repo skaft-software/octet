@@ -556,7 +556,7 @@ changing its native codec.
 
 `ultra` requires advertised Ultra/V2 metadata **and** the trusted, enabled,
 live `octet-subagents` service. Otherwise it is clamped to the highest ordinary
-safe effort. Child work uses extension `subagent_*` tools and `/subagents`;
+safe effort. Child work uses extension `subagent_*` tools and the worker list in `/extensions`;
 there is no parallel native root collaboration tool surface. See
 [legacy Pro configuration](configuration.md#compatibility-inputs),
 [context budgeting](context.md), and [reasoning display](terminal.md#reasoning-and-progress).

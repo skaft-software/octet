@@ -269,8 +269,8 @@ During an active interactive run, the product schedules one nonblocking
 owner-scoped subagent status refresh every 250 ms, reduces the resulting fenced
 semantic snapshot, and updates one bounded tool-like **Subagents** transcript
 block in place, including between root turns. Its heading counts worker states
-and up to four active child lines show tasks and input/output tokens; `/subagents`
-retains the complete roster and cost. Ctrl+O retains disclosure. Structured
+and up to four active child lines show tasks and input/output tokens; the worker
+list retains the complete roster and cost. Ctrl+O retains disclosure. Structured
 priced child cost temporarily augments the host-owned footer; after
 `octet-agent` mirrors the settled child usage into root `delegated_agent`
 records, the idle footer reads only the durable session total.
@@ -363,8 +363,7 @@ remain disabled; the appearance selector is not a theme loader. See
 - `/name [name]`, `/export [path]` — name and safely export the current session.
 - `/prompt [name] [arguments]` — inspect or expand prompt templates.
 - `/skills search|load|reload|off ...` — inspect, invoke, reload, or deactivate skills; TUI load-prefill does not establish durable activation.
-- `/extensions [status|reload]` — interactively enable/disable managed executable bundles, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped.
-- `/subagents` — when supplied by the enabled `octet-subagents` package, navigate workers with arrow keys and open owner-authorized read-only transcripts with Enter.
+- `/extensions [status|reload]` — enable, set up, and configure managed executable bundles through each one's options menu, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped. octet-subagents' **Workers** entry navigates workers with arrow keys and opens owner-authorized read-only transcripts with Enter.
 - `/help [command]` — show local command help and octet self-documentation.
 - `/status`, `/exit` — product status and lifecycle controls.
 

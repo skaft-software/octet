@@ -624,6 +624,78 @@ Return `null` to contribute nothing.
 
 ---
 
+### 1.6b `menu/collect` (API `0.2`+)
+
+Requires `contributes.menu = true` and at least one declared command. The
+coding TUI sends it when the person selects the extension under `/extensions`,
+and again after every action, so the menu is pulled fresh and never pushed. Keep
+the handler fast and side-effect free: answer from cached state. The host waits
+at most 5 seconds and then falls back to one generated entry per declared
+command.
+
+**Request:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "menu/collect",
+  "params": {
+    "context": {
+      "workspace": "/home/user/project",
+      "execution_scope": null,
+      "host": {},
+      "resource_owner": {
+        "session_id": "session-…",
+        "extension_instance_id": "…",
+        "process_generation": 1
+      }
+    }
+  }
+}
+```
+
+**Response:** the complete [`ExtensionMenu`](#extensionmenu-api-02):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "title": "Computer use",
+    "status": {"state": "pending", "label": "Not set up"},
+    "detail": "Set up installs Cua Driver and checks what your desktop needs.",
+    "items": [
+      {"id": "setup", "label": "Set up computer use", "command": "computer-use",
+       "arguments": ["setup"], "recommended": true,
+       "description": "Install the driver, then check permissions"},
+      {"id": "jev", "label": "Jev (optional)", "items": [
+        {"id": "forget", "label": "Forget stored API key", "command": "computer-use",
+         "arguments": ["jev", "forget"], "destructive": true}
+      ]}
+    ]
+  }
+}
+```
+
+Each item is either an action (`command` names one of the extension's declared
+commands, `arguments` are literal) or a submenu (`items`). Choosing an action
+runs `command/execute` with those arguments, so a menu can only run what the
+extension could already run. The host asks for confirmation before a
+`destructive` action and then pre-approves that action's own first
+`confirmation/request`. While the action runs, its `$/progress` status lines,
+`confirmation/request`, and `input/request` appear in place, and the person can
+cancel it. Because a person started it and watches it, the action may run for
+up to 30 minutes instead of the ordinary request deadline.
+
+The host rejects the whole menu (and shows generated entries instead) when an
+action routes to an undeclared command or a bound is exceeded: at most 256
+items across all levels, 4 levels, unique ids per level, at most one
+`recommended` item per level, and a submenu that carries neither `arguments` nor
+`destructive`.
+
+---
+
 ### 1.7 `tool/render`
 
 Host requests semantic renderer output for a tool call.
@@ -1071,7 +1143,7 @@ recognizes owner-fenced `octet-subagents` activities as a first-party observed
 surface and updates one bounded tool-like **Subagents** transcript block in place
 from native `AgentEvent::DelegationUpdated` events, including between root turns.
 Its heading counts worker states and up to four active child lines show tasks and
-input/output tokens; `/subagents` retains the complete roster, metrics, and cost.
+input/output tokens; the worker list retains the complete roster, metrics, and cost.
 The TUI does not poll a status command, and the extension cannot supply footer
 text or terminal rows. It clears stale state on owner/process replacement; Serve
 action identity includes the instance fence, generation, and revision before
@@ -1584,7 +1656,7 @@ without opening its transcript, cumulative disjoint `usage`, optional
 `timed_out`, `failed` (with bounded `error`), and `shutdown`. Private delegation
 JSONL paths are never returned. A current owner-scoped presentation may route
 the opaque reference into Serve, `/extensions inspect`, or the native
-`/subagents` arrow-key browser as a locked read-only transcript; the resolver
+octet-subagents arrow-key worker list as a locked read-only transcript; the resolver
 separately verifies host-written parent-session, extension-principal, and
 resource-owner provenance. The TUI transcript panel starts at the live tail,
 supports bounded scrolling, and returns to the worker list on Escape or Left.
@@ -1939,6 +2011,31 @@ result.
 
 See [`presentation/update`](#25-presentationupdate-api-02) for exact state,
 reference, safety, parentage, and bound rules.
+
+### `ExtensionMenu` (API `0.2`)
+
+| Field | Type | Description |
+|---|---|---|
+| `title` | string \| null | Display title (≤256 bytes); the host falls back to the extension name |
+| `status` | object \| null | Generic `state`, compact `label`, optional `detail`, as in presentation snapshots |
+| `detail` | string \| null | Plain-text explanation (≤16 KiB); its first line is the menu subtitle |
+| `items` | array | Top-level `ExtensionMenuItem`s in display order |
+
+`ExtensionMenuItem`:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique among siblings (≤256 bytes); keeps the selection stable across refreshes |
+| `label` | string | Host-rendered label (≤256 bytes) |
+| `description` | string \| null | One-line explanation (≤2 KiB) |
+| `command` | string \| null | Declared command an action runs; absent for a submenu |
+| `arguments` | string array | Literal arguments (≤32, each ≤4 KiB) |
+| `destructive` | bool | Confirm before running |
+| `recommended` | bool | Preselected and emphasized; at most one per level |
+| `items` | array \| null | Submenu entries; mutually exclusive with `command` |
+| `detail` | string \| null | Shown when the submenu opens (≤16 KiB) |
+
+The encoded menu is at most 256 KiB.
 
 ### API `0.2` protocol features
 

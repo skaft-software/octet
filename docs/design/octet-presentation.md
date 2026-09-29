@@ -52,12 +52,12 @@ rendering instruction. Presentation code coalesces activity by stable request,
 tool, and worker identity.
 
 Subagent orchestration occupies one tool-like transcript block. Its bold
-heading shows state counts (queued separately from running) and `/subagents`;
+heading shows state counts (queued separately from running) and `/extensions`;
 while workers are queued or running, up to four child lines show task and
 `↑input ↓output` token counts, rounded with `K`, `M`, `B`, and `T` suffixes.
 Child and overflow rows share Thinking's column-2 `└` continuation marker
 (with the same ASCII fallback), rather than adding a deeper tree indent. There
-is an overflow count for the rest. An inline `/subagents stop all` hint remains
+is an overflow count for the rest. An inline `/extensions to stop` hint remains
 in the existing heading while workers are active and disappears on settlement
 or hydration; narrow headings compact without adding a transcript row.
 Input includes uncached, cache-read, and
@@ -74,7 +74,7 @@ or yellow for mixed outcomes. Raw calls, arguments, worker prompts and costs
 remain hidden. On session hydration, durable call/results without worker
 telemetry yield a neutral “activity recorded” row, not a claim
 that a spawned child has completed; only proven orchestration failures colour
-that restored row as failed. `/subagents` retains the detailed roster,
+that restored row as failed. The worker list retains the detailed roster,
 reasons, usage, and read-only child transcripts after settlement. No duplicate
 pinned strip or automatic per-worker notices are created. This does not
 suppress ordinary tool/run failures or approval prompts, or alter model-visible

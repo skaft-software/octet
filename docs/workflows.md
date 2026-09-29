@@ -64,7 +64,8 @@ Workers otherwise inherit the parent's standard read/search/edit/write/bash
 scope. The host enforces depth one, at most eight active children and thirty-two
 retained records, inherited policy and cost/token limits, cancellation, and
 owner-authorized read-only transcripts. A shared cwd is not isolation. Open
-`/subagents` to inspect phase, tool calls, tokens, spend, and transcripts.
+`/extensions` → octet-subagents → **Workers** (or `/extensions` during a run) to
+inspect phase, tool calls, tokens, spend, and transcripts.
 Cleanup retains bounded terminal diagnostics/roster when a live record disappears;
 child spend is persisted once in the root ledger before settlement.
 

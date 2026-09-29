@@ -49,11 +49,12 @@ way as on other platforms:
 ```console
 octet extension install octet-computer-use
 octet --enable-extension octet-computer-use
-/computer-use setup
 ```
 
-Linux has no system permission to grant. Computer use is ready when the driver can
-reach your display session, and `/computer-use status` says which one it found.
+Then open `/extensions`, choose octet-computer-use, and pick **Set up computer
+use**. Linux has no system permission to grant. Computer use is ready when the
+driver can reach your display session, and **Check status** says which one it
+found.
 Setup also works without `python3-venv` or pip: on Debian and Ubuntu the extension
 installs the published driver wheel directly after verifying its checksum.
 
@@ -74,7 +75,7 @@ installs the published driver wheel directly after verifying its checksum.
 - **Wayland input targets the focused window.** Wayland has no way to send input
   to a window in the background, so the agent retries such an action with
   foreground delivery, which briefly focuses the target window.
-- **GNOME needs one login.** On GNOME Wayland, `/computer-use setup` installs and
+- **GNOME needs one login.** On GNOME Wayland, setup installs and
   enables Cua's GNOME Shell helper. GNOME loads it at the next login, so log out
   and back in once. Until then, status says so.
 - **KDE limits.** Cua's KWin helper must be built against your KWin, so it is not

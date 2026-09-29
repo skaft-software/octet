@@ -174,7 +174,8 @@ Worker activity appears in a bounded, tool-like **Subagents** transcript block
 while workers are active. The block updates in place rather than staying pinned
 above the composer; its heading counts worker states, and up to four child lines
 show active tasks with input/output tokens. Ctrl+O retains disclosure, and
-`/subagents` exposes the complete roster (up to 32) and failure details on
+the worker list (`/extensions` → octet-subagents → **Workers**, or `/extensions`
+during a run) exposes the complete roster (up to 32) and failure details on
 demand. Its list rows retain state, model, and available metrics; the `tools`
 column counts tool calls, not model turns.
 Host `limit_reached` belongs to the failed group; `interrupted`, `shutdown`,
@@ -214,7 +215,7 @@ cache-write usage; output estimates are marked until usage settles. Tool-call
 counts, priced spend, transient phases, and tool identities remain in the
 inspector. The nonblocking 250 ms refresh retains its last fenced snapshot on
 failure.
-`/subagents` opens an arrow-key list; Enter opens a scrollable read-only child
-transcript. No extension replaces the cumulative footer. Completed child usage
+The worker list is an arrow-key list; Enter opens a scrollable read-only child
+transcript and Ctrl+X stops the selected worker. No extension replaces the cumulative footer. Completed child usage
 is mirrored once into the root ledger before settlement, including later cost
 limits. [Worker presentation and accounting](../extensions/octet-subagents/README.md#tui-and-serve-presentation).
