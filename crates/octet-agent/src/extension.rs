@@ -816,7 +816,11 @@ impl ExtensionHost {
             .dynamic_tools
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if dynamic.static_names.contains(&name)
+        // `static_names` is the shared registry's conflict set: it also holds
+        // names reserved for later host tools and tools installed by other
+        // hosts cloned from this one (every native delegation child), so it
+        // cannot decide what this host already installed.
+        if self.tools.iter().any(|t| t.definition().name == name)
             || dynamic.dynamic_names.contains(&name)
             || dynamic.reserved_names.contains(&name)
         {
@@ -1245,6 +1249,24 @@ mod tests {
         host.tool(NamedTool("search"));
         assert_eq!(host.tools.len(), 2);
         assert_eq!(host.duplicate_tools, ["search"]);
+    }
+
+    #[test]
+    fn reserved_names_and_sibling_hosts_do_not_make_host_tools_duplicates() {
+        let mut host = ExtensionHost::new();
+        host.reserve_tool_names(["spawn_agent"]);
+        host.tool(NamedTool("spawn_agent"));
+        assert!(host.duplicate_tools.is_empty());
+
+        // Native delegation children are clones of one template host and so
+        // share its dynamic registry; each still installs its own tools.
+        let template = ExtensionHost::new();
+        let mut first = template.clone();
+        first.tool(NamedTool("spawn_agent"));
+        let mut second = template.clone();
+        second.tool(NamedTool("spawn_agent"));
+        assert!(second.duplicate_tools.is_empty());
+        assert_eq!(second.tools.len(), 1);
     }
 
     #[test]
