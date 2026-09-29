@@ -2201,7 +2201,8 @@ impl ShellState {
         let index = self.push_block(TranscriptBlock::NoticeStatus {
             text: activity_group_label(&group, &[], kind),
             tone: NoticeTone::ToolActive,
-            reserved_rows: 1,
+            // The separate trailing Working row now owns the live height.
+            reserved_rows: 0,
         });
         self.register_active_event(index);
         self.activity_groups.push(ActivityGroupView {
@@ -2231,16 +2232,8 @@ impl ShellState {
     fn extend_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
         if let Some(position) = self.activity_groups.iter().rposition(|view| view.open) {
             if self.activity_groups[position].kind == group.kind() {
-                let had_settled = !self.activity_groups[position].settled.is_empty();
                 self.activity_groups[position].group.merge(group);
                 let index = self.activity_groups[position].index;
-                if had_settled {
-                    if let Some(TranscriptBlock::NoticeStatus { reserved_rows, .. }) =
-                        self.transcript.get_mut(index)
-                    {
-                        *reserved_rows = 3;
-                    }
-                }
                 self.register_active_event(index);
                 self.refresh_activity_group(position);
                 return;
@@ -2257,20 +2250,11 @@ impl ShellState {
             self.seal_activity_group();
             return false;
         }
-        if let Some(view) = self
+        if self
             .activity_groups
             .iter()
-            .find(|view| view.group.member_ids.contains(id))
+            .any(|view| view.group.member_ids.contains(id))
         {
-            let index = view.index;
-            if !view.settled.is_empty() && !view.settled.contains(id) {
-                if let Some(TranscriptBlock::NoticeStatus { reserved_rows, .. }) =
-                    self.transcript.get_mut(index)
-                {
-                    *reserved_rows = 3;
-                }
-                self.touch_block(index);
-            }
             return true;
         }
         let group = if let Some(position) = self
@@ -4082,6 +4066,10 @@ impl InteractiveShell {
                     state.tool_panels.insert(id.clone(), index);
                     state.register_active_event(index);
                 }
+                // Tool activity is not the run's liveness indicator: compact
+                // summaries can hide the active command altogether. Keep the
+                // animated status at the tail until the run actually settles.
+                state.open_working_status();
             }
             // The tool panel retains the model-facing failure text; detailed
             // policy diagnostics are intentionally available through telemetry

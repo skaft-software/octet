@@ -452,15 +452,7 @@ pub(super) fn render_block_planned_with_rainbow(
             // of `panel.output`, selection, and plain/print projections.
             output_lines.extend(panel.image_rows(nested_width));
             append_nested_tool_output(&mut lines, output_lines, theme, width);
-            let mut lines = finish_transcript_block(lines);
-            // Still's compact in-flight tool header replaces a two-row
-            // Working/Thinking slot. Keep its empty detail row until the
-            // result arrives, so starting a tool cannot pull the tail (and
-            // composer) upward by one cell.
-            if quiet_summary && !panel.finished && lines.len() == 1 {
-                lines.push(String::new());
-            }
-            lines
+            finish_transcript_block(lines)
         }
         TranscriptBlock::Outcome(outcome) => {
             render_outcome(outcome, theme, width, subagents_running)

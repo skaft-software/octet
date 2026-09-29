@@ -969,7 +969,7 @@ fn reasoning_to_working_to_tool_reuses_the_cached_tail_in_long_sessions() {
             "tool admission must not force reflow"
         );
         assert_eq!(cache.lines, history_lines);
-        assert_eq!(cache.block_revisions.len() + 1, state.transcript.len());
+        assert_eq!(cache.block_revisions.len() + 2, state.transcript.len());
     }
 
     shell.apply_edit(EditAction::Char('x'));
@@ -1030,7 +1030,7 @@ fn unrendered_working_handoff_preserves_the_long_session_cache() {
         let cache = state.transcript_cache.borrow();
         assert_eq!(cache.width, Some(80), "the cache width must be retained");
         assert_eq!(cache.block_revisions.len(), cached_blocks);
-        assert_eq!(cache.block_revisions.len() + 1, state.transcript.len());
+        assert_eq!(cache.block_revisions.len() + 2, state.transcript.len());
     }
 
     shell.apply_edit(EditAction::Char('x'));

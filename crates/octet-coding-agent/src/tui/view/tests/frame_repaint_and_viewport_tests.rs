@@ -87,12 +87,11 @@ fn short_transcript_chrome_follows_content_without_viewport_padding() {
         },
     );
     let tool = render_shell_at(&shell.state.borrow(), 80, now);
-    assert_eq!(
-        composer_row(&tool),
-        composer_row(&streamed),
-        "the active tool should replace, not duplicate, the trailing Working row"
+    assert!(
+        composer_row(&tool) > composer_row(&streamed),
+        "the active tool should precede the persistent Working row"
     );
-    assert!(!tool
+    assert!(tool
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .any(|line| line.contains("Working")));

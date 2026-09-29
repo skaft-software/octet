@@ -154,6 +154,114 @@ fn still_working_to_thinking_keeps_the_transcript_height_stable() {
 }
 
 #[test]
+fn working_status_persists_below_running_tools_in_default_and_still() {
+    use octet_agent::{EntryId, FinishReason};
+
+    for theme in [
+        crate::tui::theme::test_theme(),
+        crate::tui::theme::test_theme_from_source(include_str!(
+            "../../../../../examples/themes/Still.toml"
+        )),
+    ] {
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        let run_id = shell.begin_run("openai");
+        let first = ToolCallId("long-bash".into());
+        let second = ToolCallId("overlapping-read".into());
+        let rows = |shell: &InteractiveShell| {
+            shell
+                .state
+                .borrow()
+                .rendered_transcript(100)
+                .iter()
+                .map(|row| strip_terminal_sequences(row).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let assert_working_tail = |shell: &InteractiveShell| {
+            let rendered = rows(shell);
+            assert_eq!(
+                rendered
+                    .iter()
+                    .filter(|row| row.contains("Working ("))
+                    .count(),
+                1,
+                "{rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .any(|row| row.contains("Working (")),
+                "status must remain at the bottom: {rendered:?}"
+            );
+            let state = shell.state.borrow();
+            assert!(state.has_active_status_shimmer());
+            assert!(state.has_active_status_timer());
+        };
+
+        shell.on_run_event(
+            run_id,
+            &AgentEvent::ToolStarted {
+                id: first.clone(),
+                name: "bash".into(),
+                args: serde_json::json!({"command": "sleep 30"}),
+            },
+        );
+        assert_working_tail(&shell);
+        {
+            let mut state = shell.state.borrow_mut();
+            let frame = state.status_shimmer_frame;
+            state.advance_status_shimmer();
+            assert_eq!(state.status_shimmer_frame, frame + 1);
+        }
+        shell.on_run_event(
+            run_id,
+            &AgentEvent::ToolProgress {
+                id: first.clone(),
+                progress: ToolProgress::Status("still running".into()),
+            },
+        );
+        assert_working_tail(&shell);
+        shell.on_run_event(
+            run_id,
+            &AgentEvent::ToolStarted {
+                id: second.clone(),
+                name: "read".into(),
+                args: serde_json::json!({"path": "README.md"}),
+            },
+        );
+        assert_working_tail(&shell);
+        shell.on_run_event(
+            run_id,
+            &AgentEvent::ToolFinished {
+                id: first,
+                result: Ok(octet_agent::ToolOutput::new("done")),
+                duration: Duration::from_secs(1),
+            },
+        );
+        assert_working_tail(&shell);
+        shell.on_run_event(
+            run_id,
+            &AgentEvent::ToolFinished {
+                id: second,
+                result: Ok(octet_agent::ToolOutput::new("done")),
+                duration: Duration::from_secs(1),
+            },
+        );
+        assert_working_tail(&shell);
+        shell.on_run_event(
+            run_id,
+            &AgentEvent::RunFinished {
+                head: EntryId("head".into()),
+                reason: FinishReason::Completed,
+            },
+        );
+        assert!(!rows(&shell).iter().any(|row| row.contains("Working (")));
+        assert!(!shell.state.borrow().has_active_status_shimmer());
+    }
+}
+
+#[test]
 fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "off");
@@ -462,13 +570,10 @@ fn reasoning_status_reopens_after_tools_for_the_next_model_turn() {
             args: serde_json::json!({"path": "README.md"}),
         },
     );
-    assert!(shell.state.borrow().active_reasoning.is_none());
-    assert!(shell
-        .state
-        .borrow()
-        .transcript
-        .iter()
-        .all(|block| !matches!(block, TranscriptBlock::Reasoning(_))));
+    assert!(matches!(
+        shell.state.borrow().transcript.last(),
+        Some(TranscriptBlock::Reasoning(reasoning)) if reasoning.is_working_activity()
+    ));
     shell.on_run_event(
         run_id,
         &AgentEvent::ToolFinished {
