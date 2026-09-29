@@ -312,11 +312,8 @@ fn native_pending_tool_progress_then_result_is_addressable_and_exactly_once() {
             },
         );
         replay.render(true);
-        assert!(replay
-            .terminal
-            .screen()
-            .contents()
-            .contains("native-fixture"));
+        assert!(replay.frame().contains("native-fixture"));
+        assert_eq!(replay.history().matches("native-fixture").count(), 1);
         let baseline = replay.shell.tui.as_ref().unwrap().full_redraws();
         // A real progress frame after every row, not a single coalesced result.
         for index in 0..5 {
@@ -336,10 +333,9 @@ fn native_pending_tool_progress_then_result_is_addressable_and_exactly_once() {
                 visible.contains(&format!("RESULT-{index:02}")),
                 "newest live output must remain promptly visible: {visible}"
             );
-            assert!(
-                visible.contains("native-fixture"),
-                "pending intent vanished: {visible}"
-            );
+            // The persistent Working row can push the command header above
+            // this eight-row viewport, but it must remain in native history.
+            assert_eq!(replay.history().matches("native-fixture").count(), 1);
             replay
                 .shell
                 .state
@@ -364,11 +360,15 @@ fn native_pending_tool_progress_then_result_is_addressable_and_exactly_once() {
                 duration: Duration::from_millis(10),
             },
         );
-        replay.render(true);
+        // The tool is now above the persistent status. Settling its mutable
+        // rows may require one native-history repair when they have scrolled
+        // out of the eight-row viewport; subsequent frames must stay stable.
+        let output = replay.render(false);
+        assert!(output.matches("\x1b[3J").count() <= 1);
         for _ in 0..3 {
             replay.render(true);
         }
-        assert_eq!(replay.shell.tui.as_ref().unwrap().full_redraws(), baseline);
+        assert!(replay.shell.tui.as_ref().unwrap().full_redraws() <= baseline + 1);
         assert_eq!(replay.shell.debug_tool_output(&id).unwrap(), result_text);
         let physical = replay.history();
         for index in 0..final_rows {

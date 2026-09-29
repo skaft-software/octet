@@ -169,7 +169,9 @@ it the compact 16x4 startup mark shaded from the active model family. The dark
 UI uses a restrained blue accent over neutral grays. Reasoning is hidden by
 default.
 The reserved row under its live `Working` indicator prevents the composer from
-bouncing as two-line `Thinking` and compact tool activity replace it. It is
+bouncing as two-line `Thinking` takes over. While tools run, including collapsed
+commands, the `Working` indicator remains below their activity until the run
+settles. This liveness behavior also applies to the default theme. It is
 offered in `/theme` after `Cards`, its `Still` stem is reserved, and
 `still_example_theme_is_valid_for_every_background_profile` in
 `crates/octet-coding-agent/src/tui/theme.rs` validates the embedded file for
