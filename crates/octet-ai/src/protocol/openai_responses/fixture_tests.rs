@@ -3,12 +3,13 @@
 //! Covers offline fixture-matrix replay of the stream decoder.
 //!
 //! Extracted from `openai_responses.rs` so the implementation reads as pure
-//! production code and the assertions that pin it can be
-//! navigated separately. This is still a child module of
-//! `crate::protocol::openai_responses`, so `use super::*` reaches exactly the
-//! private items it reached while the tests were inline.
+//! production code and the assertions that pin it can be navigated separately.
+//! This is still a child module of `crate::protocol::openai_responses`: the
+//! decoder is reached through the seam, and the wire vocabulary the fixtures
+//! assert against is named from `super::wire`, where it is defined.
 
-use super::{decode_stream_event, COMPUTER_TOOL_NAME, MAX_COMPUTER_ACTION_BYTES};
+use super::decode_stream_event;
+use super::wire::{COMPUTER_TOOL_NAME, MAX_COMPUTER_ACTION_BYTES};
 use crate::error::{AiError, StreamProtocolError};
 use crate::protocol::harness;
 use crate::stream::StreamEvent;

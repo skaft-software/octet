@@ -3,13 +3,27 @@
 //! Covers the module's observable behaviour and bounds.
 //!
 //! Extracted from `openai_responses.rs` so the implementation reads as pure
-//! production code and the assertions that pin it can be
-//! navigated separately. This is still a child module of
-//! `crate::protocol::openai_responses`, so `use super::*` reaches exactly the
-//! private items it reached while the tests were inline.
+//! production code and the assertions that pin it can be navigated separately.
+//! This is still a child module of `crate::protocol::openai_responses`, so
+//! `use super::*` reaches the entries the seam re-exports, and the items that
+//! now live in a sibling module are imported from that sibling by name: the
+//! request wire tree from `super::wire` and the decode helpers and usage DTO
+//! from `super::stream`.
 
+use super::stream::{map_usage, ResponsesUsageDto};
+use super::wire::{
+    into_wire_input, ResponsesRequest, COMPUTER_TOOL_NAME, MAX_COMPUTER_SCREENSHOT_BYTES,
+};
 use super::*;
 use crate::catalog::Model;
+use crate::error::AiError;
+use crate::protocol::sse::SseEvent;
+use crate::protocol::HttpRequestParts;
+use crate::stream::{ResponseBuilder, StreamEvent};
+use crate::types::{
+    AssistantPart, CacheRetention, Protocol, ReasoningState, ReasoningStateKind, ToolCallId,
+    ToolDef, ToolResultPart,
+};
 use crate::types::{
     Capabilities, Endpoint, EndpointId, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message,
     ModalitySet, ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities, ProviderMediaRef,

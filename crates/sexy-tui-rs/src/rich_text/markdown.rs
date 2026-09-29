@@ -16,7 +16,7 @@
 //! builds that preview itself) and publishes the diagram once, when the closing
 //! fence arrives, so a partially received body is never half-drawn. A body line
 //! that merely *looks* like a closer (four-space indentation, trailing text)
-//! does not terminate the block — [`fence_is_closed`] mirrors the parser's own
+//! does not terminate the block — `fence_is_closed` mirrors the parser's own
 //! CommonMark closure rules.
 
 use std::ops::Range;

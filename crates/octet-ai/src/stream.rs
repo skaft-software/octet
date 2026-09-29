@@ -926,7 +926,7 @@ impl ResponseBuilder {
 /// Public, strict assembler for canonical events emitted by host-mediated
 /// provider transports.
 ///
-/// Native protocol codecs keep using the crate-private [`ResponseBuilder`].
+/// Native protocol codecs keep using the crate-private `ResponseBuilder`.
 /// This adapter intentionally exposes only canonical event ingestion: an
 /// integration cannot alter pricing, diagnostics, response snapshots, or the
 /// request tool-definition snapshot while a response is being assembled.

@@ -5,12 +5,12 @@
 //! of several transports an endpoint asked for. The transports themselves live
 //! in sibling modules, one per boundary:
 //!
-//! - [`hooks`] — the host payload-hook and host-transport seams.
-//! - [`transport`] — reqwest failure classification and the body-read clocks.
-//! - [`diagnostics`] — redaction and size bounds for anything a provider sent.
-//! - [`stream`] — opening a streaming request, decoding SSE and Bedrock frames.
-//! - [`websocket`] — the steerable Responses WebSocket transport and its resume.
-//! - [`batch`] — the OpenRouter batch HTTP surface.
+//! - `hooks` — the host payload-hook and host-transport seams.
+//! - `transport` — reqwest failure classification and the body-read clocks.
+//! - `diagnostics` — redaction and size bounds for anything a provider sent.
+//! - `stream` — opening a streaming request, decoding SSE and Bedrock frames.
+//! - `websocket` — the steerable Responses WebSocket transport and its resume.
+//! - `batch` — the OpenRouter batch HTTP surface.
 //!
 //! What stays here is the part that is genuinely a client: the public entry
 //! points, and the decisions about which transport an endpoint supports. That

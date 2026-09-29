@@ -1,5 +1,10 @@
 //! Deterministic GPT-6 wire foundations; these tests do not qualify a live route.
 use super::*;
+use crate::stream::StreamEvent;
+use crate::types::{
+    AssistantPart, CacheRetention, Message, OutputFormat, Protocol, ReasoningConfig, ReasoningMode,
+    Request, StopReason, ToolCallId, ToolChoice, ToolDef, UserPart,
+};
 use crate::{AssistantMessage, CompatibilityMode, ModelId, UserMessage};
 use crate::{
     ResponsesConfigurationUpdate, ResponsesFeatures, ResponsesInput, ResponsesItem,

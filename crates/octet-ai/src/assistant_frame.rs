@@ -2,8 +2,9 @@
 //!
 //! A generation stream ([`crate::StreamEvent`]) is rich and terminal-oriented:
 //! each delta is only valid in the context of the events around it, and the
-//! assembled [`Response`] is emitted once at the end. That makes the stream a
-//! poor durability unit — a crash between two deltas loses the whole turn.
+//! assembled [`crate::Response`] is emitted once at the end. That makes the
+//! stream a poor durability unit — a crash between two deltas loses the whole
+//! turn.
 //!
 //! This module mirrors Pi's `utils/assistant-message-frame.ts`. An
 //! [`AssistantMessageFrameEncoder`] turns a live event stream into a sequence of

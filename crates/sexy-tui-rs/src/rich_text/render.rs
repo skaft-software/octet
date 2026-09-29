@@ -5,16 +5,16 @@
 //! [`Document`] into rows plus escape-free copy text. What it delegates to
 //! lives in a sibling module, one per layout concern:
 //!
-//! - [`lines`] — the styled-row primitives every block layout is built from.
-//! - [`blocks`] — the block dispatch and the prose, list, quote, detail and
+//! - `lines` — the styled-row primitives every block layout is built from.
+//! - `blocks` — the block dispatch and the prose, list, quote, detail and
 //!   table row builders.
-//! - [`code`] — code-block geometry: borders, headers, gutters and the
-//!   [`CodeLayout`] the streaming tail also measures against.
-//! - [`wrap`] — inline flattening, wrapping, clipping, tab expansion and the
+//! - `code` — code-block geometry: borders, headers, gutters and the
+//!   `CodeLayout` the streaming tail also measures against.
+//! - `wrap` — inline flattening, wrapping, clipping, tab expansion and the
 //!   terminal-boundary sanitizer.
-//! - [`diffs`] — promoting fenced `diff`/`patch` code into the semantic diff
+//! - `diffs` — promoting fenced `diff`/`patch` code into the semantic diff
 //!   pipeline, plus the shell-command scoping a hunk header needs.
-//! - [`append_tail`] — the incremental tail used while a block is still
+//! - `append_tail` — the incremental tail used while a block is still
 //!   growing, which must agree with the static layouts above.
 //!
 //! What stays here is the part that is genuinely the renderer: the options and
