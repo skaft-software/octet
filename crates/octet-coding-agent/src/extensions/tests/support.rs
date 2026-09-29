@@ -80,11 +80,11 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.2","tools":[],"comma
 while IFS= read -r request; do
   printf '%s\n' "$request" >> "$OCTET_WORKSPACE/lifecycle-wire.jsonl"
   case "$request" in
-*'"method":"shutdown"'*)
-  id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
-  exit 0
-  ;;
+    *'"method":"shutdown"'*)
+      id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
   esac
 done
 "#,

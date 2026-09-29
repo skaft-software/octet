@@ -51,11 +51,11 @@ id=$(printf '%s\n' "$initialize" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
 printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.1","tools":[],"commands":[{"name":"hang","description":"Never responds"}]}}\n' "$id"
 while IFS= read -r request; do
   case "$request" in
-*'"method":"shutdown"'*)
-  id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
-  exit 0
-  ;;
+    *'"method":"shutdown"'*)
+      id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
   esac
 done
 "#,
@@ -189,20 +189,20 @@ if [ "$count" -gt 1 ]; then
   : > "$OCTET_WORKSPACE/$OCTET_EXTENSION_NAME.ready"
   attempts=0
   while [ ! -f "$OCTET_WORKSPACE/alpha.ready" ] || [ ! -f "$OCTET_WORKSPACE/beta.ready" ]; do
-attempts=$((attempts + 1))
-if [ "$attempts" -gt 500 ]; then exit 41; fi
-sleep 0.01
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 500 ]; then exit 41; fi
+    sleep 0.01
   done
 fi
 id=$(printf '%s\n' "$initialize" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
 printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.1","tools":[],"commands":[]}}\n' "$id"
 while IFS= read -r request; do
   case "$request" in
-*'"method":"shutdown"'*)
-  id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
-  exit 0
-  ;;
+    *'"method":"shutdown"'*)
+      id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
   esac
 done
 "#;

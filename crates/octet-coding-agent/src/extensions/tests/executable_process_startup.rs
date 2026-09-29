@@ -109,32 +109,32 @@ async fn installed_extension_is_disabled_by_default_and_full_access_trust_is_not
         let name = "policy-fixture";
         let manifest = format!(
             r#"name = "policy-fixture"
-version = "0.1.0"
-api_version = "0.2"
-requires_octet = "={}"
-[entrypoint]
-command = "extension.sh"
-[runtime]
-lifecycle = "workspace_service"
-sharing = "workspace"
-"#,
+    version = "0.1.0"
+    api_version = "0.2"
+    requires_octet = "={}"
+    [entrypoint]
+    command = "extension.sh"
+    [runtime]
+    lifecycle = "workspace_service"
+    sharing = "workspace"
+    "#,
             env!("CARGO_PKG_VERSION")
         );
         let script = r#"#!/bin/sh
-printf 'launched\n' >> "$OCTET_WORKSPACE/policy-extension-starts"
-while IFS= read -r request; do
-  id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  case "$request" in
-    *'"method":"initialize"'*)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.2","tools":[],"commands":[],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}\n' "$id"
-      ;;
-    *'"method":"shutdown"'*)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
-      exit 0
-      ;;
-  esac
-done
-"#;
+    printf 'launched\n' >> "$OCTET_WORKSPACE/policy-extension-starts"
+    while IFS= read -r request; do
+      id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      case "$request" in
+        *'"method":"initialize"'*)
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.2","tools":[],"commands":[],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}\n' "$id"
+          ;;
+        *'"method":"shutdown"'*)
+          printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+          exit 0
+          ;;
+      esac
+    done
+    "#;
         let archive_path = temp.path().join("policy-fixture.tar.gz");
         let encoder = flate2::write::GzEncoder::new(
             std::fs::File::create(&archive_path).unwrap(),

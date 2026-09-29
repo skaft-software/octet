@@ -85,26 +85,26 @@ long_method=$(printf '%*s' 20000 '' | tr ' ' z)
 round=0
 while IFS= read -r request; do
   case "$request" in
-*'"method":"context/collect"'*)
-  id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  printf '{"jsonrpc":"2.0","method":"context/contribution","params":{"label":"oversized","content":"%s","placement":"prompt_suffix"}}\n' "$oversized"
-  if [ "$round" -eq 0 ]; then
-    printf '{"jsonrpc":"2.0","method":"%s","params":{}}\n' "$long_method"
-  fi
-  index=0
-  while [ "$index" -lt 40 ]; do
-    printf '{"jsonrpc":"2.0","method":"context/contribution","params":{"label":"context-%s-%s","content":"%s","placement":"prompt_suffix"}}\n' "$round" "$index" "$chunk"
-    printf '%s\n' '{"jsonrpc":"2.0","method":"flood/unknown","params":{}}'
-    index=$((index + 1))
-  done
-  printf '{"jsonrpc":"2.0","id":%s,"result":[{"label":"collected-oversized","content":"%s","placement":"prompt_suffix"}]}\n' "$id" "$oversized"
-  round=$((round + 1))
-  ;;
-*'"method":"shutdown"'*)
-  id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
-  exit 0
-  ;;
+    *'"method":"context/collect"'*)
+      id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","method":"context/contribution","params":{"label":"oversized","content":"%s","placement":"prompt_suffix"}}\n' "$oversized"
+      if [ "$round" -eq 0 ]; then
+        printf '{"jsonrpc":"2.0","method":"%s","params":{}}\n' "$long_method"
+      fi
+      index=0
+      while [ "$index" -lt 40 ]; do
+        printf '{"jsonrpc":"2.0","method":"context/contribution","params":{"label":"context-%s-%s","content":"%s","placement":"prompt_suffix"}}\n' "$round" "$index" "$chunk"
+        printf '%s\n' '{"jsonrpc":"2.0","method":"flood/unknown","params":{}}'
+        index=$((index + 1))
+      done
+      printf '{"jsonrpc":"2.0","id":%s,"result":[{"label":"collected-oversized","content":"%s","placement":"prompt_suffix"}]}\n' "$id" "$oversized"
+      round=$((round + 1))
+      ;;
+    *'"method":"shutdown"'*)
+      id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
   esac
 done
 "#,

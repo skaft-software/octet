@@ -13,18 +13,18 @@ use super::*;
 fn fixture_model() -> ImageModel {
     let catalog = ImageModelCatalog::from_json(
         r#"{
-            "version": 1,
-            "models": [{
-                "id": "test/image-model",
-                "name": "Test Image",
-                "api": "openrouter-images",
-                "provider": "openrouter",
-                "base_url": "https://openrouter.ai/api/v1/",
-                "input": ["text", "image"],
-                "output": ["image", "text"],
-                "cost": {"input": 1000000, "output": 2000000, "cache_read": 100000, "cache_write": 250000}
-            }]
-        }"#,
+                "version": 1,
+                "models": [{
+                    "id": "test/image-model",
+                    "name": "Test Image",
+                    "api": "openrouter-images",
+                    "provider": "openrouter",
+                    "base_url": "https://openrouter.ai/api/v1/",
+                    "input": ["text", "image"],
+                    "output": ["image", "text"],
+                    "cost": {"input": 1000000, "output": 2000000, "cache_read": 100000, "cache_write": 250000}
+                }]
+            }"#,
     )
     .unwrap();
     catalog.resolve("openrouter", "test/image-model").unwrap()
@@ -33,18 +33,18 @@ fn fixture_model() -> ImageModel {
 fn unpriced_model() -> ImageModel {
     let catalog = ImageModelCatalog::from_json(
         r#"{
-            "version": 1,
-            "models": [{
-                "id": "test/dynamic-router",
-                "name": "Dynamic Router",
-                "api": "openrouter-images",
-                "provider": "openrouter",
-                "base_url": "https://openrouter.ai/api/v1/",
-                "input": ["text", "image"],
-                "output": ["image", "text"],
-                "cost": null
-            }]
-        }"#,
+                "version": 1,
+                "models": [{
+                    "id": "test/dynamic-router",
+                    "name": "Dynamic Router",
+                    "api": "openrouter-images",
+                    "provider": "openrouter",
+                    "base_url": "https://openrouter.ai/api/v1/",
+                    "input": ["text", "image"],
+                    "output": ["image", "text"],
+                    "cost": null
+                }]
+            }"#,
     )
     .unwrap();
     catalog

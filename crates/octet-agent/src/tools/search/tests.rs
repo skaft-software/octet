@@ -123,9 +123,9 @@ async fn stderr_saturation_does_not_block_search() {
         &f.workspace,
         "rg-stderr-saturating",
         r#"
-        dd if=/dev/zero bs=1048576 count=1 >&2
-        exit 2
-        "#,
+            dd if=/dev/zero bs=1048576 count=1 >&2
+            exit 2
+            "#,
     );
     let mut sandbox = f.sandbox.clone();
     sandbox.bash_timeout = Duration::from_secs(2);
@@ -155,11 +155,11 @@ async fn stdout_eof_does_not_bypass_search_timeout_or_cleanup() {
         &f.workspace,
         "rg-closes-stdout",
         r#"
-        exec 1>&-
-        printf '%s\n' "$$" > child.pid
-        kill -STOP "$$"
-        exit 2
-        "#,
+            exec 1>&-
+            printf '%s\n' "$$" > child.pid
+            kill -STOP "$$"
+            exit 2
+            "#,
     );
     let mut sandbox = f.sandbox.clone();
     sandbox.bash_timeout = Duration::from_millis(150);

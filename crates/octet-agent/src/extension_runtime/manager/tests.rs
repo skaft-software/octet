@@ -49,7 +49,7 @@ IFS= read -r initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.2","tools":[],"commands":[],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}'
 while IFS= read -r line; do
   case "$line" in
-*'"method":"shutdown"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'; exit 0 ;;
+    *'"method":"shutdown"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'; exit 0 ;;
   esac
 done
 "#,
@@ -104,13 +104,13 @@ import sys
 sys.path.insert(0, os.environ['OCTET_EXTENSION_DIR'])
 from localpkg.helper import START_TEXT
 with open(os.path.join(os.environ['OCTET_WORKSPACE'], 'starts'), 'a') as output:
-output.write(START_TEXT)
+    output.write(START_TEXT)
 for line in sys.stdin:
-if '"method":"initialize"' in line:
-    print('{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.2","tools":[],"commands":[],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}', flush=True)
-if '"method":"shutdown"' in line:
-    print('{"jsonrpc":"2.0","id":2,"result":{}}', flush=True)
-    break
+    if '"method":"initialize"' in line:
+        print('{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.2","tools":[],"commands":[],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}', flush=True)
+    if '"method":"shutdown"' in line:
+        print('{"jsonrpc":"2.0","id":2,"result":{}}', flush=True)
+        break
 "#,
     );
     selected.manifest.entrypoint.command = "runner.py".into();

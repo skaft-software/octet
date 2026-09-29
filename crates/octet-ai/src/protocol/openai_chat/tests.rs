@@ -863,20 +863,20 @@ fn test_build_request_audio_out() {
 fn test_decode_response_basic() {
     let model = make_test_model(false, false, false, false, false, false);
     let raw_json = r#"{
-        "id": "chatcmpl-123",
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "Hello back!"
-            },
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "total_tokens": 15
-        }
-    }"#;
+            "id": "chatcmpl-123",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello back!"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }"#;
 
     let resp = decode_response(&model, raw_json.as_bytes(), None).unwrap();
     assert_eq!(resp.response_id, Some("chatcmpl-123".to_string()));
@@ -925,16 +925,16 @@ fn nonstream_defaulted_stop_diagnostic_preserves_required_usage() {
 fn test_decode_response_recovers_qwen_xml_tool_call() {
     let model = make_test_model(false, false, false, true, false, false);
     let raw_json = r#"{
-        "id": "chatcmpl-qwen-xml",
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "<tool_call><function=read><parameter=path>README.md</parameter></function></tool_call>"
-            },
-            "finish_reason": "stop"
-        }],
-        "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
-    }"#;
+            "id": "chatcmpl-qwen-xml",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "<tool_call><function=read><parameter=path>README.md</parameter></function></tool_call>"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+        }"#;
 
     let response = decode_response(&model, raw_json.as_bytes(), None).unwrap();
     assert_eq!(response.stop_reason, StopReason::ToolUse);
@@ -1015,16 +1015,16 @@ fn compatibility_parser_accepts_common_json_and_xml_tool_dialects() {
 fn completed_native_tool_arguments_are_repaired_conservatively() {
     let model = make_test_model(false, false, false, true, false, false);
     let raw_json = r#"{
-        "id":"repair",
-        "choices":[{
-            "message":{"tool_calls":[{
-                "id":"call_1","type":"function",
-                "function":{"name":"read","arguments":"{'path':'C:\\Users\\example',}"}
-            }]},
-            "finish_reason":"tool_calls"
-        }],
-        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
-    }"#;
+            "id":"repair",
+            "choices":[{
+                "message":{"tool_calls":[{
+                    "id":"call_1","type":"function",
+                    "function":{"name":"read","arguments":"{'path':'C:\\Users\\example',}"}
+                }]},
+                "finish_reason":"tool_calls"
+            }],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+        }"#;
     let response = decode_response(&model, raw_json.as_bytes(), None).unwrap();
     let call = response
         .message
@@ -1042,13 +1042,13 @@ fn completed_native_tool_arguments_are_repaired_conservatively() {
 fn completed_bare_json_tool_call_is_recovered_from_content() {
     let model = make_test_model(false, false, false, true, false, false);
     let raw_json = r#"{
-        "id":"bare-json",
-        "choices":[{
-            "message":{"content":"```json\n{\"tool\":\"read\",\"arguments\":{\"path\":\"README.md\",}}\n```"},
-            "finish_reason":"stop"
-        }],
-        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
-    }"#;
+            "id":"bare-json",
+            "choices":[{
+                "message":{"content":"```json\n{\"tool\":\"read\",\"arguments\":{\"path\":\"README.md\",}}\n```"},
+                "finish_reason":"stop"
+            }],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+        }"#;
     let response = decode_response(&model, raw_json.as_bytes(), None).unwrap();
     assert_eq!(response.stop_reason, StopReason::ToolUse);
     assert!(matches!(
@@ -1061,13 +1061,13 @@ fn completed_bare_json_tool_call_is_recovered_from_content() {
 fn tool_output_locked_is_suppressed_and_requests_recovery() {
     let model = make_test_model(false, false, false, true, false, false);
     let raw_json = r#"{
-        "id":"locked",
-        "choices":[{
-            "message":{"content":"I will inspect it now.\n[tool_output_locked]"},
-            "finish_reason":"stop"
-        }],
-        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
-    }"#;
+            "id":"locked",
+            "choices":[{
+                "message":{"content":"I will inspect it now.\n[tool_output_locked]"},
+                "finish_reason":"stop"
+            }],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+        }"#;
     let response = decode_response(&model, raw_json.as_bytes(), None).unwrap();
     assert_eq!(
         response.stop_reason,

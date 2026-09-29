@@ -618,8 +618,8 @@ while [ "$count" -lt 2 ]; do
   printf '{"jsonrpc":"2.0","id":"%s","method":"confirmation/request","params":{"prompt":"Install runtime?","destructive":false,"default":false}}\n' "$confirmation_id"
   IFS= read -r confirmation
   case "$confirmation" in
-*\"id\":\"$confirmation_id\"*'"confirmed":true'*) ;;
-*) exit 41 ;;
+    *\"id\":\"$confirmation_id\"*'"confirmed":true'*) ;;
+    *) exit 41 ;;
   esac
   printf '{"jsonrpc":"2.0","id":%s,"result":{"text":"setup started","notifications":[],"context":[]}}\n' "$id"
   count=$((count + 1))

@@ -14,71 +14,71 @@ import sys
 
 
 def canonical(value):
-return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def receive():
-line = sys.stdin.readline()
-assert line, "host closed stdin"
-value = json.loads(line)
-assert line.rstrip("\n") == canonical(value), line
-return value
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    value = json.loads(line)
+    assert line.rstrip("\n") == canonical(value), line
+    return value
 
 
 def send(value):
-sys.stdout.write(canonical(value) + "\n")
-sys.stdout.flush()
+    sys.stdout.write(canonical(value) + "\n")
+    sys.stdout.flush()
 
 
 def provider(provider_id, model_id):
-return {
-    "provider": {
-        "id": provider_id,
-        "label": provider_id + " provider",
-        "auth": {"kind": "none"},
-    },
-    "models": [{
-        "id": model_id,
-        "api_name": model_id,
-        "protocol": "openai_chat",
-        "context_window": 8192,
-        "max_output_tokens": 1024,
-        "capabilities": {
-            "tools": False,
-            "parallel_tool_calls": False,
-            "structured_output": False,
-            "reasoning": False,
+    return {
+        "provider": {
+            "id": provider_id,
+            "label": provider_id + " provider",
+            "auth": {"kind": "none"},
         },
-    }],
-}
+        "models": [{
+            "id": model_id,
+            "api_name": model_id,
+            "protocol": "openai_chat",
+            "context_window": 8192,
+            "max_output_tokens": 1024,
+            "capabilities": {
+                "tools": False,
+                "parallel_tool_calls": False,
+                "structured_output": False,
+                "reasoning": False,
+            },
+        }],
+    }
 
 
 def reverse_request(identifier, method, params):
-send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
-response = receive()
-assert response.get("id") == identifier and "result" in response, response
-return response["result"]
+    send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+    response = receive()
+    assert response.get("id") == identifier and "result" in response, response
+    return response["result"]
 
 
 def provider_many(provider_id, count):
-declaration = provider(provider_id, "bulk-model-0")
-declaration["models"] = [
-    {
-        "id": "bulk-model-%d" % index,
-        "api_name": "bulk-model-%d" % index,
-        "protocol": "openai_chat",
-        "context_window": 8192,
-        "max_output_tokens": 1024,
-        "capabilities": {
-            "tools": False,
-            "parallel_tool_calls": False,
-            "structured_output": False,
-            "reasoning": False,
-        },
-    }
-    for index in range(count)
-]
-return declaration
+    declaration = provider(provider_id, "bulk-model-0")
+    declaration["models"] = [
+        {
+            "id": "bulk-model-%d" % index,
+            "api_name": "bulk-model-%d" % index,
+            "protocol": "openai_chat",
+            "context_window": 8192,
+            "max_output_tokens": 1024,
+            "capabilities": {
+                "tools": False,
+                "parallel_tool_calls": False,
+                "structured_output": False,
+                "reasoning": False,
+            },
+        }
+        for index in range(count)
+    ]
+    return declaration
 
 
 initialize = receive()
@@ -86,78 +86,78 @@ assert initialize["method"] == "initialize", initialize
 contract = initialize["params"]["contract"]
 provider_capabilities = {"provider_catalog", "provider_stream", "provider_auth"}
 provider_methods = {
-"providers/complete",
-"providers/register",
-"providers/update",
-"providers/unregister",
-"provider/stream",
-"provider/event",
-"provider/cancel",
-"provider/auth/request",
-"provider/auth/revoke",
+    "providers/complete",
+    "providers/register",
+    "providers/update",
+    "providers/unregister",
+    "provider/stream",
+    "provider/event",
+    "provider/cancel",
+    "provider/auth/request",
+    "provider/auth/revoke",
 }
 selection = {
-"schema": contract["schema"],
-"encoding": contract["encoding"],
-"capabilities": [
-    capability
-    for capability in contract["required_capabilities"] + contract["optional_capabilities"]
-    if capability in contract["required_capabilities"] or capability in provider_capabilities
-],
-"methods": [
-    method
-    for method in contract["required_methods"] + contract["optional_methods"]
-    if method in contract["required_methods"] or method in provider_methods
-],
-"limits": contract["limits"],
+    "schema": contract["schema"],
+    "encoding": contract["encoding"],
+    "capabilities": [
+        capability
+        for capability in contract["required_capabilities"] + contract["optional_capabilities"]
+        if capability in contract["required_capabilities"] or capability in provider_capabilities
+    ],
+    "methods": [
+        method
+        for method in contract["required_methods"] + contract["optional_methods"]
+        if method in contract["required_methods"] or method in provider_methods
+    ],
+    "limits": contract["limits"],
 }
 send({
-"jsonrpc": "2.0",
-"id": initialize["id"],
-"result": {
-    "api_version": "0.3",
-    "tools": [{
-        "name": "late-control",
-        "description": "Publish or retire a provider declaration after the initial catalog",
-        "parameters": {"type": "object"},
-    }],
-    "contract": selection,
-},
+    "jsonrpc": "2.0",
+    "id": initialize["id"],
+    "result": {
+        "api_version": "0.3",
+        "tools": [{
+            "name": "late-control",
+            "description": "Publish or retire a provider declaration after the initial catalog",
+            "parameters": {"type": "object"},
+        }],
+        "contract": selection,
+    },
 })
 reverse_request("initial-register", "providers/register", provider("alpha", "alpha-model"))
 send({"jsonrpc": "2.0", "method": "providers/complete", "params": {}})
 
 while True:
-message = receive()
-method = message.get("method")
-if method == "tool/call":
-    action = message["params"]["arguments"].get("action")
-    if action == "register-beta":
-        reverse_request("late-register", "providers/register", provider("beta", "beta-model"))
-    elif action == "register-many":
-        reverse_request(
-            "late-register-many",
-            "providers/register",
-            provider_many("bulk", 12),
-        )
-    elif action == "unregister-beta":
-        reverse_request("late-unregister", "providers/unregister", {"provider_id": "beta"})
+    message = receive()
+    method = message.get("method")
+    if method == "tool/call":
+        action = message["params"]["arguments"].get("action")
+        if action == "register-beta":
+            reverse_request("late-register", "providers/register", provider("beta", "beta-model"))
+        elif action == "register-many":
+            reverse_request(
+                "late-register-many",
+                "providers/register",
+                provider_many("bulk", 12),
+            )
+        elif action == "unregister-beta":
+            reverse_request("late-unregister", "providers/unregister", {"provider_id": "beta"})
+        else:
+            raise AssertionError(action)
+        send({
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {
+                "content": [{"type": "text", "text": action}],
+                "is_error": False,
+                "metadata": {},
+            },
+        })
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"terminal": "shutdown"}})
+        break
     else:
-        raise AssertionError(action)
-    send({
-        "jsonrpc": "2.0",
-        "id": message["id"],
-        "result": {
-            "content": [{"type": "text", "text": action}],
-            "is_error": False,
-            "metadata": {},
-        },
-    })
-elif method == "shutdown":
-    send({"jsonrpc": "2.0", "id": message["id"], "result": {"terminal": "shutdown"}})
-    break
-else:
-    raise AssertionError(message)
+        raise AssertionError(message)
 "#;
 
 async fn start_late_provider_fixture(
