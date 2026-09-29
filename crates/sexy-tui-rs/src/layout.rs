@@ -834,150 +834,103 @@ impl Stack {
     }
 }
 
+/// Generates the whole surface a stack axis wrapper owns.
+///
+/// [`VStack`] and [`HStack`] are the same wrapper around the same private
+/// [`Stack`], differing only in the axis handed to `Stack::new`. Every builder,
+/// query and [`Component`] method is a one-line delegation, and the axis alone
+/// decides gap clamping, child ordering and the emitted [`LayoutNode`] — so two
+/// hand-written copies of this surface could silently disagree and give the two
+/// axes different behaviour. Declaring the body once here makes that difference
+/// inexpressible.
+///
+/// This is a macro rather than a shared trait because these are inherent
+/// methods: putting them on a trait would force every caller to import it,
+/// which is an API change.
+macro_rules! impl_stack_axis {
+    ($axis:ident, $kind:expr) => {
+        impl Default for $axis {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $axis {
+            /// An empty stack along this axis.
+            pub fn new() -> Self {
+                Self {
+                    stack: Stack::new($kind),
+                }
+            }
+
+            /// Set the gap between adjacent children.
+            pub fn with_gap(mut self, gap: i32) -> Self {
+                self.stack.gap = gap.max(0);
+                self
+            }
+
+            /// Set cross-axis alignment.
+            pub fn with_align(mut self, align: StackAlign) -> Self {
+                self.stack.align = align;
+                self
+            }
+
+            /// Append a child with default sizing.
+            pub fn push(&mut self, component: Box<dyn Component>) {
+                self.stack.push(component, StackEntryOptions::new());
+            }
+
+            /// Append a child with explicit sizing.
+            pub fn push_with(&mut self, component: Box<dyn Component>, options: StackEntryOptions) {
+                self.stack.push(component, options);
+            }
+
+            /// Number of children.
+            pub fn len(&self) -> usize {
+                self.stack.entries.len()
+            }
+
+            /// Whether the stack has no children.
+            pub fn is_empty(&self) -> bool {
+                self.stack.entries.is_empty()
+            }
+        }
+
+        impl Component for $axis {
+            fn render(&self, width: u16) -> Vec<String> {
+                let mut lines = Vec::new();
+                for entry in &self.stack.entries {
+                    lines.extend(entry.component.render(width));
+                }
+                lines
+            }
+
+            fn invalidate(&mut self) {
+                for entry in &mut self.stack.entries {
+                    entry.component.invalidate();
+                }
+            }
+
+            fn layout_node(&self) -> Option<LayoutNode<'_>> {
+                Some(self.stack.layout_node())
+            }
+        }
+    };
+}
+
 /// Vertical stack: children are laid out top to bottom.
 pub struct VStack {
     stack: Stack,
 }
 
-impl Default for VStack {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl VStack {
-    /// An empty vertical stack.
-    pub fn new() -> Self {
-        Self {
-            stack: Stack::new(StackKind::Vertical),
-        }
-    }
-
-    /// Set the gap between adjacent children.
-    pub fn with_gap(mut self, gap: i32) -> Self {
-        self.stack.gap = gap.max(0);
-        self
-    }
-
-    /// Set cross-axis alignment.
-    pub fn with_align(mut self, align: StackAlign) -> Self {
-        self.stack.align = align;
-        self
-    }
-
-    /// Append a child with default sizing.
-    pub fn push(&mut self, component: Box<dyn Component>) {
-        self.stack.push(component, StackEntryOptions::new());
-    }
-
-    /// Append a child with explicit sizing.
-    pub fn push_with(&mut self, component: Box<dyn Component>, options: StackEntryOptions) {
-        self.stack.push(component, options);
-    }
-
-    /// Number of children.
-    pub fn len(&self) -> usize {
-        self.stack.entries.len()
-    }
-
-    /// Whether the stack has no children.
-    pub fn is_empty(&self) -> bool {
-        self.stack.entries.is_empty()
-    }
-}
-
-impl Component for VStack {
-    fn render(&self, width: u16) -> Vec<String> {
-        let mut lines = Vec::new();
-        for entry in &self.stack.entries {
-            lines.extend(entry.component.render(width));
-        }
-        lines
-    }
-
-    fn invalidate(&mut self) {
-        for entry in &mut self.stack.entries {
-            entry.component.invalidate();
-        }
-    }
-
-    fn layout_node(&self) -> Option<LayoutNode<'_>> {
-        Some(self.stack.layout_node())
-    }
-}
+impl_stack_axis!(VStack, StackKind::Vertical);
 
 /// Horizontal stack: children are laid out left to right.
 pub struct HStack {
     stack: Stack,
 }
 
-impl Default for HStack {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HStack {
-    /// An empty horizontal stack.
-    pub fn new() -> Self {
-        Self {
-            stack: Stack::new(StackKind::Horizontal),
-        }
-    }
-
-    /// Set the gap between adjacent children.
-    pub fn with_gap(mut self, gap: i32) -> Self {
-        self.stack.gap = gap.max(0);
-        self
-    }
-
-    /// Set cross-axis alignment.
-    pub fn with_align(mut self, align: StackAlign) -> Self {
-        self.stack.align = align;
-        self
-    }
-
-    /// Append a child with default sizing.
-    pub fn push(&mut self, component: Box<dyn Component>) {
-        self.stack.push(component, StackEntryOptions::new());
-    }
-
-    /// Append a child with explicit sizing.
-    pub fn push_with(&mut self, component: Box<dyn Component>, options: StackEntryOptions) {
-        self.stack.push(component, options);
-    }
-
-    /// Number of children.
-    pub fn len(&self) -> usize {
-        self.stack.entries.len()
-    }
-
-    /// Whether the stack has no children.
-    pub fn is_empty(&self) -> bool {
-        self.stack.entries.is_empty()
-    }
-}
-
-impl Component for HStack {
-    fn render(&self, width: u16) -> Vec<String> {
-        let mut lines = Vec::new();
-        for entry in &self.stack.entries {
-            lines.extend(entry.component.render(width));
-        }
-        lines
-    }
-
-    fn invalidate(&mut self) {
-        for entry in &mut self.stack.entries {
-            entry.component.invalidate();
-        }
-    }
-
-    fn layout_node(&self) -> Option<LayoutNode<'_>> {
-        Some(self.stack.layout_node())
-    }
-}
-
+impl_stack_axis!(HStack, StackKind::Horizontal);
 /// One resolved box in the last rendered frame.
 pub struct LayoutBox<'a> {
     /// The component this box was rendered from.

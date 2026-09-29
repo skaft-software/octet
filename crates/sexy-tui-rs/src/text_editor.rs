@@ -319,6 +319,20 @@ enum LastAction {
     TypeWord,
 }
 
+/// What the shared line-edge step of a kill found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineEdge {
+    /// The cursor sits on the buffer boundary in the kill's direction, so the
+    /// join it wanted to make does not exist.
+    Blocked,
+    /// The newline joining to the neighbouring line was removed; the caller
+    /// must report a completed kill and stop.
+    Joined,
+    /// The cursor is strictly inside its logical line, which is given back as
+    /// `(start, end)` for the caller to apply its own range rule to.
+    Interior(usize, usize),
+}
+
 #[derive(Clone, Debug)]
 struct LayoutCache {
     wrap_width: usize,
@@ -804,36 +818,50 @@ impl TextEditor {
         true
     }
 
-    /// Kill one word backward or forward, accumulating consecutive kills.
-    fn delete_word(&mut self, forward: bool) -> bool {
+    /// The shared first step of every line-aware kill.
+    ///
+    /// At a line edge "kill one word forward" and "kill to end of line" name the
+    /// same edit — remove the newline that joins the cursor's line to its
+    /// neighbour — so that edit is implemented once, here, and both kills
+    /// delegate to it. Away from an edge the caller receives the cursor's
+    /// logical line bounds and applies its own range rule to them.
+    fn kill_at_line_edge(&mut self, forward: bool) -> LineEdge {
         let (line_start, line_end) = logical_line_bounds(&self.text, self.cursor);
         let at_edge = if forward {
             self.cursor >= line_end
         } else {
             self.cursor == line_start
         };
-
-        if at_edge {
-            let newline = if forward {
-                if line_end >= self.text.len() {
-                    return false;
-                }
-                line_end
-            } else {
-                if line_start == 0 {
-                    return false;
-                }
-                line_start - 1
-            };
-            self.push_undo();
-            let was_kill = self.last_action == Some(LastAction::Kill);
-            self.kill_ring.push("\n", !forward, was_kill);
-            self.last_action = Some(LastAction::Kill);
-            self.text.replace_range(newline..newline + 1, "");
-            self.finish_after_edit(newline, true);
-            return true;
+        if !at_edge {
+            return LineEdge::Interior(line_start, line_end);
         }
+        let newline = if forward {
+            if line_end >= self.text.len() {
+                return LineEdge::Blocked;
+            }
+            line_end
+        } else {
+            if line_start == 0 {
+                return LineEdge::Blocked;
+            }
+            line_start - 1
+        };
+        self.push_undo();
+        let was_kill = self.last_action == Some(LastAction::Kill);
+        self.kill_ring.push("\n", !forward, was_kill);
+        self.last_action = Some(LastAction::Kill);
+        self.text.replace_range(newline..newline + 1, "");
+        self.finish_after_edit(newline, true);
+        LineEdge::Joined
+    }
 
+    /// Kill one word backward or forward, accumulating consecutive kills.
+    fn delete_word(&mut self, forward: bool) -> bool {
+        let (line_start, line_end) = match self.kill_at_line_edge(forward) {
+            LineEdge::Joined => return true,
+            LineEdge::Blocked => return false,
+            LineEdge::Interior(start, end) => (start, end),
+        };
         let was_kill = self.last_action == Some(LastAction::Kill);
         let line = &self.text[line_start..line_end];
         let local = self.cursor - line_start;
@@ -862,34 +890,11 @@ impl TextEditor {
 
     /// Kill from the line edge to the cursor, merging lines at an edge.
     fn delete_to_line_edge(&mut self, forward: bool) -> bool {
-        let (line_start, line_end) = logical_line_bounds(&self.text, self.cursor);
-        let at_edge = if forward {
-            self.cursor >= line_end
-        } else {
-            self.cursor == line_start
+        let (line_start, line_end) = match self.kill_at_line_edge(forward) {
+            LineEdge::Joined => return true,
+            LineEdge::Blocked => return false,
+            LineEdge::Interior(start, end) => (start, end),
         };
-
-        if at_edge {
-            let newline = if forward {
-                if line_end >= self.text.len() {
-                    return false;
-                }
-                line_end
-            } else {
-                if line_start == 0 {
-                    return false;
-                }
-                line_start - 1
-            };
-            self.push_undo();
-            let was_kill = self.last_action == Some(LastAction::Kill);
-            self.kill_ring.push("\n", !forward, was_kill);
-            self.last_action = Some(LastAction::Kill);
-            self.text.replace_range(newline..newline + 1, "");
-            self.finish_after_edit(newline, true);
-            return true;
-        }
-
         let was_kill = self.last_action == Some(LastAction::Kill);
         let range = if forward {
             self.cursor..line_end
