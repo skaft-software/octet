@@ -1,10 +1,10 @@
-#![cfg(unix)]
-
 //! Real-binary PTY qualification for activity rows while an API response is held.
 //!
 //! The loopback server sends HTTP headers and then waits before sending its
 //! finite SSE body. It emits no provider-token events while the row is sampled;
 //! all HOME, workspace, session and provider state is disposable.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

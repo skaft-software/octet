@@ -1,3 +1,7 @@
+//! Scrolling regressions against the real shell renderer: the reader's viewport must not move
+//! when new output arrives, and native scrollback must keep every committed row. Its own module
+//! because each probe replays a full transcript through the production renderer.
+use super::support::*;
 use super::*;
 
 const WIDTH: u16 = 80;

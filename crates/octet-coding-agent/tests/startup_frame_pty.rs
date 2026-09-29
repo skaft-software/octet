@@ -1,11 +1,11 @@
-#![cfg(unix)]
-
 //! Deterministic PTY/frame regression coverage for primary-screen startup.
 //!
 //! The real binary is run against a disposable HOME, workspace, session store,
 //! and a local custom-provider record. Startup tests submit no prompt. API-wait
 //! and plain-prompt tests use only a gated loopback fixture, never credentials
 //! or a live model.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

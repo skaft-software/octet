@@ -1221,6 +1221,8 @@ impl std::fmt::Debug for Session {
 }
 
 pub use context::ActiveSkillState;
+// Only Windows session creation maps secure-file errors in `store`.
+#[cfg(windows)]
 use journal::partial_journal_file_error;
 pub use journal::{
     AssistantFrameJournal, MAX_PARTIAL_FRAME_JOURNAL_BYTES, MAX_PARTIAL_FRAME_JOURNAL_FRAMES,
