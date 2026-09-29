@@ -11,7 +11,8 @@
 use super::*;
 use crate::capabilities::{CapabilityOverrides, ColorDepth};
 use crate::rich_text::markdown;
-use crate::style::Color;
+use crate::rich_text::{DetailBlock, Inline, StatusKind};
+use crate::style::{BlockRole, Color};
 
 fn renderer(color: ColorDepth, unicode: bool) -> RichRenderer {
     let capabilities =
