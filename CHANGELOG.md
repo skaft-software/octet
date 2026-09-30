@@ -115,7 +115,6 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   request headers. Cover Chat Completions and Batch API requests without adding
   attribution to unrelated providers or changing explicit header overrides.
 - Link the npm launcher and native platform packages to the same octet homepage.
-
 - Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
   `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the
   verified immutable release assets with trusted publishing and registry
@@ -190,7 +189,7 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   suite skips on older toolchains instead of failing, and CI runs it from a new
   `extensions/source-catalog.txt` under a 1.96 toolchain. The extension remains
   unpublished: only its README ships in a release.
-- Condense picker chrome for a denser Codex-like read: the model picker omits
+- Condense picker chrome for a denser read: the model picker omits
   `in —`/`out —` when pricing is unknown (subscription/OAuth models now show
   only `272K ctx · vision`), and the resume picker hides `re:<pattern>` /
   `"phrase"` hints until the filter actually uses them.
