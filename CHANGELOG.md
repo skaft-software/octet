@@ -211,6 +211,11 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
 - Extend Still's quiet activity grouping to web search/fetch, MCP, and
   computer-use calls, with concise family summaries. Delegations keep their
   existing subagent presentation; `Ctrl+O` still reveals individual call details.
+- Split the five largest source files into focused modules, with no change in
+  behaviour: `agent.rs` (12.6K lines), `extension_process.rs` (18K) and
+  `delegation.rs` (8.6K) in `octet-agent`, and `extensions.rs` (7.9K) and
+  `extensions/serve.rs` (9.3K) in `octet-coding-agent`. Public items keep their
+  paths through re-exports.
 
 ## [0.8.1] - 2026-09-27
 
