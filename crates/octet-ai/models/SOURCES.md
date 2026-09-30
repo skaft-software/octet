@@ -97,6 +97,37 @@ native steering are not enabled on Codex solely by GPT-6 names. See the
 [provider guide](../../../docs/providers.md) and
 [wire foundations](../docs/responses-controls.md).
 
+## GPT-6.1 Sol contract review (2026-09-29)
+
+The public [GPT-6.1 Sol model page](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+qualifies the exact direct OpenAI ID `gpt-6.1-sol`: Responses is required for
+**tools** (Chat Completions is tool-free only), text/image input, 1,050,000
+context, 128,000 max output, and a 2026-04-30 knowledge cutoff. Its exact
+reasoning choices are `low`, `medium` (default), `high`, `xhigh`, `max`: unlike
+6-Sol, neither `none` nor `minimal` is supported.
+
+Public standard input/output/cache-read/cache-write rates are $2/$10/$0.10/$2.50
+per million tokens (2,000,000/10,000,000/100,000/2,500,000 microdollars per
+million). **Above 272K input** the whole request uses $4/$15/$0.20/$5 (4,000,000/
+15,000,000/200,000/5,000,000 microdollars per million), not just tokens over the
+threshold. In particular 6-Sol's $0.20 base cache read is not 6.1 Sol's $0.10.
+These are public API prices, **not** subscription prices; Codex 6.1 Sol remains
+unpriced until a reviewed subscription quote exists.
+
+The bundled [Codex model catalog at rust-v0.159.1](https://github.com/openai/codex/blob/rust-v0.159.1/codex-rs/models-manager/models.json)
+lists slug `gpt-6.1-sol`, display name `GPT-6.1-Sol`, and priority 1 (the
+Codex default). It advertises a 272K default / 872K maximum window, low default
+reasoning with `low`/`medium`/`high`/`xhigh`/`max`/`ultra`, Responses Lite,
+V2 multi-agent delegation with `xhigh` delegation effort, parallel tool calls,
+WebSocket preference, text/image input, and minimum client 0.153.0. octet's
+compatibility version 0.156.1 is sufficient; cache schema 9 refreshes older
+inventories. As for Astra, **online account inventory** establishes Lite/V2;
+Ultra maps to `max` wire effort only alongside V2 delegation, while an offline
+or unreachable inventory keeps the conservative low-through-max fallback. The
+working 272K limit and optional Pro/ProLite 872K entitlement remain distinct.
+The model-only [test fixture](../../octet-coding-agent/fixtures/providers/gpt-6.1-sol.json)
+is a bundled-catalog projection, not a live OAuth inference result.
+
 ## Reasoning contract supplement (2026-09-05)
 
 The Cerebras route fallback for an inventory-returned **`qwen-3.8-27b`** uses

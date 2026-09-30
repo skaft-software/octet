@@ -204,7 +204,7 @@ fn graphical_catalog_keeps_models_beyond_the_old_cutoff() {
     }
     let models = graphical_model_catalog(&catalog, &config);
     assert_eq!(models.len(), catalog.models().count());
-    for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+    for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
         assert!(models.iter().any(|model| model.id == id), "{id}");
     }
 }

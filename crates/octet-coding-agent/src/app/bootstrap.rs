@@ -2090,6 +2090,13 @@ fn has_model_id(catalog: &ModelCatalog, id: &str) -> bool {
     catalog.resolve(&ModelId(id.to_owned())).is_ok()
 }
 
+fn known_gpt_6_model(id: &str) -> bool {
+    matches!(
+        id,
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+    )
+}
+
 fn gpt_6_family_model(id: &str) -> bool {
     id.rsplit('/')
         .next()
@@ -2099,7 +2106,7 @@ fn gpt_6_family_model(id: &str) -> bool {
 /// Sparse public OpenAI inventory entries may use the documented GPT-6 family
 /// fallback. Other compatible providers must supply capability metadata.
 fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> bool {
-    declaration.id == "openai" && matches!(id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
+    declaration.id == "openai" && known_gpt_6_model(id)
 }
 
 fn effort_capability(
@@ -2224,6 +2231,13 @@ fn sparse_route_reasoning(
                 Mode::Standard,
                 &["low", "medium", "high", "xhigh", "max"],
                 Some("low"),
+            ));
+        }
+        if id == "gpt-6.1-sol" {
+            return Some(effort_capability(
+                Mode::Standard,
+                &["low", "medium", "high", "xhigh", "max"],
+                Some("medium"),
             ));
         }
         if matches!(id, "gpt-6-sol" | "gpt-6-luna") {
@@ -2520,6 +2534,9 @@ fn register_openai_compatible_models_from_response(
             model
                 .display_name
                 .clone()
+                .or_else(|| {
+                    (public_gpt_6 && api_name == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".into())
+                })
                 .or_else(|| direct_grok_4_7.then(|| "Grok 4.7".into())),
             Capabilities {
                 input_modalities,
@@ -5221,9 +5238,9 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<u64> {
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
 /// Luna uses its 372K default; smaller advertised windows remain authoritative.
-/// Version 8 invalidates inventories filtered by the pre-0.155 Codex client
-/// version, so a fresh cache cannot hide GPT-6 Sol/Luna after upgrading.
-const CODEX_MODEL_CACHE_VERSION: u8 = 8;
+/// Version 9 invalidates inventories from before GPT-6.1 Sol launched, so
+/// a fresh cache cannot hide it after upgrading.
+const CODEX_MODEL_CACHE_VERSION: u8 = 9;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
@@ -5303,27 +5320,35 @@ fn positive_u64(entry: &serde_json::Value, names: &[&str]) -> Option<u64> {
 
 fn codex_fallback_reasoning_options(model_id: &str) -> octet_ai::types::ReasoningOptions {
     // Sparse Codex metadata cannot establish Off or Ultra for generic fallback
-    // models. The observed Luna route has an exact supported set of
-    // none/low/medium/high/xhigh/max; keep that narrow evidence scoped to Luna.
+    // models. Bundled 6.1 Sol advertises Ultra, but it is only usable when the
+    // account inventory also positively advertises V2; offline fallback strips it.
     let floor = codex_min_effort(model_id);
     let ceiling = codex_max_effort(model_id);
-    let candidates = if model_id == "gpt-5.6-luna" {
-        ["none", "low", "medium", "high", "xhigh", "max"]
+    let candidates: &[&str] = if model_id == "gpt-6.1-sol" {
+        &["low", "medium", "high", "xhigh", "max", "ultra"]
+    } else if model_id == "gpt-5.6-luna" {
+        &["none", "low", "medium", "high", "xhigh", "max"]
     } else {
-        ["minimal", "low", "medium", "high", "xhigh", "max"]
+        &["minimal", "low", "medium", "high", "xhigh", "max"]
     };
     let values = candidates
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|value| match ReasoningConfig::from_provider_value(value) {
             Some(ReasoningConfig::Off) => true,
-            Some(ReasoningConfig::Effort(effort)) => effort >= floor && effort <= ceiling,
+            Some(ReasoningConfig::Effort(effort)) => {
+                effort >= floor
+                    && (effort <= ceiling
+                        || (model_id == "gpt-6.1-sol"
+                            && effort == octet_ai::ReasoningEffort::Ultra))
+            }
             _ => false,
         })
         .map(str::to_owned)
         .collect();
     octet_ai::types::ReasoningOptions {
         values,
-        default: None,
+        default: (model_id == "gpt-6.1-sol").then(|| "low".to_owned()),
     }
 }
 
@@ -5407,7 +5432,7 @@ fn codex_models_from_response(
                 (None, Some(maximum)) => (maximum, maximum),
                 (None, None) => fallback,
             };
-        if matches!(id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna") {
+        if known_gpt_6_model(id) {
             // Keep the observed GPT-6 input envelope distinct from the
             // conservative Codex working budget, and never overstate the
             // provider's 872K input allowance when only a total window appears.
@@ -5460,7 +5485,8 @@ fn codex_models_from_response(
             .unwrap_or(false);
         models.push(DiscoveredCodexModel {
             id: id.to_owned(),
-            display_name: discovered_display_name(entry, id),
+            display_name: discovered_display_name(entry, id)
+                .or_else(|| (id == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".to_owned())),
             reasoning_options,
             context_window,
             default_context_window,
@@ -5539,10 +5565,7 @@ fn codex_model_limits(
 }
 
 fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if matches!(
-        model_id,
-        "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" | "gpt-5.6-luna"
-    ) {
+    if known_gpt_6_model(model_id) || model_id == "gpt-5.6-luna" {
         octet_ai::ReasoningEffort::Low
     } else {
         octet_ai::ReasoningEffort::Minimal
@@ -5552,9 +5575,7 @@ fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
 // New Codex families accept the top `max` effort tier. Live discovery narrows
 // this range when the backend publishes explicit supported reasoning levels.
 fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
-        || model_id.starts_with("gpt-5.6-")
-    {
+    if known_gpt_6_model(model_id) || model_id.starts_with("gpt-5.6-") {
         octet_ai::ReasoningEffort::Max
     } else {
         octet_ai::ReasoningEffort::High
@@ -5567,7 +5588,7 @@ fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
 /// OAuth model to text-only.
 fn codex_supports_image_input(model_id: &str) -> bool {
     model_id == "codex-mini-latest"
-        || matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
+        || known_gpt_6_model(model_id)
         || model_id.starts_with("gpt-5.4")
         || model_id.starts_with("gpt-5.5")
         || model_id.starts_with("gpt-5.6")
@@ -5610,10 +5631,7 @@ fn load_codex_model_cache(
         return Ok(None);
     }
     for model in &mut cache.models {
-        if matches!(
-            model.id.as_str(),
-            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
-        ) {
+        if known_gpt_6_model(&model.id) {
             // Current-schema caches can still contain a previously accepted
             // over-cap GPT-6 entry; normalize it to the fixed contract.
             model.max_output_tokens = model.max_output_tokens.min(CODEX_MAX_OUTPUT_TOKENS);
@@ -5801,10 +5819,14 @@ fn fallback_codex_models(
         .map(|model_id| {
             let (default_context_window, _) = codex_model_context_limits(model_id);
             let (limits, max_context_window) = codex_model_limits(model_id, plan);
+            let mut reasoning_options = codex_fallback_reasoning_options(model_id);
+            // The checked-in model contract alone cannot establish account
+            // authority for V2/Ultra when the live inventory is unreachable.
+            strip_codex_ultra(&mut reasoning_options);
             DiscoveredCodexModel {
                 id: (*model_id).to_owned(),
-                display_name: None,
-                reasoning_options: codex_fallback_reasoning_options(model_id),
+                display_name: (*model_id == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".to_owned()),
+                reasoning_options,
                 context_window: limits.context_window,
                 default_context_window,
                 max_context_window,
@@ -6178,10 +6200,8 @@ fn register_openai_codex_with_notes(
         // GPT-6 routes are always namespaced so an OAuth selection cannot be
         // confused with the public OpenAI route when credentials change. Other
         // Codex ids retain their historical collision-based compatibility.
-        let catalog_id = if matches!(
-            model.id.as_str(),
-            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
-        ) || catalog.resolve(&ModelId(model.id.clone())).is_ok()
+        let catalog_id = if known_gpt_6_model(&model.id)
+            || catalog.resolve(&ModelId(model.id.clone())).is_ok()
         {
             ModelId(format!("{}/{}", declaration.id, model.id))
         } else {

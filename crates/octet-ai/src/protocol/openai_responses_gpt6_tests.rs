@@ -46,13 +46,13 @@ fn request() -> Request {
 
 #[test]
 fn public_gpt6_cache_options_encode_documented_mode_and_ttl() {
-    for name in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+    for name in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
         let model = crate::ModelCatalog::builtin()
             .unwrap()
             .resolve(&ModelId(name.into()))
             .unwrap();
         let mut req = request();
-        req.reasoning = if name == "gpt-6-astra" {
+        req.reasoning = if matches!(name, "gpt-6-astra" | "gpt-6.1-sol") {
             ReasoningConfig::Effort(crate::ReasoningEffort::Low)
         } else {
             ReasoningConfig::Off
@@ -354,6 +354,34 @@ fn sol_luna_sampling_depends_on_effective_not_baseline_effort_and_checks_presets
             url::Url::parse("https://third-party.invalid/v1/").unwrap();
         assert!(build_request(&model, &req).is_ok());
     }
+}
+
+#[test]
+fn public_gpt_6_1_sol_rejects_off_and_sampling_with_reasoning() {
+    let mut model = crate::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6.1-sol".into()))
+        .unwrap();
+    let mut req = request();
+    req.reasoning = ReasoningConfig::Off;
+    assert!(
+        build_request(&model, &req).is_err(),
+        "none is not a public 6.1 Sol choice"
+    );
+    req.reasoning = ReasoningConfig::Effort(crate::ReasoningEffort::Minimal);
+    assert!(
+        build_request(&model, &req).is_err(),
+        "minimal is not a public 6.1 Sol choice"
+    );
+    req.reasoning = ReasoningConfig::Effort(crate::ReasoningEffort::Medium);
+    req.temperature = Some(0.7);
+    assert!(build_request(&model, &req).is_err());
+    Arc::make_mut(&mut model.endpoint).base_url =
+        url::Url::parse("https://third-party.invalid/v1/").unwrap();
+    assert!(
+        build_request(&model, &req).is_ok(),
+        "a copied ID is not a qualified OpenAI route"
+    );
 }
 
 #[tokio::test]

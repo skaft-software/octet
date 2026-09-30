@@ -470,7 +470,13 @@ mod tests {
                 Duration::from_secs(1),
             )
             .unwrap();
-            for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-unverified"] {
+            for id in [
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6.1-sol",
+                "gpt-6-luna",
+                "gpt-6-unverified",
+            ] {
                 register_discovered_model(
                     &mut catalog,
                     provider,
