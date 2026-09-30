@@ -331,7 +331,7 @@ When advertised, select `codex/gpt-6.1-sol`, `codex/gpt-6-astra`,
 direct OpenAI presets. When discovery is unreachable, 6.1 Sol leads the fallback
 suggestions.
 
-Codex discovery sends compatibility version **`0.156.1`**. GPT-6 Sol and Luna
+Codex discovery sends compatibility version **`0.159.2`**. GPT-6 Sol and Luna
 require at least `0.155.0`: older query versions filter them out on the server,
 even when the account has access. Read-only checks on 2026-09-23 confirmed that
 changing only this query version from `0.153.2`/`0.154.0` to `0.156.1` returned
@@ -351,9 +351,11 @@ choices. Output budgeting and separately sourced prices remain unchanged; the
 inventory check did not establish those values. New slugs require account
 inventory, not a static alias. The Codex 6.1 Sol bundled catalog advertises
 272K default / 872K maximum context, low reasoning by default with low through
-Ultra, Lite/V2, and priority 1; offline fallback removes dynamic Ultra/V2. The
-0.156.1 discovery client meets its minimum 0.153.0 and cache schema 9 refreshes
-old inventories. Its subscription price remains unknown.
+Ultra, Lite/V2, and priority 1; offline fallback removes dynamic Ultra/V2.
+Although that catalog lists a 0.153.0 minimum, the live backend withheld 6.1 Sol
+from the 0.156.1 query version while Codex 0.159.2 listed it for the same
+account. Discovery therefore sends 0.159.2, and cache schema 10 refreshes older
+inventories. Its subscription price remains unknown.
 
 For advertised Ultra/V2 support, first review and activate the subagents source
 inside an appropriate OS isolation boundary:

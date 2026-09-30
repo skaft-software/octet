@@ -367,8 +367,8 @@ fn codex_spark_and_astra_are_registered_as_image_capable() {
 
 #[test]
 fn codex_catalog_query_uses_gpt6_compatible_client_and_cache_versions() {
-    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.156.1");
-    assert_eq!(CODEX_MODEL_CACHE_VERSION, 9);
+    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.159.2");
+    assert_eq!(CODEX_MODEL_CACHE_VERSION, 10);
     let url = codex_models_url().unwrap();
     assert_eq!(url.path(), "/backend-api/codex/models");
     assert_eq!(
@@ -740,7 +740,7 @@ fn codex_gpt_6_1_sol_priority_default_and_inventory_contract() {
     .unwrap();
     assert_eq!(body["models"][0]["priority"], 1);
     assert_eq!(body["models"][0]["minimal_client_version"], "0.153.0");
-    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.156.1");
+    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.159.2");
     assert_eq!(crate::auth::codex::MODELS[0], "gpt-6.1-sol");
     assert_eq!(
         fallback_codex_models(None)[0].id,

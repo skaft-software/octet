@@ -163,9 +163,11 @@ lists slug `gpt-6.1-sol`, display name `GPT-6.1-Sol`, and priority 1 (the
 Codex default). It advertises a 272K default / 872K maximum window, low default
 reasoning with `low`/`medium`/`high`/`xhigh`/`max`/`ultra`, Responses Lite,
 V2 multi-agent delegation with `xhigh` delegation effort, parallel tool calls,
-WebSocket preference, text/image input, and minimum client 0.153.0. octet's
-compatibility version 0.156.1 is sufficient; cache schema 9 refreshes older
-inventories. As for Astra, **online account inventory** establishes Lite/V2;
+WebSocket preference, text/image input, and minimum client 0.153.0. The live
+backend nevertheless withheld 6.1 Sol from compatibility version 0.156.1, while
+Codex 0.159.2 listed it for the same account (manual QA, 2026-09-30). octet
+therefore sends 0.159.2, and cache schema 10 refreshes inventories fetched as
+0.156.1. As for Astra, **online account inventory** establishes Lite/V2;
 Ultra maps to `max` wire effort only alongside V2 delegation, while an offline
 or unreachable inventory keeps the conservative low-through-max fallback. The
 working 272K limit and optional Pro/ProLite 872K entitlement remain distinct.

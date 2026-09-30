@@ -396,9 +396,9 @@ closed.
 
 ## OpenAI Codex discovery and Ultra
 
-Authenticated Codex discovery sends compatibility client version `0.156.1` and
+Authenticated Codex discovery sends compatibility client version `0.159.2` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 9 invalidates inventories
+`multi_agent_version: "v2"`. Cache schema version 10 invalidates inventories
 queried with older compatibility, context-window or GPT-6.1 Sol policies; entries carry the
 pre-cap backend default window so the deliberate Codex cap can be reported and an
 explicit operator override resolved exactly (`docs/codex-context.md`). It

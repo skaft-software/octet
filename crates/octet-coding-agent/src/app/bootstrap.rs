@@ -5238,14 +5238,16 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<u64> {
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
 /// Luna uses its 372K default; smaller advertised windows remain authoritative.
-/// Version 9 invalidates inventories from before GPT-6.1 Sol launched, so
-/// a fresh cache cannot hide it after upgrading.
-const CODEX_MODEL_CACHE_VERSION: u8 = 9;
+/// Version 10 invalidates inventories fetched as client 0.156.1, which the
+/// live backend served without GPT-6.1 Sol, so upgrading shows it at once.
+const CODEX_MODEL_CACHE_VERSION: u8 = 10;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
-// filter out models that require a contemporary Codex client.
-const CODEX_MODELS_CLIENT_VERSION: &str = "0.156.1";
+// filter out models that require a contemporary Codex client: it withheld
+// GPT-6.1 Sol from 0.156.1 although the bundled catalog lists a 0.153.0
+// minimum, while Codex 0.159.2 listed it for the same account.
+const CODEX_MODELS_CLIENT_VERSION: &str = "0.159.2";
 
 pub(crate) fn effective_compaction_threshold_fraction(config: &Config, model: &Model) -> f64 {
     let Some(max_active_tokens) = config
