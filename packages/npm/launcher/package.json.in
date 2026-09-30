@@ -4,6 +4,7 @@
   "description": "Native octet coding agent launcher",
   "license": "MIT",
   "repository": "https://github.com/skaft-software/octet",
+  "homepage": "https://octet.skaft.org",
   "files": [
     "README.md",
     "LICENSE",

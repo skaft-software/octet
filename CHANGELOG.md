@@ -110,6 +110,11 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
 - Fix inflated TUI throughput for hidden reasoning and buffered responses. Use
   request-to-completion timing and label the latest-turn rate as end-to-end,
   not server generation speed (#462).
+- Attribute built-in OpenRouter requests to `octet coding agent` at
+  `https://octet.skaft.org`, with the `cli-agent` category, using fixed public
+  request headers. Cover Chat Completions and Batch API requests without adding
+  attribution to unrelated providers or changing explicit header overrides.
+- Link the npm launcher and native platform packages to the same octet homepage.
 
 - Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
   `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the

@@ -338,6 +338,9 @@ for package in manifest["packages"]:
     assert package["bytes"] == len(data)
     assert package["sha256"] == hashlib.sha256(data).hexdigest()
     assert package["sha512_integrity"] == "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+    with tarfile.open(output / package["artifact"]) as packed:
+        metadata = json.loads(packed.extractfile("package/package.json").read())
+        assert metadata["homepage"] == "https://octet.skaft.org", package["artifact"]
     if package["target"] == "launcher":
         continue
     root = f"octet-{version}-{package['target']}"
@@ -348,6 +351,26 @@ for line in (output / "OCTET_NPM_SHA256SUMS").read_text().splitlines():
     digest, name = line.split("  ./")
     assert hashlib.sha256((output / name).read_bytes()).hexdigest() == digest
 print(f"native → npm: {len(files)} inventoried files match for all three targets; final artifact digests match")
+
+# Every launcher/platform manifest must retain the fixed app homepage. Missing,
+# empty, or substituted URLs are release-identity failures, not extra metadata.
+for package in verification["expected_packages"](version):
+    original = verification["inspect_tarball"](output / package.artifact, package)
+    for homepage in (None, "", "https://unrelated.test"):
+        damaged = copy.deepcopy(original)
+        metadata = json.loads(damaged.contents["package.json"])
+        if homepage is None:
+            del metadata["homepage"]
+        else:
+            metadata["homepage"] = homepage
+        damaged.contents["package.json"] = json.dumps(metadata).encode()
+        try:
+            verification["check_manifest"](damaged, version)
+        except verification["VerificationError"] as error:
+            assert "wrong release identity" in str(error)
+        else:
+            raise AssertionError("verifier accepted invalid homepage: " + package.artifact)
+print("launcher/platform homepage and invalid-homepage regressions passed")
 
 expected = verification["expected_packages"](version)[1]
 inspection = verification["inspect_tarball"](output / expected.artifact, expected)
