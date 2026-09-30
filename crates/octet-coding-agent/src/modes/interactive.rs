@@ -71,7 +71,10 @@ use crate::tui::view::{
 mod extension_menu;
 mod onboarding;
 
-use extension_menu::{extension_options_menu, set_extension_enabled, ExtensionMenuOutcome};
+use extension_menu::{
+    authority_label, extension_options_menu, set_extension_enabled, set_extension_host_authority,
+    ExtensionMenuOutcome,
+};
 
 /// Ordered controls sent to the frozen Agent during an active run.
 enum ControlIntent {
@@ -4699,17 +4702,13 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                     } else {
                         "stopped"
                     },
-                    if summary.trusted {
-                        "trusted"
-                    } else {
-                        "untrusted"
-                    },
+                    format!("Host authority: {}", authority_label(&app.config, summary)),
                     bundle.version,
                     summary.api_version,
                 ),
                 Some(summary) => format!(
-                    "installed {} · shadowed by {:?} source; toggle unavailable",
-                    bundle.version, summary.source
+                    "installed {} · Host authority: {} · shadowed by {:?} source; toggle unavailable",
+                    bundle.version, authority_label(&app.config, summary), summary.source
                 ),
                 None if unavailable_disable && activation_authoritative => format!(
                     "installed {} · enabled but unavailable in discovery; Enter disables safely",
@@ -4753,12 +4752,13 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                 summary.name
             ),
             description: format!(
-                "{} · {} · from {origin}; enable or disable it there",
+                "{} · Host authority: {} · {} · from {origin}; enable or disable it there",
                 if summary.running {
                     "running"
                 } else {
                     "stopped"
                 },
+                authority_label(&app.config, summary),
                 summary.version,
             ),
             enabled: summary.enabled,
@@ -4804,7 +4804,7 @@ async fn extension_management_menu(
             input,
             OrdinarySurfaceMetadata::with_purpose(
                 "Manage extensions",
-                "Enter opens an extension's options; a disabled one is enabled first",
+                "On/off selects activation; Host authority grants run code with your OS permissions (even in safe mode)",
             ),
             items,
             descriptions,
@@ -4825,6 +4825,14 @@ async fn extension_management_menu(
                 ExtensionMenuOutcome::Back => {}
                 ExtensionMenuOutcome::Disable => {
                     (app, _) = set_extension_enabled(app, shell, input, &choice.name, true).await?;
+                }
+                ExtensionMenuOutcome::GrantHostAuthority => {
+                    app =
+                        set_extension_host_authority(app, shell, input, &choice.name, true).await?;
+                }
+                ExtensionMenuOutcome::RevokeHostAuthority => {
+                    app = set_extension_host_authority(app, shell, input, &choice.name, false)
+                        .await?;
                 }
             }
             if shell.close_requested() {
@@ -4848,10 +4856,19 @@ async fn extension_management_menu(
             .any(|summary| summary.name == choice.name && summary.running && summary.trusted);
         if changed && running {
             // Enabling is the start of setup: show every option right away.
-            if extension_options_menu(&mut app, shell, input, &choice.name, true).await?
-                == ExtensionMenuOutcome::Disable
-            {
-                (app, _) = set_extension_enabled(app, shell, input, &choice.name, true).await?;
+            match extension_options_menu(&mut app, shell, input, &choice.name, true).await? {
+                ExtensionMenuOutcome::Disable => {
+                    (app, _) = set_extension_enabled(app, shell, input, &choice.name, true).await?;
+                }
+                ExtensionMenuOutcome::GrantHostAuthority => {
+                    app =
+                        set_extension_host_authority(app, shell, input, &choice.name, true).await?;
+                }
+                ExtensionMenuOutcome::RevokeHostAuthority => {
+                    app = set_extension_host_authority(app, shell, input, &choice.name, false)
+                        .await?;
+                }
+                ExtensionMenuOutcome::Back => {}
             }
             if shell.close_requested() {
                 return Ok(app);

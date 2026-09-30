@@ -21,7 +21,10 @@ include the version and commit because behavior may change.
 - Full access is the default. Enabled shell commands and extensions can access
   files, the network, and other processes with your permissions.
 - `--safe-mode` asks before file changes and every shell call. It does not start
-  executable extensions. Approved actions still affect the real workspace.
+  executable extensions **unless you granted host authority** for the selected
+  source (or explicitly selected `--extension-dir`). Granted extension code runs
+  as a host process with your OS permissions outside the tool-effect broker;
+  safe mode is **not** a sandbox. Approved actions still affect the real workspace.
 - Full-access CLI launches default to `allow_external_paths = true`, allowing
   built-in file tools outside the workspace. Set it to `false` for workspace-local
   file access; `--safe-mode` forces false. File-path restrictions do not contain

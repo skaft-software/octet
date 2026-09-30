@@ -84,17 +84,19 @@ OS CPU/RSS/FD/PID isolation. Use separate OS-level isolation for full-access wor
 **Executable extensions are disabled by default, including installed bundles.**
 Discovery never executes code. **Full access (`unsafe_host`, the default) trusts
 selected extensions implicitly, but never enables them.** An explicitly enabled
-extension can start without an extra trust flag, subject to process-policy gates
-and the existing source, compatibility, and integrity checks. This implicit
-trust is calculated for the current policy; it never writes a persistent trust
-grant or an invocation trust flag back into configuration.
+extension can start without an extra authority grant, subject to the
+`--no-process`/`--no-shell` capability gate and existing source, compatibility,
+and integrity checks. This implicit authority is calculated for the current
+policy; it never writes a persistent grant back into configuration.
 
-`--safe-mode` removes implicit trust and never starts executable extensions,
-even with explicit trust and process/shell flags enabled. Executable processes
-still require `unsafe_host`: safe mode is not an extension sandbox, and an
-approval cannot bypass that floor. Native-host protocol `1` is a
-[separate embedding interface](sdk.md); it discovers extensions but does not
-start them.
+`--safe-mode` (and other controlled policies) removes implicit host authority.
+An **enabled extension with an explicit source-bound grant can start even in
+safe mode**; an ungranted one stays stopped. Granting authority permits its code
+to run as a host process with your OS permissions **outside the tool-effect
+broker**. Safe mode still governs brokered tool effects, but it is not an OS
+sandbox for the extension. Use OS-level isolation for untrusted work.
+Native-host protocol `1` is a [separate embedding interface](sdk.md); it
+discovers extensions but does not start them.
 
 ## Layout and discovery
 
@@ -108,8 +110,8 @@ must exactly match the manifest `name`:
 
 Precedence is global, then trusted project, then explicit `--extension-dir`
 directories in command-line order; later definitions win by directory name.
-Project resources are ignored until the workspace is trusted. Enablement and
-executable trust remain separate. Full-access trust applies to the selected,
+Project resources are ignored until the workspace is trusted. On/off and host
+authority remain separate. Full-access implicit authority applies to the selected,
 validated source, without changing discovery precedence or enabling other
 installed extensions. For example, with a reviewed bundle installed:
 
@@ -119,13 +121,15 @@ octet --enable-extension octet-web-search
 
 `--enable-extension NAME` enables a selected extension for that invocation;
 `enabled_extensions = ["octet-web-search"]` persists activation in user config.
-`--trust-extension NAME` remains an optional explicit invocation-only trust grant,
-not activation or permission to bypass safe mode. A bare persistent
-`trusted_extensions` name applies only under `~/.octet/extensions`; an exact
-`NAME@/absolute/path/extension.toml` grant is required to persist trust for project
-or explicit sources. These source-bound grants remain distinct when implicit
-full-access trust is absent. Even an explicitly trusted extension stays stopped
-under a controlled policy.
+`--trust-extension NAME` grants host authority to the selected source for this
+invocation, even in safe mode; it does not turn the extension on. An explicit
+`--extension-dir` grants host authority for that invocation without an extra
+flag, but does not enable the extension. `trusted_extensions` is the existing
+user-config list of **persistent host authority grants**: a bare name applies
+only under `~/.octet/extensions`, while `NAME@/absolute/path/extension.toml`
+grants one exact project or other source. A same-named project shadow never
+inherits a global grant; the workspace must first be trusted. Revoking an
+explicit grant does not override full-access implicit authority.
 
 A trusted project config can suggest `enabled_extensions` but cannot create a
 persistent trust grant. Persistent trust comes from user config or
@@ -134,7 +138,9 @@ persistent trust grant. Persistent trust comes from user config or
 See the retained [discovery and trust reference](extensions/legacy-authoring.md#layout-and-discovery)
 for config examples, bounded manifest reads, diagnostics, and resolver APIs.
 `/extensions status` shows discovered, enabled, trusted, and running state;
-`/extensions` manages activation without granting trust.
+`/extensions` shows On/off and Host authority per row and offers Grant/Revoke.
+Enabling an ungranted extension under safe mode prompts for host authority.
+An off extension never starts, even with authority.
 
 ## Manifest
 
