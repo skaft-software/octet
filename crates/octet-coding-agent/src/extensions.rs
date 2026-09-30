@@ -124,7 +124,7 @@ pub fn subagents_extension_activation_configured(config: &Config) -> bool {
     let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
     let mut diagnostics = Vec::new();
     let (policy, _) = extension_policy(config, &mut diagnostics);
-    snapshot.resources().any(|resource| {
+    snapshot.resources().iter().any(|resource| {
         resource.name == SUBAGENTS_EXTENSION_NAME
             && load_extension_descriptor(&resolver, resource, &policy, &mut diagnostics)
                 .is_some_and(|descriptor| {

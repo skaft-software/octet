@@ -9896,9 +9896,10 @@ impl Agent {
                     let hard_budget = max_session_tokens.is_some()
                         || max_session_cost_microdollars.is_some();
                     let bounded = !uncertainty_blocks_ceiling(session, max_session_tokens, max_session_cost_microdollars);
+                    // A hard ceiling admits a replacement only on bounded exposure.
                     let eligible = provider_retries_enabled
                         && (waiting_for_network || stream_retries < retry_limit)
-                        && !(hard_budget && !bounded);
+                        && (bounded || !hard_budget);
                     let host_delay = if waiting_for_network {
                         network_wait_delay(&effect_run_id, network_retries)
                     } else {

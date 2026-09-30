@@ -4696,13 +4696,13 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                     colliding_tools.join(", ")
                 ),
                 Some(summary) if toggleable => format!(
-                    "{} · {} · {} · API {}",
+                    "{} · Host authority: {} · {} · API {}",
                     if summary.running {
                         "running"
                     } else {
                         "stopped"
                     },
-                    format!("Host authority: {}", authority_label(&app.config, summary)),
+                    authority_label(&app.config, summary),
                     bundle.version,
                     summary.api_version,
                 ),
