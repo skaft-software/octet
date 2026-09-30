@@ -18,7 +18,88 @@ fn a_missing_stale_or_future_cache_needs_a_refresh() {
 }
 
 fn client() -> reqwest::Client {
-    fetch_client().unwrap()
+    // The loopback servers are IP literals, so no hostname lookup ever runs.
+    fetch_client(|| Err(std::io::Error::other("tests never resolve a hostname"))).unwrap()
+}
+
+#[test]
+fn the_refresh_resolves_only_its_api_host() {
+    let url = reqwest::Url::parse(API_URL).unwrap();
+    assert_eq!(url.host_str(), Some(API_HOST));
+}
+
+/// getaddrinfo cannot be cancelled. A lookup that never returns must not hold
+/// the runtime or the process open once the refresh is abandoned, as it would
+/// on the runtime's blocking pool.
+#[test]
+fn a_pending_dns_lookup_does_not_delay_runtime_or_process_exit() {
+    const CHILD_MODE: &str = "OCTET_TEST_MODELS_DEV_DNS_EXIT";
+    const TEST: &str =
+        "models_dev::tests::a_pending_dns_lookup_does_not_delay_runtime_or_process_exit";
+    const DROPPED: &str = "runtime dropped while DNS remains held";
+
+    if std::env::var_os(CHILD_MODE).is_some() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let client = fetch_client(move || {
+                started.send(()).unwrap();
+                // Deliberately never release this lookup, even after the
+                // runtime drops. Only child process exit ends it.
+                loop {
+                    std::thread::park();
+                }
+            })
+            .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("metadata.json");
+            let refresh = tokio::spawn(async move {
+                let _ = refresh_at(&client, "http://models.dev/api.json", &path, 0).await;
+                drop(directory);
+            });
+            tokio::time::timeout(Duration::from_secs(2), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            refresh.abort();
+            assert!(refresh.await.unwrap_err().is_cancelled());
+        });
+        let start = std::time::Instant::now();
+        drop(runtime); // Normal shutdown, as the binary's main does.
+        println!("{DROPPED}: {:?}", start.elapsed());
+        return;
+    }
+
+    // A subprocess turns a shutdown regression into a bounded failure instead
+    // of a hung suite.
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST, "--nocapture"])
+        .env(CHILD_MODE, "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut timed_out = false;
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() >= Duration::from_secs(3) {
+            timed_out = true;
+            child.kill().unwrap();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !timed_out && output.status.success() && stdout.contains(DROPPED),
+        "held DNS blocked runtime/process exit or the child failed\n{stdout}\n{stderr}",
+    );
 }
 
 /// A first refresh caches the checked catalog; a fresh cache makes no request;

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 const API_URL: &str = "https://models.dev/api.json";
+const API_HOST: &str = "models.dev";
 /// How long fetched metadata stays fresh before the next background refresh.
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -109,7 +110,7 @@ pub(crate) async fn refresh(offline: bool) {
     let Some(path) = cache_path() else {
         return;
     };
-    let Ok(client) = fetch_client() else {
+    let Ok(client) = fetch_client(resolve_api_host) else {
         return;
     };
     if let Ok(RefreshOutcome::Updated(metadata)) =
@@ -121,15 +122,30 @@ pub(crate) async fn refresh(offline: bool) {
 
 /// No redirects, retries or credentials, and a bounded deadline. Like the
 /// startup update check, optional background traffic never picks up
-/// environment proxy credentials.
-fn fetch_client() -> reqwest::Result<reqwest::Client> {
+/// environment proxy credentials, and it resolves its one host on a detached
+/// thread: getaddrinfo cannot be cancelled, and a lookup on the runtime's
+/// blocking pool would hold octet's exit open until the resolver answered.
+fn fetch_client(
+    lookup: impl FnOnce() -> std::io::Result<reqwest::dns::Addrs> + Send + 'static,
+) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .no_proxy()
+        .dns_resolver(std::sync::Arc::new(crate::update::StartupResolver::new(
+            API_HOST, lookup,
+        )))
         .timeout(FETCH_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .user_agent(concat!("octet/", env!("CARGO_PKG_VERSION")))
         .build()
+}
+
+fn resolve_api_host() -> std::io::Result<reqwest::dns::Addrs> {
+    use std::net::ToSocketAddrs;
+
+    (API_HOST, 0)
+        .to_socket_addrs()
+        .map(|addrs| Box::new(addrs) as reqwest::dns::Addrs)
 }
 
 async fn refresh_at(

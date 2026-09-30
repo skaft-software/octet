@@ -105,16 +105,17 @@ async fn startup_available_update_url(
     startup_available_update_with_resolver(url, current, timeout, resolver).await
 }
 
-// Only the optional startup client uses this resolver; explicit update and
-// provider clients retain their existing DNS behavior. FnOnce enforces a single
-// lookup per startup check, including any unexpected repeated resolver calls.
-struct StartupResolver<F> {
+// Only optional background clients use this resolver: the startup update check
+// and the models.dev metadata refresh. Explicit update and provider clients
+// retain their existing DNS behavior. FnOnce enforces a single lookup per
+// client, including any unexpected repeated resolver calls.
+pub(crate) struct StartupResolver<F> {
     hostname: &'static str,
     lookup: std::sync::Mutex<Option<F>>,
 }
 
 impl<F> StartupResolver<F> {
-    fn new(hostname: &'static str, lookup: F) -> Self {
+    pub(crate) fn new(hostname: &'static str, lookup: F) -> Self {
         Self {
             hostname,
             lookup: std::sync::Mutex::new(Some(lookup)),
