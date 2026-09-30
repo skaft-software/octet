@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use ring::rand::{SecureRandom as _, SystemRandom};
 use sha2::{Digest as _, Sha256};
@@ -20,9 +20,16 @@ const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
+/// The monochrome mark; the page's CSS paints it in the text colour.
 const MARK: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/assets/octet/marks/mark-gradient.svg"
+    "/../../docs/assets/octet/marks/mark-black.svg"
+));
+/// Local Grotesk Regular (Local 0.53, as vendored for the web UI), inlined so
+/// the pages load nothing from the network. See `THIRD_PARTY_NOTICES.md`.
+const FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../apps/web/src/assets/fonts/LocalGrotesk-Regular.woff2"
 ));
 
 /// The loopback address for one registered callback port.
@@ -280,21 +287,20 @@ fn callback(request: &str, port: u16, expected_state: &str) -> Callback {
     if query.contains('#') {
         return Callback::NotFound;
     }
-    let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
-    if pairs.len() != 2 && pairs.len() != 3 {
-        return Callback::NotFound;
-    }
     let mut state = None;
     let mut code = None;
     let mut error = None;
     let mut error_description = None;
-    for (key, value) in pairs {
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         let slot = match key.as_ref() {
             "state" => &mut state,
             "code" => &mut code,
             "error" => &mut error,
             "error_description" => &mut error_description,
-            _ => return Callback::NotFound,
+            // OpenAI's callback also carries `scope`, and an authorization
+            // server may add others such as `iss`. They authorize nothing
+            // here: the state check and the PKCE exchange do.
+            _ => continue,
         };
         if slot.replace(value.into_owned()).is_some() {
             return Callback::NotFound;
@@ -324,7 +330,7 @@ async fn respond(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Re
         _ => "Not Found",
     };
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes()).await?;
@@ -332,14 +338,21 @@ async fn respond(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Re
     stream.shutdown().await
 }
 
+/// A flat page in the brand's ink colours, following the system theme: one
+/// hairline frame, no fills, radii or shadows.
 fn page(title: &str, heading: &str, message: &str) -> String {
+    let font = STANDARD.encode(FONT);
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><style>
-:root{{color-scheme:light dark;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f9ff;color:#151b30}}
+@font-face{{font-family:"Local Grotesk";src:url(data:font/woff2;base64,{font}) format("woff2");font-weight:400;font-style:normal;font-display:block}}
+:root{{color-scheme:light dark;--bg:#fafaf7;--fg:#121416;--muted:#6b6e69;--line:#dfe0da}}
+@media(prefers-color-scheme:dark){{:root{{--bg:#101214;--fg:#f2f3ee;--muted:#9a9d97;--line:#2a2d30}}}}
+html{{background:var(--bg);color:var(--fg);font:400 15px/1.6 "Local Grotesk",ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}}
 body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box}}
-main{{width:min(100%,440px);background:#fff;border:1px solid #e1e8f3;border-radius:22px;padding:42px;box-shadow:0 20px 60px #273c6914}}
-svg{{width:64px;height:32px}}h1{{font-size:1.55rem;letter-spacing:-.035em;margin:32px 0 12px}}p{{color:#53617d;line-height:1.6;margin:0}}
-@media(prefers-color-scheme:dark){{:root{{background:#0e1424;color:#f6f8ff}}main{{background:#171f31;border-color:#313c53;box-shadow:0 20px 60px #0004}}p{{color:#b5bfd1}}}}
+main{{width:min(100%,400px);box-sizing:border-box;border:1px solid var(--line);padding:32px}}
+svg{{display:block;width:40px;height:20px}}svg rect{{fill:currentColor}}
+h1{{font-size:20px;font-weight:400;line-height:1.3;letter-spacing:-.01em;margin:40px 0 8px}}
+p{{margin:0;color:var(--muted)}}
 </style></head><body><main>{MARK}<h1>{heading}</h1><p>{message}</p></main></body></html>"#
     )
 }
@@ -391,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn callback_rejects_bad_state_path_method_and_extra_fields() {
+    fn callback_rejects_bad_state_path_method_and_duplicate_fields() {
         let request =
             |target: &str| format!("GET {target} HTTP/1.1\r\nHost: localhost:1455\r\n\r\n");
         assert!(matches!(
@@ -408,7 +421,7 @@ mod tests {
         ));
         assert!(matches!(
             callback(
-                &request("/auth/callback?code=secret&state=right&other=x"),
+                &request("/auth/callback?code=secret&code=other&state=right"),
                 1455,
                 "right"
             ),
@@ -440,6 +453,40 @@ mod tests {
                 "right"
             ),
             Callback::Code(_)
+        ));
+    }
+
+    /// OpenAI's real redirect carries `scope` between `code` and `state`;
+    /// other authorization-response parameters such as `iss` are ignored too.
+    #[test]
+    fn callback_accepts_openais_redirect_with_scope_and_other_parameters() {
+        let request = |target: &str| {
+            format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:1455\r\nUser-Agent: test\r\n\r\n")
+        };
+        for target in [
+            "/auth/callback?code=ac_secret.part&scope=openid+profile+email+offline_access&state=right",
+            "/auth/callback?code=ac_secret.part&scope=openid&state=right&iss=https%3A%2F%2Fauth.openai.com",
+        ] {
+            let Callback::Code(code) = callback(&request(target), 1455, "right") else {
+                panic!("{target} must be a sign-in callback");
+            };
+            assert_eq!(code, "ac_secret.part");
+        }
+        assert!(matches!(
+            callback(
+                &request("/auth/callback?code=secret&scope=openid&state=wrong"),
+                1455,
+                "right"
+            ),
+            Callback::StateMismatch
+        ));
+        assert!(matches!(
+            callback(
+                &request("/auth/callback?scope=openid&state=right"),
+                1455,
+                "right"
+            ),
+            Callback::NotFound
         ));
     }
 
@@ -498,9 +545,10 @@ mod tests {
         assert_eq!(wrong_state.status(), 400);
         assert!(wrong_state.text().await.unwrap().contains("State mismatch"));
         assert!(store.load().unwrap().is_none());
+        // The exact shape OpenAI redirects with, `scope` included.
         let response = client
             .get(format!(
-                "{base}/auth/callback?code=browser-secret&state=test-state"
+                "{base}/auth/callback?code=browser-secret&scope=openid+profile+email+offline_access&state=test-state"
             ))
             .send()
             .await

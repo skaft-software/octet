@@ -223,10 +223,29 @@ async fn login_device(store: &CredentialStore, headless: bool) -> Result<()> {
 }
 
 fn signed_in_notice() {
-    crate::output::stdout_multiline(format!(
-        "\nSigned in to OpenAI Codex. Your model catalog will be discovered on startup.\nIf discovery is unavailable, the fallback models are: {}.\nSelect one with `octet --model {}` or set `model = \"{}\"` in ~/.octet/config.toml.",
-        MODELS.join(", "), MODELS[0], MODELS[0]
-    ));
+    crate::output::stdout_multiline(signed_in_message());
+}
+
+/// GPT-6 routes always register under the provider's namespace, so the
+/// example selection must name `codex/gpt-6.1-sol`: a bare `gpt-6.1-sol` is
+/// the public OpenAI API route, which needs an API key.
+fn signed_in_message() -> String {
+    let catalog_id = |model: &str| {
+        if crate::app::bootstrap::known_gpt_6_model(model) {
+            format!("{}/{model}", crate::providers::CODEX.id)
+        } else {
+            model.to_owned()
+        }
+    };
+    let fallback = MODELS
+        .iter()
+        .map(|model| catalog_id(model))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let selection = catalog_id(MODELS[0]);
+    format!(
+        "\nSigned in to OpenAI Codex. Your model catalog will be discovered on startup.\nIf discovery is unavailable, the fallback models are: {fallback}.\nSelect one with `octet --model {selection}` or set `model = \"{selection}\"` in ~/.octet/config.toml."
+    )
 }
 
 /// Remove the stored credential.
@@ -283,6 +302,24 @@ mod tests {
             .unwrap()
             .expect("the preferred port is free again");
         assert_eq!(port, first_port);
+    }
+
+    #[test]
+    fn signed_in_message_names_the_namespaced_codex_route() {
+        let message = signed_in_message();
+        assert!(
+            message.contains("`octet --model codex/gpt-6.1-sol`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("model = \"codex/gpt-6.1-sol\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("codex/gpt-6-astra, codex/gpt-6-sol"),
+            "{message}"
+        );
+        assert!(message.contains(", gpt-5.5, "), "{message}");
     }
 
     #[test]

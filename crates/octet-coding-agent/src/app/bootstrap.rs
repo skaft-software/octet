@@ -2090,7 +2090,7 @@ fn has_model_id(catalog: &ModelCatalog, id: &str) -> bool {
     catalog.resolve(&ModelId(id.to_owned())).is_ok()
 }
 
-fn known_gpt_6_model(id: &str) -> bool {
+pub(crate) fn known_gpt_6_model(id: &str) -> bool {
     matches!(
         id,
         "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"

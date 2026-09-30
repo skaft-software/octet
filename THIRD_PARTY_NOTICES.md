@@ -50,3 +50,15 @@ inspiration is not use of benchmark evaluation data for agent development.
 
 The upstream Terminal-Bench repository had no separate `NOTICE` file when this
 notice was prepared.
+
+## Local typeface
+
+The web UI and the ChatGPT sign-in pages use Skaft Software's
+[Local 0.53](https://github.com/skaft-software/local-typeface/releases/tag/v0.53.0)
+typeface, vendored with its lineage notice in `apps/web/src/assets/fonts/`.
+
+- **Local Grotesk** is a modified and renamed version of TeX Gyre Heros 2.004.
+  License: GUST Font License (`apps/web/src/assets/fonts/GUST-FONT-LICENSE.txt`).
+- **Local Mono** is a modified and renamed version of IBM Plex Mono 2.5.0,
+  copyright 2017 IBM Corp. License: SIL Open Font License 1.1
+  (`apps/web/src/assets/fonts/IBM-PLEX-OFL.txt`).
