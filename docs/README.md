@@ -61,6 +61,7 @@ see [installation](installation.md) for supported channels.
   [application](design/octet-coding-agent.md), [terminal renderer](design/octet-tui.md)
 - [Performance and measurement contract](design/performance.md)
 - [Build profiles](build-profiles.md)
+- [Testing lanes](testing/README.md)
 - [Distribution](distribution.md)
 - [Maintainer prompts, skills and playbooks](maintainers/README.md)
 - [Contributing](../CONTRIBUTING.md)
