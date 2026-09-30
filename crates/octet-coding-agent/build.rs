@@ -131,6 +131,8 @@ enum AuthenticationSpec {
 struct DiscoverySpec {
     kind: String,
     filter: Option<FilterSpec>,
+    /// Inventory wire shape for a `subscription_inventory` discovery.
+    protocol: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -481,6 +483,42 @@ fn quote(value: &str) -> String {
     format!("{value:?}")
 }
 
+/// Render a model-filter expression, rejecting anything malformed.
+///
+/// Filters are parsed once here so a declaration cannot smuggle an unchecked
+/// prefix list into the generated constant.
+fn filter_expression(filter: &FilterSpec) -> Result<String, io::Error> {
+    match filter.kind.as_str() {
+        "all" if filter.values.is_none() => Ok("ModelFilter::All".to_owned()),
+        "prefix" => {
+            let Some(values) = filter.values.as_ref() else {
+                return Err(provider_manifest_error(
+                    "prefix model filter requires values",
+                ));
+            };
+            if values.is_empty() || values.iter().any(|value| value.is_empty()) {
+                return Err(provider_manifest_error("prefix model filter is invalid"));
+            }
+            let values = values
+                .iter()
+                .map(|value| quote(value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!("ModelFilter::Prefix(&[{values}])"))
+        }
+        _ => Err(provider_manifest_error("unknown model filter")),
+    }
+}
+
+fn required_filter(spec: &DiscoverySpec, kind: &str) -> Result<String, io::Error> {
+    let Some(filter) = spec.filter.as_ref() else {
+        return Err(provider_manifest_error(format!(
+            "{kind} discovery requires a filter"
+        )));
+    };
+    filter_expression(filter)
+}
+
 fn discovery_expression(spec: &DiscoverySpec) -> Result<String, io::Error> {
     let expression = match spec.kind.as_str() {
         "static" => {
@@ -492,59 +530,11 @@ fn discovery_expression(spec: &DiscoverySpec) -> Result<String, io::Error> {
             "ModelDiscovery::Static".to_owned()
         }
         "openai_models" => {
-            let Some(filter) = spec.filter.as_ref() else {
-                return Err(provider_manifest_error(
-                    "openai_models discovery requires a filter",
-                ));
-            };
-            let filter = match filter.kind.as_str() {
-                "all" if filter.values.is_none() => "ModelFilter::All".to_owned(),
-                "prefix" => {
-                    let Some(values) = filter.values.as_ref() else {
-                        return Err(provider_manifest_error(
-                            "prefix model filter requires values",
-                        ));
-                    };
-                    if values.is_empty() || values.iter().any(|value| value.is_empty()) {
-                        return Err(provider_manifest_error("prefix model filter is invalid"));
-                    }
-                    let values = values
-                        .iter()
-                        .map(|value| quote(value))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("ModelFilter::Prefix(&[{values}])")
-                }
-                _ => return Err(provider_manifest_error("unknown model filter")),
-            };
+            let filter = required_filter(spec, "openai_models")?;
             format!("ModelDiscovery::OpenAiModels {{ filter: {filter} }}")
         }
         "anthropic_models" => {
-            let Some(filter) = spec.filter.as_ref() else {
-                return Err(provider_manifest_error(
-                    "anthropic_models discovery requires a filter",
-                ));
-            };
-            let filter = match filter.kind.as_str() {
-                "all" if filter.values.is_none() => "ModelFilter::All".to_owned(),
-                "prefix" => {
-                    let Some(values) = filter.values.as_ref() else {
-                        return Err(provider_manifest_error(
-                            "prefix model filter requires values",
-                        ));
-                    };
-                    if values.is_empty() || values.iter().any(|value| value.is_empty()) {
-                        return Err(provider_manifest_error("prefix model filter is invalid"));
-                    }
-                    let values = values
-                        .iter()
-                        .map(|value| quote(value))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("ModelFilter::Prefix(&[{values}])")
-                }
-                _ => return Err(provider_manifest_error("unknown model filter")),
-            };
+            let filter = required_filter(spec, "anthropic_models")?;
             format!("ModelDiscovery::AnthropicModels {{ filter: {filter} }}")
         }
         "openrouter_models" => {
@@ -570,6 +560,41 @@ fn discovery_expression(spec: &DiscoverySpec) -> Result<String, io::Error> {
                 ));
             }
             "ModelDiscovery::CodexSubscription".to_owned()
+        }
+        // A subscription login whose inventory is read through the same
+        // credential the inference requests use. The `protocol` names the
+        // wire shape of the provider's `models` resource; the Codex flavour
+        // above stays separate because its inventory and claims are bespoke.
+        "subscription_inventory" => {
+            let Some(protocol) = spec.protocol.as_deref() else {
+                return Err(provider_manifest_error(
+                    "subscription_inventory discovery requires a protocol",
+                ));
+            };
+            let shape = match protocol {
+                "openai_models" => format!(
+                    "SubscriptionInventoryShape::OpenAi {{ filter: {} }}",
+                    required_filter(spec, "subscription_inventory")?
+                ),
+                "anthropic_models" => format!(
+                    "SubscriptionInventoryShape::Anthropic {{ filter: {} }}",
+                    required_filter(spec, "subscription_inventory")?
+                ),
+                "openrouter_models" => {
+                    if spec.filter.is_some() {
+                        return Err(provider_manifest_error(
+                            "OpenRouter subscription inventory cannot have a filter",
+                        ));
+                    }
+                    "SubscriptionInventoryShape::OpenRouter".to_owned()
+                }
+                _ => {
+                    return Err(provider_manifest_error(
+                        "unknown subscription inventory protocol",
+                    ))
+                }
+            };
+            format!("ModelDiscovery::SubscriptionInventory {{ shape: {shape} }}")
         }
         "none" => {
             if spec.filter.is_some() {
