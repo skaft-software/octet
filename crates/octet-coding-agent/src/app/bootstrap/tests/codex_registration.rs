@@ -27,6 +27,8 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
     for model_id in crate::auth::codex::MODELS {
         let catalog_id = if *model_id == "gpt-6-astra" {
             "codex/gpt-6-astra"
+        } else if *model_id == "gpt-6.1-sol" {
+            "codex/gpt-6.1-sol"
         } else {
             model_id
         };
@@ -42,7 +44,7 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
             }
         );
         assert_eq!(model.spec.limits.max_output_tokens, 128_000);
-        assert!(model.spec.pricing.is_some());
+        assert_eq!(model.spec.pricing.is_some(), *model_id != "gpt-6.1-sol");
         if *model_id == "gpt-6-astra" {
             assert!(model
                 .spec
@@ -342,6 +344,7 @@ fn codex_fallback_never_infers_ultra_or_delegation_from_oauth_plan() {
 fn codex_spark_and_astra_are_registered_as_image_capable() {
     assert!(codex_supports_image_input("gpt-6-astra"));
     assert!(codex_supports_image_input("gpt-6-sol"));
+    assert!(codex_supports_image_input("gpt-6.1-sol"));
     assert!(codex_supports_image_input("gpt-6-luna"));
     assert!(!codex_supports_image_input("gpt-6-unadvertised"));
     assert!(codex_supports_image_input("gpt-5.3-codex-spark"));
@@ -362,7 +365,7 @@ fn codex_spark_and_astra_are_registered_as_image_capable() {
 #[test]
 fn codex_catalog_query_uses_gpt6_compatible_client_and_cache_versions() {
     assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.156.1");
-    assert_eq!(CODEX_MODEL_CACHE_VERSION, 8);
+    assert_eq!(CODEX_MODEL_CACHE_VERSION, 9);
     let url = codex_models_url().unwrap();
     assert_eq!(url.path(), "/backend-api/codex/models");
     assert_eq!(
@@ -698,6 +701,125 @@ fn codex_gpt6_sol_luna_inventory_registers_exact_oauth_contracts() {
 }
 
 #[test]
+fn codex_gpt_6_1_sol_priority_default_and_inventory_contract() {
+    let body: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../fixtures/providers/gpt-6.1-sol.json"
+    ))
+    .unwrap();
+    assert_eq!(body["models"][0]["priority"], 1);
+    assert_eq!(body["models"][0]["minimal_client_version"], "0.153.0");
+    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.156.1");
+    assert_eq!(crate::auth::codex::MODELS[0], "gpt-6.1-sol");
+    assert_eq!(
+        fallback_codex_models(None)[0].id,
+        crate::auth::codex::MODELS[0]
+    );
+    for plan in [
+        crate::auth::codex::ChatGptPlan::Plus,
+        crate::auth::codex::ChatGptPlan::Pro,
+    ] {
+        let models = codex_models_from_response(&body, Some(&plan)).unwrap();
+        assert_eq!(models.len(), 1);
+        let sol = &models[0];
+        assert_eq!(sol.id, "gpt-6.1-sol");
+        assert_eq!(sol.display_name.as_deref(), Some("GPT-6.1-Sol"));
+        assert_eq!(sol.context_window, 272_000);
+        assert_eq!(sol.max_context_window, 872_000);
+        assert_eq!(sol.max_output_tokens, 128_000);
+        assert_eq!(sol.reasoning_options.default.as_deref(), Some("low"));
+        assert_eq!(
+            sol.reasoning_options.values,
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(sol.min_effort, octet_ai::ReasoningEffort::Low);
+        assert_eq!(sol.max_effort, octet_ai::ReasoningEffort::Ultra);
+        assert!(sol.responses_lite);
+        assert_eq!(sol.agent_delegation, Some(AgentDelegation::V2));
+        assert!(codex_supports_image_input(&sol.id));
+        // An account inventory missing V2 cannot authorize Ultra even for a
+        // bundled model. A sparse positive V2 inventory may use the fallback.
+        let mut sparse = body.clone();
+        sparse["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("supported_reasoning_levels");
+        assert_eq!(
+            codex_models_from_response(&sparse, Some(&plan)).unwrap()[0]
+                .reasoning_options
+                .values,
+            sol.reasoning_options.values
+        );
+        sparse["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("multi_agent_version");
+        let without_v2 = codex_models_from_response(&sparse, Some(&plan)).unwrap();
+        assert_eq!(without_v2[0].max_effort, octet_ai::ReasoningEffort::Max);
+        assert_eq!(without_v2[0].reasoning_options.values.len(), 5);
+        assert_eq!(without_v2[0].agent_delegation, None);
+    }
+
+    let raw = codex_fallback_reasoning_options("gpt-6.1-sol");
+    assert_eq!(raw.default.as_deref(), Some("low"));
+    assert_eq!(raw.values.last().map(String::as_str), Some("ultra"));
+    let fallback = &fallback_codex_models(Some(&crate::auth::codex::ChatGptPlan::Pro))[0];
+    assert_eq!(fallback.context_window, 272_000);
+    assert_eq!(fallback.max_context_window, 872_000);
+    assert_eq!(fallback.reasoning_options.default.as_deref(), Some("low"));
+    assert_eq!(
+        fallback.reasoning_options.values,
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(fallback.agent_delegation, None);
+    assert!(!fallback.responses_lite);
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "pro");
+    let store = crate::auth::codex::CredentialStore::new(&path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+    let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+    save_codex_model_cache(&store, &CodexDiscovery { claims, models }).unwrap();
+    let mut catalog = base_model_catalog(true).unwrap();
+    register_openai_codex(&mut catalog, store, true).unwrap();
+    let codex = catalog
+        .resolve(&ModelId("codex/gpt-6.1-sol".into()))
+        .unwrap();
+    let public = catalog.resolve(&ModelId("gpt-6.1-sol".into())).unwrap();
+    assert_eq!(public.endpoint.id.0, "openai");
+    assert_eq!(codex.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
+    assert_eq!(codex.spec.display_name.as_deref(), Some("GPT-6.1-Sol"));
+    assert_eq!(codex.spec.limits.context_window, 272_000);
+    assert!(codex
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    assert_eq!(
+        default_reasoning_for_model(&codex),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)
+    );
+    assert_eq!(
+        codex
+            .spec
+            .capabilities
+            .reasoning
+            .as_ref()
+            .unwrap()
+            .max_effort,
+        octet_ai::ReasoningEffort::Max
+    );
+    assert_eq!(codex.spec.capabilities.agent_delegation, None);
+    assert!(!codex.spec.capabilities.responses_lite);
+    assert!(
+        codex.spec.pricing.is_none(),
+        "OAuth must not borrow the public API quote"
+    );
+}
+
+#[test]
 fn public_gpt6_discovery_uses_exact_contracts_without_cross_route_inference() {
     let declaration = &crate::providers::OPENAI;
     let mut catalog = metadata_fixture_catalog(declaration, declaration.base_url);
@@ -706,28 +828,37 @@ fn public_gpt6_discovery_uses_exact_contracts_without_cross_route_inference() {
         declaration,
         ModelFilter::All,
         &serde_json::json!({"data": [
-            {"id":"gpt-6-astra"}, {"id":"gpt-6-sol"}, {"id":"gpt-6-luna"},
+            {"id":"gpt-6-astra"}, {"id":"gpt-6-sol"}, {"id":"gpt-6.1-sol"}, {"id":"gpt-6-luna"},
             {"id":"gpt-6-unverified"}
         ]}),
     )
     .unwrap();
-    for leaf in ["astra", "sol", "luna"] {
-        let model = catalog
-            .resolve(&ModelId(format!("openai/gpt-6-{leaf}")))
-            .unwrap();
+    for (id, off) in [
+        ("gpt-6-astra", false),
+        ("gpt-6-sol", true),
+        ("gpt-6.1-sol", false),
+        ("gpt-6-luna", true),
+    ] {
+        let model = catalog.resolve(&ModelId(format!("openai/{id}"))).unwrap();
         let capability = model.spec.capabilities.reasoning.as_ref().unwrap();
         let mut efforts = vec!["low", "medium", "high", "xhigh", "max"];
-        if leaf != "astra" {
+        if off {
             efforts.insert(0, "none");
         }
         assert_eq!(capability.options.as_ref().unwrap().values, efforts);
         assert_eq!(
             capability.options.as_ref().unwrap().default.as_deref(),
-            Some(if leaf == "astra" { "low" } else { "medium" })
+            Some(if id == "gpt-6-astra" { "low" } else { "medium" })
         );
-        assert_eq!(capability.supports(&ReasoningConfig::Off), leaf != "astra");
+        assert_eq!(capability.supports(&ReasoningConfig::Off), off);
         assert_eq!(model.spec.limits.context_window, 1_050_000);
         assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+        if id == "gpt-6.1-sol" {
+            assert_eq!(model.spec.display_name.as_deref(), Some("GPT-6.1-Sol"));
+            assert!(
+                !capability.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Minimal))
+            );
+        }
         assert!(model.spec.capabilities.responses_features.async_tools);
         // Model authority alone never upgrades an unqualified endpoint.
         assert_eq!(
@@ -820,6 +951,22 @@ fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
         )
         .is_none());
     }
+    let sol_61 = crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-6.1-sol").unwrap();
+    assert_eq!(sol_61.input, TokenRate(2_000_000));
+    assert_eq!(sol_61.output, TokenRate(10_000_000));
+    assert_eq!(sol_61.cache_read, TokenRate(100_000));
+    assert_eq!(sol_61.cache_write_5m, TokenRate(2_500_000));
+    assert_eq!(sol_61.tiers.len(), 1);
+    assert_eq!(sol_61.tiers[0].min_input_tokens, 272_001);
+    assert_eq!(sol_61.tiers[0].input, Some(TokenRate(4_000_000)));
+    assert_eq!(sol_61.tiers[0].output, Some(TokenRate(15_000_000)));
+    assert_eq!(sol_61.tiers[0].cache_read, Some(TokenRate(200_000)));
+    assert_eq!(sol_61.tiers[0].cache_write_5m, Some(TokenRate(5_000_000)));
+    assert!(crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-sol").is_none());
+    assert!(
+        crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-6.1-sol-unverified")
+            .is_none()
+    );
     // Reviewed subscription prices still apply to explicitly allowlisted models,
     // but even a known public API quote must not price an unreviewed OAuth route.
     let astra = crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6-astra").unwrap();
@@ -944,7 +1091,7 @@ fn codex_fresh_pre_gpt6_cache_refreshes_once_before_use() {
         "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max"]
     }]});
     let old_cache = CodexModelCache {
-        version: 7,
+        version: 8,
         account_id: claims.account_id.clone(),
         plan: codex_plan_cache_key(&claims).map(str::to_owned),
         models: codex_models_from_response(&body, claims.plan.as_ref()).unwrap(),

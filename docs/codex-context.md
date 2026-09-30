@@ -30,7 +30,7 @@ only records the budgeting policy and the notice that references it.
 
 | Model (`api_name`) | Working window octet budgets | Advertised/entitled ceiling |
 | --- | --- | --- |
-| `gpt-6-astra` | 272,000 | 872,000 |
+| `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6-luna` | 272,000 | 872,000 |
 | `gpt-5.4`, `codex-auto-review` | 272,000 | 1,000,000 |
 | `gpt-5.6-luna` | 372,000 | 372,000 (family default) |
 | `gpt-5.6-*` (sol, terra, ...) | 272,000 | 372,000 |

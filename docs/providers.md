@@ -308,8 +308,9 @@ account-scoped live inventory is authoritative. octet does not infer Ultra,
 collaboration, Responses Lite, or model availability from a name or subscription
 plan. Missing or unusable metadata falls back conservatively. If live inventory
 omits a model, no corresponding GPT-6 Codex route is injected. When advertised,
-select `codex/gpt-6-astra`, `codex/gpt-6-sol`, or `codex/gpt-6-luna`; these stay
-namespaced independently of direct OpenAI presets.
+select `codex/gpt-6.1-sol`, `codex/gpt-6-astra`, `codex/gpt-6-sol`, or
+`codex/gpt-6-luna`; these stay namespaced independently of direct OpenAI
+presets. When discovery is unreachable, 6.1 Sol leads the fallback suggestions.
 
 Codex discovery sends compatibility version **`0.156.1`**. GPT-6 Sol and Luna
 require at least `0.155.0`: older query versions filter them out on the server,
@@ -319,7 +320,7 @@ changing only this query version from `0.153.2`/`0.154.0` to `0.156.1` returned
 8 invalidates the older filtered inventories; the next online launch refreshes
 them without another login. Offline launches never perform this refresh.
 
-The observed OAuth contracts include text/image input, a 272K working window,
+The 2026-09-23 OAuth contracts include text/image input, a 272K working window,
 medium reasoning by default, and low/medium/high/xhigh/max choices; Sol also
 advertises Ultra. Both advertise Responses Lite and V2 delegation. All three
 GPT-6 routes positively advertise `supports_reasoning_effort_updates`. This
@@ -329,7 +330,11 @@ account-scoped inventory observations, not successful inference checks or claims
 about other accounts. Public API `none` support is not imported into the OAuth
 choices. Output budgeting and separately sourced prices remain unchanged; the
 inventory check did not establish those values. New slugs require account
-inventory, not a static alias.
+inventory, not a static alias. The Codex 6.1 Sol bundled catalog advertises
+272K default / 872K maximum context, low reasoning by default with low through
+Ultra, Lite/V2, and priority 1; offline fallback removes dynamic Ultra/V2. The
+0.156.1 discovery client meets its minimum 0.153.0 and cache schema 9 refreshes
+old inventories. Its subscription price remains unknown.
 
 For advertised Ultra/V2 support, first review and activate the subagents source
 inside an appropriate OS isolation boundary:
@@ -688,12 +693,15 @@ for eligibility, budgets, and verification limits.
 
 ## GPT-6 contracts and execution
 
-Direct `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna` are declared on Responses with
-text/image input, a 1.05M-token context window and 128K output. Astra accepts
-`low` through `max` (default low); Sol/Luna additionally accept Off/`none` and
-default to medium. Exact public pricing and its above-272K tier are recorded in
+Direct `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol`, and `gpt-6-luna` are declared
+on Responses with text/image input, a 1.05M-token context window and 128K
+output. Astra accepts `low` through `max` (default low); Sol/Luna additionally
+accept Off/`none` and default to medium. 6.1 Sol defaults to medium but accepts
+only `low` through `max` (no `none` or `minimal`). Tools on 6.1 Sol require the
+Responses API. Exact public pricing and its above-272K tier are recorded in
 [the catalog sources](../crates/octet-ai/models/SOURCES.md). New public prices
-are not borrowed for Codex Sol/Luna: their subscription cost remains unknown.
+are not borrowed for Codex Sol/Luna/6.1 Sol: their subscription cost remains
+unknown.
 
 Model and endpoint feature declarations must **both** opt in:
 

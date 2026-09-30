@@ -77,6 +77,81 @@ fn builtin_gpt_6_astra_matches_the_public_openai_contract() {
 }
 
 #[test]
+fn builtin_gpt_6_1_sol_uses_the_exact_public_contract_and_whole_request_tier() {
+    let catalog = ModelCatalog::builtin().unwrap();
+    let model = catalog.resolve(&ModelId("gpt-6.1-sol".into())).unwrap();
+    assert_eq!(model.spec.endpoint.0, "openai");
+    assert_eq!(model.spec.api_name, "gpt-6.1-sol");
+    assert_eq!(model.spec.display_name.as_deref(), Some("GPT-6.1-Sol"));
+    assert_eq!(model.spec.protocol, crate::Protocol::OpenAiResponses);
+    assert_eq!(model.spec.limits.context_window, 1_050_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+    assert!(model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(Modality::Image));
+    assert!(model.spec.capabilities.tools && model.spec.capabilities.parallel_tool_calls);
+    assert!(model.spec.cache.supports_explicit_prompt_cache_mode);
+    let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+    let options = reasoning.options.as_ref().unwrap();
+    assert_eq!(options.values, ["low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(options.default.as_deref(), Some("medium"));
+    assert!(!reasoning.supports(&crate::ReasoningConfig::Off));
+    assert!(!reasoning.supports(&crate::ReasoningConfig::Effort(
+        crate::ReasoningEffort::Minimal
+    )));
+
+    let pricing = model.spec.pricing.as_ref().unwrap();
+    assert_eq!((pricing.input.0, pricing.output.0), (2_000_000, 10_000_000));
+    assert_eq!(
+        (pricing.cache_read.0, pricing.cache_write_5m.0),
+        (100_000, 2_500_000)
+    );
+    let tier = &pricing.tiers[0];
+    assert_eq!(tier.min_input_tokens, 272_001);
+    assert_eq!(
+        (tier.input.unwrap().0, tier.output.unwrap().0),
+        (4_000_000, 15_000_000)
+    );
+    assert_eq!(
+        (tier.cache_read.unwrap().0, tier.cache_write_5m.unwrap().0),
+        (200_000, 5_000_000)
+    );
+    // Crossing the cliff by one cached token reprices *every* bucket, not just
+    // the excess token. Use divisible amounts so category totals stay exact.
+    let usage = crate::Usage {
+        input_tokens: 200_000,
+        cache_read_tokens: 72_000,
+        cache_write_tokens: 0,
+        output_tokens: 10_000,
+        ..Default::default()
+    };
+    let below = crate::pricing::cost_of(pricing, &usage).unwrap();
+    assert_eq!(
+        (below.input, below.cache_read, below.output),
+        (400_000, 7_200, 100_000)
+    );
+    assert_eq!(below.total, 507_200);
+    let above = crate::pricing::cost_of(
+        pricing,
+        &crate::Usage {
+            cache_read_tokens: 72_001,
+            ..usage
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (above.input, above.cache_read, above.output),
+        (800_000, 14_400, 150_000)
+    );
+    assert_eq!(above.total, 964_400);
+    assert!(model.responses_features().async_tools);
+    assert!(model.responses_features().steering);
+    assert!(model.responses_features().reasoning_effort_updates);
+}
+
+#[test]
 fn builtin_gpt6_controls_and_sol_luna_prices_are_route_qualified() {
     let catalog = ModelCatalog::builtin().unwrap();
     for (id, input) in [

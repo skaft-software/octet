@@ -21,7 +21,10 @@ pub(crate) fn cache_compatibility(
             // Discovery and static registration share this exact public-API
             // contract. A copied name on another provider is not sufficient.
             cache.supports_explicit_prompt_cache_mode = protocol == Protocol::OpenAiResponses
-                && matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna");
+                && matches!(
+                    model_id,
+                    "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+                );
         }
         // OpenRouter forwards Anthropic's explicit cache-control blocks only
         // for its Anthropic routes. These markers are required for prompt
@@ -104,7 +107,7 @@ mod tests {
 
     #[test]
     fn explicit_cache_mode_requires_verified_public_openai_responses_model() {
-        for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
             assert!(
                 cache_compatibility(OPENAI.compatibility, id, Protocol::OpenAiResponses)
                     .supports_explicit_prompt_cache_mode
