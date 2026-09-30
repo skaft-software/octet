@@ -400,6 +400,17 @@ fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Whether OpenAI marked this access token localhost-only. Such tokens are
+/// routed to a reduced model pool, so octet never stores them.
+pub(crate) fn is_localhost_only(access: &str) -> bool {
+    decode_jwt_claims(access)
+        .as_ref()
+        .and_then(|claims| claims.get(JWT_AUTH_CLAIM))
+        .and_then(|auth| auth.get("localhost"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Decode and validate the account-routing and plan claims from a ChatGPT
 /// subscription token. Claims are advisory for local catalog selection; the
 /// backend still authorizes every request and account entitlement.

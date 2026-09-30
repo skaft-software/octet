@@ -25,14 +25,13 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
     let mut catalog = base_model_catalog(true).unwrap();
     register_openai_codex(&mut catalog, store, false).unwrap();
     for model_id in crate::auth::codex::MODELS {
-        let catalog_id = if *model_id == "gpt-6-astra" {
-            "codex/gpt-6-astra"
-        } else if *model_id == "gpt-6.1-sol" {
-            "codex/gpt-6.1-sol"
+        // GPT-6 routes are always namespaced; older ids keep their bare name.
+        let catalog_id = if model_id.starts_with("gpt-6") {
+            format!("codex/{model_id}")
         } else {
-            model_id
+            (*model_id).to_owned()
         };
-        let model = catalog.resolve(&ModelId(catalog_id.into())).unwrap();
+        let model = catalog.resolve(&ModelId(catalog_id)).unwrap();
         assert_eq!(model.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
         assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
         assert_eq!(
@@ -44,7 +43,11 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
             }
         );
         assert_eq!(model.spec.limits.max_output_tokens, 128_000);
-        assert_eq!(model.spec.pricing.is_some(), *model_id != "gpt-6.1-sol");
+        // Subscription pricing is reviewed only where it was observed.
+        assert_eq!(
+            model.spec.pricing.is_some(),
+            !matches!(*model_id, "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna")
+        );
         if *model_id == "gpt-6-astra" {
             assert!(model
                 .spec
@@ -611,6 +614,35 @@ fn codex_observed_sol_luna_inventory_preserves_exact_ids_and_oauth_routes() {
     }
 }
 
+/// Discovery can fail for many reasons (network, 401, the readiness envelope,
+/// a malformed body). The offline fallback must still offer every GPT-6 model
+/// octet has a contract for, with the same reasoning choices as discovery.
+#[test]
+fn codex_offline_fallback_covers_every_known_gpt6_model() {
+    for id in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        assert!(known_gpt_6_model(id), "{id}");
+        assert!(
+            crate::auth::codex::MODELS.contains(&id),
+            "{id} missing from MODELS"
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(&path);
+    let mut catalog = base_model_catalog(true).unwrap();
+    register_openai_codex(&mut catalog, store, true).unwrap();
+    for id in ["gpt-6-sol", "gpt-6-luna"] {
+        let model = catalog.resolve(&ModelId(format!("codex/{id}"))).unwrap();
+        let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+        let options = reasoning.options.as_ref().unwrap();
+        assert_eq!(options.values, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(options.default.as_deref(), Some("medium"));
+        assert!(!reasoning.supports(&ReasoningConfig::Off));
+        assert_eq!(model.spec.limits.context_window, 272_000);
+    }
+}
+
 #[test]
 fn codex_gpt6_sol_luna_inventory_registers_exact_oauth_contracts() {
     // Model-only projection of the account inventory observed on 2026-09-23
@@ -1104,9 +1136,10 @@ fn codex_fresh_pre_gpt6_cache_refreshes_once_before_use() {
         panic!("offline must not refresh the old inventory")
     });
     assert_eq!(source, CodexInventorySource::ConservativeFallback);
-    assert!(!offline.iter().any(|m| m.id == "gpt-6-sol"));
+    // A model newer than the checked-in fallback only arrives with a refresh.
+    assert!(!offline.iter().any(|m| m.id == "gpt-6-future"));
 
-    body["models"][0]["slug"] = serde_json::json!("gpt-6-sol");
+    body["models"][0]["slug"] = serde_json::json!("gpt-6-future");
     let live = CodexDiscovery {
         claims: claims.clone(),
         models: codex_models_from_response(&body, claims.plan.as_ref()).unwrap(),
@@ -1118,7 +1151,7 @@ fn codex_fresh_pre_gpt6_cache_refreshes_once_before_use() {
     });
     assert_eq!(source, CodexInventorySource::OnlineDiscovery);
     assert_eq!(requests.get(), 1);
-    assert_eq!(models[0].id, "gpt-6-sol");
+    assert_eq!(models[0].id, "gpt-6-future");
     assert_eq!(
         load_codex_model_cache(&store, &claims).unwrap(),
         Some(models.clone())
@@ -1153,6 +1186,33 @@ fn codex_malformed_exact_choices_fail_closed_and_no_v2_removes_only_ultra() {
     assert_eq!(models[0].max_effort, octet_ai::ReasoningEffort::High);
     assert_eq!(models[0].reasoning_options.values, ["high"]);
     assert_eq!(models[0].agent_delegation, None);
+}
+
+/// Failing closed is per model: an entry with unusable reasoning metadata is
+/// left out and named, while the rest of the account's inventory survives.
+#[test]
+fn codex_malformed_entry_is_left_out_without_discarding_the_inventory() {
+    let inventory = codex_inventory_from_response(
+        &serde_json::json!({"models": [
+            {"slug": "gpt-5.6-broken", "supported_reasoning_levels": ["low", "low"]},
+            {"slug": "gpt-5.6-empty", "supported_reasoning_levels": ["ultra"]},
+            {"slug": "gpt-5.6-sol"}
+        ]}),
+        None,
+    )
+    .unwrap();
+    let ids = inventory
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["gpt-5.6-sol"]);
+    assert_eq!(inventory.skipped.len(), 2, "{:?}", inventory.skipped);
+    assert!(inventory.skipped[0].starts_with("gpt-5.6-broken: "));
+    assert_eq!(
+        inventory.skipped[1],
+        "gpt-5.6-empty: no usable reasoning choices"
+    );
 }
 
 #[test]

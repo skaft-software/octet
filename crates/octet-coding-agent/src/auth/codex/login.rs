@@ -132,7 +132,7 @@ async fn login_with(store: &CredentialStore, headless: bool, ask: bool) -> Resul
             ));
             if open_browser(&url) {
                 let http = super::http_client();
-                browser::serve(
+                match browser::serve(
                     listener,
                     store,
                     &http,
@@ -140,13 +140,21 @@ async fn login_with(store: &CredentialStore, headless: bool, ask: bool) -> Resul
                     &redirect_uri,
                     &authorization,
                 )
-                .await?;
-                signed_in_notice();
-                return Ok(());
+                .await?
+                {
+                    browser::BrowserSignIn::Saved => {
+                        signed_in_notice();
+                        return Ok(());
+                    }
+                    browser::BrowserSignIn::LimitedCredential => crate::output::stdout_line(
+                        "OpenAI issued a limited (localhost-only) credential through the browser, which cannot reach the ChatGPT model pool; continuing with a device code.",
+                    ),
+                }
+            } else {
+                crate::output::stdout_line(
+                    "No browser opener could be started; using a device code instead.",
+                );
             }
-            crate::output::stdout_line(
-                "No browser opener could be started; using a device code instead.",
-            );
         }
     } else if method == LoginMethod::Browser {
         crate::output::stdout_line("No browser opener is available; using a device code instead.");

@@ -95,6 +95,16 @@ pub(super) async fn bind(address: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::bind(address).await
 }
 
+/// How a browser sign-in that received a valid callback ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum BrowserSignIn {
+    /// The credential was validated and stored.
+    Saved,
+    /// OpenAI issued a localhost-only credential, which cannot reach the
+    /// ChatGPT model pool. Nothing was stored; finish with a device code.
+    LimitedCredential,
+}
+
 /// Serve until the first valid callback, cancellation, or the five-minute deadline.
 /// A matching code is exchanged and stored *before* sending the success page.
 pub(super) async fn serve(
@@ -104,7 +114,7 @@ pub(super) async fn serve(
     token_url: &str,
     redirect_uri: &str,
     authorization: &Authorization,
-) -> Result<()> {
+) -> Result<BrowserSignIn> {
     tokio::select! {
         result = tokio::time::timeout(CALLBACK_TIMEOUT, serve_callbacks(listener, store, http, token_url, redirect_uri, authorization)) => {
             result.context("browser sign-in timed out after 5 minutes")?
@@ -122,7 +132,7 @@ async fn serve_callbacks(
     token_url: &str,
     redirect_uri: &str,
     authorization: &Authorization,
-) -> Result<()> {
+) -> Result<BrowserSignIn> {
     let port = listener.local_addr()?.port();
     loop {
         let (mut stream, _) = listener
@@ -182,6 +192,19 @@ async fn serve_callbacks(
                         anyhow::bail!("browser sign-in token exchange failed");
                     }
                 };
+                if oauth::is_localhost_only(&tokens.access) {
+                    let _ = respond(
+                        &mut stream,
+                        200,
+                        &page(
+                            "Finish in your terminal",
+                            "Finish signing in from your terminal.",
+                            "OpenAI issued a limited credential for this browser sign-in, so octet will finish with a device code. Return to your terminal.",
+                        ),
+                    )
+                    .await;
+                    return Ok(BrowserSignIn::LimitedCredential);
+                }
                 if login::save_tokens(store, tokens).await.is_err() {
                     let _ = respond(&mut stream, 400, &page("Sign-in failed", "Sign-in could not be saved", "The credential could not be validated or saved. Return to your terminal and try again.")).await;
                     anyhow::bail!("browser sign-in credential could not be validated or saved");
@@ -196,7 +219,7 @@ async fn serve_callbacks(
                     ),
                 )
                 .await;
-                return Ok(());
+                return Ok(BrowserSignIn::Saved);
             }
         }
     }
@@ -489,12 +512,70 @@ mod tests {
         assert!(body.contains("prefers-color-scheme"));
         assert!(body.contains("data-bit=\"0\""));
         assert!(!body.contains("browser-secret"));
-        server.await.unwrap().unwrap();
+        assert_eq!(server.await.unwrap().unwrap(), BrowserSignIn::Saved);
         let saved = store.load().unwrap().unwrap();
         assert_eq!(saved.tokens.account_id, "acct_test");
         assert_eq!(saved.tokens.refresh_token, "refresh-secret");
         token.verify().await;
         assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn localhost_only_credential_is_not_stored_and_asks_for_a_device_code() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let token = MockServer::start().await;
+        let claims = serde_json::json!({ "https://api.openai.com/auth": {
+            "chatgpt_account_id": "acct_test", "chatgpt_plan_type": "plus", "localhost": true
+        }});
+        let access = format!(
+            "h.{}.s",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+        );
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": access, "refresh_token": "refresh-secret", "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&token)
+            .await;
+        let listener = bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(directory.path().join("codex.json"));
+        let http = super::super::http_client();
+        let auth = Authorization {
+            verifier: "verifier".into(),
+            state: "test-state".into(),
+        };
+        let server = tokio::spawn({
+            let store = store.clone();
+            let token_url = format!("{}/token", token.uri());
+            let redirect_uri = redirect_uri(addr.port());
+            async move { serve(listener, &store, &http, &token_url, &redirect_uri, &auth).await }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .get(format!(
+                "http://{addr}/auth/callback?code=browser-secret&state=test-state"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("Finish signing in from your terminal."));
+        assert!(!body.contains("Signed in to octet."));
+        assert_eq!(
+            server.await.unwrap().unwrap(),
+            BrowserSignIn::LimitedCredential
+        );
+        assert!(store.load().unwrap().is_none());
+        token.verify().await;
     }
 
     #[tokio::test]

@@ -12,13 +12,22 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   where the plan allows. On the API it offers low through max reasoning, a
   1.05M-token context, 128K output tokens, and long-context pricing above 272K
   input tokens.
+- Refresh cached Codex inventories once (cache schema 9) so GPT-6.1 Sol and
+  its contracts appear without waiting for the cache to expire. Discovery
+  keeps sending compatibility client version `0.156.1` (since 0.8.0, which
+  also moved the cache to schema 8 without a changelog entry). An inventory
+  entry with unusable reasoning metadata is now left out and named in a
+  startup warning instead of discarding the whole inventory, and the offline
+  fallback lists GPT-6 Sol and GPT-6 Luna alongside GPT-6.1 Sol and GPT-6
+  Astra.
 - Sign in to ChatGPT (Codex) through the browser. `octet --login codex` and the
   in-app ChatGPT sign-in open OpenAI's authorization page (PKCE) and receive the
   callback only on `127.0.0.1:1455`, or on the registered fallback port `1457`
   when 1455 is busy, then show a self-contained octet signed-in page.
   `octet --login codex` asks which method to use; the device code remains the
   default over SSH, with `--headless`, without a browser opener, or when both
-  ports are busy.
+  ports are busy. If OpenAI issues a limited localhost-only credential through
+  the browser, octet stores nothing and finishes with a device code.
 - Replace executable-extension trust with On/off plus Host authority. Full
   access (the default) still runs enabled extensions without a grant. Safe mode
   and the other controlled policies now start an enabled extension whose exact

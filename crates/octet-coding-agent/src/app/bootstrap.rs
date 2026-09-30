@@ -5346,9 +5346,15 @@ fn codex_fallback_reasoning_options(model_id: &str) -> octet_ai::types::Reasonin
         })
         .map(str::to_owned)
         .collect();
+    // Defaults follow the bundled Codex catalog (rust-v0.159.1).
+    let default = match model_id {
+        "gpt-6.1-sol" => Some("low"),
+        "gpt-6-sol" | "gpt-6-luna" => Some("medium"),
+        _ => None,
+    };
     octet_ai::types::ReasoningOptions {
         values,
-        default: (model_id == "gpt-6.1-sol").then(|| "low".to_owned()),
+        default: default.map(str::to_owned),
     }
 }
 
@@ -5392,10 +5398,29 @@ fn codex_reasoning_range(
     )
 }
 
+/// The decoded models alone; tests that do not inspect skipped entries use it.
+#[cfg(test)]
 fn codex_models_from_response(
     body: &serde_json::Value,
     plan: Option<&crate::auth::codex::ChatGptPlan>,
 ) -> anyhow::Result<Vec<DiscoveredCodexModel>> {
+    codex_inventory_from_response(body, plan).map(|inventory| inventory.models)
+}
+
+/// A decoded Codex inventory plus the entries it had to leave out.
+struct CodexInventory {
+    models: Vec<DiscoveredCodexModel>,
+    /// `id: reason` for each entry whose reasoning metadata was unusable.
+    skipped: Vec<String>,
+}
+
+/// Decode an inventory, failing closed per model: an entry with malformed or
+/// unusable reasoning metadata is left out, never registered with guessed
+/// choices, and never costs the account its other models.
+fn codex_inventory_from_response(
+    body: &serde_json::Value,
+    plan: Option<&crate::auth::codex::ChatGptPlan>,
+) -> anyhow::Result<CodexInventory> {
     // The subscription backend uses `models`, while OpenAI-compatible proxies
     // commonly expose the same inventory under `data`. Accepting both keeps
     // OAuth discovery working through enterprise gateways as well.
@@ -5405,6 +5430,7 @@ fn codex_models_from_response(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("Codex models response has no models array"))?;
     let mut models = Vec::with_capacity(entries.len());
+    let mut skipped = Vec::new();
     for entry in entries {
         let Some(id) = entry
             .as_str()
@@ -5460,7 +5486,13 @@ fn codex_models_from_response(
             .and_then(serde_json::Value::as_str)
             .is_some_and(|version| version.eq_ignore_ascii_case("v2"))
             .then_some(AgentDelegation::V2);
-        let metadata = decode_reasoning_metadata(entry)?;
+        let metadata = match decode_reasoning_metadata(entry) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                skipped.push(format!("{id}: {error}"));
+                continue;
+            }
+        };
         let mut reasoning_options = if metadata.supported == Some(false) {
             octet_ai::types::ReasoningOptions {
                 values: vec!["none".into()],
@@ -5474,10 +5506,10 @@ fn codex_models_from_response(
         if agent_delegation != Some(AgentDelegation::V2) {
             strip_codex_ultra(&mut reasoning_options);
         }
-        anyhow::ensure!(
-            reasoning_options.is_valid(),
-            "Codex inventory has no usable reasoning choices"
-        );
+        if !reasoning_options.is_valid() {
+            skipped.push(format!("{id}: no usable reasoning choices"));
+            continue;
+        }
         let (min_effort, max_effort) = codex_reasoning_range(&reasoning_options, id);
         let responses_lite = entry
             .get("use_responses_lite")
@@ -5507,7 +5539,25 @@ fn codex_models_from_response(
     if models.is_empty() {
         anyhow::bail!("Codex models response contained no usable models");
     }
-    Ok(models)
+    Ok(CodexInventory { models, skipped })
+}
+
+/// Report inventory entries left out for unusable reasoning metadata.
+fn report_skipped_codex_models(skipped: &[String]) {
+    let messages = (!skipped.is_empty())
+        .then(|| {
+            format!(
+                "warning: Codex models left out for unusable reasoning metadata: {}",
+                skipped.join("; ")
+            )
+        })
+        .into_iter()
+        .collect();
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("codex-inventory".into()),
+        messages,
+        true,
+    );
 }
 
 /// Checked-in discovery fallback windows for a Codex family. The policy itself
@@ -5982,8 +6032,12 @@ fn discover_codex_models_with(
             .error_for_status()
             .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?;
         let body = bounded_discovery_json_async(response, "Codex models").await?;
-        let models = codex_models_from_response(&body, claims.plan.as_ref())?;
-        Ok(CodexDiscovery { claims, models })
+        let inventory = codex_inventory_from_response(&body, claims.plan.as_ref())?;
+        report_skipped_codex_models(&inventory.skipped);
+        Ok(CodexDiscovery {
+            claims,
+            models: inventory.models,
+        })
     })
 }
 
@@ -8479,6 +8533,8 @@ mod codex_context_note_regression_tests {
                 &[
                     "gpt-6.1-sol",
                     "gpt-6-astra",
+                    "gpt-6-sol",
+                    "gpt-6-luna",
                     "gpt-5.5",
                     "gpt-5.4",
                     "gpt-5.4-mini",
@@ -8489,6 +8545,8 @@ mod codex_context_note_regression_tests {
                 &[
                     "gpt-6.1-sol",
                     "gpt-6-astra",
+                    "gpt-6-sol",
+                    "gpt-6-luna",
                     "gpt-5.4",
                     "gpt-5.6-luna",
                     "gpt-5.6-sol",

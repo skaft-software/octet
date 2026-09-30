@@ -41,6 +41,9 @@ This installs the `@skaft/octet` launcher plus the matching platform package
 release assets as the native installer. The launcher has no install-time
 lifecycle scripts. To pin an exact version instead of tracking `latest`, use
 `npm install -g @skaft/octet@0.8.2`; see [distribution](distribution.md).
+There is no Windows npm package: on Windows the launcher installs but cannot
+start octet. Build from source or use a pull-request test build instead; see
+[Windows](windows.md).
 See [distribution channels](distribution.md) for their exact boundaries.
 [Historical Ygg instructions](reference/historical-installation.md) describe
 older releases, not a way to install or migrate to octet.
