@@ -1,6 +1,6 @@
 # npm trusted publishing
 
-**The octet npm CLI is published at 0.8.1 with npm provenance.** Native GitHub
+**The octet npm CLI is published at 0.8.2 with npm provenance.** Native GitHub
 releases and npm publication are independent; see [installation](../installation.md)
 for current install instructions. This maintainer reference describes packaging,
 protected publication, and recovery for the four immutable packages. The
@@ -114,12 +114,12 @@ provenance is understood; revocation or closure is an explicit maintainer action
 
 ## Installation and updates
 
-The current published CLI is `@skaft/octet@0.8.1`, with npm provenance. For
+The current published CLI is `@skaft/octet@0.8.2`, with npm provenance. For
 supported platforms and setup details, see the user-facing
 [installation guide](../installation.md). The version-pinned install command is:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.2
 ```
 
 `octet update` offers npm automatically only for a physically validated global

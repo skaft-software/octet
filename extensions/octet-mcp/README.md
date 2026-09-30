@@ -1,8 +1,8 @@
 # octet-mcp
 
-**Distribution: 0.8.1.** This bundle requires exactly octet 0.8.1.
+**Distribution: 0.8.2.** This bundle requires exactly octet 0.8.2.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.1 release record](../../docs/releases/v0.8.1.md) for signed assets and
+[0.8.2 release record](../../docs/releases/v0.8.2.md) for signed assets and
 public-install evidence.
 
 Connect explicitly configured [MCP](https://modelcontextprotocol.io/) tool servers
@@ -46,7 +46,7 @@ your reviewed local paths, and protect it with `chmod 600`:
 }
 ```
 
-With [octet 0.8.1](../../docs/installation.md), Python 3.9+
+With [octet 0.8.2](../../docs/installation.md), Python 3.9+
 on `PATH`, and verified matching published assets, the catalog path is:
 
 ```console
@@ -158,7 +158,7 @@ and ambient discovery are unsupported.
 
 ## Reference
 
-The bundle requires exactly octet `0.8.1` and uses API `0.4`. The following
+The bundle requires exactly octet `0.8.2` and uses API `0.4`. The following
 is a retained bundled-runtime contract, not a general SDK authoring guide.
 
 - <a id="security-and-authority"></a>[Security and authority](REFERENCE.md#security-and-authority).

@@ -125,8 +125,9 @@ inventories. As for Astra, **online account inventory** establishes Lite/V2;
 Ultra maps to `max` wire effort only alongside V2 delegation, while an offline
 or unreachable inventory keeps the conservative low-through-max fallback. The
 working 272K limit and optional Pro/ProLite 872K entitlement remain distinct.
-The model-only [test fixture](../../octet-coding-agent/fixtures/providers/gpt-6.1-sol.json)
-is a bundled-catalog projection, not a live OAuth inference result.
+The model-only test fixture
+`crates/octet-coding-agent/fixtures/providers/gpt-6.1-sol.json` is a
+bundled-catalog projection, not a live OAuth inference result.
 
 ## Reasoning contract supplement (2026-09-05)
 

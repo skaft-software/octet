@@ -1,8 +1,8 @@
 # octet-web-search
 
-**Distribution: 0.8.1.** This bundle requires exactly octet 0.8.1.
+**Distribution: 0.8.2.** This bundle requires exactly octet 0.8.2.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.1 release record](../../docs/releases/v0.8.1.md) for signed assets and
+[0.8.2 release record](../../docs/releases/v0.8.2.md) for signed assets and
 public-install evidence.
 
 Search the public web and retrieve pages with stable citations. Choose
@@ -12,7 +12,7 @@ browser tabs, sign in, run JavaScript, or submit forms.
 
 ## Start a search
 
-With [octet 0.8.1](../../docs/installation.md), Python 3.9+
+With [octet 0.8.2](../../docs/installation.md), Python 3.9+
 available as `python3`, and verified matching published assets, the catalog path is:
 
 ```console
@@ -87,7 +87,7 @@ keeps the process stopped even with explicit grants: executable startup still
 requires `unsafe_host`. An admitted extension has your OS authority; manifest
 consent metadata is not a sandbox. Skill loading remains independent.
 
-The source bundle `0.8.1` requires exactly octet `0.8.1`. For a reviewed
+The source bundle `0.8.2` requires exactly octet `0.8.2`. For a reviewed
 source checkout, select it with `--extension-dir ./extensions`. The following
 is a bundled-runtime reference, not a general SDK authoring tutorial.
 

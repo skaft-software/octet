@@ -1,8 +1,8 @@
 # octet Browse
 
-**Distribution: 0.8.1.** This bundle requires exactly octet 0.8.1.
+**Distribution: 0.8.2.** This bundle requires exactly octet 0.8.2.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.1 release record](../../docs/releases/v0.8.1.md) for signed assets and
+[0.8.2 release record](../../docs/releases/v0.8.2.md) for signed assets and
 public-install evidence.
 
 Use a visible, isolated Chromium window to inspect pages and perform bounded
@@ -39,7 +39,7 @@ Practical guidance:
 
 ## Install the bundle
 
-With [octet 0.8.1](../../docs/installation.md) and verified
+With [octet 0.8.2](../../docs/installation.md) and verified
 matching published assets, the catalog path is:
 
 ```console
@@ -117,8 +117,8 @@ run as the `/browse` command (`setup`, `status`, `open`, `close`,
 ## Reference
 
 The bundled runtime uses API `0.4`; these are usage and implementation
-references, not general extension-authoring tutorials. Bundle `0.8.1` requires
-exactly octet `0.8.1` and `playwright==1.57.0`.
+references, not general extension-authoring tutorials. Bundle `0.8.2` requires
+exactly octet `0.8.2` and `playwright==1.57.0`.
 
 - <a id="install-and-activate"></a>[Install and activate](REFERENCE.md#install-and-activate): inert installation, persistent activation, and skill readiness.
 - <a id="commands"></a>[Commands](REFERENCE.md#commands): setup, status, open, close, and reset.

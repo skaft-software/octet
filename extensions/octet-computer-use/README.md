@@ -1,8 +1,8 @@
 # octet computer-use
 
-**Distribution: 0.8.1.** This bundle requires exactly octet 0.8.1.
+**Distribution: 0.8.2.** This bundle requires exactly octet 0.8.2.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.1 release record](../../docs/releases/v0.8.1.md) for signed assets and
+[0.8.2 release record](../../docs/releases/v0.8.2.md) for signed assets and
 public-install evidence. Windows and Linux desktop parity remain unqualified.
 
 Operate native desktop applications on **macOS, Windows, and Linux** through a

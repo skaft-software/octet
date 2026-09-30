@@ -7,7 +7,7 @@ and web search—and the separate Serve application through `octet extension`. S
 [executable bundle setup](installation.md#optional-packages) for the tool
 integrations. The application-package format on this page is specifically for
 `octet-serve`; Serve is not an executable-extension activation target.
-The [0.8.1 release record](releases/v0.8.1.md) records matching signed packages
+The [0.8.2 release record](releases/v0.8.2.md) records matching signed packages
 and public-install verification.
 
 ## Commands
@@ -46,8 +46,8 @@ An archive declares a closed manifest (`deny_unknown_fields`):
 ```toml
 schema_version = 1
 id = "octet-serve"
-version = "0.8.1"
-requires_octet = "=0.8.1"
+version = "0.8.2"
+requires_octet = "=0.8.2"
 target = "aarch64-apple-darwin"
 
 [entrypoint]

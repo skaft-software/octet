@@ -241,9 +241,9 @@ octet extension list
 ```
 
 The five executable bundles and separate Serve application are pinned to the
-running host exactly. This checkout's source manifests require `=0.8.1`;
+running host exactly. This checkout's source manifests require `=0.8.2`;
 previously published 0.8.0 bundles require `=0.8.0`. The
-[0.8.1 release](https://github.com/skaft-software/octet/releases/tag/v0.8.1)
+[0.8.2 release](https://github.com/skaft-software/octet/releases/tag/v0.8.2)
 records signed assets and public-install evidence. Catalog forms below require
 verified published assets matching the running host version:
 

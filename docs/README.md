@@ -2,7 +2,7 @@
 
 octet is a fast, small coding host across cloud and local models. Extensions add
 tools and bounded host-shaped integrations; they do not promise Pi execution
-parity or an everything-as-extension platform. These docs describe **octet 0.8.1**;
+parity or an everything-as-extension platform. These docs describe **octet 0.8.2**;
 see [installation](installation.md) for supported channels.
 
 ## Getting started
@@ -69,6 +69,7 @@ see [installation](installation.md) for supported channels.
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
+- [0.8.2 release notes](releases/v0.8.2.md)
 - [0.8.1 release notes](releases/v0.8.1.md)
 - [0.8.0 release notes](releases/v0.8.0.md)
 - [0.7.6 hotfix notes](releases/v0.7.6.md)

@@ -2,11 +2,39 @@
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-30
+
+See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits.
+
+- Add GPT-6.1 Sol on OpenAI API keys and ChatGPT (Codex) sign-in. On Codex it
+  leads the fallback model list, starts at low reasoning, and offers Ultra only
+  when the account advertises it; its window is 272K by default and up to 872K
+  where the plan allows. On the API it offers low through max reasoning, a
+  1.05M-token context, 128K output tokens, and long-context pricing above 272K
+  input tokens.
+- Sign in to ChatGPT (Codex) through the browser. `octet --login codex` and the
+  in-app ChatGPT sign-in open OpenAI's authorization page (PKCE) and receive the
+  callback only on `127.0.0.1:1455`, or on the registered fallback port `1457`
+  when 1455 is busy, then show a self-contained octet signed-in page.
+  `octet --login codex` asks which method to use; the device code remains the
+  default over SSH, with `--headless`, without a browser opener, or when both
+  ports are busy.
+- Replace executable-extension trust with On/off plus Host authority. Full
+  access (the default) still runs enabled extensions without a grant. Safe mode
+  and the other controlled policies now start an enabled extension whose exact
+  source has host authority: a `trusted_extensions` entry (unchanged format),
+  `--trust-extension`, or an explicit `--extension-dir`. Before, they never
+  started executable extensions. Granted code runs with your OS permissions
+  outside the tool-effect broker. `/extensions` shows each row's host authority,
+  offers Grant and Revoke with a confirmation, and asks for a grant when you
+  enable an extension in safe mode. The native-host protocol still never starts
+  extension processes.
+
 - One ambiguous provider failure no longer disables hard cost ceilings for the
   rest of the session; the attempt is charged its admitted worst case. Missing
   bounds or prices still fail closed for the affected ceiling.
 
-- Target v0.8.2: set up and configure every extension from `/extensions`.
+- Set up and configure every extension from `/extensions`.
   Choosing an extension opens its options menu (a disabled one is enabled
   first), which shows its state and offers only what applies. Actions show
   their steps live and can be cancelled with Esc; confirmations, choices, and
@@ -50,22 +78,22 @@
   still built with Rust 1.97.1. Source builds need Rust 1.88 or newer.
 - Fix inflated TUI throughput for hidden reasoning and buffered responses. Use
   request-to-completion timing and label the latest-turn rate as end-to-end,
-  not server generation speed. Intended for v0.8.2.
+  not server generation speed (#462).
 
 - Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
   `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the
   verified immutable release assets with trusted publishing and registry
-  provenance. Install with
-  `npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1`.
+  provenance. Install with `npm install -g @skaft/octet`, or pin
+  `@skaft/octet@0.8.1` to reproduce one exact release.
   README, installation, distribution, getting-started, and release docs now lead
   with the npm lane.
-- Target v0.8.2: omit the redundant `computer_use_` prefix from TUI labels so
+- Omit the redundant `computer_use_` prefix from TUI labels so
   computer-use actions remain distinguishable within the label width cap.
-- Target v0.8.2: computer-use setup builds the Cua Driver runtime from a
+- Computer-use setup builds the Cua Driver runtime from a
   Python 3.10+ interpreter even when the bundle runs on macOS's Xcode Python
   3.9. Setup failures, including a missing compatible Python, are now reported
   as actionable errors instead of `internal error` (#457).
-- Target v0.8.2: computer use requires `cua-driver` 0.30.2 or newer. macOS 11
+- Computer use requires `cua-driver` 0.30.2 or newer. macOS 11
   and 12, which pip used to resolve silently to 0.11.0, and other unsupported
   systems now get a clear error that names the supported platforms.
 - Make octet and `octet-computer-use` work on Linux desktops: Omarchy
@@ -116,15 +144,6 @@
   published with a no-replace rename. This unblocks the `edit` tool and every
   rewrite of existing private state (session metadata, auth stores, model
   caches) beyond first-run writes; see [Windows](docs/windows.md).
-- Give the live-reload PTY test a budget derived from the reload supervisor's
-  own timing. The test retried `/prompt` until an automatic reload pass exposed a
-  newly written prompt, but its outer deadline and its per-attempt wait were both
-  the 5s `STARTUP_TIMEOUT`, so one slow iteration could outlast the whole budget
-  and the retry loop could never actually retry. The supervisor samples every
-  `DEFAULT_POLL_INTERVAL` (1s) and debounces for 200ms before applying at an
-  idle boundary, so observing a new prompt needs several poll cycles. The outer
-  budget is now 15s with a 2s per-attempt slice. The assertions are unchanged:
-  the prompt must load and no routine reload notice may appear.
 - Make the source-only `octet-snap-compact` extension launchable and actually
   tested. Its `extension.py` entrypoint is committed non-executable while every
   released extension's entrypoint is `100755`, so a fresh checkout could not
@@ -146,10 +165,21 @@
   candidates without a full sort, and application-owned resume hydrates a
   viewport-scaled tail. Defer OSC 11 background-color detection until after
   the first ready frame, repainting only if the detected theme changes.
-  provenance. Install with `npm install -g @skaft/octet`, or pin
-  `@skaft/octet@0.8.1` to reproduce one exact release. README, installation,
-  getting-started, and release docs document the npm lane alongside the native
-  installer.
+- Size the runtime's worker pool to the machine (`available_parallelism()`, at
+  least 2) instead of 2 threads, and run parallel read-only tool calls in waves
+  of one per CPU, from 4 to 32, instead of 4. `Agent::set_parallel_read_wave_width`
+  pins the width.
+- Say plainly in the README, `--help` and `/status` that the default full
+  access has no sandbox and no approvals, and that `--safe-mode` asks before
+  every bash call and file change but is not a sandbox.
+- Fix a crash (a reentrant `RefCell` borrow) when hovering over or clicking the
+  scrollbar with the threaded renderer (#461).
+- Keep `Working` visible while tools run (#463).
+- Honour a request's `NO_PROXY` when a lower-case `no_proxy` is also set: a
+  proxy overlay now replaces both letter cases of each variable it sets.
+- Extend Still's quiet activity grouping to web search/fetch, MCP, and
+  computer-use calls, with concise family summaries. Delegations keep their
+  existing subagent presentation; `Ctrl+O` still reveals individual call details.
 
 ## [0.8.1] - 2026-09-27
 
@@ -167,9 +197,6 @@ See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits
   colour with the compiled default's 16x4 byte that shades from the active model
   family, matching its model-adaptive prompt chevron and composer marker.
 
-- Extend Still's quiet activity grouping to web search/fetch, MCP, and
-  computer-use calls, with concise family summaries. Delegations keep their
-  existing subagent presentation; `Ctrl+O` still reveals individual call details.
 - Group Still's successive exploration and edit/write calls into distinct-file
   summaries. `Ctrl+O` retains paths and commands, and failures stay visible.
 - Remove `Still`'s 112-column cap so its transcript, splash, composer text,

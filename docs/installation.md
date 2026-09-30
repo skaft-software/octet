@@ -7,15 +7,15 @@
 ## Install native binaries
 
 Native release packages target macOS Apple silicon/Intel and GNU/Linux x86-64.
-See the [v0.8.1 notes](releases/v0.8.1.md) for changes; availability, signed
+See the [v0.8.2 notes](releases/v0.8.2.md) for changes; availability, signed
 assets and public-install verification are recorded on the version-pinned
 GitHub release. Install using the matching installer from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1):
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.2):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.1/install-octet.sh | sh
-octet --version   # octet 0.8.1
+  https://github.com/skaft-software/octet/releases/download/v0.8.2/install-octet.sh | sh
+octet --version   # octet 0.8.2
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -32,7 +32,7 @@ macOS Apple silicon/Intel and GNU/Linux x86-64:
 
 ```sh
 npm install -g @skaft/octet
-octet --version   # octet 0.8.1
+octet --version   # octet 0.8.2
 ```
 
 This installs the `@skaft/octet` launcher plus the matching platform package
@@ -40,7 +40,7 @@ This installs the `@skaft/octet` launcher plus the matching platform package
 `@skaft/octet-linux-x64-gnu`) with npm provenance, from the same verified
 release assets as the native installer. The launcher has no install-time
 lifecycle scripts. To pin an exact version instead of tracking `latest`, use
-`npm install -g @skaft/octet@0.8.1`; see [distribution](distribution.md).
+`npm install -g @skaft/octet@0.8.2`; see [distribution](distribution.md).
 See [distribution channels](distribution.md) for their exact boundaries.
 [Historical Ygg instructions](reference/historical-installation.md) describe
 older releases, not a way to install or migrate to octet.
@@ -89,7 +89,7 @@ or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.8.1. Check `octet --version` and use matching
+This checkout targets octet 0.8.2. Check `octet --version` and use matching
 source extension manifests from this checkout. A source build is not a signed
 release artifact and does not replace an installed binary.
 
@@ -114,7 +114,7 @@ need Git for Windows or another Bash-compatible shell.
 ## Optional packages
 
 Executable extension bundles and the separate Serve application are pinned to
-the host version. Install assets matching octet `0.8.1` from its version-pinned
+the host version. Install assets matching octet `0.8.2` from its version-pinned
 release, or run reviewed source extensions from this checkout with
 `--extension-dir ./extensions`. The 0.8.0 bundles require their 0.8.0 host.
 
@@ -145,7 +145,7 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
 The five executable-bundle manifests declare API `0.4`, distribution version
-`0.8.1`, and require octet `=0.8.1`; older bundles remain pinned to their
+`0.8.2`, and require octet `=0.8.2`; older bundles remain pinned to their
 host. Distribution and host versions are independent boundaries; an API number does not bypass the exact
 host pin. See [current authoring](extensions.md) for the Python API 0.4 process
 recipe and retained API 0.3 conformance example; generated contract bindings

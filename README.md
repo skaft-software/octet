@@ -6,7 +6,7 @@
 
 **A high-performance coding agent.**
 
-[![Release: 0.8.1](https://img.shields.io/badge/release-0.8.1-536dfe?style=flat-square)](docs/releases/v0.8.1.md)
+[![Release: 0.8.2](https://img.shields.io/badge/release-0.8.2-536dfe?style=flat-square)](docs/releases/v0.8.2.md)
 
 octet reads code, edits files, and runs commands from your terminal. It has a
 native Rust core, supports cloud and local models, saves resumable sessions,
@@ -23,7 +23,7 @@ enabled extensions run with your operating-system permissions, and nothing asks
 first. `--safe-mode` asks before every shell call and file change, but it is an
 approval policy, not a sandbox. See [Security](SECURITY.md#permissions).
 
-This is **octet 0.8.1**. See the [release notes](docs/releases/v0.8.1.md)
+This is **octet 0.8.2**. See the [release notes](docs/releases/v0.8.2.md)
 for changes and supported installation channels.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
@@ -35,14 +35,14 @@ Node.js required:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.1/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.8.2/install-octet.sh | sh
 ```
 
 **npm:** same platforms, if you already have Node.js:
 
 ```sh
 npm install -g @skaft/octet
-octet --version   # octet 0.8.1
+octet --version   # octet 0.8.2
 ```
 
 The launcher pulls the matching signed platform package
@@ -52,8 +52,8 @@ from the same verified release assets; see
 [distribution](docs/distribution.md) to pin an exact version.
 
 Availability, signed assets and public-install results are tracked on the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1).
-See [release notes](docs/releases/v0.8.1.md) and
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.2).
+See [release notes](docs/releases/v0.8.2.md) and
 [installation](docs/installation.md) for scope, prerequisites and channel availability.
 When moving from Ygg, install octet afresh: older installations and data remain
 separate; no automatic migration is performed.

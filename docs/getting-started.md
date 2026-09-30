@@ -8,7 +8,7 @@ lane, verify it with a read-only request, and only then allow edits or commands.
 Shell commands are in `sh` blocks; text in `text` blocks is entered inside the
 interactive Octet UI, not in your shell.
 
-> **Version boundary.** This guide targets octet 0.8.1. Check `octet --version`
+> **Version boundary.** This guide targets octet 0.8.2. Check `octet --version`
 > and `octet --help` for the binary you will run. Source builds are not signed
 > release artifacts, and older binaries may not include these options.
 
@@ -22,11 +22,11 @@ check the version:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.1/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.8.2/install-octet.sh | sh
 octet --version
 ```
 
-Expected output includes `octet 0.8.1`. The release page is authoritative for
+Expected output includes `octet 0.8.2`. The release page is authoritative for
 signed assets and availability; Homebrew, crates.io, and SDK registries are
 separate unpublished channels.
 
@@ -40,7 +40,7 @@ npm install -g @skaft/octet
 octet --version
 ```
 
-Expected output includes `octet 0.8.1`. npm resolves the matching platform
+Expected output includes `octet 0.8.2`. npm resolves the matching platform
 package automatically.
 
 ### Intentional source checkout: macOS or GNU/Linux
@@ -102,7 +102,7 @@ shell command, history, or session fixture.
 
 ### Interactive setup
 
-For an unconfigured octet 0.8.1 installation, start without `--model`:
+For an unconfigured octet 0.8.2 installation, start without `--model`:
 
 ```sh
 octet --safe-mode
