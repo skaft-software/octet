@@ -77,6 +77,13 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   and typing one names the extension to open instead. The web UI keeps them for
   now. Menu actions may run for up to 30 minutes instead of the 30-second
   request deadline, so long installs finish.
+- Make Files tab search in the web UI usable on large projects (#459). It no
+  longer walks build output, dependencies, VCS state or hidden directories
+  (`node_modules`, `target`, `dist`, `.git` and the like; `.github` stays
+  searchable), the same set the `@` picker's index skips. A search stops after
+  3 seconds and says it was cut short, a newer query aborts the previous
+  request, and non-ASCII text is matched case-insensitively instead of
+  case-sensitively.
 - Report why model discovery was rejected. A provider's HTTP error now names
   its status and the provider's own message, bounded and with
   credential-shaped tokens masked, instead of only "model discovery request

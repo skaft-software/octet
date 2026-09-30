@@ -646,7 +646,7 @@ fn scan_root(root: &Path, project_id: &ProjectId) -> Result<FileIndex, TrustedFi
                 continue;
             }
             if metadata.file_type().is_dir() {
-                if depth >= MAX_WALK_DEPTH || ignored_directory(&name) {
+                if depth >= MAX_WALK_DEPTH || crate::ignored_paths::ignored_directory(&name) {
                     ignored_entries = ignored_entries.saturating_add(1);
                 } else {
                     stack.push((relative_path, depth + 1));
@@ -897,35 +897,6 @@ fn accepted_extensionless_name(name: &str) -> bool {
             | "gemfile"
             | "procfile"
     )
-}
-
-fn ignored_directory(name: &str) -> bool {
-    let lowercase = name.to_ascii_lowercase();
-    lowercase.starts_with('.') && lowercase != ".github"
-        || matches!(
-            lowercase.as_str(),
-            "node_modules"
-                | "target"
-                | "dist"
-                | "build"
-                | "out"
-                | "coverage"
-                | "vendor"
-                | "__pycache__"
-                | ".git"
-                | ".hg"
-                | ".svn"
-                | ".idea"
-                | ".vscode"
-                | ".ssh"
-                | ".aws"
-                | ".azure"
-                | ".gnupg"
-                | ".kube"
-                | "secrets"
-                | "credentials"
-                | "private-keys"
-        )
 }
 
 fn ignored_hidden_file(name: &str) -> bool {

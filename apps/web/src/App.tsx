@@ -1863,7 +1863,8 @@ export default function App() {
     [],
   );
   const searchProjectFilesystem = useCallback(
-    (projectId: string, query: string) => store.searchProjectFiles(projectId, query),
+    (projectId: string, query: string, signal?: AbortSignal) =>
+      store.searchProjectFiles(projectId, query, signal),
     [],
   );
   const writeProjectFile = useCallback(

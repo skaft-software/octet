@@ -18,6 +18,7 @@ mod event;
 mod fs;
 mod goal;
 mod ids;
+mod ignored_paths;
 mod journal;
 mod model;
 mod process_tree;

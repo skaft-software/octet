@@ -57,6 +57,8 @@ pub const MAX_PROJECT_FILE_SEARCH_DEPTH: usize = 32;
 pub const MAX_PROJECT_FILE_SEARCH_ENTRIES_PER_DIRECTORY: usize = 1_000;
 /// Maximum physical directory entries inspected by one full-text search.
 pub const MAX_PROJECT_FILE_SEARCH_DIRECTORY_ENTRIES: usize = 20_000;
+/// Wall-clock budget for one search; past it the result is marked truncated.
+pub const MAX_PROJECT_FILE_SEARCH_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
 
 const TEMP_FILE_PREFIX: &str = ".octet-write.tmp-";
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
@@ -444,6 +446,7 @@ impl ProjectFileSystem {
         let mut scanned_files = 0usize;
         let mut scanned_directory_entries = 0usize;
         let mut truncated = false;
+        let deadline = std::time::Instant::now() + MAX_PROJECT_FILE_SEARCH_DURATION;
 
         'directories: while let Some((relative_directory, depth)) = stack.pop() {
             #[cfg(test)]
@@ -461,12 +464,22 @@ impl ProjectFileSystem {
                     continue;
                 };
                 if matches!(kind, ProjectFileEntryKind::Directory) {
+                    // Build output, dependencies, VCS state and hidden
+                    // directories hold most of a real project's bytes, and
+                    // the `@` picker's index skips the same set (#459).
+                    if crate::ignored_paths::ignored_directory(&name) {
+                        continue;
+                    }
                     if depth >= MAX_PROJECT_FILE_SEARCH_DEPTH {
                         truncated = true;
                     } else {
                         stack.push((relative_path, depth.saturating_add(1)));
                     }
                     continue;
+                }
+                if std::time::Instant::now() >= deadline {
+                    truncated = true;
+                    break 'directories;
                 }
                 if scanned_files >= MAX_PROJECT_FILE_SEARCH_FILES {
                     truncated = true;
@@ -1492,14 +1505,24 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Case-insensitive search returning the match's byte offset in `haystack`.
+/// Non-ASCII text is folded per character, so it is no longer matched
+/// case-sensitively (#459).
 fn find_match(haystack: &str, needle: &str) -> Option<usize> {
     if haystack.is_ascii() && needle.is_ascii() {
-        haystack
+        return haystack
             .to_ascii_lowercase()
-            .find(&needle.to_ascii_lowercase())
-    } else {
-        haystack.find(needle)
+            .find(&needle.to_ascii_lowercase());
     }
+    let needle = needle.to_lowercase();
+    let mut folded = String::with_capacity(haystack.len());
+    // The haystack offset of the character each folded byte came from.
+    let mut origins = Vec::with_capacity(haystack.len());
+    for (offset, character) in haystack.char_indices() {
+        folded.extend(character.to_lowercase());
+        origins.resize(folded.len(), offset);
+    }
+    folded.find(&needle).map(|position| origins[position])
 }
 
 fn line_number(text: &str, byte_position: usize) -> u32 {

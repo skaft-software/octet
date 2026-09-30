@@ -4,6 +4,9 @@
 #[path = "../src/bounds.rs"]
 mod bounds;
 #[allow(dead_code)]
+#[path = "../src/ignored_paths.rs"]
+mod ignored_paths;
+#[allow(dead_code)]
 #[path = "../src/project_registry.rs"]
 mod project_registry;
 #[allow(dead_code)]
