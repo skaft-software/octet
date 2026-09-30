@@ -886,7 +886,9 @@ fn public_gpt6_discovery_uses_exact_contracts_without_cross_route_inference() {
         assert_eq!(model.spec.limits.context_window, 1_050_000);
         assert_eq!(model.spec.limits.max_output_tokens, 128_000);
         if id == "gpt-6.1-sol" {
-            assert_eq!(model.spec.display_name.as_deref(), Some("GPT-6.1-Sol"));
+            // The models.dev names snapshot supplies the canonical display name,
+            // which supersedes the derived id fallback and matches the release notes.
+            assert_eq!(model.spec.display_name.as_deref(), Some("GPT-6.1 Sol"));
             assert!(
                 !capability.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Minimal))
             );
