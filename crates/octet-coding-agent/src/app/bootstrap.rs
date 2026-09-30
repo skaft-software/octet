@@ -8466,20 +8466,28 @@ mod codex_context_note_regression_tests {
     ///
     /// A "reduced" route is one whose effective window is below what the plan
     /// advertises, or above the 272K standard tier (`gpt-5.6-luna`). On a Plus
-    /// plan the backend applies its own default window, so `gpt-6-astra` is not
-    /// reduced even though its entitlement ceiling is 872K; on a Pro plan the
-    /// advertised window is raised and every 872K/1M family is reduced.
+    /// plan the backend applies its own default window, so the GPT-6 models
+    /// (`gpt-6.1-sol`, `gpt-6-astra`) are not reduced even though their
+    /// entitlement ceiling is 872K; on a Pro plan the advertised window is
+    /// raised and every 872K/1M family is reduced.
     #[test]
     fn registration_records_one_note_per_reduced_model_and_none_for_an_unreduced_route() {
         for (plan, reduced, plain) in [
             (
                 "plus",
                 &["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"][..],
-                &["gpt-6-astra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"][..],
+                &[
+                    "gpt-6.1-sol",
+                    "gpt-6-astra",
+                    "gpt-5.5",
+                    "gpt-5.4",
+                    "gpt-5.4-mini",
+                ][..],
             ),
             (
                 "pro",
                 &[
+                    "gpt-6.1-sol",
                     "gpt-6-astra",
                     "gpt-5.4",
                     "gpt-5.6-luna",
