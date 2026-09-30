@@ -301,7 +301,11 @@ def check_manifest(inspection: Inspection, version: str) -> Mapping[str, Any]:
         fail(f"{inspection.expected.artifact} has the wrong package name")
     if manifest.get("version") != version:
         fail(f"{inspection.expected.artifact} version is not {version}")
-    if manifest.get("license") != "MIT" or manifest.get("repository") != REPOSITORY:
+    if (
+        manifest.get("license") != "MIT"
+        or manifest.get("repository") != REPOSITORY
+        or manifest.get("homepage") != "https://octet.skaft.org"
+    ):
         fail(f"{inspection.expected.artifact} has the wrong release identity or license")
     if manifest.get("description") is None or not isinstance(manifest["description"], str):
         fail(f"{inspection.expected.artifact} must have a description")
@@ -314,6 +318,7 @@ def check_manifest(inspection: Inspection, version: str) -> Mapping[str, Any]:
             "description",
             "license",
             "repository",
+            "homepage",
             "files",
             "bin",
             "optionalDependencies",
@@ -335,6 +340,7 @@ def check_manifest(inspection: Inspection, version: str) -> Mapping[str, Any]:
             "description",
             "license",
             "repository",
+            "homepage",
             "os",
             "cpu",
             "files",
