@@ -97,9 +97,11 @@ change, or an explicit CI dispatch requesting it, CI runs the live models.dev
 source is frozen; the check does not silently rewrite release inputs.
 
 Ordinary compilation uses checked-in metadata without network access. This gate
-is not a startup catalog auto-update, an all-provider test or live-inference
-qualification. See the [model-source record](../crates/octet-ai/models/SOURCES.md)
-for metadata scope and limitations.
+is not an all-provider test or live-inference qualification. Interactive sessions
+separately refresh checked live records at runtime; the reviewed snapshot is
+their fallback and the baseline their checks use. See the
+[model-source record](../crates/octet-ai/models/SOURCES.md) for metadata scope
+and limitations.
 
 ## Homebrew
 

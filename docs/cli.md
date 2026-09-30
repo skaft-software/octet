@@ -34,7 +34,7 @@ choices, generated extension flags, and defaults are not inferred here.
 | `--workspace PATH` | Workspace root for relative tool paths and default bash cwd. |
 | `--workspace-trusted` / `--trust-workspace` | Admit project config/instructions/resources; cannot relax global safety floors or grant executable trust. |
 | `--no-context-files` | Do not compose context files. |
-| `--offline` | Skip optional discovery and disable remote media reads; inference can still use the network. |
+| `--offline` | Skip optional discovery and the background models.dev metadata refresh, and disable remote media reads; inference can still use the network. |
 | `--strict-config` | Treat unknown configuration keys as errors; the default is a warning. Equivalent setting: `strict_config = true`. |
 
 [Terminal behavior](terminal.md), [provider setup](providers.md), and

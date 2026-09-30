@@ -20,10 +20,19 @@ false/null/malformed assertion — is honored as-is and the supplement is not
 consulted for modalities at all. Only a sparse inventory that says nothing about
 input modalities may inherit the snapshot's documented `image`/`audio` input.
 Configured/custom metadata and routes keep precedence; Codex account inventory
-does not inherit the supplement. Builds and runtime never fetch models.dev. See
+does not inherit the supplement. See
 the [catalog source and pricing review](../crates/octet-ai/models/SOURCES.md) for
 snapshot provenance and the distinction between retained rich records and the
 discovery projection.
+
+The supplement stays current without an octet release. Builds never fetch
+models.dev, but an interactive session refreshes it in the background at most
+every six hours and caches the result at
+`~/.octet/cache/models-dev/metadata.json`; `--offline` skips the refresh. Each
+live record is checked against the built-in snapshot first, for example a price
+may not become zero or fall more than tenfold, and a record that fails keeps
+the built-in data for that model. See
+[Live metadata](../crates/octet-ai/models/SOURCES.md#live-metadata-v082).
 
 Input modalities and limits are part of that projection because several providers
 publish a sparse model list. Direct DeepSeek is the concrete case: its

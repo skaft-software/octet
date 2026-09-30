@@ -6801,6 +6801,9 @@ pub(crate) fn model_catalog_for_readiness(
     offline: bool,
     readiness: &CatalogReadiness,
 ) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
+    // Checked live models.dev metadata, cached by an earlier refresh, feeds
+    // this catalog's names, prices and capability records.
+    crate::models_dev::install_cached();
     let mut catalog = base_model_catalog_with_readiness(offline, None, readiness)?;
     let mut notes = CodexContextNotes::default();
     if readiness.includes(crate::providers::CODEX.id) {
@@ -6824,6 +6827,7 @@ pub(crate) fn model_catalog_with_setup_store(
     custom_store: &crate::auth::custom::CredentialStore,
     offline: bool,
 ) -> anyhow::Result<ModelCatalog> {
+    crate::models_dev::install_cached();
     let mut catalog = base_model_catalog_with_custom_store(offline, Some(custom_store))?;
     let mut notes = CodexContextNotes::default();
     register_codex_catalog(&mut catalog, offline, &mut notes);

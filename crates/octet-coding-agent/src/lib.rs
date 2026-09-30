@@ -22,6 +22,7 @@ mod herdr;
 pub mod host;
 mod hydrate;
 mod migrate;
+mod models_dev;
 mod modes;
 mod output;
 mod presentation;

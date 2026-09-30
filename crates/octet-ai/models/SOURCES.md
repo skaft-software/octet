@@ -42,8 +42,9 @@ explicit `CatalogConfig` or provider-specific override supplies rates. This is
 fail-closed for subagent cost ceilings: unknown pricing cannot silently be
 borrowed from another provider. Refresh the pricing snapshot only as a reviewed
 maintainer operation with
-`scripts/refresh-models-dev-pricing.py`; do not add network access to `build.rs`
-or runtime.
+`scripts/refresh-models-dev-pricing.py`; do not add network access to `build.rs`.
+At runtime the snapshot is the baseline for the checked live records described
+under [Live metadata](#live-metadata-v082).
 
 - Protocol request/response capabilities are constrained by the repository API docs under `docs/research/apidocs/`.
 - `gpt-4o-mini` text pricing uses $0.15/M input, $0.60/M output, and $0.075/M cached input, represented as 150,000 / 600,000 / 75,000 microdollars per million tokens.
@@ -63,6 +64,49 @@ provider/model keys never borrow names or prices by leaf ID. Configured catalogs
 and custom metadata keep precedence; Codex account inventory never inherits this
 supplement. A model name does not select a protocol or reasoning encoding, and
 native Messages/budget contracts are not inferred from a generic reasoning boolean.
+
+## Live metadata (v0.8.2)
+
+An interactive session refreshes these records from
+`https://models.dev/api.json` in the background, off the startup path, at most
+every six hours. The request revalidates with the cached ETag, has a 10-second
+deadline, follows no redirects and accepts at most 16 MiB. Like the startup
+update check, it sends no credentials and ignores environment proxies, so
+behind a mandatory proxy the snapshot stays in use. `--offline`
+(`OCTET_OFFLINE=true`) skips it. Other modes use a cache an interactive session
+wrote, but never fetch.
+
+The refresh applies the same extraction as
+`scripts/refresh-models-dev-pricing.py`: its provider table, exclusions,
+allowlists, text-only corrections and unverified-pricing providers, mirrored in
+`src/model_metadata/live.rs`. The script's own outputs for a shared fixture,
+`tests/fixtures/models-dev/`, are checked in, and a Rust parity test must
+reproduce them, so the two extractions cannot drift apart.
+
+Each record is then checked against the compiled snapshot. A record that fails
+keeps the built-in data for that model only, and the cache lists it under
+`rejected` with the reason:
+
+- a rate above $100,000 per million tokens, or a limit above 100M tokens, is
+  malformed;
+- an input or output price the snapshot publishes may not become zero or fall
+  more than tenfold, so a live quote cannot make a hard cost ceiling undercount
+  sharply;
+- a route the snapshot does not price needs non-zero input and output rates;
+  and
+- a catalog that is not an object, or that yields no usable record, is ignored
+  altogether.
+
+Accepted records are cached with private permissions at
+`~/.octet/cache/models-dev/metadata.json`, with the fetch time, ETag and source
+SHA-256. Each launch installs that cache before building its first model
+catalog, and a refresh installs its result for later catalog builds. A cache
+written by another octet version is ignored, because its records were checked
+against a different snapshot. Lookups consult live records first and fall back
+to this snapshot per model, so a route that disappears upstream keeps its
+built-in data. Live records are consumed exactly like snapshot records: the
+precedence rules above are unchanged, and a failed refresh leaves the metadata
+in use as it was.
 
 ## GPT-6 contract review (2026-09-23)
 
@@ -223,8 +267,8 @@ policy; no flat direct DeepSeek quote or schedule accounting is inferred.
 
 Six offline metadata-tooling tests and 13 release-gate tests passed. Reproduce
 or validate using the saved-source commands below with a response matching the
-new digest. Normal builds and runtime consume checked-in metadata without
-fetching models.dev. This is reviewed public metadata, not live inference
+new digest. Normal builds consume checked-in metadata without fetching
+models.dev. This is reviewed public metadata, not live inference
 acceptance; endpoint assertions and explicit configured pricing retain precedence.
 
 ## Rich metadata refresh (v0.7.6)

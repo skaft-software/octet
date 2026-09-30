@@ -99,6 +99,17 @@ class MetadataRefreshTests(unittest.TestCase):
         self.assertEqual(pricing["qwen-token-plan/qwen3.7-max"]["input"], 200000)
         self.assertNotIn("baseten/retired/model", pricing)
 
+    def test_shared_fixture_outputs_match_what_the_runtime_parity_test_expects(self):
+        # octet-ai's live extraction (`model_metadata/live.rs`) must reproduce
+        # these files; regenerate them with --source when the rules change.
+        fixtures = Path(__file__).resolve().parent.parent / "crates/octet-ai/tests/fixtures/models-dev"
+        catalog = json.loads((fixtures / "api-subset.json").read_text())
+        for name, result in [("expected-pricing.json", refresh.snapshot(catalog)),
+                             ("expected-names.json", refresh.names_snapshot(catalog)),
+                             ("expected-capabilities.json", refresh.capabilities_snapshot(catalog))]:
+            with self.subTest(name=name):
+                self.assertEqual(json.loads((fixtures / name).read_text()), result)
+
     def test_pricing_stays_absent_when_no_reference_rate_exists(self):
         model = {"tool_call": True, "cost": None}
         catalog = {"zhipuai-coding-plan": {"models": {"glm-5.2": model}}}

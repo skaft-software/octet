@@ -46,7 +46,7 @@ models and legacy endpoint assertions ahead of self-description leaves. Sparse
 family defaults cannot override a self-description's disabled capabilities.
 
 Only selected-endpoint inventory or its URL/account-isolated raw cache may be
-passed as authority. The pinned models.dev record contributes a display name,
+passed as authority. The models.dev record, pinned or checked live, contributes a display name,
 provider-scoped pricing, and — solely where the endpoint asserts nothing —
 input modalities and context/output limits; it never supplies reasoning
 controls or tool/structured-output flags, and it never overrides an endpoint
@@ -248,6 +248,14 @@ Pricing is provider-scoped, represented as integer microdollars per million
 tokens, and is used as a fallback for discovered built-in routes; explicit
 `CatalogConfig` pricing remains authoritative. Runtime discovery is a
 coding-product concern and can be disabled with `--offline`/`OCTET_OFFLINE=true`.
+
+The crate never fetches models.dev itself. `live_metadata_from_models_dev`
+applies the refresh script's extraction to a catalog the host fetched and checks
+each record against the compiled snapshot; `install_live_metadata` then makes
+the accepted records visible to every lookup, which falls back to the snapshot
+per model. The coding product owns the fetch, its cache and six-hour TTL, and
+`--offline`; see
+[Live metadata](../../crates/octet-ai/models/SOURCES.md#live-metadata-v082).
 
 ## OpenRouter Batch API
 

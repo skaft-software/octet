@@ -42,6 +42,16 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
 - One ambiguous provider failure no longer disables hard cost ceilings for the
   rest of the session; the attempt is charged its admitted worst case. Missing
   bounds or prices still fail closed for the affected ceiling.
+- Keep models.dev names, prices and capability records current between
+  releases. An interactive session refreshes them in the background at most
+  every six hours, revalidating with the ETag, and caches them at
+  `~/.octet/cache/models-dev/metadata.json`; `--offline` skips the refresh.
+  Records go through the snapshot refresh's extraction and are checked against
+  the built-in snapshot: a price may not become zero or fall more than tenfold,
+  and a route new to octet needs non-zero input and output prices. A record
+  that fails keeps the built-in data, which stays the fallback. A cache from
+  another octet version is ignored, and nothing waits on the network at
+  startup.
 
 - Set up and configure every extension from `/extensions`.
   Choosing an extension opens its options menu (a disabled one is enabled

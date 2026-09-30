@@ -101,7 +101,7 @@ baseline. Executable sampling remains independent of these resource-tree limits.
 | `OCTET_MAX_TURNS` | Turn bound. |
 | `OCTET_COMPACTION_MODE`, `OCTET_COMPACTION_THRESHOLD_FRACTION`, `OCTET_COMPACTION_MAX_ACTIVE_TOKENS` | Compaction mode and thresholds. |
 | `OCTET_SHELL_PATH`, `OCTET_BASH_TIMEOUT_SECS`, `OCTET_MAX_OUTPUT_BYTES` | Shell and command limits. |
-| `OCTET_OFFLINE` | Skip optional discovery; not network isolation. |
+| `OCTET_OFFLINE` | Skip optional discovery and the background models.dev metadata refresh; not network isolation. |
 | `OCTET_TELEMETRY` | Opt-in telemetry path. |
 | `OCTET_ALLOW_*` | Mirrored capability controls; specifically `OCTET_ALLOW_REMOTE_READ=true` grants remote media reads unless offline. |
 | `OCTET_PACKAGE_DIR`, `OCTET_DATA_DIR` | Override the [self-documentation asset root](instructions.md#self-documentation). |

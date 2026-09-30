@@ -9136,6 +9136,9 @@ async fn run_interactive_once(
         crate::update::startup_available_update(),
         shell.startup_update_notifier(),
     );
+    // Live models.dev metadata refreshes off the startup path, at most every
+    // six hours; later catalog builds and lookups use it once cached.
+    tokio::spawn(crate::models_dev::refresh(config.offline));
     let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
     if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
