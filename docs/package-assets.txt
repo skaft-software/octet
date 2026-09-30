@@ -267,6 +267,7 @@ text docs/subagents.md
 text docs/telemetry.md
 text docs/terminal.md
 text docs/termux.md
+text docs/testing/README.md
 text docs/testing/startup-frame-pty.md
 text docs/themes.md
 text docs/tmux.md
