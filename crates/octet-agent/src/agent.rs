@@ -55,7 +55,7 @@ use crate::sandbox::SandboxConfig;
 use crate::session::{
     now_unix_millis, DelegatedUsage, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
     ExtensionMetadataProvenance, Session, SessionError, SessionRunOutcome, SnapcompactCheckpoint,
-    UsageRecordKind,
+    UsageRecordKind, UsageUncertaintyBound,
 };
 use crate::telemetry::{
     schema::{
@@ -3651,6 +3651,7 @@ struct PendingProviderRecovery {
     qualified: bool,
     saw_generation: bool,
     opened: bool,
+    exposure: Option<UsageUncertaintyBound>,
 }
 
 impl PendingProviderRecovery {
@@ -3777,6 +3778,12 @@ struct AuxiliaryRecovery<'a> {
     qualified: bool,
     enabled: bool,
     hard_budget: bool,
+    exposure: Option<UsageUncertaintyBound>,
+    input_tokens: u64,
+    output_tokens: u64,
+    token_limit: Option<u64>,
+    cost_limit: Option<u64>,
+    retention: CacheRetention,
     abort: &'a AbortFlag,
     events: &'a mpsc::UnboundedSender<AgentEvent>,
     operation: crate::events::ProviderOperation,
@@ -3793,7 +3800,7 @@ impl AuxiliaryRecovery<'_> {
 
     fn record_uncertainty(&mut self) -> Result<(), AgentError> {
         let first = !self.session.has_uncertain_usage();
-        let recorded = self.session.record_usage_uncertainty(
+        let recorded = self.session.record_usage_uncertainty_with_bound(
             self.model.endpoint.id.clone(),
             self.model.spec.id.clone(),
             match self.operation {
@@ -3802,6 +3809,7 @@ impl AuxiliaryRecovery<'_> {
                 crate::events::ProviderOperation::NativeCompaction => "native_compaction",
                 crate::events::ProviderOperation::TerminalGate => "terminal_gate",
             },
+            self.exposure,
         );
         recorded?;
         if first {
@@ -3836,6 +3844,7 @@ impl Drop for AuxiliaryRecovery<'_> {
                 crate::events::ProviderOperation::NativeCompaction => "native_compaction",
                 crate::events::ProviderOperation::TerminalGate => "terminal_gate",
             },
+            self.exposure,
         );
         if first {
             let _ = self.events.send(AgentEvent::ProviderUsageUncertain);
@@ -3927,6 +3936,7 @@ where
             // complete() hides generation progress. Only explicit rejection
             // or pre-send evidence can establish absence of generation.
             saw_generation,
+            exposure: context.exposure,
         };
         if recovery.usage_unknown() {
             context.record_uncertainty()?;
@@ -3959,7 +3969,13 @@ where
         };
         if !context.enabled
             || (!waiting && retries >= limit)
-            || (context.hard_budget && usage_unknown)
+            || (context.hard_budget
+                && usage_unknown
+                && uncertainty_blocks_ceiling(
+                    context.session,
+                    context.token_limit,
+                    context.cost_limit,
+                ))
         {
             return Err(AgentError::ProviderRecovery {
                 retries,
@@ -4017,6 +4033,22 @@ where
                 source: recovery.error,
             });
         }
+        // Each physical replacement needs its own reservation, including any
+        // previously accepted attempts charged at their admission bounds.
+        reserve_request_tokens(
+            context.session,
+            context.input_tokens,
+            context.output_tokens,
+            context.token_limit,
+        )?;
+        reserve_request_cost(
+            context.session,
+            context.model,
+            context.input_tokens,
+            context.output_tokens,
+            context.cost_limit,
+            context.retention,
+        )?;
         if !waiting {
             recovery_budget.admit(&recovery);
         }
@@ -5881,22 +5913,100 @@ fn record_delegated_usage_once(
     session.record_delegated_agent_usage(delegated)
 }
 
-// Child records are cumulative snapshots. Root uncertainty is a sticky aggregate
-// flag, not another physical failed attempt each time the same child is mirrored.
+// Child records are cumulative snapshots. The root ledger, not a fleet-local
+// watermark, is authoritative across repeated snapshots and process restarts.
 fn mirror_delegated_uncertainty(
     session: &mut Session,
     model: &Model,
+    agent_id: &str,
     uncertain: bool,
+    exposure: Option<UsageUncertaintyBound>,
 ) -> Result<bool, SessionError> {
-    if !uncertain || session.has_uncertain_usage() {
+    if !uncertain {
         return Ok(false);
     }
-    session.record_usage_uncertainty(
+    let operation = format!("delegated_agent:{agent_id}");
+    let mut mirrored = UsageUncertaintyBound {
+        tokens: 0,
+        cost_microdollars: Some(0),
+    };
+    let mut has_record = false;
+    for (record, bound) in session
+        .usage_uncertainty_records()
+        .iter()
+        .zip(session.usage_uncertainty_bounds())
+    {
+        if record.operation != operation {
+            continue;
+        }
+        has_record = true;
+        let Some(bound) = bound else {
+            return Ok(false); // Already mirrored as unbounded.
+        };
+        mirrored.tokens = mirrored.tokens.saturating_add(bound.tokens);
+        mirrored.cost_microdollars = mirrored
+            .cost_microdollars
+            .zip(bound.cost_microdollars)
+            .map(|(left, right)| left.saturating_add(right));
+    }
+    let delta = exposure.map(|exposure| UsageUncertaintyBound {
+        tokens: exposure.tokens.saturating_sub(mirrored.tokens),
+        cost_microdollars: exposure.cost_microdollars.and_then(|cost| {
+            mirrored
+                .cost_microdollars
+                .map(|prior| cost.saturating_sub(prior))
+        }),
+    });
+    if has_record
+        && delta.is_some_and(|delta| {
+            delta.tokens == 0 && delta.cost_microdollars.unwrap_or_default() == 0
+        })
+    {
+        return Ok(false);
+    }
+    session.record_usage_uncertainty_with_bound(
         model.endpoint.id.clone(),
         model.spec.id.clone(),
-        "delegated_agent",
+        operation,
+        delta,
     )?;
     Ok(true)
+}
+
+fn request_uncertainty_bound(
+    model: &Model,
+    input_tokens: u64,
+    requested_output_tokens: u64,
+    service_tier: Option<ServiceTier>,
+    retention: CacheRetention,
+) -> Option<UsageUncertaintyBound> {
+    let cap = octet_ai::effective_output_token_cap(model, Some(requested_output_tokens))?;
+    let fallback_long_retention = retention == CacheRetention::Long
+        && model.spec.protocol == Protocol::AnthropicMessages
+        && model.spec.cache.supports_long_retention
+        && model
+            .spec
+            .preset
+            .anthropic_compat
+            .as_ref()
+            .is_some_and(|compat| !compat.allowed_fallback_models.is_empty());
+    Some(UsageUncertaintyBound {
+        tokens: input_tokens.saturating_add(cap),
+        cost_microdollars: (!fallback_long_retention)
+            .then(|| worst_case_request_cost(model, input_tokens, cap, service_tier))
+            .flatten(),
+    })
+}
+
+fn uncertainty_blocks_ceiling(
+    session: &Session,
+    token_limit: Option<u64>,
+    cost_limit: Option<u64>,
+) -> bool {
+    (token_limit.is_some() || cost_limit.is_some())
+        && session
+            .usage_uncertainty_exposure()
+            .is_none_or(|exposure| cost_limit.is_some() && exposure.cost_microdollars.is_none())
 }
 
 fn require_enforceable_output_cap(
@@ -5909,7 +6019,7 @@ fn require_enforceable_output_cap(
         return Ok(());
     }
     // Existing exposure is the more specific reason a ceiling cannot work.
-    if session.has_uncertain_usage() {
+    if uncertainty_blocks_ceiling(session, token_limit, cost_limit) {
         return Err(AgentError::UsageUncertain);
     }
     if let Some(limit) = cost_limit {
@@ -5944,10 +6054,10 @@ fn reserve_request_tokens(
     let Some(limit) = limit else {
         return Ok(());
     };
-    if session.has_uncertain_usage() {
-        return Err(AgentError::UsageUncertain);
-    }
-    let current = session_total_tokens_for_own_context(session);
+    let exposure = session
+        .usage_uncertainty_exposure()
+        .ok_or(AgentError::UsageUncertain)?;
+    let current = session_total_tokens_for_own_context(session).saturating_add(exposure.tokens);
     let reserved = input_tokens.saturating_add(output_tokens);
     if current >= limit || current.saturating_add(reserved) > limit {
         return Err(AgentError::TokenLimit {
@@ -5990,10 +6100,14 @@ fn reserve_request_cost_with_tier(
     let Some(limit) = limit else {
         return Ok(());
     };
-    if session.has_uncertain_usage() {
-        return Err(AgentError::UsageUncertain);
-    }
-    let current = session.total_cost_microdollars();
+    let exposure = session
+        .usage_uncertainty_exposure()
+        .ok_or(AgentError::UsageUncertain)?;
+    let current = session.total_cost_microdollars().saturating_add(
+        exposure
+            .cost_microdollars
+            .ok_or(AgentError::UsageUncertain)?,
+    );
     if session.has_unpriced_usage() {
         return Err(AgentError::CostUnavailable { limit });
     }
@@ -6452,6 +6566,18 @@ impl CompactionContext<'_> {
                 enabled: self.provider_retries_enabled,
                 hard_budget: self.max_session_tokens.is_some()
                     || self.max_session_cost_microdollars.is_some(),
+                exposure: request_uncertainty_bound(
+                    self.compaction_model,
+                    input_tokens,
+                    reserved_output_tokens,
+                    None,
+                    request.cache_retention,
+                ),
+                input_tokens,
+                output_tokens: reserved_output_tokens,
+                token_limit: self.max_session_tokens,
+                cost_limit: self.max_session_cost_microdollars,
+                retention: request.cache_retention,
                 abort: self.abort,
                 events: self.events,
                 operation: self.summary_operation,
@@ -6829,6 +6955,12 @@ impl CompactionContext<'_> {
                     enabled: self.provider_retries_enabled,
                     hard_budget: self.max_session_tokens.is_some()
                         || self.max_session_cost_microdollars.is_some(),
+                    exposure: None, // Compact has no provider-enforced output cap.
+                    input_tokens,
+                    output_tokens: self.model.spec.limits.max_output_tokens,
+                    token_limit: self.max_session_tokens,
+                    cost_limit: self.max_session_cost_microdollars,
+                    retention: self.cache_retention,
                     abort: self.abort,
                     events: self.events,
                     operation: crate::events::ProviderOperation::NativeCompaction,
@@ -7233,6 +7365,18 @@ impl TerminalGateContext<'_> {
                     enabled: self.provider_retries_enabled,
                     hard_budget: self.max_session_tokens.is_some()
                         || self.max_session_cost_microdollars.is_some(),
+                    exposure: request_uncertainty_bound(
+                        self.model,
+                        input_tokens,
+                        reserved_output_tokens,
+                        None,
+                        request.cache_retention,
+                    ),
+                    input_tokens,
+                    output_tokens: reserved_output_tokens,
+                    token_limit: self.max_session_tokens,
+                    cost_limit: self.max_session_cost_microdollars,
+                    retention: request.cache_retention,
                     abort: self.abort,
                     events: self.events,
                     operation: crate::events::ProviderOperation::TerminalGate,
@@ -7779,6 +7923,7 @@ impl Agent {
             &mut self.session,
             request,
             policy.deadline,
+            request_uncertainty_bound(&self.model, input_tokens, 1, None, CacheRetention::Short),
         )
         .await
         .map_err(AgentError::from)
@@ -8608,6 +8753,12 @@ impl Agent {
                 enabled: self.provider_retries_enabled,
                 hard_budget: self.max_session_tokens.is_some()
                     || self.max_session_cost_microdollars.is_some(),
+                exposure: None, // Compact has no provider-enforced output cap.
+                input_tokens,
+                output_tokens: self.model.spec.limits.max_output_tokens,
+                token_limit: self.max_session_tokens,
+                cost_limit: self.max_session_cost_microdollars,
+                retention: self.cache_retention,
                 abort: &abort,
                 events: &events,
                 operation: crate::events::ProviderOperation::NativeCompaction,
@@ -9722,7 +9873,7 @@ impl Agent {
                 if let Some(recovery) = pending_recovery.take() {
                     if recovery.usage_unknown() {
                         let first = !session.has_uncertain_usage();
-                        if let Err(error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "assistant_turn") {
+                        if let Err(error) = session.record_usage_uncertainty_with_bound(model.endpoint.id.clone(), model.spec.id.clone(), "assistant_turn", recovery.exposure) {
                             if first {
                                 let event = AgentEvent::ProviderUsageUncertain;
                                 notify_observers(&observers, &event);
@@ -9744,9 +9895,10 @@ impl Agent {
                     let retry_limit = recovery_budget.limit(stream_retries, &recovery);
                     let hard_budget = max_session_tokens.is_some()
                         || max_session_cost_microdollars.is_some();
+                    let bounded = !uncertainty_blocks_ceiling(session, max_session_tokens, max_session_cost_microdollars);
                     let eligible = provider_retries_enabled
                         && (waiting_for_network || stream_retries < retry_limit)
-                        && !(hard_budget && failed_usage_unknown);
+                        && !(hard_budget && !bounded);
                     let host_delay = if waiting_for_network {
                         network_wait_delay(&effect_run_id, network_retries)
                     } else {
@@ -9787,7 +9939,7 @@ impl Agent {
                         break 'run FinishReason::Aborted;
                     }
                     if !decision.proceed {
-                        let error = if (failed_usage_unknown && hard_budget)
+                        let error = if (hard_budget && !bounded)
                             || (stream_retries > 0 && !is_replayable_network_failure(&recovery.error)) {
                             AgentError::ProviderRecovery {
                                 retries: stream_retries,
@@ -10169,6 +10321,14 @@ impl Agent {
                     break 'run FinishReason::Failed(error);
                 }
 
+                let attempt_bound = request_uncertainty_bound(
+                    &model,
+                    input_tokens,
+                    request_max_output_tokens,
+                    request.responses.as_ref().and_then(|options| options.service_tier),
+                    request.cache_retention,
+                );
+
                 // ── Open the provider stream (abortable) ───────────────────
                 // Row 3.5: one logical provider request. It is opened here so
                 // that turn iterations that never reach the provider (steering
@@ -10210,7 +10370,7 @@ impl Agent {
                     _ = wait_network_deadline(network_deadline) => {
                         if opening_client.request_may_have_been_sent() {
                             let first = !session.has_uncertain_usage();
-                            let recorded = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "assistant_turn");
+                            let recorded = session.record_usage_uncertainty_with_bound(model.endpoint.id.clone(), model.spec.id.clone(), "assistant_turn", attempt_bound);
                             if first {
                                 let event = AgentEvent::ProviderUsageUncertain;
                                 notify_observers(&observers, &event);
@@ -10323,6 +10483,7 @@ impl Agent {
                     Err(error) => {
                         pending_recovery = Some(PendingProviderRecovery {
                             error, qualified, saw_generation: false, opened: false,
+                            exposure: attempt_bound,
                         });
                         continue 'run;
                     }
@@ -10555,6 +10716,7 @@ impl Agent {
                             }
                             pending_recovery = Some(PendingProviderRecovery {
                                 error, qualified, saw_generation: attempt_saw_generation, opened: true,
+                                exposure: attempt_bound,
                             });
                             continue 'run;
                         }
@@ -12218,7 +12380,7 @@ impl Agent {
                 // double-counted and never lose accounting.
                 delegation.detach_run();
                 for delegated in delegation.delegated_usage_records() {
-                    match mirror_delegated_uncertainty(session, &model, delegated.usage_uncertain) {
+                    match mirror_delegated_uncertainty(session, &model, &delegated.agent_id, delegated.usage_uncertain, delegated.usage_exposure) {
                         Ok(true) => {
                             let event = AgentEvent::ProviderUsageUncertain;
                             notify_observers(&observers, &event);
@@ -16738,7 +16900,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         let mut session = Session::create(&path).unwrap();
         for pass in 0..3 {
             assert_eq!(
-                mirror_delegated_uncertainty(&mut session, &model, true).unwrap(),
+                mirror_delegated_uncertainty(&mut session, &model, "child-1", true, None).unwrap(),
                 pass == 0
             );
             record_delegated_usage_once(
@@ -16768,10 +16930,64 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         assert_eq!(session.total_cost_microdollars(), 7);
         drop(session);
         let mut session = Session::open(path).unwrap();
-        assert!(!mirror_delegated_uncertainty(&mut session, &model, true).unwrap());
+        assert!(
+            !mirror_delegated_uncertainty(&mut session, &model, "child-1", true, None).unwrap()
+        );
         assert!(session.has_uncertain_usage());
         assert_eq!(session.usage_uncertainty_records().len(), 1);
         assert_eq!(session.total_cost_microdollars(), 7);
+    }
+
+    #[test]
+    fn delegated_uncertainty_mirrors_per_child_deltas_across_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mirror-bounded.jsonl");
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let mut root = Session::create(&path).unwrap();
+        let exposure = |tokens, cost| {
+            Some(UsageUncertaintyBound {
+                tokens,
+                cost_microdollars: Some(cost),
+            })
+        };
+        assert!(
+            mirror_delegated_uncertainty(&mut root, &model, "agent-1", true, exposure(10, 2))
+                .unwrap()
+        );
+        assert!(
+            !mirror_delegated_uncertainty(&mut root, &model, "agent-1", true, exposure(10, 2))
+                .unwrap()
+        );
+        assert!(
+            mirror_delegated_uncertainty(&mut root, &model, "agent-1", true, exposure(25, 7))
+                .unwrap()
+        );
+        assert_eq!(
+            root.usage_uncertainty_bounds(),
+            &[exposure(10, 2), exposure(15, 5)]
+        );
+        drop(root);
+        let mut root = Session::open(&path).unwrap();
+        assert!(
+            mirror_delegated_uncertainty(&mut root, &model, "agent-1", true, exposure(40, 9))
+                .unwrap()
+        );
+        assert!(
+            mirror_delegated_uncertainty(&mut root, &model, "agent-2", true, exposure(3, 1))
+                .unwrap()
+        );
+        assert_eq!(root.usage_uncertainty_exposure(), exposure(43, 10));
+        assert!(root
+            .usage_uncertainty_records()
+            .iter()
+            .take(3)
+            .all(|record| record.operation == "delegated_agent:agent-1"));
+        assert!(mirror_delegated_uncertainty(&mut root, &model, "agent-1", true, None).unwrap());
+        assert!(!mirror_delegated_uncertainty(&mut root, &model, "agent-1", true, None).unwrap());
+        assert!(root.usage_uncertainty_exposure().is_none());
     }
 
     #[tokio::test]
@@ -17128,6 +17344,7 @@ mod inference_recovery_tests {
                 qualified,
                 saw_generation: true,
                 opened: true,
+                exposure: None,
             };
             assert_eq!(
                 recovery.replacement_limit(),
@@ -17159,6 +17376,7 @@ mod inference_recovery_tests {
                     qualified: true,
                     saw_generation: true,
                     opened: true,
+                    exposure: None,
                 };
                 assert_eq!(recovery.replacement_limit(), MAX_INFERENCE_REPLACEMENTS);
                 assert!(recovery.usage_unknown());
@@ -17186,6 +17404,7 @@ mod inference_recovery_tests {
                 qualified: true,
                 saw_generation: true,
                 opened: true,
+                exposure: None,
             };
             assert_eq!(recovery.replacement_limit(), 0);
         }
@@ -17202,6 +17421,7 @@ mod inference_recovery_tests {
                 qualified: false,
                 saw_generation,
                 opened: true,
+                exposure: None,
             };
             assert_eq!(recovery.replacement_limit(), 0);
         }
@@ -17236,7 +17456,8 @@ mod inference_recovery_tests {
                 error: malformed,
                 qualified: false,
                 saw_generation: true,
-                opened: true
+                opened: true,
+                exposure: None,
             }
             .replacement_limit(),
             0
@@ -17304,6 +17525,77 @@ mod inference_recovery_tests {
     }
 
     #[test]
+    fn bounded_attempts_charge_ceiling_and_unpriced_cost_still_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bounded.jsonl");
+        let mut model = model();
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Default;
+        let bound =
+            request_uncertainty_bound(&model, 100, 300, None, CacheRetention::Short).unwrap();
+        let cost = bound.cost_microdollars.unwrap();
+        let next_cost = worst_case_request_cost(&model, 20, 10, None).unwrap();
+        let mut session = Session::create(&path).unwrap();
+        session
+            .record_usage_uncertainty_with_bound(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                "assistant_turn",
+                Some(bound),
+            )
+            .unwrap();
+        drop(session);
+        let session = Session::open(&path).unwrap();
+        assert!(
+            require_enforceable_output_cap(&session, Some(10), Some(u64::MAX), Some(u64::MAX))
+                .is_ok()
+        );
+        assert!(reserve_request_tokens(&session, 20, 10, Some(bound.tokens + 30)).is_ok());
+        assert!(
+            matches!(reserve_request_tokens(&session, 20, 10, Some(bound.tokens + 29)),
+            Err(AgentError::TokenLimit { current, reserved: 30, .. }) if current == bound.tokens)
+        );
+        assert!(reserve_request_cost(
+            &session,
+            &model,
+            20,
+            10,
+            Some(cost + next_cost),
+            CacheRetention::Short
+        )
+        .is_ok());
+        assert!(
+            matches!(reserve_request_cost(&session, &model, 20, 10, Some(cost + next_cost - 1), CacheRetention::Short),
+            Err(AgentError::CostLimit { current, reserved, .. }) if current == cost && reserved == next_cost)
+        );
+        drop(session);
+        let mut session = Session::open(&path).unwrap();
+        session
+            .record_usage_uncertainty_with_bound(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                "assistant_turn",
+                Some(UsageUncertaintyBound {
+                    tokens: 7,
+                    cost_microdollars: None,
+                }),
+            )
+            .unwrap();
+        assert!(reserve_request_tokens(&session, 1, 1, Some(u64::MAX)).is_ok());
+        assert!(matches!(
+            reserve_request_cost(
+                &session,
+                &model,
+                1,
+                1,
+                Some(u64::MAX),
+                CacheRetention::Short
+            ),
+            Err(AgentError::UsageUncertain)
+        ));
+    }
+
+    #[test]
     fn permanent_codes_and_generic_connect_errors_never_authorize_outage_waiting() {
         let error = AiError::Provider(octet_ai::ProviderError {
             code: Some("invalid_request_error".into()),
@@ -17325,6 +17617,7 @@ mod inference_recovery_tests {
             qualified: true,
             saw_generation: false,
             opened: false,
+            exposure: None,
         };
         assert!(!recovery.waiting_for_network());
     }
@@ -17337,6 +17630,7 @@ mod inference_recovery_tests {
                 qualified,
                 saw_generation: false,
                 opened: false,
+                exposure: None,
             };
             assert_eq!(
                 recovery.replacement_limit(),
@@ -17608,6 +17902,12 @@ mod sustained_network_recovery_tests {
                         qualified: true,
                         enabled: true,
                         hard_budget,
+                        exposure: None,
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        token_limit: hard_budget.then_some(u64::MAX),
+                        cost_limit: None,
+                        retention: CacheRetention::Short,
                         abort: &abort,
                         events: &events,
                         operation,
@@ -17675,6 +17975,12 @@ mod sustained_network_recovery_tests {
                 qualified: true,
                 enabled: true,
                 hard_budget: true,
+                exposure: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                token_limit: Some(u64::MAX),
+                cost_limit: None,
+                retention: CacheRetention::Short,
                 abort: &abort,
                 events: &events,
                 operation: crate::events::ProviderOperation::LocalCompaction,
@@ -17737,6 +18043,7 @@ mod sustained_network_recovery_tests {
                     qualified,
                     saw_generation: false,
                     opened: true,
+                    exposure: None,
                 };
                 assert_eq!(recovery.replacement_limit(), expected);
                 assert!(recovery.usage_unknown());

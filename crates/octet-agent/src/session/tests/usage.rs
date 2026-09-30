@@ -12,6 +12,13 @@ fn usage_uncertainty_serializes_without_fictional_usage_or_payloads() {
     let path = temp_path(&dir);
     let mut session = Session::create(&path).unwrap();
     assert!(!session.has_uncertain_usage());
+    assert_eq!(
+        session.usage_uncertainty_exposure(),
+        Some(UsageUncertaintyBound {
+            tokens: 0,
+            cost_microdollars: Some(0)
+        })
+    );
     record_unknown_attempt(&mut session).unwrap();
     let bytes = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
@@ -26,7 +33,11 @@ fn usage_uncertainty_serializes_without_fictional_usage_or_payloads() {
         })
     );
     let record: SessionRecord = serde_json::from_str(&bytes).unwrap();
-    let SessionRecord::UsageUncertainty { record } = record else {
+    let SessionRecord::UsageUncertainty {
+        record,
+        bound: None,
+    } = record
+    else {
         panic!("expected uncertainty, not known usage");
     };
     assert_eq!(session.usage_uncertainty_records(), &[record]);
@@ -36,6 +47,7 @@ fn usage_uncertainty_serializes_without_fictional_usage_or_payloads() {
     assert!(session.context().unwrap().is_empty());
     let reopened = Session::open_read_only(&path).unwrap();
     assert!(reopened.has_uncertain_usage());
+    assert_eq!(reopened.usage_uncertainty_exposure(), None);
     assert_eq!(
         reopened.usage_uncertainty_records(),
         session.usage_uncertainty_records()
@@ -48,6 +60,76 @@ fn usage_uncertainty_serializes_without_fictional_usage_or_payloads() {
             0o600
         );
     }
+}
+
+#[test]
+fn bounded_uncertainty_sums_and_survives_replay_without_changing_known_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_path(&dir);
+    let mut session = Session::create(&path).unwrap();
+    for (tokens, cost_microdollars) in [(45, Some(12)), (9, Some(3))] {
+        session
+            .record_usage_uncertainty_with_bound(
+                EndpointId("codex".into()),
+                ModelId("model".into()),
+                "assistant_turn",
+                Some(UsageUncertaintyBound {
+                    tokens,
+                    cost_microdollars,
+                }),
+            )
+            .unwrap();
+    }
+    let exposure = UsageUncertaintyBound {
+        tokens: 54,
+        cost_microdollars: Some(15),
+    };
+    assert_eq!(session.usage_uncertainty_exposure(), Some(exposure));
+    assert_eq!(session.total_cost_microdollars(), 0);
+    let bytes = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(bytes.lines().next().unwrap()).unwrap()["bound"],
+        serde_json::json!({"tokens":45,"cost_microdollars":12})
+    );
+    drop(session);
+    let mut reopened = Session::open(&path).unwrap();
+    assert_eq!(reopened.usage_uncertainty_exposure(), Some(exposure));
+    reopened.checkout_root().unwrap();
+    assert_eq!(reopened.usage_uncertainty_exposure(), Some(exposure));
+    reopened
+        .record_usage_uncertainty_with_bound(
+            EndpointId("codex".into()),
+            ModelId("model".into()),
+            "assistant_turn",
+            Some(UsageUncertaintyBound {
+                tokens: 4,
+                cost_microdollars: None,
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        reopened.usage_uncertainty_exposure(),
+        Some(UsageUncertaintyBound {
+            tokens: 58,
+            cost_microdollars: None,
+        })
+    );
+}
+
+#[test]
+fn old_reader_accepts_new_bound_as_unknown_sibling_field() {
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum OldRecord {
+        UsageUncertainty { record: UsageUncertaintyRecord },
+    }
+    let json = serde_json::json!({
+        "type": "usage_uncertainty",
+        "record": { "endpoint": "codex", "model": "model", "operation": "assistant_turn" },
+        "bound": { "tokens": 4096, "cost_microdollars": 7 }
+    });
+    let OldRecord::UsageUncertainty { record } = serde_json::from_value(json).unwrap();
+    assert_eq!(record.operation, "assistant_turn");
 }
 
 #[test]

@@ -153,6 +153,16 @@ pub struct UsageUncertaintyRecord {
     pub operation: String,
 }
 
+/// Conservative admission exposure for an attempt whose actual usage is unknown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UsageUncertaintyBound {
+    /// Input estimate plus the provider-enforced output cap.
+    pub tokens: u64,
+    /// That many tokens at the route's worst-case price; None when unpriced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_microdollars: Option<u64>,
+}
+
 impl UsageUncertaintyRecord {
     fn validate(&self) -> Result<(), SessionError> {
         // Keep persisted diagnostics bounded and exclude URL/query/header and
@@ -856,6 +866,9 @@ pub enum SessionRecord {
     UsageUncertainty {
         /// Bounded host-selected identifiers only; no invented usage or cost.
         record: UsageUncertaintyRecord,
+        /// Optional worst-case admission exposure; absent in legacy records.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound: Option<UsageUncertaintyBound>,
     },
     /// Cache-warm lifecycle; independent from provider usage and context.
     CacheWarm {
@@ -894,6 +907,8 @@ pub enum SessionRecord {
 enum SessionRecordRef<'a> {
     UsageUncertainty {
         record: &'a UsageUncertaintyRecord,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bound: Option<UsageUncertaintyBound>,
     },
     Entry(&'a Entry),
     Head {
@@ -1189,6 +1204,8 @@ pub struct Session {
     usage_records: Vec<UsageRecord>,
     /// Session-global exposure; checkout and compaction never clear it.
     usage_uncertainty_records: Vec<UsageUncertaintyRecord>,
+    /// Admission bounds in the same append order; None fails closed.
+    usage_uncertainty_bounds: Vec<Option<UsageUncertaintyBound>>,
     /// Separate cache-warm lifecycle, session-global and never model-visible.
     cache_warm_records: Vec<CacheWarmRecord>,
     /// Replaceable parked deferred-run leaves, keyed by operation id. The

@@ -27,7 +27,7 @@ use crate::events::{
 use crate::extension::ExtensionHost;
 use crate::sandbox::EffectiveToolPolicy;
 use crate::secure_fs::{self, SecureFileError};
-use crate::session::{Session, SessionError};
+use crate::session::{Session, SessionError, UsageUncertaintyBound};
 use crate::telemetry::{
     schema::{DelegationSpan, EmptyAttributes},
     spans::TelemetryContext,
@@ -1643,6 +1643,7 @@ pub(crate) struct DelegatedUsageRecord {
     pub(crate) agent_id: String,
     pub(crate) usage: Usage,
     pub(crate) usage_uncertain: bool,
+    pub(crate) usage_exposure: Option<UsageUncertaintyBound>,
     pub(crate) cost: Option<Cost>,
     pub(crate) turn_count: u64,
     pub(crate) tool_call_count: u64,
@@ -1713,6 +1714,7 @@ struct AgentRecord {
     /// Process-local provisional generation; never part of durable/billable usage.
     streamed_output_bytes: u64,
     usage_uncertain: bool,
+    usage_exposure: Option<UsageUncertaintyBound>,
     cost: Option<Cost>,
     cost_microdollars: Option<u64>,
     deadline_at_ms: Option<u64>,
@@ -1768,6 +1770,8 @@ struct DurableFleetRecord {
     tool_call_count: u64,
     usage: Usage,
     usage_uncertain: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage_exposure: Option<UsageUncertaintyBound>,
     cost: Option<Cost>,
     cost_microdollars: Option<u64>,
     deadline_at_ms: Option<u64>,
@@ -1825,6 +1829,7 @@ impl Default for DurableFleetRecord {
             tool_call_count: 0,
             usage: Usage::default(),
             usage_uncertain: false,
+            usage_exposure: None,
             cost: None,
             cost_microdollars: None,
             deadline_at_ms: None,
@@ -3122,6 +3127,7 @@ impl DelegationManager {
             usage: durable.usage,
             streamed_output_bytes: 0,
             usage_uncertain: durable.usage_uncertain,
+            usage_exposure: durable.usage_exposure,
             cost: durable.cost,
             cost_microdollars: durable.cost_microdollars,
             deadline_at_ms: durable.deadline_at_ms,
@@ -4152,6 +4158,7 @@ impl DelegationManager {
                     usage: Usage::default(),
                     streamed_output_bytes: 0,
                     usage_uncertain: false,
+                    usage_exposure: None,
                     cost: (extension_policy.is_some() && resolved.model.spec.pricing.is_some())
                         .then_some(Cost::default()),
                     cost_microdollars: (extension_policy.is_some()
@@ -5351,6 +5358,7 @@ impl DelegationManager {
             return;
         };
         record.usage_uncertain = true;
+        record.usage_exposure = None;
         record.cost_microdollars = None;
         drop(state);
         self.changed.notify_waiters();
@@ -5449,6 +5457,10 @@ impl DelegationManager {
         record.streamed_output_bytes = 0;
         record.cost = aggregate_cost;
         record.usage_uncertain = session.has_uncertain_usage();
+        record.usage_exposure = record
+            .usage_uncertain
+            .then(|| session.usage_uncertainty_exposure())
+            .flatten();
         record.cost_microdollars = if record.usage_uncertain {
             None
         } else {
@@ -6939,6 +6951,7 @@ impl DelegationManager {
                 agent_id: record.identity.id.clone(),
                 usage: record.usage,
                 usage_uncertain: record.usage_uncertain,
+                usage_exposure: record.usage_exposure,
                 cost: record.cost,
                 turn_count: record.turn_count,
                 tool_call_count: record.tool_call_count,
@@ -7892,6 +7905,7 @@ fn durable_fleet_record(record: &AgentRecord) -> DurableFleetRecord {
         tool_call_count: record.tool_call_count,
         usage: record.usage,
         usage_uncertain: record.usage_uncertain,
+        usage_exposure: record.usage_exposure,
         cost: record.cost,
         cost_microdollars: record.cost_microdollars,
         deadline_at_ms: record.deadline_at_ms,
