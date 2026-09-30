@@ -3374,10 +3374,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 6000,
+    "cache_read": 2910,
     "cache_write_5m": 0,
-    "input": 300000,
-    "output": 1200000,
+    "input": 19800,
+    "output": 396000,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -5495,9 +5495,9 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.2": {
-    "cache_read": 200000,
+    "cache_read": 260000,
     "cache_write_5m": 0,
-    "input": 250000,
+    "input": 410000,
     "output": 3990000,
     "reasoning": null
   },
@@ -5565,24 +5565,24 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 20000,
+    "cache_read": 2910,
     "cache_write_5m": 0,
-    "input": 20000,
-    "output": 600000,
+    "input": 19800,
+    "output": 396000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 88320,
+    "cache_read": 144800,
     "cache_write_5m": 0,
-    "input": 160000,
-    "output": 1850240,
+    "input": 144900,
+    "output": 3490000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
-    "cache_read": 10000,
+    "cache_read": 1386,
     "cache_write_5m": 0,
-    "input": 10000,
-    "output": 1280000,
+    "input": 9900,
+    "output": 130680,
     "reasoning": null
   },
   "openrouter/~google/gemini-flash-latest": {
@@ -5602,8 +5602,8 @@
   "openrouter/~moonshotai/kimi-latest": {
     "cache_read": 400000,
     "cache_write_5m": 0,
-    "input": 400000,
-    "output": 9000000,
+    "input": 365400,
+    "output": 9134300,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
@@ -5652,13 +5652,13 @@
     "cache_read": 10000,
     "cache_write_5m": 0,
     "input": 20000,
-    "output": 300000,
+    "output": 247500,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {
-    "cache_read": 90000,
+    "cache_read": 130000,
     "cache_write_5m": 0,
-    "input": 90000,
+    "input": 130000,
     "output": 4000000,
     "reasoning": null
   },
