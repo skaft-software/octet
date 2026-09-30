@@ -12302,7 +12302,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 384000
     },
     "modalities": {
       "input": [
@@ -17588,7 +17588,7 @@
   "openrouter/qwen/qwen3-30b-a3b": {
     "limit": {
       "context": 131072,
-      "output": 8192
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -18425,7 +18425,7 @@
   "openrouter/qwen/qwen3.8-27b": {
     "limit": {
       "context": 1000000,
-      "output": 131072
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -19692,7 +19692,7 @@
   },
   "openrouter/xiaomi/mimo-v2.6-flash": {
     "limit": {
-      "context": 1048576,
+      "context": 1050000,
       "output": 131072
     },
     "modalities": {
@@ -20346,7 +20346,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
