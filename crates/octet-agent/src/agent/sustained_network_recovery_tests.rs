@@ -1,4 +1,3 @@
-
 use super::*;
 // The /fast tier-reservation test builds the same Codex model as the
 // inference-recovery tests; share that one constructor rather than
