@@ -122,9 +122,9 @@ key and discovering models are separate from verifying inference; if discovery
 fails, the saved key can remain for retry. Select a model from the refreshed
 picker, then follow the read-only verification step below.
 
-For subscription sign-in, choose **ChatGPT (OpenAI Codex)** or **GitHub Copilot**
-and authorize on the provider's device-login page. Only those two subscription
-flows are offered; availability depends on your account and supported routes.
+For subscription sign-in, choose **ChatGPT (OpenAI Codex)** (browser or device
+code) or **GitHub Copilot** (device code). Only those two subscription flows are
+offered; availability depends on your account and supported routes.
 Restart without `--offline` to sign in. For a local server, select the explicit
 endpoint and review the model/credential policy before saving.
 
@@ -163,16 +163,19 @@ picker; `--offline` skips it and still does not disable inference traffic.
 ### B. Subscription login
 
 Prerequisite: an account that can use the hosted Codex subscription flow and a
-browser (or a second device) for device authorization. Run this in a shell; the
+browser (or a second device for device authorization). Run this in a shell; the
 command exits after login:
 
 ```sh
 octet --login codex
 ```
 
-Octet prints the OpenAI verification URL and a one-time code. Keep the code
-private and enter it only on the OpenAI page. If opening a browser is not
-available, use the same flow without a browser opener:
+Choose browser sign-in (recommended) to open the OpenAI page and print its URL;
+octet receives the callback on `127.0.0.1:1455` and displays a signed-in page.
+You can instead choose a device code. Octet prints the verification URL and a
+one-time code; keep it private and enter it only on the OpenAI page. SSH, no
+opener, or a busy callback port selects the device flow by default. To force
+device sign-in without opening a browser:
 
 ```sh
 octet --login codex --headless

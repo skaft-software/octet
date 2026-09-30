@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
-//! OpenAI device authorization, token exchange/refresh, and JWT claim
-//! validation. The flow mirrors Pi's TypeScript OpenAI Codex OAuth provider.
+//! OpenAI browser/device authorization, token exchange/refresh, and JWT claim
+//! validation.
 
 use std::fmt;
 
@@ -217,6 +217,17 @@ async fn exchange_code_with_redirect(
         ],
     )
     .await
+}
+
+/// Exchange a browser authorization code against the registered loopback redirect.
+pub(crate) async fn exchange_browser_code_with_url(
+    client: &reqwest::Client,
+    token_url: &str,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<Tokens> {
+    exchange_code_with_redirect(client, token_url, code, verifier, redirect_uri).await
 }
 
 /// Exchange a completed device authorization for tokens.

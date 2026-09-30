@@ -124,8 +124,9 @@ selection, the setup menu offers, in order:
    input, and review before saving. This is a dedicated secret input, not the
    conversation composer; no environment variable is required.
 2. **Sign in with ChatGPT / other supported OAuth subscriptions** — choose
-   **ChatGPT (OpenAI Codex)** or **GitHub Copilot** and complete the provider's
-   device authorization. No other subscription login is implied.
+   **ChatGPT (OpenAI Codex)** or **GitHub Copilot**. Codex offers browser sign-in
+   (PKCE) or a device code; Copilot uses device authorization. No other
+   subscription login is implied.
 3. **Local/self-hosted models** — choose LM Studio or an explicit
    OpenAI-compatible endpoint, then discover/select a model and review the
    custom registry change.
@@ -303,14 +304,22 @@ octet --login codex
 octet --model gpt-5.6
 ```
 
-This uses hosted device login instead of a manually managed API key. A successful
-account-scoped live inventory is authoritative. octet does not infer Ultra,
-collaboration, Responses Lite, or model availability from a name or subscription
-plan. Missing or unusable metadata falls back conservatively. If live inventory
-omits a model, no corresponding GPT-6 Codex route is injected. When advertised,
-select `codex/gpt-6.1-sol`, `codex/gpt-6-astra`, `codex/gpt-6-sol`, or
-`codex/gpt-6-luna`; these stay namespaced independently of direct OpenAI
-presets. When discovery is unreachable, 6.1 Sol leads the fallback suggestions.
+Codex offers **Sign in with your browser (recommended)** and **Use a device code
+(SSH/headless)** instead of a manually managed API key. Browser sign-in opens the
+OpenAI authorization page, also prints its URL, and listens only on
+`127.0.0.1:1455` for up to five minutes. The browser displays a self-contained
+signed-in page after the credential is saved. `--headless`, SSH, an unavailable
+browser opener, or a busy callback port uses the hosted device-code flow; you
+can also choose it explicitly.
+
+A successful account-scoped live inventory is authoritative. octet does not
+infer Ultra, collaboration, Responses Lite, or model availability from a name
+or subscription plan. Missing or unusable metadata falls back conservatively.
+If live inventory omits a model, no corresponding GPT-6 Codex route is injected.
+When advertised, select `codex/gpt-6.1-sol`, `codex/gpt-6-astra`,
+`codex/gpt-6-sol`, or `codex/gpt-6-luna`; these stay namespaced independently of
+direct OpenAI presets. When discovery is unreachable, 6.1 Sol leads the fallback
+suggestions.
 
 Codex discovery sends compatibility version **`0.156.1`**. GPT-6 Sol and Luna
 require at least `0.155.0`: older query versions filter them out on the server,
