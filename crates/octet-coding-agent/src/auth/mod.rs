@@ -2,13 +2,19 @@
 
 //! Provider authentication flows for subscription-backed models.
 //!
-//! OpenAI Codex ("Sign in with ChatGPT"), GitHub Copilot device OAuth, and
-//! custom OpenAI-compatible endpoint credentials. Authentication stays in the
-//! product crate behind public credential/provider seams; `octet-ai` is not touched.
+//! OpenAI Codex ("Sign in with ChatGPT"), GitHub Copilot device OAuth, the
+//! shared [`subscription`] login framework, and custom OpenAI-compatible
+//! endpoint credentials. Authentication stays in the product crate behind public
+//! credential/provider seams; `octet-ai` is not touched.
 
 pub mod codex;
 pub mod copilot;
 pub mod custom;
+pub(crate) mod kimi;
+pub(crate) mod meta;
+pub(crate) mod openrouter;
+pub(crate) mod subscription;
+pub(crate) mod xai;
 
 pub(crate) fn read_bounded_regular(
     path: &std::path::Path,

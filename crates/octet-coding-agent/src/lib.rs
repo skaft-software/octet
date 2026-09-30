@@ -328,6 +328,31 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                 }
             }
         }
-        other => anyhow::bail!("unknown provider {other:?}; supported: codex, copilot, custom"),
+        // Every remaining provider is a subscription login driven by the shared
+        // framework, so one lookup covers all of them. This must stay the final
+        // arm so the explicitly named providers above keep precedence.
+        selector => {
+            let Some(flow) = auth::subscription::registry::resolve(selector) else {
+                anyhow::bail!(
+                    "unknown provider {selector:?}; supported: codex, copilot, {}, custom",
+                    supported_subscription_providers().join(", ")
+                );
+            };
+            let store = auth::subscription::store_for(&flow);
+            match command {
+                AuthCommand::Login { headless } => {
+                    auth::subscription::login::login(&flow, &store, headless).await
+                }
+                AuthCommand::Logout => auth::subscription::login::logout(&flow, &store).await,
+            }
+        }
     }
+}
+
+/// The canonical `--login` selector for every supported subscription provider.
+pub fn supported_subscription_providers() -> Vec<&'static str> {
+    auth::subscription::registry::all()
+        .iter()
+        .map(|flow| flow.login())
+        .collect()
 }

@@ -769,7 +769,13 @@ fn selected_route_trace_brackets_inventory_after_the_cheap_base_phase() {
         if selected_inventory {
             expected.push("catalog.selected");
         }
-        expected.extend(["catalog.codex", "catalog.copilot"]);
+        expected.extend([
+            "catalog.codex",
+            "catalog.copilot",
+            // The shared subscription logins bracket their own phase so a
+            // slow one is attributable rather than hidden inside "catalog.base".
+            "catalog.subscriptions",
+        ]);
         assert_eq!(phases, expected, "{}", output.stderr);
         assert_no_prompt(&output);
         assert_secret_free(&output);

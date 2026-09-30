@@ -84,8 +84,8 @@ other supported OAuth subscriptions**, **Local/self-hosted models**, and
 open that wizard on demand; the current model/session and default stay in place
 until the user explicitly switches with `/model`. API-key entry is masked and
 saved only after review to owner-private, recoverable storage; it is not a
-command-line secret argument. Subscription choices are ChatGPT (Codex) and
-GitHub Copilot. See
+command-line secret argument. Subscription choices are ChatGPT (Codex), GitHub
+Copilot, Grok, Kimi Code, Meta, and OpenRouter. See
 [first-run behavior and credential privacy](providers.md#first-run-setup-unreleased).
 The `octet setup` subcommand below still configures explicit custom endpoints;
 print/RPC modes never open onboarding.
@@ -100,6 +100,16 @@ octet setup --endpoint URL [--api-key-env VAR] [--model ID|--manual-model ID] [-
 ```
 
 `--headless` prints the device verification URL/code without opening a browser.
+`--login`/`--logout` accept `codex` (`openai-codex`, `openai`), `copilot`
+(`github-copilot`), `grok` (`xai-subscription`, `supergrok`), `kimi`
+(`kimi-code`), `meta` (`muse`), `openrouter`, and `custom` (`openai-custom`). An
+unknown provider is rejected with the full list. Each subscription provider
+stores one owner-private credential and never reads another provider's.
+`--logout` removes only the named provider's credential and makes no network
+call. Grok, Kimi, and Meta use a device code, so `--headless` applies to them;
+OpenRouter's browser login prints the URL either way. See
+[subscription OAuth logins](providers.md#subscription-oauth-logins).
+
 The Copilot integration accepts `--login copilot [--headless]` and
 `--logout copilot`, also under the alias `github-copilot`. It uses only its private
 OAuth store, not environment or editor credentials. Online shared catalogs can

@@ -42,7 +42,7 @@ use crate::modes::interactive::run_blocking_startup_lifecycle;
 use crate::prompts::PromptRegistry;
 use crate::providers::{
     ModelDiscovery, ModelFilter, ProviderAuthentication, ProviderDeclaration, ProviderRoute,
-    ProviderRuntimeConfiguration, BUILTIN_PROVIDER_DECLARATIONS,
+    ProviderRuntimeConfiguration, SubscriptionInventoryShape, BUILTIN_PROVIDER_DECLARATIONS,
 };
 use crate::resources::{format_skills_for_prompt, FileSystemSkillRegistry};
 use crate::session_store::SessionStore;
@@ -354,11 +354,11 @@ const DEEPSEEK_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 384_000;
 
 #[cfg(test)]
 const OPENCODE_ANTHROPIC_ENDPOINT_ID: &str = "opencode-anthropic";
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 // A provider may spend minutes queueing or processing a large prompt before
 // it emits response headers. Connection establishment remains separately
 // bounded in octet-ai; this phase needs a generous, cancellable allowance.
-const PROVIDER_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const PROVIDER_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 // Local servers may need to load a model before they can return response
 // headers. Keep the same fifteen-minute default for custom endpoints while
 // allowing each provider to override it for its own cold-start behavior.
@@ -2066,7 +2066,7 @@ fn declaration_discovery_headers(
     Ok(headers)
 }
 
-fn add_declared_headers(
+pub(crate) fn add_declared_headers(
     target: &mut http::HeaderMap,
     declaration: &ProviderDeclaration,
 ) -> anyhow::Result<()> {
@@ -2075,6 +2075,38 @@ fn add_declared_headers(
         target.insert(name.clone(), value.clone());
     }
     Ok(())
+}
+
+/// Read one subscription provider's inventory, reusing the shared provider cache.
+///
+/// `fingerprint` is a hash of the credential rather than the credential itself,
+/// so the cache is scoped to an account without the file ever holding a usable
+/// token. Cache-miss refresh, the `Retry-After`/backoff policy, and the
+/// "unavailable" marker are all handled by [`cached_provider_inventory`], exactly
+/// as they are for environment-backed providers.
+pub(crate) fn fetch_cached_subscription_inventory(
+    declaration: &ProviderDeclaration,
+    shape: SubscriptionInventoryShape,
+    mut headers: http::HeaderMap,
+    fingerprint: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let base_url = declaration.resolved_base_url()?;
+    let models_url = match shape {
+        SubscriptionInventoryShape::OpenAi { .. } | SubscriptionInventoryShape::OpenRouter => {
+            base_url.join("models")?
+        }
+        SubscriptionInventoryShape::Anthropic { .. } => {
+            // Anthropic's catalog is paginated, and a subscription credential
+            // sees only the models its plan exposes, so a generous limit is the
+            // whole point of the request.
+            headers.insert(
+                http::HeaderName::from_static("anthropic-version"),
+                http::HeaderValue::from_static("2023-06-01"),
+            );
+            base_url.join("models?limit=1000")?
+        }
+    };
+    cached_provider_inventory(declaration.id, models_url.to_string(), headers, fingerprint)
 }
 
 fn model_filter_matches(filter: ModelFilter, id: &str) -> bool {
@@ -2444,7 +2476,7 @@ fn register_openai_compatible_models(
     register_openai_compatible_models_from_response(catalog, declaration, filter, &body)
 }
 
-fn register_openai_compatible_models_from_response(
+pub(crate) fn register_openai_compatible_models_from_response(
     catalog: &mut ModelCatalog,
     declaration: &ProviderDeclaration,
     filter: ModelFilter,
@@ -2575,7 +2607,7 @@ fn register_anthropic_compatible_models(
     register_anthropic_compatible_models_from_response(catalog, declaration, filter, &body)
 }
 
-fn register_anthropic_compatible_models_from_response(
+pub(crate) fn register_anthropic_compatible_models_from_response(
     catalog: &mut ModelCatalog,
     declaration: &ProviderDeclaration,
     filter: ModelFilter,
@@ -2931,7 +2963,7 @@ fn register_cached_openrouter_models_offline(catalog: &mut ModelCatalog) -> anyh
     register_openrouter_models_from_response(catalog, declaration, &body)
 }
 
-fn register_openrouter_models_from_response(
+pub(crate) fn register_openrouter_models_from_response(
     catalog: &mut ModelCatalog,
     declaration: &ProviderDeclaration,
     body: &serde_json::Value,
@@ -3407,8 +3439,13 @@ fn try_register_environment_declaration(
         }
         ModelDiscovery::DeepSeekModels => unreachable!("handled before endpoint registration"),
         // Host-owned subscription discovery is registered by its embedding
-        // integration, never by the environment-backed preset bootstrap.
-        ModelDiscovery::CodexSubscription | ModelDiscovery::HostOwnedSubscription => {}
+        // integration, never by the environment-backed preset bootstrap. A
+        // `Subscription` provider is skipped for the same reason: only the
+        // private credential lifecycle may register it, because only that
+        // lifecycle can read the credential file.
+        ModelDiscovery::CodexSubscription
+        | ModelDiscovery::HostOwnedSubscription
+        | ModelDiscovery::SubscriptionInventory { .. } => {}
     }
     crate::providers::register_static_models(catalog, declaration)?;
     Ok(())
@@ -3767,7 +3804,7 @@ fn spawn_declaration_inventory(
 
 /// Attach a diagnostic to the operation that was actually checked. Calling a
 /// different provider, or skipping discovery, cannot clear this component.
-fn bootstrap_check<T, E: std::fmt::Display>(
+pub(crate) fn bootstrap_check<T, E: std::fmt::Display>(
     component: impl Into<String>,
     result: Result<T, E>,
     message: impl FnOnce(&E) -> String,
@@ -6381,6 +6418,7 @@ fn readiness_declarations() -> impl Iterator<Item = &'static ProviderDeclaration
     BUILTIN_PROVIDER_DECLARATIONS
         .iter()
         .chain([&crate::providers::CODEX])
+        .chain(crate::app::subscriptions::DECLARATIONS.iter().copied())
 }
 
 /// Resolve the builtin declaration that provably owns one selected model id.
@@ -6732,6 +6770,10 @@ pub(crate) fn model_catalog_for_readiness(
         register_copilot_catalog(&mut catalog, offline);
     }
     startup_phase("catalog.copilot");
+    // Subscription logins other than Codex: each one appears only if its own
+    // credential file says the user signed in.
+    crate::app::subscriptions::register_all(&mut catalog, offline, |id| readiness.includes(id));
+    startup_phase("catalog.subscriptions");
     Ok((catalog, notes))
 }
 
@@ -6746,6 +6788,7 @@ pub(crate) fn model_catalog_with_setup_store(
     let mut notes = CodexContextNotes::default();
     register_codex_catalog(&mut catalog, offline, &mut notes);
     register_copilot_catalog(&mut catalog, offline);
+    crate::app::subscriptions::register_all(&mut catalog, offline, |_| true);
     Ok(catalog)
 }
 

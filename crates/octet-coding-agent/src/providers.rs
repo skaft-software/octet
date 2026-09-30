@@ -47,10 +47,13 @@ pub(crate) use catalog::{
     register_static_models,
 };
 pub(crate) use compatibility::cache_compatibility;
+#[cfg(test)]
+pub(crate) use contract::EndpointAuthPresentation;
 pub(crate) use contract::{
     InventoryCacheMode, ModelDiscovery, ModelFilter, ProviderAuthentication, ProviderDeclaration,
-    ProviderRoute, ProviderRuntimeConfiguration, ALL_PROVIDER_DECLARATIONS,
-    BUILTIN_PROVIDER_DECLARATIONS, CODEX, DEEPSEEK,
+    ProviderRoute, ProviderRuntimeConfiguration, SubscriptionInventoryShape,
+    ALL_PROVIDER_DECLARATIONS, BUILTIN_PROVIDER_DECLARATIONS, CODEX, DEEPSEEK,
+    KIMI_CODING_SUBSCRIPTION, META_SUBSCRIPTION, OPENROUTER_OAUTH, XAI_SUBSCRIPTION,
 };
 #[cfg(test)]
 pub(crate) use contract::{OPENAI, OPENCODE, OPENROUTER};
