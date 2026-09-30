@@ -188,7 +188,7 @@ impl ImageLimits {
 
     /// Set an emission chunk bound. It must be a nonzero base64 quartet count.
     pub fn with_max_protocol_chunk_bytes(mut self, value: usize) -> Result<Self, ImageError> {
-        if !(4..=HARD_MAX_PROTOCOL_CHUNK_BYTES).contains(&value) || value % 4 != 0 {
+        if !(4..=HARD_MAX_PROTOCOL_CHUNK_BYTES).contains(&value) || !value.is_multiple_of(4) {
             return Err(ImageError::InvalidLimit);
         }
         self.max_protocol_chunk_bytes = value;

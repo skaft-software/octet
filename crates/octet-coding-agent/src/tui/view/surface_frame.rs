@@ -301,7 +301,7 @@ pub(super) fn event_margin_marker_with_frame(
     let quiet_transcript = theme
         .resolve::<bool>("quiet_tool_summaries")
         .unwrap_or(false);
-    let active_dot_visible = spinner_frame % 2 == 0;
+    let active_dot_visible = spinner_frame.is_multiple_of(2);
     let active_phase_dot = || {
         if active_dot_visible {
             theme.fg("foreground", event_dot)

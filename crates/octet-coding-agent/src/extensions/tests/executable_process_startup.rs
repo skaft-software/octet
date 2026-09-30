@@ -5,7 +5,6 @@
 //! executable, and an installed extension staying disabled by default
 //! with full-access trust not being persisted.
 
-use super::support::*;
 use super::*;
 
 #[cfg(unix)]

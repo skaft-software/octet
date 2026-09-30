@@ -943,7 +943,7 @@ mod tests {
             "exp": 4_102_444_800_u64,
         });
         let mut claim_bytes = serde_json::to_vec(&claims).unwrap();
-        if claim_bytes.len() % 3 == 0 {
+        if claim_bytes.len().is_multiple_of(3) {
             claim_bytes.push(b' ');
         }
         let payload = URL_SAFE.encode(claim_bytes);

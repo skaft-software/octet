@@ -8,8 +8,6 @@
 //! shadow, directory and manifest names must match, exact paths normalise only
 //! the parent).
 
-#[cfg(unix)]
-use super::support::*;
 use super::*;
 
 fn write_extension_manifest(directory: &Path, name: &str, description: &str) {

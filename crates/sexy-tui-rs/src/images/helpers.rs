@@ -74,13 +74,13 @@ pub(super) fn checked_mul(left: usize, right: usize) -> Result<usize, ImageError
 }
 
 pub(super) fn ceil_div_usize(value: usize, divisor: usize) -> usize {
-    value / divisor + usize::from(value % divisor != 0)
+    value / divisor + usize::from(!value.is_multiple_of(divisor))
 }
 
 pub(super) fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
-    value / divisor + u64::from(value % divisor != 0)
+    value / divisor + u64::from(!value.is_multiple_of(divisor))
 }
 
 pub(super) fn ceil_div_u128(value: u128, divisor: u128) -> u128 {
-    value / divisor + u128::from(value % divisor != 0)
+    value / divisor + u128::from(!value.is_multiple_of(divisor))
 }

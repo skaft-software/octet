@@ -734,6 +734,8 @@ struct RpcAdmission {
 }
 
 impl RpcAdmission {
+    // Forwards `RunControl`'s own public error type unchanged.
+    #[allow(clippy::result_large_err)]
     async fn send(&self, control: &RunControl) -> Result<(), AgentError> {
         match &self.request {
             RpcControlRequest::Steer(queued) => control.steer(queued.input.clone()).await,

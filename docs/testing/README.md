@@ -113,8 +113,15 @@ prerequisite for a green build.
 `release-octet.yml` and `release-serve.yml` publish signed artifacts, and
 `homebrew-formula.yml` renders the formula. All of them key off an **existing
 canonical `vX.Y.Z` tag** — the tag is both the trigger and the pinned source of
-provenance, so there is no untagged path through them. Building an untagged
-candidate means using the ordinary CI lanes above, not these.
+provenance, so there is no untagged path through them.
+
+Untagged candidates come from the `release-candidate` job in `ci.yml`, which
+runs only when the workflow is dispatched by hand. It builds release binaries
+for GNU/Linux x86-64 and for macOS on Intel and Apple silicon, packages each
+with `scripts/package-octet-release.sh`, runs `--version`, `--help` and the
+native-host hello, then uploads `octet-rc-<commit>-<target>` for 14 days. The
+archives are unsigned and not notarized, and they are not releases. The Windows
+test build comes from the `windows` lane on the same run.
 
 ## What a green run does not prove
 

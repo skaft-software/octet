@@ -406,7 +406,7 @@ impl CodexContextWindow {
 /// Every window octet prints goes through this label so a user never has to
 /// guess which bare number means what.
 pub fn context_window_label(tokens: u64) -> String {
-    if tokens >= 1_000 && tokens % 1_000 == 0 {
+    if tokens >= 1_000 && tokens.is_multiple_of(1_000) {
         format!("{}K", tokens / 1_000)
     } else {
         tokens.to_string()
