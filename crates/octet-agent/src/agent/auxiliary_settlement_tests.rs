@@ -193,11 +193,22 @@ async fn successful_same_poll_cancellation_and_failed_settlement_never_erase_exp
                 assert!(matches!(result, Err(AgentError::Session(_))), "{result:?}");
                 assert!(agent.session.usage_records().is_empty());
                 assert_eq!(agent.session.usage_uncertainty_records().len(), 1);
-                agent.set_max_session_cost_microdollars(Some(u64::MAX));
+                // The fallback keeps the attempt's admitted worst case, so a
+                // ceiling still counts it: a limit at that exposure refuses the
+                // next request, and a larger one admits it.
+                let exposure = agent
+                    .session
+                    .usage_uncertainty_exposure()
+                    .and_then(|exposure| exposure.cost_microdollars)
+                    .expect("the auxiliary reservation bounds the attempt");
+                assert!(exposure > 0);
+                agent.set_max_session_cost_microdollars(Some(exposure));
                 assert!(matches!(
                     agent.ensure_request_cost_capacity(&model, 1, 1),
-                    Err(AgentError::UsageUncertain)
+                    Err(AgentError::CostLimit { current, .. }) if current == exposure
                 ));
+                agent.set_max_session_cost_microdollars(Some(u64::MAX));
+                assert!(agent.ensure_request_cost_capacity(&model, 1, 1).is_ok());
             }
             drop(agent);
             let reopened = Session::open_read_only(&path).unwrap();

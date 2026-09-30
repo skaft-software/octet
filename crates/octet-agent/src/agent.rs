@@ -17663,10 +17663,16 @@ mod inference_recovery_tests {
     }
 
     #[tokio::test]
-    async fn hard_token_ceiling_and_hook_veto_stop_interrupted_inference_before_replacement() {
+    async fn hard_token_ceiling_without_room_and_hook_veto_stop_interrupted_inference_before_replacement(
+    ) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        for hard_token_limit in [true, false] {
+        // A ceiling with room charges each interrupted attempt its admitted
+        // bound and replays as usual. Once that charge leaves no room, the
+        // replacement is refused before dispatch, as it is by a hook veto.
+        let mut attempt_bound = None;
+        for case in ["roomy_ceiling", "tight_ceiling", "hook_veto"] {
+            let hard_token_limit = case != "hook_veto";
             let server = MockServer::start().await;
             Mock::given(method("POST")).and(path("responses"))
                 .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
@@ -17703,33 +17709,49 @@ mod inference_recovery_tests {
                 session_id: None,
             })
             .unwrap();
-            if hard_token_limit {
-                agent.set_max_session_tokens(Some(u64::MAX));
+            match case {
+                "roomy_ceiling" => agent.set_max_session_tokens(Some(u64::MAX)),
+                "tight_ceiling" => agent.set_max_session_tokens(attempt_bound),
+                _ => {}
             }
             let error = agent.complete("finish").await.unwrap_err();
-            if hard_token_limit {
-                assert!(
-                    matches!(
-                        error,
-                        AgentError::ProviderRecovery {
-                            retries: 0,
-                            usage_unknown: true,
-                            ..
-                        }
-                    ),
-                    "{error:?}"
-                );
-            }
             let requests = server.received_requests().await.unwrap();
-            assert_eq!(
-                requests.len(),
-                1,
-                "hard={hard_token_limit}: {:?}",
-                requests
-                    .iter()
-                    .map(|request| (&request.method, &request.url))
-                    .collect::<Vec<_>>()
-            );
+            match case {
+                "roomy_ceiling" => {
+                    assert!(
+                        matches!(
+                            error,
+                            AgentError::ProviderRecovery {
+                                usage_unknown: true,
+                                ..
+                            }
+                        ),
+                        "{error:?}"
+                    );
+                    assert!(requests.len() > 1);
+                    let records = agent.session.usage_uncertainty_records().len();
+                    assert_eq!(records, requests.len());
+                    let exposure = agent
+                        .session
+                        .usage_uncertainty_exposure()
+                        .expect("capped attempts are bounded");
+                    assert_eq!(exposure.tokens % records as u64, 0);
+                    attempt_bound = Some(exposure.tokens / records as u64);
+                }
+                "tight_ceiling" => {
+                    let bound = attempt_bound.unwrap();
+                    assert!(
+                        matches!(
+                            error,
+                            AgentError::TokenLimit { current, limit, .. }
+                                if current == bound && limit == bound
+                        ),
+                        "{error:?}"
+                    );
+                    assert_eq!(requests.len(), 1);
+                }
+                _ => assert_eq!(requests.len(), 1),
+            }
         }
     }
 }

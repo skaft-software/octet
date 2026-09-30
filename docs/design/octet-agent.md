@@ -210,6 +210,9 @@ admitted input estimate plus that cap as a conservative token bound, priced at
 the route's worst-case rate when available. Hard cumulative ceilings charge
 known usage plus all such bounds, including after resume or later ceiling
 activation; the bound can over-count but cannot under-count admitted usage.
+A replacement attempt is admitted like any other request, on top of the failed
+attempt's bound. With bounded exposure a ceiling never changes whether a failure
+replays; it only refuses a replacement that no longer fits.
 Unbounded attempts (including native steering, unpriced routes for cost ceilings,
 and legacy records) still fail closed. Child exposure is mirrored by agent ID,
 recording only the increase in each child's bound before its known usage subtotal.
