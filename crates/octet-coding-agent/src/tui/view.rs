@@ -439,6 +439,30 @@ fn activity_group_label(
             group.edited_files,
             if group.edited_files == 1 { "" } else { "s" }
         ),
+        crate::hydrate::ToolActivityKind::WebSearch => format!(
+            "Searched web · {} quer{}",
+            group.web_searches,
+            if group.web_searches == 1 { "y" } else { "ies" }
+        ),
+        crate::hydrate::ToolActivityKind::WebFetch => format!(
+            "Fetched {} page{}",
+            group.web_fetches,
+            if group.web_fetches == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::Mcp => format!(
+            "Used MCP · {} call{}",
+            group.mcp_calls,
+            if group.mcp_calls == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::ComputerUse => format!(
+            "Used computer · {} action{}",
+            group.computer_use_actions,
+            if group.computer_use_actions == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ),
     };
     if group.read_files > 0 && group.searches > 0 {
         label.push_str(&format!(
