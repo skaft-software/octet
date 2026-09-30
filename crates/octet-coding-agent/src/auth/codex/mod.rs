@@ -9,6 +9,7 @@
 //! are composed by the endpoint, the request codec's session affinity, and the
 //! resolver's dynamic account routing.
 
+mod browser;
 mod login;
 mod oauth;
 mod resolver;
@@ -22,8 +23,12 @@ pub use store::{default_path, CredentialStore};
 
 /// Public OAuth client id of the Codex CLI (not a secret).
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-/// Token endpoint (device-code exchange + refresh).
+/// Token endpoint (device code, browser code exchange + refresh).
 pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+/// Registered loopback redirect for browser sign-in (the port is not arbitrary).
+pub const BROWSER_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+/// The same originator value sent to the Codex backend in declarations.json.
+pub const ORIGINATOR: &str = "octet";
 /// OAuth device authorization start endpoint.
 pub const DEVICE_USER_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 /// OAuth device authorization polling endpoint.

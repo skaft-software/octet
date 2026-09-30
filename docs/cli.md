@@ -99,7 +99,10 @@ octet setup --preset lm-studio --manual-model ID [--yes]
 octet setup --endpoint URL [--api-key-env VAR] [--model ID|--manual-model ID] [--offline] [--yes]
 ```
 
-`--headless` prints the device verification URL/code without opening a browser.
+For Codex, `--login codex` offers browser sign-in (PKCE on `127.0.0.1:1455`)
+and device-code sign-in. `--headless` selects the device flow and prints its
+verification URL/code without opening a browser. SSH, no opener, or a busy
+callback port also defaults/falls back to device code.
 The Copilot integration accepts `--login copilot [--headless]` and
 `--logout copilot`, also under the alias `github-copilot`. It uses only its private
 OAuth store, not environment or editor credentials. Online shared catalogs can
