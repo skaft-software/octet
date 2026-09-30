@@ -468,6 +468,38 @@
     "structured_output": true,
     "tool_call": true
   },
+  "anthropic/claude-sonnet-5-5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Sonnet 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "baseten/deepseek-ai/DeepSeek-V4-Flash-0731": {
     "interleaved": {
       "field": "reasoning_content"
@@ -588,6 +620,39 @@
       ]
     },
     "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/deepseek-ai/DeepSeek-V4.1-Flash-Fast": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "deepseek-ai/DeepSeek-V4.1-Flash-Fast",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -5156,23 +5221,6 @@
     "reasoning": false,
     "tool_call": true
   },
-  "nvidia/moonshotai/kimi-k2-instruct-0905": {
-    "limit": {
-      "context": 262144,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Kimi K2 0905",
-    "reasoning": false,
-    "tool_call": true
-  },
   "nvidia/moonshotai/kimi-k2.6": {
     "interleaved": {
       "field": "reasoning_content"
@@ -5988,34 +6036,6 @@
     "name": "usdvalidate",
     "reasoning": false,
     "tool_call": false
-  },
-  "nvidia/openai/gpt-oss-120b": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-OSS-120B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
   },
   "nvidia/openai/gpt-oss-20b": {
     "limit": {
@@ -7375,6 +7395,106 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openai/gpt-6.1-sol": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Sol",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openai/gpt-daybreak-blue-latest": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Daybreak Blue",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openai/gpt-daybreak-red-latest": {
+    "limit": {
+      "context": 400000,
+      "input": 272000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Daybreak Red",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openai/gpt-image-1": {
     "limit": {
       "context": 0,
@@ -8160,6 +8280,37 @@
       ]
     },
     "name": "Claude Sonnet 5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "opencode/claude-sonnet-5-5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Sonnet 5.5",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -9579,6 +9730,39 @@
     "structured_output": true,
     "tool_call": true
   },
+  "opencode/gpt-6.1-sol": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Sol",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/grok-4.5": {
     "limit": {
       "context": 500000,
@@ -9653,7 +9837,7 @@
         "text"
       ]
     },
-    "name": "Grok 4.7 (30% Off)",
+    "name": "Grok 4.7",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -11539,6 +11723,38 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/anthropic/claude-sonnet-5.5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Sonnet 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/arcee-ai/trinity-large-thinking": {
     "limit": {
       "context": 262144,
@@ -12011,33 +12227,10 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/deepseek/deepseek-r1-distill-llama-70b": {
-    "limit": {
-      "context": 8192,
-      "output": 7372
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "R1 Distill Llama 70B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": false
-  },
   "openrouter/deepseek/deepseek-v3.1-terminus": {
     "limit": {
       "context": 163840,
-      "output": 32768
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -12083,7 +12276,7 @@
   "openrouter/deepseek/deepseek-v3.2-exp": {
     "limit": {
       "context": 163840,
-      "output": 65536
+      "output": 147456
     },
     "modalities": {
       "input": [
@@ -12138,7 +12331,7 @@
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "limit": {
-      "context": 1310720,
+      "context": 1048576,
       "output": 943718
     },
     "modalities": {
@@ -12235,7 +12428,7 @@
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -12266,7 +12459,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -13347,29 +13540,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/inclusionai/ling-3.0-flash-fin:free": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Ling 3.0 Flash Fin (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/inclusionai/ling-3.0-flash-sante:free": {
     "limit": {
       "context": 262144,
@@ -13685,7 +13855,7 @@
   "openrouter/meta/muse-glimmer-30b": {
     "limit": {
       "context": 131072,
-      "output": 16384
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -13721,9 +13891,8 @@
       "input": [
         "text",
         "image",
-        "video",
         "pdf",
-        "audio"
+        "video"
       ],
       "output": [
         "text"
@@ -13756,8 +13925,7 @@
         "text",
         "image",
         "video",
-        "pdf",
-        "audio"
+        "pdf"
       ],
       "output": [
         "text"
@@ -13790,8 +13958,7 @@
         "text",
         "image",
         "video",
-        "pdf",
-        "audio"
+        "pdf"
       ],
       "output": [
         "text"
@@ -13824,8 +13991,7 @@
         "text",
         "image",
         "video",
-        "pdf",
-        "audio"
+        "pdf"
       ],
       "output": [
         "text"
@@ -13859,8 +14025,7 @@
         "text",
         "image",
         "video",
-        "pdf",
-        "audio"
+        "pdf"
       ],
       "output": [
         "text"
@@ -14673,6 +14838,64 @@
     "structured_output": true,
     "tool_call": false
   },
+  "openrouter/nex-agi/nex-n2.5-mini": {
+    "limit": {
+      "context": 262144,
+      "output": 235929
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nex-N2.5-Mini",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": false
+  },
+  "openrouter/nex-agi/nex-n2.5-pro": {
+    "limit": {
+      "context": 262144,
+      "output": 235929
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nex-N2.5-Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/nousresearch/hermes-3-llama-3.1-405b": {
     "limit": {
       "context": 131072,
@@ -14966,8 +15189,8 @@
   },
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "limit": {
-      "context": 1000000,
-      "output": 131072
+      "context": 262144,
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -16372,6 +16595,71 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/openai/gpt-6.1-sol": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Sol",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/openai/gpt-6.1-sol-pro": {
+    "limit": {
+      "context": 1050000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "pdf",
+        "image",
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Sol Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/openai/gpt-audio": {
     "limit": {
       "context": 128000,
@@ -16435,7 +16723,7 @@
   "openrouter/openai/gpt-oss-120b": {
     "limit": {
       "context": 131072,
-      "output": 65536
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -17300,7 +17588,7 @@
   "openrouter/qwen/qwen3-30b-a3b": {
     "limit": {
       "context": 131072,
-      "output": 16384
+      "output": 8192
     },
     "modalities": {
       "input": [
@@ -17323,7 +17611,7 @@
   "openrouter/qwen/qwen3-30b-a3b-instruct-2507": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 32000
     },
     "modalities": {
       "input": [
@@ -17710,7 +17998,7 @@
   "openrouter/qwen/qwen3.5-122b-a10b": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -17760,7 +18048,7 @@
   "openrouter/qwen/qwen3.5-35b-a3b": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -18033,7 +18321,7 @@
   "openrouter/qwen/qwen3.7-flash": {
     "limit": {
       "context": 1000000,
-      "input": 991000,
+      "input": 991808,
       "output": 65536
     },
     "modalities": {
@@ -19734,7 +20022,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -19763,7 +20051,7 @@
   },
   "openrouter/z-ai/glm-5.3": {
     "limit": {
-      "context": 1310720,
+      "context": 1048576,
       "output": 943717
     },
     "modalities": {
@@ -19791,8 +20079,8 @@
   },
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
-      "context": 1310720,
-      "output": 128000
+      "context": 1048576,
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -20010,9 +20298,6 @@
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
-      },
-      {
         "type": "effort",
         "values": [
           "low",
@@ -20029,7 +20314,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20061,7 +20346,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20091,7 +20376,7 @@
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "limit": {
-      "context": 1310720,
+      "context": 1048576,
       "output": 943718
     },
     "modalities": {
@@ -20335,7 +20620,6 @@
       {
         "type": "effort",
         "values": [
-          "none",
           "low",
           "medium",
           "high",
@@ -20413,8 +20697,8 @@
   },
   "openrouter/~z-ai/glm-flash-latest": {
     "limit": {
-      "context": 1310720,
-      "output": 128000
+      "context": 1048576,
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20443,7 +20727,7 @@
   },
   "openrouter/~z-ai/glm-latest": {
     "limit": {
-      "context": 1310720,
+      "context": 1048576,
       "output": 131072
     },
     "modalities": {
@@ -22548,74 +22832,6 @@
     "name": "Meta Llama 3 8B Instruct Lite",
     "reasoning": false,
     "tool_call": false
-  },
-  "together/moonshotai/Kimi-K2.5": {
-    "interleaved": true,
-    "limit": {
-      "context": 262144,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Kimi K2.5",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
-  "together/moonshotai/Kimi-K2.6": {
-    "limit": {
-      "context": 262144,
-      "output": 131000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Kimi K2.6",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "together/moonshotai/Kimi-K2.7-Code": {
-    "limit": {
-      "context": 262144,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Kimi K2.7 Code",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": true,
-    "tool_call": true
   },
   "together/moonshotai/Kimi-K3": {
     "interleaved": {
