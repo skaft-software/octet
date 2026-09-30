@@ -153,6 +153,7 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         extension_activation_overridden: true,
         trusted_extensions: request.trusted_extensions.clone(),
         invocation_trusted_extensions: Vec::new(),
+        start_extension_processes: false,
         experimental_streamable_http_mcp: false,
         extension_flag_values: Default::default(),
         tools,

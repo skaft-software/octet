@@ -55,6 +55,7 @@ pub(in crate::extensions) fn executable_extension_config(
         extension_activation_overridden: false,
         trusted_extensions: vec![],
         invocation_trusted_extensions: vec![name.to_owned()],
+        start_extension_processes: true,
         experimental_streamable_http_mcp: false,
         extension_flag_values: BTreeMap::new(),
         tools: crate::config::ToolPolicy::default(),

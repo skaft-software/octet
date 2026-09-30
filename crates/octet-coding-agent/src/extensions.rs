@@ -106,7 +106,8 @@ const MAX_CONTEXT_CONTRIBUTION_BYTES: usize = 64 * 1024;
 /// worker app has been built.
 #[cfg(feature = "serve")]
 pub fn subagents_extension_activation_configured(config: &Config) -> bool {
-    if !config.sandbox.process_execution_allowed()
+    if !config.start_extension_processes
+        || !config.sandbox.process_execution_allowed()
         || !config
             .enabled_extensions
             .iter()
@@ -189,6 +190,7 @@ const SESSION_LIFECYCLE_QUEUE_CAPACITY: usize = 8;
 const MAX_HOST_REQUEST_TOOL_NAMES: usize = 64;
 /// Upper bound for host requests queued between two shell drains.
 const HOST_REQUEST_QUEUE_CAPACITY: usize = 64;
+const NATIVE_HOST_EXTENSION_START_DIAGNOSTIC: &str = "executable extensions were not started: the native-host protocol reports extension discovery only and never starts extension processes";
 const CONTROLLED_EXTENSION_START_DIAGNOSTIC: &str = "enabled extensions without host authority were not started: grant host authority per source in /extensions or trusted_extensions; safe mode is not a sandbox—granted extensions run with your OS permissions outside the tool-effect broker";
 static NEXT_EXTENSION_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -503,6 +505,7 @@ pub(crate) fn selected_extension_flag_declarations(
                 .activation
                 .start_decision(descriptor.source, config.workspace_trusted)
                 == ExtensionStartDecision::Allowed
+                && config.start_extension_processes
                 && config.sandbox.process_execution_allowed()
         })
         .flat_map(|descriptor| {
@@ -2741,7 +2744,12 @@ impl ExecutableExtensions {
             );
         }
         let mut needs_host_authority = false;
-        for descriptor in &descriptors {
+        // A surface that never starts extension processes gets no grant hints:
+        // no grant could change the outcome there.
+        for descriptor in descriptors
+            .iter()
+            .filter(|_| config.start_extension_processes)
+        {
             match descriptor
                 .activation
                 .start_decision(descriptor.source, config.workspace_trusted)
@@ -2772,14 +2780,18 @@ impl ExecutableExtensions {
         let has_enabled = descriptors
             .iter()
             .any(|descriptor| descriptor.activation.enabled);
-        // --no-process/--no-shell still denies subprocesses independently of
-        // host authority. Discovery remains available for diagnostics.
-        if !config.sandbox.process_execution_allowed() && has_enabled {
+        // The native-host protocol never starts extension processes, and
+        // --no-process/--no-shell deny them independently of host authority.
+        // Discovery remains available for diagnostics.
+        if !config.start_extension_processes && has_enabled {
+            diagnostics.push(NATIVE_HOST_EXTENSION_START_DIAGNOSTIC.to_owned());
+        } else if !config.sandbox.process_execution_allowed() && has_enabled {
             diagnostics.push(
                 "executable extensions were not started: process execution is disabled by --no-process/--no-shell".to_owned(),
             );
         }
-        let execution_allowed = config.sandbox.process_execution_allowed();
+        let execution_allowed =
+            config.start_extension_processes && config.sandbox.process_execution_allowed();
         let startable = descriptors
             .iter()
             .filter(|descriptor| {

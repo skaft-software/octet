@@ -645,6 +645,7 @@ pub(crate) mod tests {
             extension_activation_overridden: false,
             trusted_extensions: vec![],
             invocation_trusted_extensions: vec![],
+            start_extension_processes: true,
             experimental_streamable_http_mcp: false,
             extension_flag_values: Default::default(),
             tools: crate::config::ToolPolicy::default(),

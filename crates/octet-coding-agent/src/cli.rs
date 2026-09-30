@@ -1729,6 +1729,7 @@ fn build_config_with_global_path_and_diagnostics(
         extension_activation_overridden,
         trusted_extensions,
         invocation_trusted_extensions,
+        start_extension_processes: true,
         experimental_streamable_http_mcp: cli.experimental_streamable_http_mcp,
         extension_flag_values: Default::default(),
         tools,

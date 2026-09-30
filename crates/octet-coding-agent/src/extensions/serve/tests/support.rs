@@ -49,6 +49,7 @@ pub(super) fn serve_test_config(directory: &Path) -> Config {
         extension_activation_overridden: false,
         trusted_extensions: Vec::new(),
         invocation_trusted_extensions: Vec::new(),
+        start_extension_processes: true,
         experimental_streamable_http_mcp: false,
         extension_flag_values: Default::default(),
         tools: crate::config::ToolPolicy::default(),

@@ -485,6 +485,10 @@ pub struct Config {
     pub trusted_extensions: Vec<String>,
     /// One-shot extension names trusted only for this process invocation.
     pub invocation_trusted_extensions: Vec<String>,
+    /// Whether this product surface may start executable extension processes
+    /// at all. The native-host protocol reports discovery only, whatever the
+    /// activation and host-authority grants in its request say.
+    pub start_extension_processes: bool,
     /// One-shot process-owner gate for experimental remote Streamable HTTP MCP.
     /// This is deliberately not loaded from configuration, environment, or sessions.
     pub experimental_streamable_http_mcp: bool,

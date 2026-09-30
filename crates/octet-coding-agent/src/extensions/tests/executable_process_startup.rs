@@ -92,6 +92,85 @@ command = "launch-probe.sh"
     }
 }
 
+/// The native-host protocol reports discovery only. Activation, full access,
+/// an explicit directory and a persistent grant together still start nothing.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_host_surface_never_starts_granted_extensions() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let extension_root = temp.path().join("explicit-extensions");
+    let extension_dir = extension_root.join("host-launch-probe");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    let manifest = extension_dir.join(EXTENSION_MANIFEST_FILENAME);
+    std::fs::write(
+        &manifest,
+        r#"name = "host-launch-probe"
+version = "0.1.0"
+api_version = "0.1"
+
+[entrypoint]
+command = "launch-probe.sh"
+"#,
+    )
+    .unwrap();
+    let executable = extension_dir.join("launch-probe.sh");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nprintf launched > \"$OCTET_WORKSPACE/host-extension-launched\"\nexit 1\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    for effect_policy in [
+        octet_agent::EffectPolicy::Controlled,
+        octet_agent::EffectPolicy::UnsafeHost,
+    ] {
+        let mut config =
+            executable_extension_config(temp.path(), &extension_root, "host-launch-probe");
+        config.effect_policy = effect_policy;
+        config.start_extension_processes = false;
+        config
+            .trusted_extensions
+            .push(format!("host-launch-probe@{}", manifest.display()));
+        let session =
+            Session::create(temp.path().join(format!("session-{effect_policy:?}.jsonl"))).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let sessions = SessionStore::new(&config.session_dir, temp.path());
+        let mut host = ExtensionHost::new();
+
+        let mut extensions = ExecutableExtensions::discover_and_start(
+            &config,
+            &session,
+            &model,
+            &ReasoningConfig::Off,
+            &sessions,
+            &mut host,
+        );
+
+        assert!(!temp.path().join("host-extension-launched").exists());
+        assert!(extensions.processes.is_empty());
+        assert!(extensions.summaries.iter().any(|extension| {
+            extension.name == "host-launch-probe" && extension.enabled && !extension.running
+        }));
+        assert!(extensions
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic == NATIVE_HOST_EXTENSION_START_DIAGNOSTIC));
+        assert!(!extensions
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("host authority")));
+        extensions.shutdown().await;
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_source_bound_trust_config_starts_under_safe_mode() {
