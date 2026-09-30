@@ -82,6 +82,7 @@ impl Session {
             checkpoints: Vec::new(),
             usage_records: Vec::new(),
             usage_uncertainty_records: Vec::new(),
+            usage_uncertainty_bounds: Vec::new(),
             cache_warm_records: Vec::new(),
             entry_labels: BTreeMap::new(),
         })
@@ -226,6 +227,7 @@ impl Session {
         let mut checkpoint_lines: Vec<usize> = Vec::new();
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut usage_uncertainty_records = Vec::new();
+        let mut usage_uncertainty_bounds = Vec::new();
         let mut cache_warm_records: Vec<CacheWarmRecord> = Vec::new();
         let restored_invocations = DurableInvocationStore::new();
         let mut invocation_entries = InvocationEntryIndex::default();
@@ -517,12 +519,13 @@ impl Session {
                     }
                     cache_warm_records.push(record);
                 }
-                SessionRecord::UsageUncertainty { record } => {
+                SessionRecord::UsageUncertainty { record, bound } => {
                     record.validate().map_err(|_| SessionError::Corrupt {
                         line: line_no,
                         message: "invalid usage uncertainty identifiers".into(),
                     })?;
                     usage_uncertainty_records.push(record);
+                    usage_uncertainty_bounds.push(bound);
                 }
                 SessionRecord::Usage { record } => {
                     if let UsageRecordKind::AssistantTurn { assistant } = &record.kind {
@@ -639,6 +642,7 @@ impl Session {
             checkpoints,
             usage_records,
             usage_uncertainty_records,
+            usage_uncertainty_bounds,
             cache_warm_records,
             entry_labels,
         })

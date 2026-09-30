@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- One ambiguous provider failure no longer disables hard cost ceilings for the
+  rest of the session; the attempt is charged its admitted worst case. Missing
+  bounds or prices still fail closed for the affected ceiling.
+
 - Target v0.8.2: set up and configure every extension from `/extensions`.
   Choosing an extension opens its options menu (a disabled one is enabled
   first), which shows its state and offers only what applies. Actions show

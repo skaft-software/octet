@@ -205,14 +205,19 @@ Failed-attempt usage is **unknown**, not zero. Every observed accepted failure
 is durably recorded before replacement, independently of successful usage and
 session branches. HTTP 5xx and 408 responses also carry unknown usage: a gateway
 failure can hide accepted upstream work. Replay authority is not zero-billing
-evidence. Under a hard ceiling these stop after the first response; without a
-ceiling their uncertainty remains durable after recovery. Hard cumulative token/cost ceilings fail closed on outstanding
-uncertainty, including after resume or later ceiling activation. Child uncertainty
-is mirrored before its known usage subtotal. `ProviderUsageUncertain` is emitted
-on the first observed uncertainty and at run start for an already-uncertain
-session; successful turns do not clear it. Subsequent cost/token numbers are known
-subtotals, not complete totals. Context-size estimates still use successful
-provider usage, never invented failed-attempt tokens.
+evidence. Each ambiguous attempt with an enforceable output cap retains its
+admitted input estimate plus that cap as a conservative token bound, priced at
+the route's worst-case rate when available. Hard cumulative ceilings charge
+known usage plus all such bounds, including after resume or later ceiling
+activation; the bound can over-count but cannot under-count admitted usage.
+Unbounded attempts (including native steering, unpriced routes for cost ceilings,
+and legacy records) still fail closed. Child exposure is mirrored by agent ID,
+recording only the increase in each child's bound before its known usage subtotal.
+`ProviderUsageUncertain` is emitted on the first observed uncertainty and at
+run start for an already-uncertain session; successful turns do not clear it.
+Subsequent cost/token numbers are known subtotals, not complete totals.
+Context-size estimates still use successful provider usage, never invented
+failed-attempt tokens.
 
 Accepted OAuth rotation with indeterminate completion is not autonomously
 replayed merely to refresh credentials. Generic Connect/DNS/TLS failures have

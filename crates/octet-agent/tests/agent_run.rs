@@ -8068,6 +8068,66 @@ async fn qualified_codex_permanent_failures_do_not_replace() {
     }
 }
 
+struct Gateway504ThenAnswer(AtomicUsize);
+impl Respond for Gateway504ThenAnswer {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            ResponseTemplate::new(504)
+                .set_body_json(serde_json::json!({"error":{"code":"server_error"}}))
+        } else {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses_text_turn(
+                    "ok",
+                    "bounded retry",
+                    "response.completed",
+                    "accepted",
+                ))
+        }
+    }
+}
+
+#[tokio::test]
+async fn capped_504_charges_worst_case_without_disabling_later_cost_ceiling() {
+    let (mut agent, server, _workspace, session_path) =
+        recovery_harness_with_output_cap(vec![], true).await;
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Gateway504ThenAnswer(AtomicUsize::new(0)))
+        .mount(&server)
+        .await;
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert_eq!(
+        agent.complete("possibly accepted").await.unwrap().text,
+        "bounded retry"
+    );
+    let exposure = agent.session().usage_uncertainty_exposure().unwrap();
+    assert!(exposure.tokens > 0);
+    let cost = exposure.cost_microdollars.unwrap();
+    assert!(cost > 0);
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert_eq!(wire_requests(&server).await.len(), 2);
+
+    let current = cost.saturating_add(agent.session().total_cost_microdollars());
+    agent.set_max_session_cost_microdollars(Some(current));
+    assert!(matches!(agent.complete("not affordable").await,
+        Err(octet_agent::AgentError::CostLimit { current: charged, .. }) if charged == current));
+    assert_eq!(wire_requests(&server).await.len(), 2);
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert_eq!(
+        agent.complete("now affordable").await.unwrap().text,
+        "bounded retry"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 3);
+    assert_eq!(
+        Session::open_read_only(&session_path)
+            .unwrap()
+            .usage_uncertainty_exposure(),
+        Some(exposure)
+    );
+}
+
 #[tokio::test]
 async fn cap_supported_hard_cost_budget_fails_closed_on_unknown_interrupted_usage() {
     let (mut agent, server, _workspace, _) = recovery_harness_with_output_cap(

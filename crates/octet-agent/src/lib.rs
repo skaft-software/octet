@@ -235,7 +235,7 @@ pub use session::{
     CacheWarmRecord, CacheWarmState, Checkpoint, Entry, EntryId, EntryMetadata, EntryValue,
     ExtensionEntryMetadata, ExtensionMetadataProvenance, Session, SessionError, SessionRecord,
     SessionRunOutcome, SessionRunOutcomeStatus, UsageRecord, UsageRecordKind,
-    UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
+    UsageUncertaintyBound, UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
     MAX_EXTENSION_ENTRY_METADATA_NAMESPACES, MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
 };
 pub use skills::{

@@ -9,7 +9,9 @@ use octet_ai::{
     StopReason, StreamEvent,
 };
 
-use crate::session::{now_unix_millis, CacheWarmRecord, CacheWarmState, Session, SessionError};
+use crate::session::{
+    now_unix_millis, CacheWarmRecord, CacheWarmState, Session, SessionError, UsageUncertaintyBound,
+};
 
 /// Explicit keepalive trigger. An idle host must call the API to schedule it;
 /// no speculative streaming-prefix mode is implemented.
@@ -163,6 +165,7 @@ pub(crate) async fn dispatch(
     session: &mut Session,
     request: Request,
     deadline: Duration,
+    bound: Option<UsageUncertaintyBound>,
 ) -> Result<CacheWarmOutcome, SessionError> {
     let attempt = session
         .cache_warm_records()
@@ -202,10 +205,11 @@ pub(crate) async fn dispatch(
         other => {
             // An opening failure does not prove non-acceptance. In particular
             // deadline expiration can race response headers or a provider body.
-            session.record_usage_uncertainty(
+            session.record_usage_uncertainty_with_bound(
                 model.endpoint.id.clone(),
                 model.spec.id.clone(),
                 "cache_warm",
+                bound,
             )?;
             status.state = if other.is_err() {
                 CacheWarmState::TimedOut
@@ -498,6 +502,7 @@ mod tests {
             &mut session,
             warm_request,
             Duration::from_secs(1),
+            None,
         )
         .await;
         assert_eq!(outcome.unwrap(), CacheWarmOutcome::Completed);
@@ -560,6 +565,10 @@ mod tests {
             &mut session,
             request,
             Duration::from_millis(5),
+            Some(UsageUncertaintyBound {
+                tokens: 4_097,
+                cost_microdollars: Some(50),
+            }),
         )
         .await
         .unwrap();
@@ -570,10 +579,18 @@ mod tests {
         );
         assert_eq!(session.usage_records().len(), 1);
         assert_eq!(session.usage_uncertainty_records().len(), 1);
+        assert_eq!(session.usage_uncertainty_exposure().unwrap().tokens, 4_097);
         drop(session);
         let reopened = Session::open(path).unwrap();
         assert!(reopened.has_uncertain_usage());
         assert_eq!(reopened.cache_warm_records().len(), 2);
+        assert_eq!(
+            reopened
+                .usage_uncertainty_exposure()
+                .unwrap()
+                .cost_microdollars,
+            Some(50)
+        );
     }
 
     #[test]

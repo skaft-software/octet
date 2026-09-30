@@ -186,12 +186,15 @@ known usage. An append failure must stop automatic replacement.
 checkpoints, compaction, checkout (including another branch or the root), and
 reopening. It is session-global accounting, never model-visible context or head
 state. Existing usage and cost totals remain **known subtotals**, not complete
-spend; hard cumulative cost/token limits must fail closed while uncertainty is
-present, including limits enabled after resuming. `usage_uncertainty_records()`
-exposes the bounded evidence without inventing missing counts or prices. The
-writer records each failed physical attempt once, not each retry notification;
-records are evidence, not provider-confirmed billable-attempt counts. Delegated
-unknown exposure must also be mirrored into the owning root ledger.
+spend. If `usage_uncertainty.bound` is present, hard ceilings conservatively
+charge its input estimate plus provider-enforced output cap and its worst-case
+cost. Missing bounds still fail closed; missing prices fail the cost ceiling.
+This includes limits enabled after resuming. `usage_uncertainty_records()`
+exposes the bounded identifiers separately from the optional admission bounds;
+neither invents provider-confirmed usage. The writer records each failed
+physical attempt once, not each retry notification; records are evidence, not
+provider-confirmed billable-attempt counts. Delegated exposure is mirrored into
+the owning root ledger by child, recording only increases.
 
 Older sessions without these records retain their existing known ledger; the
 reader does not fabricate evidence about historical failures. Fork/clone remains

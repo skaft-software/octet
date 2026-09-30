@@ -319,6 +319,18 @@ impl Session {
         model: ModelId,
         operation: impl Into<String>,
     ) -> Result<(), SessionError> {
+        self.record_usage_uncertainty_with_bound(endpoint, model, operation, None)
+    }
+
+    /// Persist an accepted attempt's unknown usage with its conservative
+    /// admission exposure. An absent bound continues to fail hard ceilings closed.
+    pub fn record_usage_uncertainty_with_bound(
+        &mut self,
+        endpoint: EndpointId,
+        model: ModelId,
+        operation: impl Into<String>,
+        bound: Option<UsageUncertaintyBound>,
+    ) -> Result<(), SessionError> {
         let record = UsageUncertaintyRecord {
             endpoint,
             model,
@@ -328,10 +340,14 @@ impl Session {
         let mut buffer = Vec::with_capacity(256);
         write_json_line(
             &mut buffer,
-            &SessionRecordRef::UsageUncertainty { record: &record },
+            &SessionRecordRef::UsageUncertainty {
+                record: &record,
+                bound,
+            },
         )?;
         self.persist(&buffer)?;
         self.usage_uncertainty_records.push(record);
+        self.usage_uncertainty_bounds.push(bound);
         Ok(())
     }
 
@@ -344,14 +360,21 @@ impl Session {
         endpoint: EndpointId,
         model: ModelId,
         operation: &str,
+        bound: Option<UsageUncertaintyBound>,
     ) -> Result<(), SessionError> {
-        let result = self.record_usage_uncertainty(endpoint.clone(), model.clone(), operation);
+        let result = self.record_usage_uncertainty_with_bound(
+            endpoint.clone(),
+            model.clone(),
+            operation,
+            bound,
+        );
         if result.is_err() {
             self.usage_uncertainty_records.push(UsageUncertaintyRecord {
                 endpoint,
                 model,
                 operation: operation.to_owned(),
             });
+            self.usage_uncertainty_bounds.push(bound);
         }
         result
     }
@@ -365,9 +388,40 @@ impl Session {
             .any(|record| record.cost.is_none() && record.cost_microdollars.is_none())
     }
 
+    /// Conservative total admission exposure for all uncertain attempts.
+    /// None means a bound is missing, native steering is unsettled, or a cache
+    /// warm attempt is still in flight. Cost stays unavailable if any route was
+    /// unpriced, even if its token bound is known.
+    pub fn usage_uncertainty_exposure(&self) -> Option<UsageUncertaintyBound> {
+        if self.has_unsettled_native_steering()
+            || self
+                .cache_warm_records
+                .last()
+                .is_some_and(|record| record.state == CacheWarmState::Started)
+        {
+            return None;
+        }
+        self.usage_uncertainty_bounds.iter().try_fold(
+            UsageUncertaintyBound {
+                tokens: 0,
+                cost_microdollars: Some(0),
+            },
+            |total, bound| {
+                let bound = bound.as_ref()?;
+                Some(UsageUncertaintyBound {
+                    tokens: total.tokens.saturating_add(bound.tokens),
+                    cost_microdollars: total
+                        .cost_microdollars
+                        .zip(bound.cost_microdollars)
+                        .map(|(left, right)| left.saturating_add(right)),
+                })
+            },
+        )
+    }
+
     /// Whether any durable accepted-attempt usage is unknown, on any branch.
     /// Known usage/cost totals are only subtotals while this is true. Hard
-    /// cumulative ceilings must fail closed, including after reopening.
+    /// cumulative ceilings fail closed only when admission exposure lacks a bound.
     pub fn has_uncertain_usage(&self) -> bool {
         !self.usage_uncertainty_records.is_empty()
             || self.has_unsettled_native_steering()
@@ -403,8 +457,13 @@ impl Session {
         !pending.is_empty()
     }
 
+    /// Admission bounds alongside uncertainty evidence, in append order.
+    pub(crate) fn usage_uncertainty_bounds(&self) -> &[Option<UsageUncertaintyBound>] {
+        &self.usage_uncertainty_bounds
+    }
+
     /// Unknown-usage evidence in append order, independent of the active head.
-    /// These records contain no token or cost estimates and are not usage totals.
+    /// These records are not usage totals.
     pub fn usage_uncertainty_records(&self) -> &[UsageUncertaintyRecord] {
         &self.usage_uncertainty_records
     }
