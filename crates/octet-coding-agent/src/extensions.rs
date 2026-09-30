@@ -34,21 +34,22 @@ use octet_agent::extension_process::{
     ExtensionProcess, ExtensionRequestFailure, ExtensionRequestId, ExtensionRequestOutcome,
     ExtensionRuntimeConfig, ExtensionRuntimeSharing, ExtensionSessionEntryOperation,
     ExtensionSessionLifecycleReceiver, ExtensionSessionLifecycleRequest,
-    ExtensionSessionLifecycleService, ExtensionSource, ExtensionStatusContribution,
-    ExtensionTerminalInput, ExtensionTerminalOperation, ExtensionTerminalResize, ExtensionTrust,
-    ExtensionUiContribution, ExtensionUiSurface, ExtensionWidgetPlacement, ShortcutDefinition,
-    TerminalAcquireResult, ToolRenderRequest, ToolRenderSegment, DELEGATION_TELEMETRY_SCHEMA,
-    EXTENSION_API_VERSION_0_1, EXTENSION_API_VERSION_0_3, EXTENSION_FEATURE_ACTIVE_TOOLS,
-    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_COMPOSER,
-    EXTENSION_FEATURE_DELEGATION_TELEMETRY, EXTENSION_FEATURE_DYNAMIC_TOOLS,
-    EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, EXTENSION_FEATURE_MESSAGE_INJECTION,
-    EXTENSION_FEATURE_SESSION_CONTEXT, EXTENSION_FEATURE_SESSION_ENTRIES,
-    EXTENSION_FEATURE_SHORTCUTS, EXTENSION_FEATURE_SYSTEM_PROMPT_READ,
-    EXTENSION_FEATURE_TERMINAL_HANDOFF, EXTENSION_MANIFEST_FILENAME,
-    MAX_EXTENSION_BASH_COMMAND_BYTES, MAX_EXTENSION_COMPOSER_TEXT_BYTES,
-    MAX_EXTENSION_CONTEXT_ACTIVE_SKILLS, MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
-    MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES, MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES,
-    MAX_EXTENSION_SESSION_LABEL_BYTES, MAX_EXTENSION_SESSION_NAME_BYTES, MAX_EXTENSION_SHORTCUTS,
+    ExtensionSessionLifecycleService, ExtensionSource, ExtensionStartDecision,
+    ExtensionStatusContribution, ExtensionTerminalInput, ExtensionTerminalOperation,
+    ExtensionTerminalResize, ExtensionTrust, ExtensionUiContribution, ExtensionUiSurface,
+    ExtensionWidgetPlacement, ShortcutDefinition, TerminalAcquireResult, ToolRenderRequest,
+    ToolRenderSegment, DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION_0_1,
+    EXTENSION_API_VERSION_0_3, EXTENSION_FEATURE_ACTIVE_TOOLS, EXTENSION_FEATURE_AGENT_SESSIONS,
+    EXTENSION_FEATURE_COMPOSER, EXTENSION_FEATURE_DELEGATION_TELEMETRY,
+    EXTENSION_FEATURE_DYNAMIC_TOOLS, EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+    EXTENSION_FEATURE_MESSAGE_INJECTION, EXTENSION_FEATURE_SESSION_CONTEXT,
+    EXTENSION_FEATURE_SESSION_ENTRIES, EXTENSION_FEATURE_SHORTCUTS,
+    EXTENSION_FEATURE_SYSTEM_PROMPT_READ, EXTENSION_FEATURE_TERMINAL_HANDOFF,
+    EXTENSION_MANIFEST_FILENAME, MAX_EXTENSION_BASH_COMMAND_BYTES,
+    MAX_EXTENSION_COMPOSER_TEXT_BYTES, MAX_EXTENSION_CONTEXT_ACTIVE_SKILLS,
+    MAX_EXTENSION_INJECTED_MESSAGE_BYTES, MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES,
+    MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES, MAX_EXTENSION_SESSION_LABEL_BYTES,
+    MAX_EXTENSION_SESSION_NAME_BYTES, MAX_EXTENSION_SHORTCUTS,
     MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES, MAX_EXTENSION_SHORTCUT_ID_BYTES,
     MAX_EXTENSION_SHORTCUT_KEY_BYTES, MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES,
     MAX_EXTENSION_UI_ENTRIES, MAX_EXTENSION_UI_KEY_BYTES, MAX_EXTENSION_UI_LINES,
@@ -105,12 +106,34 @@ const MAX_CONTEXT_CONTRIBUTION_BYTES: usize = 64 * 1024;
 /// worker app has been built.
 #[cfg(feature = "serve")]
 pub fn subagents_extension_activation_configured(config: &Config) -> bool {
-    config.effect_policy == octet_agent::EffectPolicy::UnsafeHost
-        && config.sandbox.process_execution_allowed()
-        && config
+    if !config.sandbox.process_execution_allowed()
+        || !config
             .enabled_extensions
             .iter()
             .any(|name| name == SUBAGENTS_EXTENSION_NAME)
+    {
+        return false;
+    }
+    // Full access has implicit authority. Under controlled policies an exact
+    // selected source must have a grant; a bare global name must not authorize
+    // a project shadow when offering Ultra before the process is launched.
+    if config.effect_policy == octet_agent::EffectPolicy::UnsafeHost {
+        return true;
+    }
+    let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+    let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
+    let mut diagnostics = Vec::new();
+    let (policy, _) = extension_policy(config, &mut diagnostics);
+    snapshot.resources().any(|resource| {
+        resource.name == SUBAGENTS_EXTENSION_NAME
+            && load_extension_descriptor(&resolver, resource, &policy, &mut diagnostics)
+                .is_some_and(|descriptor| {
+                    descriptor
+                        .activation
+                        .start_decision(descriptor.source, config.workspace_trusted)
+                        == ExtensionStartDecision::Allowed
+                })
+    })
 }
 
 const MAX_EXTENSION_CONTEXT_BYTES: usize = 256 * 1024;
@@ -166,7 +189,7 @@ const SESSION_LIFECYCLE_QUEUE_CAPACITY: usize = 8;
 const MAX_HOST_REQUEST_TOOL_NAMES: usize = 64;
 /// Upper bound for host requests queued between two shell drains.
 const HOST_REQUEST_QUEUE_CAPACITY: usize = 64;
-const CONTROLLED_EXTENSION_START_DIAGNOSTIC: &str = "executable extensions were not started: safe mode/controlled policies deny extension process startup even with explicit trust; full access (unsafe_host) is required and should be used only inside OS-level isolation";
+const CONTROLLED_EXTENSION_START_DIAGNOSTIC: &str = "enabled extensions without host authority were not started: grant host authority per source in /extensions or trusted_extensions; safe mode is not a sandbox—granted extensions run with your OS permissions outside the tool-effect broker";
 static NEXT_EXTENSION_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The active-session driver is dispatched only by the interactive idle loop.
@@ -373,14 +396,22 @@ fn normalize_trusted_manifest_path(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn persistent_trust_grant(descriptor: &DiscoveredExtension) -> String {
-    if descriptor.source == ExtensionSource::Global {
-        descriptor.manifest.name.clone()
+    persistent_host_authority_grant(
+        descriptor.source,
+        &descriptor.manifest.name,
+        &descriptor.manifest_path,
+    )
+}
+
+pub(crate) fn persistent_host_authority_grant(
+    source: ExtensionSource,
+    name: &str,
+    manifest_path: &Path,
+) -> String {
+    if source == ExtensionSource::Global {
+        name.to_owned()
     } else {
-        format!(
-            "{}@{}",
-            descriptor.manifest.name,
-            descriptor.manifest_path.display()
-        )
+        format!("{name}@{}", manifest_path.display())
     }
 }
 
@@ -468,7 +499,11 @@ pub(crate) fn selected_extension_flag_declarations(
     by_name
         .into_values()
         .filter(|descriptor| {
-            descriptor.activation.enabled && descriptor.activation.trust == ExtensionTrust::Trusted
+            descriptor
+                .activation
+                .start_decision(descriptor.source, config.workspace_trusted)
+                == ExtensionStartDecision::Allowed
+                && config.sandbox.process_execution_allowed()
         })
         .flat_map(|descriptor| {
             let name = descriptor.manifest.name;
@@ -2705,44 +2740,54 @@ impl ExecutableExtensions {
                 config.experimental_streamable_http_mcp,
             );
         }
+        let mut needs_host_authority = false;
         for descriptor in &descriptors {
-            if descriptor.activation.enabled
-                && descriptor.activation.trust == ExtensionTrust::Untrusted
+            match descriptor
+                .activation
+                .start_decision(descriptor.source, config.workspace_trusted)
             {
-                diagnostics.push(format!(
-                    "warning: {}: extension {:?} is enabled but untrusted; add trusted_extensions = [{:?}] to the user config or pass --trust-extension {} for this invocation",
-                    descriptor.manifest_path.display(),
-                    descriptor.manifest.name,
-                    persistent_trust_grant(descriptor),
-                    descriptor.manifest.name
-                ));
+                ExtensionStartDecision::NeedsHostAuthority => {
+                    diagnostics.push(format!(
+                        "warning: {}: extension {:?} is enabled but needs host authority; grant trusted_extensions = [{:?}] in user config or pass --trust-extension {} for this invocation",
+                        descriptor.manifest_path.display(),
+                        descriptor.manifest.name,
+                        persistent_trust_grant(descriptor),
+                        descriptor.manifest.name
+                    ));
+                    needs_host_authority = true;
+                }
+                ExtensionStartDecision::NeedsWorkspaceTrust => {
+                    diagnostics.push(format!(
+                        "warning: {}: trust this workspace first to start the project extension {:?}",
+                        descriptor.manifest_path.display(), descriptor.manifest.name
+                    ));
+                }
+                ExtensionStartDecision::Allowed | ExtensionStartDecision::Disabled => {}
             }
+        }
+        if needs_host_authority {
+            diagnostics.push(CONTROLLED_EXTENSION_START_DIAGNOSTIC.to_owned());
         }
         let host_state = host_state(session, model, reasoning, sessions);
         let has_enabled = descriptors
             .iter()
             .any(|descriptor| descriptor.activation.enabled);
-        // Executable extensions are ambient-authority child processes, not
-        // merely optional tools. Controlled must prevent startup itself; later
-        // broker checks cannot contain an already-running process.
-        if config.effect_policy != octet_agent::EffectPolicy::UnsafeHost && has_enabled {
-            diagnostics.push(CONTROLLED_EXTENSION_START_DIAGNOSTIC.to_owned());
-        }
-        // Keep the independent product process gate as an additional
-        // prerequisite. Discovery remains available for actionable diagnostics.
+        // --no-process/--no-shell still denies subprocesses independently of
+        // host authority. Discovery remains available for diagnostics.
         if !config.sandbox.process_execution_allowed() && has_enabled {
             diagnostics.push(
                 "executable extensions were not started: process execution is disabled by --no-process/--no-shell".to_owned(),
             );
         }
-        let execution_allowed = config.effect_policy == octet_agent::EffectPolicy::UnsafeHost
-            && config.sandbox.process_execution_allowed();
+        let execution_allowed = config.sandbox.process_execution_allowed();
         let startable = descriptors
             .iter()
             .filter(|descriptor| {
                 execution_allowed
-                    && descriptor.activation.enabled
-                    && descriptor.activation.trust == ExtensionTrust::Trusted
+                    && descriptor
+                        .activation
+                        .start_decision(descriptor.source, config.workspace_trusted)
+                        == ExtensionStartDecision::Allowed
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -2769,7 +2814,11 @@ impl ExecutableExtensions {
         crate::app::bootstrap::startup_phase("extensions.digest.begin");
         let catalog = ExtensionRuntimeCatalog::from_descriptors(descriptors.iter().cloned().map(
             |mut descriptor| {
-                descriptor.activation.enabled &= execution_allowed;
+                descriptor.activation.enabled &= execution_allowed
+                    && descriptor
+                        .activation
+                        .start_decision(descriptor.source, config.workspace_trusted)
+                        == ExtensionStartDecision::Allowed;
                 descriptor
             },
         ));

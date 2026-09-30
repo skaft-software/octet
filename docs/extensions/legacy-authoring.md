@@ -83,14 +83,13 @@ separate. See [Pi migration](../pi-migration.md).
 
 Discovery is available under every effect policy; executable extensions remain
 disabled until explicitly enabled. In the coding product, startup requires
-enablement, trust, the `unsafe_host` effect-policy floor, and independent
-process permissions. Default full access (`unsafe_host`) implicitly trusts the
-selected extension without persisting a grant or enabling it. `--safe-mode`
-does not inherit that implicit trust and never starts an executable extension,
-even with explicit trust grants or enabled process/shell flags.
-`/extensions status` reports the blocked startup. Use full-access mode only
-inside separate OS-level isolation. Capability declarations are visible consent
-metadata, not an OS sandbox.
+enablement, host authority, and process permissions. Default full access
+(`unsafe_host`) implicitly authorizes the selected extension without persisting
+a grant or enabling it. `--safe-mode` does not inherit that authority: enabled
+extensions require an explicit source-bound grant or `--extension-dir` selection.
+They then run outside the tool-effect broker with your OS permissions, so use
+OS-level isolation for untrusted code. `/extensions status` reports blocked
+startup. Capability declarations are visible consent metadata, not an OS sandbox.
 
 ## Layout and discovery
 
@@ -143,9 +142,9 @@ written back as a persistent name grant. A trusted project config may suggest
 `enabled_extensions`, but cannot create explicit executable-trust grants.
 Persistent grants come from user config or environment
 (`OCTET_TRUSTED_EXTENSIONS`); one-shot grants come from `--trust-extension`.
-Coding-product full access supplies implicit trust independently of those
-grants; `--safe-mode` does not inherit it and keeps executable extensions
-stopped even with explicit grants.
+Coding-product full access supplies implicit host authority independently of
+those grants; `--safe-mode` starts only enabled, granted sources. An explicit
+`--extension-dir` is itself the invocation-only grant for that source.
 
 The agent crate exposes `discover_extension_manifests` for direct-child layouts
 and `ExtensionCatalog::load_resolved` for already resolved manifest paths in
@@ -198,8 +197,8 @@ sharing = "workspace"
 ### Runtime lifecycle and sharing
 
 Discovery builds a bounded static catalog without launching entrypoints. The
-runtime manager activates only profiles admitted by enablement, trust,
-effect-policy, and process-policy gates. `[runtime]` defaults to
+runtime manager activates only profiles admitted by enablement, host authority,
+workspace trust, and process permissions. `[runtime]` defaults to
 `lifecycle = "legacy_resident"`, `sharing = "isolated"`. Valid lifecycles are
 `legacy_resident`, `lazy_resident`, `oneshot`, `session`, `workspace_service`,
 `always`, and `pi_aggregate`.
@@ -419,8 +418,8 @@ never an extension footer string.
 
 `/extensions` opens the installed-bundle management menu. Enter opens the
 selected extension's options menu, enabling it first when it is disabled;
-activation does not persist trust grants. Activation is read-only when
-project/environment/CLI activation makes user config non-authoritative.
+activation alone does not persist host authority grants. Activation is read-only
+when project/environment/CLI activation makes user config non-authoritative.
 `/extensions status` is the diagnostic and presentation fallback;
 `/extensions inspect <agent-session:…>` opens a current parent-bound delegated
 transcript; `/extensions action <extension> <action-id>` performs validated
@@ -619,20 +618,21 @@ drops the waiter, tombstones late replies without harming unrelated calls,
 cancels correlated child requests, and terminates non-cooperative generations
 after bounded grace. Cancellation promises neither rollback nor unsafe replay.
 
-`/extensions` manages installed bundles: Up/Down moves, Enter toggles, Escape
-closes. Selecting enabled `octet-web-search` opens a provider picker; Brave
-Search is recommended and requests its key through correlated secret input;
-SearXNG remains available. Only `enabled_extensions` changes, never trust
-grants; provider state remains extension-owned. Activation is read-only if
-project, environment, or CLI layers participate, because user config is not
+`/extensions` manages installed bundles: Up/Down moves, Enter opens options,
+including Grant/Revoke host authority, Escape closes. Selecting enabled
+`octet-web-search` opens a provider picker; Brave Search is recommended and
+requests its key through correlated secret input; SearXNG remains available.
+Activation changes only `enabled_extensions`; Grant/Revoke separately changes
+`trusted_extensions`. Provider state remains extension-owned. Activation is
+read-only if project, environment, or CLI layers participate, because user config is not
 next-launch authority; already running web-search setup remains available.
 Precedence is revalidated immediately before each write. Enabled unavailable
 bundles remain disable-only. Source-changing trust, tool-name collisions, and
 explicit required-tool removal fail closed.
 
 `/extensions status` includes the selected manifest path and a copyable exact
-persistent/one-shot trust grant for enabled-but-untrusted entries. These grants
-do not bypass safe-mode startup denial.
+persistent/one-shot host authority grant for enabled-but-ungranted entries. Those
+grants permit startup in safe mode when On/off is on.
 `/extensions reload` replaces running processes after successful handshakes;
 general `/reload` reruns discovery and rebuilds the product boundary.
 
@@ -701,9 +701,9 @@ selection, sanitized binding/end payload, 250 ms dispatch, idempotence,
 non-veto, and reload/crash fencing rules moved to
 [declared API `0.3` session hooks](../extensions.md#declared-api-03-session-hooks).
 
-For admitted running full-access extensions, reload starts and fully initializes
-a candidate while the old process remains ready. Launch, handshake, or
-contribution mismatch leaves the old process active. Negotiated dynamic catalogs
+For admitted running extensions (including granted safe-mode sources), reload
+starts and fully initializes a candidate while the old process remains ready.
+Launch, handshake, or contribution mismatch leaves the old process active. Negotiated dynamic catalogs
 may change; static tools and all command/hook/UI contributions must remain
 compatible or return `re-registration required` for an intentional frontend
 rebuild. On acceptance the old generation stops admission, drains to a bounded
@@ -835,14 +835,14 @@ version. Removal accepts only managed bundles and deletes only their directory.
 Config, provider state, sessions, artifacts, browser profiles, and other data
 must live outside it and are not removed.
 
-Installation/discovery never enables or starts an extension, records a trust
-grant, or grants capabilities. `/extensions` may persist activation; it never
-records a trust grant. Coding-product full access implicitly trusts the selected
-extension without persisting trust. `--enable-extension` is invocation-only
-activation; `--trust-extension` is an optional invocation-only explicit grant
-that does not enable anything. `--safe-mode` does not inherit implicit trust and
-keeps executable extensions stopped even with explicit grants; the `unsafe_host`
-floor and independent process gates still apply.
+Installation/discovery never enables or starts an extension, records a host
+authority grant, or grants capabilities. `/extensions` may persist activation
+and can separately Grant/Revoke host authority for a selected source. Full access
+implicitly authorizes selected extensions without persisting grants;
+`--enable-extension` is invocation-only activation; `--trust-extension` is an
+invocation-only host authority grant and does not enable anything. `--safe-mode`
+starts enabled, granted sources, which run with OS permissions outside the
+broker; `--no-process`/`--no-shell` still denies process startup.
 
 Packaged `skills/*/SKILL.md` become user-installed skill candidates but stay
 inactive until explicitly loaded. `~/.octet/skills` and explicit `--skill-dir`

@@ -74,7 +74,7 @@ runtime defaults.
 | `telemetry` | Optional explicit JSONL output path; disabled unless set. Example `"./artifacts/octet-telemetry.jsonl"`. |
 | `[compaction]` | `mode = "local"`, `threshold_fraction = 1.0`, optional `max_active_tokens` (zero/unset uses model limit), `keep_recent_tokens = 20000`, optional `compact_model = "provider/model"`. [Exact budgeting and caveats](context.md#settings). |
 | `enabled_extensions` | Default `[]`: installed executable extensions stay disabled until explicitly enabled. Full access does not change activation. |
-| `trusted_extensions` | Default `[]`: optional persistent source-bound grants. Full access implicitly trusts selected extensions without adding grants; safe mode removes implicit trust and blocks executable startup even with explicit grants. [Resource rules](resources.md#locations-and-precedence). |
+| `trusted_extensions` | Default `[]`: persistent **host authority grants** (existing configs retain their meaning). A bare name grants only the global source; `NAME@/absolute/path/extension.toml` grants that exact manifest. Full access implicitly authorizes enabled extensions without writing a grant. Safe mode starts only enabled, explicitly granted sources (or an explicit `--extension-dir`); extension code runs with your OS permissions outside the tool-effect broker. [Resource rules](resources.md#locations-and-precedence). |
 
 `--theme-dir` adds a theme directory or TOML file to bounded discovery. Named
 files from global, trusted project, or explicit roots can be loaded at startup

@@ -313,7 +313,8 @@ pub struct Cli {
     )]
     pub enable_extensions: Vec<String>,
     /// Explicit invocation-only trust (comma-separated); full access already
-    /// trusts selected extensions. Does not enable them or bypass safe mode.
+    /// trusts selected extensions. Does not enable them; grants host process
+    /// authority for the selected source even under safe mode.
     #[arg(
         long = "trust-extension",
         value_name = "NAMES",
@@ -329,7 +330,7 @@ pub struct Cli {
     #[arg(long = "workspace-trusted", alias = "trust-workspace")]
     pub workspace_trusted: bool,
     /// Ask before every bash call and workspace change, and keep executable
-    /// extensions stopped. An approval policy, not a sandbox.
+    /// extensions stopped unless they have host authority. Not a sandbox.
     #[arg(long = "safe-mode", alias = "safe", conflicts_with = "effect_policy")]
     pub safe_mode: bool,
     /// How tool effects are admitted: unsafe_host (the default: full access,
@@ -907,6 +908,82 @@ fn persist_extension_enabled_to_path(
     document["enabled_extensions"] = toml_edit::value(values);
     write_config_atomically(path, &document.to_string(), original.as_deref())?;
     Ok(names.into_iter().collect())
+}
+
+/// Persist or revoke a source-bound host authority grant in user config.
+/// Existing `trusted_extensions` values retain their meaning across upgrades.
+pub fn persist_extension_host_authority(grant: &str, allowed: bool) -> anyhow::Result<Vec<String>> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist host authority: user home directory is unavailable")
+    })?;
+    persist_extension_host_authority_to_path(grant, allowed, &path)
+}
+
+/// Environment trust takes precedence over user config and cannot be changed
+/// through the menu. Project config is never permitted to grant host authority.
+pub fn extension_host_authority_menu_authoritative() -> bool {
+    std::env::var_os("OCTET_TRUSTED_EXTENSIONS").is_none()
+}
+
+fn persist_extension_host_authority_to_path(
+    grant: &str,
+    allowed: bool,
+    path: &std::path::Path,
+) -> anyhow::Result<Vec<String>> {
+    let grant = normalize_extension_trust_grants(vec![grant.to_owned()])?
+        .into_iter()
+        .next()
+        .expect("one grant remains one normalized grant");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _config_lock = config_update_lock(path)?;
+    let original = match std::fs::read_to_string(path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let content = original.as_deref().unwrap_or_default();
+    let mut document = content.parse::<toml_edit::DocumentMut>().map_err(|error| {
+        anyhow::anyhow!("cannot update invalid config {}: {error}", path.display())
+    })?;
+    let mut grants = Vec::new();
+    if let Some(item) = document.get("trusted_extensions") {
+        let values = item.as_array().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot update config {}: trusted_extensions must be an array",
+                path.display()
+            )
+        })?;
+        for value in values {
+            grants.push(
+                value
+                    .as_str()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cannot update config {}: trusted_extensions must contain only strings",
+                            path.display()
+                        )
+                    })?
+                    .to_owned(),
+            );
+        }
+    }
+    let mut grants = normalize_extension_trust_grants(grants)?;
+    if allowed {
+        grants.push(grant);
+    } else {
+        grants.retain(|value| value != &grant);
+    }
+    grants.sort();
+    grants.dedup();
+    let mut values = toml_edit::Array::new();
+    for value in &grants {
+        values.push(value.as_str());
+    }
+    document["trusted_extensions"] = toml_edit::value(values);
+    write_config_atomically(path, &document.to_string(), original.as_deref())?;
+    Ok(grants)
 }
 
 fn config_update_lock(path: &std::path::Path) -> anyhow::Result<std::fs::File> {

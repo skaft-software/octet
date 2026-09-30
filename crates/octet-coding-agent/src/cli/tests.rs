@@ -1362,6 +1362,44 @@ fn persist_extension_activation_changes_only_the_selected_user_entry() {
     assert!(content.contains("# keep this comment"), "{content}");
 }
 
+#[test]
+fn host_authority_grants_migrate_and_revoke_without_changing_activation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let project = dir.path().join("project/.octet/extensions/fixture");
+    std::fs::create_dir_all(&project).unwrap();
+    let exact = format!("fixture@{}", project.join("extension.toml").display());
+    std::fs::write(
+        &path,
+        "# retained\nenabled_extensions = ['fixture']\ntrusted_extensions = ['fixture']\n",
+    )
+    .unwrap();
+    assert_eq!(
+        persist_extension_host_authority_to_path(&exact, true, &path).unwrap(),
+        vec!["fixture", exact.as_str()]
+    );
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("enabled_extensions = ['fixture']"));
+    assert!(content.contains("# retained"));
+    assert_eq!(
+        persist_extension_host_authority_to_path("fixture", false, &path).unwrap(),
+        vec![exact.as_str()]
+    );
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("enabled_extensions = ['fixture']"));
+    let mut cli = base();
+    cli.workspace = Some(dir.path().into());
+    cli.safe_mode = true;
+    let config = build_config_with_global_path(cli, dir.path(), Some(&path)).unwrap();
+    assert_eq!(config.enabled_extensions, vec!["fixture"]);
+    assert_eq!(config.trusted_extensions, vec![exact]);
+    assert_eq!(
+        config.effect_policy,
+        octet_agent::EffectPolicy::ControlledBashApproval
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn atomic_config_update_preserves_existing_permissions_and_uses_private_new_files() {

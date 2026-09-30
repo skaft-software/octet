@@ -209,11 +209,56 @@ impl crate::extensions::ExtensionConfirmationHandler for ExtensionActionConsole<
 pub(super) enum ExtensionMenuOutcome {
     Back,
     Disable,
+    GrantHostAuthority,
+    RevokeHostAuthority,
 }
 
 enum MenuEntry {
     Item(usize),
     Disable,
+    HostAuthority(bool),
+}
+
+fn authority_grant(summary: &crate::extensions::ExtensionSummary) -> Option<String> {
+    (summary.source != octet_agent::extension_process::ExtensionSource::Explicit).then(|| {
+        crate::extensions::persistent_host_authority_grant(
+            summary.source,
+            &summary.name,
+            &summary.manifest_path,
+        )
+    })
+}
+
+pub(super) fn authority_label(
+    config: &crate::config::Config,
+    summary: &crate::extensions::ExtensionSummary,
+) -> &'static str {
+    if summary.source == octet_agent::extension_process::ExtensionSource::Explicit {
+        "granted (--extension-dir)"
+    } else if config.effect_policy == octet_agent::EffectPolicy::UnsafeHost {
+        "implicit (full access)"
+    } else if summary.trusted {
+        "granted"
+    } else {
+        "not granted"
+    }
+}
+
+fn authority_action(
+    config: &crate::config::Config,
+    summary: &crate::extensions::ExtensionSummary,
+    authoritative: bool,
+) -> Option<bool> {
+    let grant = authority_grant(summary)?;
+    if !authoritative
+        || config
+            .invocation_trusted_extensions
+            .iter()
+            .any(|name| name == &summary.name)
+    {
+        return None;
+    }
+    Some(!config.trusted_extensions.contains(&grant))
 }
 
 /// Shows one extension's options menu until the user goes back or disables it.
@@ -274,6 +319,31 @@ pub(super) async fn extension_options_menu(
             descriptions.push(item.description.clone());
             entries.push(MenuEntry::Item(index));
         }
+        if path.is_empty() {
+            if let Some(summary) = app
+                .executable_extensions
+                .summaries()
+                .into_iter()
+                .find(|summary| summary.name == extension)
+            {
+                if let Some(grant) = authority_action(
+                    &app.config,
+                    &summary,
+                    crate::cli::extension_host_authority_menu_authoritative(),
+                ) {
+                    labels.push(
+                        if grant {
+                            "Grant host authority"
+                        } else {
+                            "Revoke host authority"
+                        }
+                        .to_owned(),
+                    );
+                    descriptions.push(Some("A grant lets this extension run as a host process with your OS permissions, even in safe mode; the tool-effect broker cannot confine its code.".to_owned()));
+                    entries.push(MenuEntry::HostAuthority(grant));
+                }
+            }
+        }
         if path.is_empty() && allow_disable {
             labels.push(format!("Disable {extension}"));
             descriptions.push(Some("Stop the extension and remove its tools".to_owned()));
@@ -313,6 +383,10 @@ pub(super) async fn extension_options_menu(
         };
         let item = match entries[index] {
             MenuEntry::Disable => return Ok(ExtensionMenuOutcome::Disable),
+            MenuEntry::HostAuthority(true) => return Ok(ExtensionMenuOutcome::GrantHostAuthority),
+            MenuEntry::HostAuthority(false) => {
+                return Ok(ExtensionMenuOutcome::RevokeHostAuthority)
+            }
             MenuEntry::Item(index) => items[index].clone(),
         };
         remembered.insert(path.clone(), item.id.clone());
@@ -358,8 +432,9 @@ fn not_running_options() -> crate::extensions::ExtensionOptions {
                 detail: None,
             }),
             detail: Some(
-                "Executable extensions need full access, and safe mode keeps them stopped. \
-                 See /extensions status for why this one is not running."
+                "A stopped extension may need host authority: use Grant host authority here. \
+                 Under safe mode, granted code runs outside the tool-effect broker with your OS permissions. \
+                 See /extensions status for other launch failures."
                     .to_owned(),
             ),
             ..octet_agent::ExtensionMenu::default()
@@ -430,6 +505,98 @@ async fn run_extension_menu_action(
     Ok(())
 }
 
+async fn confirm_host_authority(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    name: &str,
+) -> anyhow::Result<bool> {
+    let request = octet_agent::extension_process::ConfirmationRequest {
+        parent_request_id: None,
+        prompt: format!("Grant {name} host authority?"),
+        detail: Some("This starts the extension's code as a host process with your OS permissions, even under safe mode. The tool-effect broker cannot confine the extension process. Only grant it to a reviewed source; use OS isolation for untrusted code.".to_owned()),
+        destructive: false,
+        default: false,
+    };
+    extension_confirmation_picker(shell, input, "octet", &request).await
+}
+
+/// Persist/revoke a source-specific host authority grant and rebuild the runtime.
+pub(super) async fn set_extension_host_authority(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    name: &str,
+    allowed: bool,
+) -> anyhow::Result<App> {
+    if !crate::cli::extension_host_authority_menu_authoritative() {
+        shell.error("Host authority is controlled by OCTET_TRUSTED_EXTENSIONS; the user config is read-only".into());
+        return Ok(app);
+    }
+    let Some(summary) = app
+        .executable_extensions
+        .summaries()
+        .into_iter()
+        .find(|summary| summary.name == name)
+    else {
+        shell.error(format!("{name}: selected extension is no longer available"));
+        return Ok(app);
+    };
+    let Some(grant) = authority_grant(&summary) else {
+        shell.error(format!("{name}: --extension-dir grants authority for this invocation; remove the option to revoke it"));
+        return Ok(app);
+    };
+    if !allowed
+        && app
+            .config
+            .invocation_trusted_extensions
+            .iter()
+            .any(|value| value == name)
+    {
+        shell.error(format!("{name}: --trust-extension grants authority for this invocation; remove the option to revoke it"));
+        return Ok(app);
+    }
+    if allowed && !confirm_host_authority(shell, input, name).await? {
+        return Ok(app);
+    }
+    if refuse_resource_reload(&app, shell) {
+        return Ok(app);
+    }
+    let config_path = crate::cli::global_config_path();
+    let before_config = config_path.as_deref().and_then(configuration_snapshot);
+    let previously_granted = app.config.trusted_extensions.contains(&grant);
+    let persisted = match crate::cli::persist_extension_host_authority(&grant, allowed) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            shell.error(format!("{name}: host authority was not changed: {error}"));
+            return Ok(app);
+        }
+    };
+    app.config.trusted_extensions = persisted;
+    app = match reload_resources(app, shell, input).await {
+        Ok((app, _)) => app,
+        Err(error) => {
+            let rollback = crate::cli::persist_extension_host_authority(&grant, previously_granted);
+            return match rollback {
+                Ok(_) => Err(error.context(format!("{name} runtime rebuild failed; host authority change was rolled back"))),
+                Err(rollback_error) => Err(error.context(format!("{name} runtime rebuild failed and host authority rollback failed: {rollback_error}"))),
+            };
+        }
+    };
+    observe_configuration_commit(
+        &mut app.executable_extensions,
+        before_config,
+        config_path.as_deref(),
+    )
+    .await;
+    request_extension_ui(shell, &mut app);
+    shell.notice(format!(
+        "{name}: host authority {}",
+        if allowed { "granted" } else { "revoked" }
+    ));
+    shell.clear_error();
+    Ok(app)
+}
+
 /// Persists and applies one activation change. Returns whether it applied.
 pub(super) async fn set_extension_enabled(
     mut app: App,
@@ -457,11 +624,47 @@ pub(super) async fn set_extension_enabled(
         return Ok((app, false));
     }
     let enabled = !currently_enabled;
+    let grant = if enabled && app.config.effect_policy != octet_agent::EffectPolicy::UnsafeHost {
+        app.executable_extensions
+            .summaries()
+            .into_iter()
+            .find(|summary| summary.name == name && !summary.trusted)
+            .and_then(|summary| authority_grant(&summary))
+    } else {
+        None
+    };
+    let grant = if let Some(grant) = grant {
+        if !crate::cli::extension_host_authority_menu_authoritative() {
+            shell.error(format!("{name}: host authority is controlled by OCTET_TRUSTED_EXTENSIONS; enablement was not changed"));
+            return Ok((app, false));
+        }
+        confirm_host_authority(shell, input, name)
+            .await?
+            .then_some(grant)
+    } else {
+        None
+    };
     let config_path = crate::cli::global_config_path();
     let before_config = config_path.as_deref().and_then(configuration_snapshot);
+    let previous_grants = app.config.trusted_extensions.clone();
+    if let Some(grant) = &grant {
+        match crate::cli::persist_extension_host_authority(grant, true) {
+            Ok(grants) => app.config.trusted_extensions = grants,
+            Err(error) => {
+                shell.error(format!(
+                    "{name} was not enabled: could not grant host authority: {error}"
+                ));
+                return Ok((app, false));
+            }
+        }
+    }
     let persisted = match crate::cli::persist_extension_enabled(name, enabled) {
         Ok(persisted) => persisted,
         Err(error) => {
+            if let Some(grant) = &grant {
+                crate::cli::persist_extension_host_authority(grant, false)?;
+                app.config.trusted_extensions = previous_grants;
+            }
             shell.error(format!(
                 "{name} was not changed: could not update user configuration: {error}"
             ));
@@ -472,7 +675,13 @@ pub(super) async fn set_extension_enabled(
     app = match reload_resources(app, shell, input).await {
         Ok((app, _)) => app,
         Err(error) => {
-            let rollback = crate::cli::persist_extension_enabled(name, currently_enabled);
+            let rollback =
+                crate::cli::persist_extension_enabled(name, currently_enabled).and_then(|_| {
+                    if let Some(grant) = &grant {
+                        crate::cli::persist_extension_host_authority(grant, false)?;
+                    }
+                    Ok(())
+                });
             return match rollback {
                 Ok(_) => Err(error.context(format!(
                     "{name} runtime rebuild failed; the user-config activation change was rolled back"
@@ -496,7 +705,7 @@ pub(super) async fn set_extension_enabled(
         .into_iter()
         .find(|summary| summary.name == name);
     let detail = if enabled && summary.as_ref().is_some_and(|summary| !summary.trusted) {
-        "; executable extensions require full access; safe mode keeps them stopped"
+        "; host authority not granted; use Grant host authority in this extension's menu to start it"
     } else {
         ""
     };
@@ -543,6 +752,73 @@ mod tests {
             Some("Only detail".to_owned())
         );
         assert_eq!(menu_purpose(&menu, None), None);
+    }
+
+    fn summary(
+        source: octet_agent::extension_process::ExtensionSource,
+        trusted: bool,
+    ) -> crate::extensions::ExtensionSummary {
+        crate::extensions::ExtensionSummary {
+            name: "fixture".into(),
+            version: "0.1.0".into(),
+            manifest_path: std::path::PathBuf::from(
+                "/workspace/.octet/extensions/fixture/extension.toml",
+            ),
+            manifest_digest: String::new(),
+            bundle_digest: None,
+            source,
+            enabled: true,
+            trusted,
+            running: trusted,
+            api_version: "0.1".into(),
+            negotiated_features: Vec::new(),
+            telemetry_schema: None,
+            compatibility: "compatible".into(),
+            health: None,
+            runtime: None,
+            tools: Vec::new(),
+            commands: Vec::new(),
+            hooks: Vec::new(),
+            ui: Vec::new(),
+            providers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn authority_rows_offer_grant_and_revoke_without_confusing_on_off() {
+        use octet_agent::extension_process::ExtensionSource;
+        let mut config =
+            super::super::tests::terminal_theme_test_config(std::path::PathBuf::from("/workspace"));
+        let mut project = summary(ExtensionSource::Project, false);
+        assert_eq!(authority_label(&config, &project), "not granted");
+        assert_eq!(authority_action(&config, &project, true), Some(true));
+        assert_eq!(authority_action(&config, &project, false), None);
+        config
+            .trusted_extensions
+            .push(authority_grant(&project).unwrap());
+        project.trusted = true;
+        assert_eq!(authority_label(&config, &project), "granted");
+        assert_eq!(authority_action(&config, &project, true), Some(false));
+        project.enabled = false;
+        assert_eq!(
+            authority_action(&config, &project, true),
+            Some(false),
+            "authority remains distinct from On/off"
+        );
+        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        assert_eq!(authority_label(&config, &project), "implicit (full access)");
+        config.invocation_trusted_extensions.push("fixture".into());
+        assert_eq!(
+            authority_action(&config, &project, true),
+            None,
+            "one-shot grants cannot be revoked in user config"
+        );
+        let explicit = summary(ExtensionSource::Explicit, true);
+        assert_eq!(
+            authority_label(&config, &explicit),
+            "granted (--extension-dir)"
+        );
+        assert_eq!(authority_action(&config, &explicit, true), None);
     }
 
     #[test]

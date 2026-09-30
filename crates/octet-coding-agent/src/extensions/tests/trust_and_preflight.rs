@@ -67,7 +67,7 @@ providers = true
 #[test]
 fn selected_cli_flags_require_enablement_and_exact_trust_without_starting_processes() {
     let temp = tempfile::tempdir().unwrap();
-    let extension_root = temp.path().join("extensions");
+    let extension_root = temp.path().join(".octet/extensions");
     for (name, flag) in [
         ("flag-trusted", "trusted-option"),
         ("flag-untrusted", "workspace"),
@@ -91,6 +91,8 @@ flags = [{{ name = {flag:?}, type = "boolean", default = false }}]
     }
     let mut config = executable_extension_config(temp.path(), &extension_root, "flag-trusted");
     config.enabled_extensions.push("flag-untrusted".into());
+    config.extension_paths.clear();
+    config.workspace_trusted = true;
     let selected = selected_extension_flag_declarations(&config);
     assert_eq!(
         selected
@@ -105,7 +107,7 @@ flags = [{{ name = {flag:?}, type = "boolean", default = false }}]
 #[test]
 fn full_access_cli_flags_need_enablement_but_no_extra_trust() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("extensions");
+    let root = temp.path().join(".octet/extensions");
     let directory = root.join("flag-fixture");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
@@ -122,6 +124,8 @@ flags = [{ name = "fixture-option", type = "boolean", default = false }]
     .unwrap();
     let mut config = executable_extension_config(temp.path(), &root, "flag-fixture");
     config.invocation_trusted_extensions.clear();
+    config.extension_paths.clear();
+    config.workspace_trusted = true;
     config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
     assert_eq!(selected_extension_flag_declarations(&config).len(), 1);
     config.enabled_extensions.clear();

@@ -31,18 +31,20 @@ launch code. Installed executable extensions remain **disabled by default**.
 Full access (`unsafe_host`, the default) implicitly trusts the selected validated
 source, so an explicitly enabled extension needs no extra trust flag. Trust and
 enablement are separate; implicit trust never writes a grant to configuration.
-Process startup still requires full access and the independent process gate.
+Process startup still respects `--no-process`/`--no-shell`.
 
-`--safe-mode` removes implicit trust and blocks executable startup even when an
-explicit grant exists. It does not sandbox extensions or allow approval to
-bypass the `unsafe_host` floor. A project config cannot create a persistent
-executable trust grant. Bare persistent trust names apply only to the global
+`--safe-mode` removes implicit host authority, so enabled extensions start
+only with an explicit grant for the selected source. A grant allows code to
+run as a host process with your OS permissions outside the tool-effect broker;
+safe mode is not an extension sandbox. A project config cannot create a
+persistent host authority grant. Bare persistent trust names apply only to the global
 extension directory; project and explicit sources require an exact absolute
-`name@.../extension.toml` grant to persist trust. `--trust-extension name` grants
-explicit trust only for that invocation, never enablement. These grants do not
-transfer between sources or override safe-mode execution policy. The extension
-directory name must match the manifest name, and source, compatibility, bundle,
-and artifact validation remain mandatory.
+`name@.../extension.toml` grant to persist host authority. `--trust-extension NAME`
+grants it only for that invocation, never enablement; `--extension-dir`
+is itself an invocation-only grant for that source. These grants do not transfer
+between sources; they permit startup under safe mode. The extension directory
+name must match the manifest name, and source, compatibility, bundle, and
+artifact validation remain mandatory.
 
 If octet cannot resolve an absolute user home directory, global configuration and
 global resources are disabled with a diagnostic. It never falls back to the
@@ -141,8 +143,7 @@ a complete replacement from the new snapshot and swap only after validation,
 so an in-flight prompt never observes half of a reload.
 
 - `/skills reload` refreshes the shared prompt/skill resource boundary.
-- `/extensions reload` handshakes replacement processes under the default
-  full-access policy when the independent process gate permits startup; safe mode
-  leaves executable extension processes stopped.
+- `/extensions reload` handshakes replacement processes when On/off and host
+  authority allow startup; safe mode starts granted sources, not ungranted ones.
 - `/reload` performs full product resource discovery and rebuilds the active
   customization boundary.

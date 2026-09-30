@@ -1,8 +1,8 @@
 //! Starting real extension processes under the effect and trust policies.
 //!
 //! These are the slow ones: they launch an executable extension and observe the
-//! result. Covers a controlled policy refusing to launch an enabled, explicitly
-//! trusted executable, and an installed extension staying disabled by default
+//! result. Covers a controlled policy refusing to launch an enabled, ungranted
+//! executable, and an installed extension staying disabled by default
 //! with full-access trust not being persisted.
 
 use super::support::*;
@@ -10,11 +10,11 @@ use super::*;
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn controlled_policy_never_launches_enabled_trusted_executable_extension() {
+async fn controlled_policy_needs_host_authority_to_launch_extension() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let temp = tempfile::tempdir().unwrap();
-    let extension_root = temp.path().join("extensions");
+    let extension_root = temp.path().join(".octet/extensions");
     let extension_dir = extension_root.join("controlled-launch-probe");
     std::fs::create_dir_all(&extension_dir).unwrap();
     std::fs::write(
@@ -47,6 +47,9 @@ command = "launch-probe.sh"
             executable_extension_config(temp.path(), &extension_root, "controlled-launch-probe");
         config.effect_policy = effect_policy;
         config.sandbox.allow_process = allow_process;
+        config.invocation_trusted_extensions.clear();
+        config.extension_paths.clear();
+        config.workspace_trusted = true;
         assert!(config.sandbox.allow_shell);
         let session =
             Session::create(temp.path().join(format!("session-{effect_policy:?}.jsonl"))).unwrap();
@@ -71,7 +74,7 @@ command = "launch-probe.sh"
         assert!(extensions.summaries.iter().any(|extension| {
             extension.name == "controlled-launch-probe"
                 && extension.enabled
-                && extension.trusted
+                && extension.trusted == (effect_policy == octet_agent::EffectPolicy::UnsafeHost)
                 && !extension.running
         }));
         if allow_process {
@@ -87,6 +90,73 @@ command = "launch-probe.sh"
         }
         extensions.shutdown().await;
     }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_source_bound_trust_config_starts_under_safe_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(".octet/extensions");
+    let directory = root.join("migrated");
+    std::fs::create_dir_all(&directory).unwrap();
+    let manifest = directory.join(EXTENSION_MANIFEST_FILENAME);
+    std::fs::write(&manifest, "name = 'migrated'\nversion = '0.1.0'\napi_version = '0.1'\n[entrypoint]\ncommand = 'extension.sh'\n").unwrap();
+    let executable = directory.join("extension.sh");
+    std::fs::write(&executable, "#!/bin/sh\nprintf launched > \"$OCTET_WORKSPACE/safe-mode-launched\"\nIFS= read -r initialize\nid=$(printf '%s\\n' \"$initialize\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\nprintf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"api_version\":\"0.1\",\"tools\":[],\"commands\":[]}}\\n' \"$id\"\nwhile IFS= read -r request; do :; done\n").unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    // A 0.8.1 user-config entry remains a per-source host authority grant.
+    let content = format!(
+        "enabled_extensions = ['migrated']\ntrusted_extensions = ['migrated@{}']\n",
+        manifest.display()
+    );
+    let existing: toml::Value = toml::from_str(&content).unwrap();
+    let mut config = executable_extension_config(temp.path(), &root, "migrated");
+    config.workspace_trusted = true;
+    config.extension_paths.clear();
+    config.effect_policy = octet_agent::EffectPolicy::ControlledBashApproval;
+    config.invocation_trusted_extensions.clear();
+    config.trusted_extensions = existing["trusted_extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect();
+    let session = Session::create(temp.path().join("session.jsonl")).unwrap();
+    let model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let sessions = SessionStore::new(&config.session_dir, temp.path());
+    let mut host = ExtensionHost::new();
+    let mut extensions = ExecutableExtensions::discover_and_start(
+        &config,
+        &session,
+        &model,
+        &ReasoningConfig::Off,
+        &sessions,
+        &mut host,
+    );
+    assert!(
+        extensions
+            .summaries
+            .iter()
+            .any(|summary| summary.name == "migrated"
+                && summary.enabled
+                && summary.trusted
+                && summary.running),
+        "{:?}",
+        extensions.diagnostics.entries
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("safe-mode-launched")).unwrap(),
+        "launched"
+    );
+    extensions.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -223,7 +293,7 @@ async fn installed_extension_is_disabled_by_default_and_full_access_trust_is_not
         if explicit_trust {
             config.invocation_trusted_extensions.push(name.into());
         }
-        let expected_trust = effect_policy == UnsafeHost || explicit_trust;
+        let expected_running = allow_process && allow_shell; // --extension-dir grants authority.
         let mut safe_host = ExtensionHost::new();
         let mut safe = ExecutableExtensions::discover_and_start_with_runtime_manager(
             &config,
@@ -235,32 +305,37 @@ async fn installed_extension_is_disabled_by_default_and_full_access_trust_is_not
             started.runtime_manager(),
         );
         assert!(safe.summaries.iter().any(|entry| {
-            entry.name == name && entry.enabled && entry.trusted == expected_trust && !entry.running
+            entry.name == name
+                && entry.enabled
+                && entry.trusted
+                && entry.running == expected_running
         }));
-        assert!(safe.processes.is_empty());
-        if !expected_trust {
-            assert!(safe
-                .diagnostics
-                .iter()
-                .any(|entry| entry.contains("enabled but untrusted")));
-        }
-        if effect_policy != UnsafeHost {
-            assert!(safe
-                .diagnostics
-                .iter()
-                .any(|entry| entry == CONTROLLED_EXTENSION_START_DIAGNOSTIC));
-        } else {
+        assert_eq!(safe.processes.len(), usize::from(expected_running));
+        if !allow_process || !allow_shell {
             assert!(safe
                 .diagnostics
                 .iter()
                 .any(|entry| entry.contains("process execution is disabled")));
+        } else {
+            assert!(!safe
+                .diagnostics
+                .iter()
+                .any(|entry| entry == CONTROLLED_EXTENSION_START_DIAGNOSTIC));
         }
-        assert_eq!(
-            started.processes[0].health_snapshot().state,
-            ExtensionHealthState::Stopped,
-            "retained service after {effect_policy:?}, process={allow_process}, shell={allow_shell}, explicit_trust={explicit_trust}"
-        );
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "launched\n");
+        if !expected_running {
+            assert_eq!(
+                started.processes[0].health_snapshot().state,
+                ExtensionHealthState::Stopped
+            );
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "launched\n");
+        } else {
+            // An eligible workspace service may be retained instead of restarted.
+            let starts = std::fs::read_to_string(&marker).unwrap();
+            assert!(
+                starts == "launched\n" || starts == "launched\nlaunched\n",
+                "{starts:?}"
+            );
+        }
         assert!(config.trusted_extensions.is_empty());
         assert_eq!(
             config.invocation_trusted_extensions.is_empty(),

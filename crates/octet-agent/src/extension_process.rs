@@ -2570,6 +2570,19 @@ pub enum ExtensionTrust {
     Trusted,
 }
 
+/// Why a selected extension can or cannot start as a host process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionStartDecision {
+    /// The user has not switched this extension on.
+    Disabled,
+    /// Project code cannot run before the workspace is trusted.
+    NeedsWorkspaceTrust,
+    /// The selected source has no host process authority grant.
+    NeedsHostAuthority,
+    /// Activation and host process authority permit startup.
+    Allowed,
+}
+
 /// Explicit activation state for one discovered extension.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionActivation {
@@ -2598,7 +2611,7 @@ impl ExtensionPolicy {
     ///
     /// Full access trusts selected sources without recording a grant. Rebuild
     /// this policy when authority changes; controlled profiles have no implicit
-    /// trust. Enablement, source validation, and process/effect gates remain
+    /// host authority. Enablement, workspace trust, and source validation are
     /// independent requirements enforced by the host.
     pub fn for_effect_policy(effect_policy: EffectPolicy) -> Self {
         Self {
@@ -2656,6 +2669,7 @@ impl ExtensionPolicy {
             .trusted_sources
             .contains(&(name.to_owned(), manifest_path.to_owned()));
         let trusted = self.implicit_trust
+            || source == ExtensionSource::Explicit
             || self.trusted_for_invocation.contains(name)
             || source_bound
             || (source == ExtensionSource::Global && self.trusted_global.contains(name));
@@ -2666,6 +2680,26 @@ impl ExtensionPolicy {
             } else {
                 ExtensionTrust::Untrusted
             },
+        }
+    }
+}
+
+impl ExtensionActivation {
+    /// The host-process admission decision. The effect broker still governs
+    /// tools, but cannot confine an extension process running with OS authority.
+    pub fn start_decision(
+        self,
+        source: ExtensionSource,
+        workspace_trusted: bool,
+    ) -> ExtensionStartDecision {
+        if !self.enabled {
+            ExtensionStartDecision::Disabled
+        } else if source == ExtensionSource::Project && !workspace_trusted {
+            ExtensionStartDecision::NeedsWorkspaceTrust
+        } else if self.trust != ExtensionTrust::Trusted {
+            ExtensionStartDecision::NeedsHostAuthority
+        } else {
+            ExtensionStartDecision::Allowed
         }
     }
 }
@@ -21523,7 +21557,9 @@ flags = [
                 ExtensionSource::Explicit,
             ] {
                 let mut policy = ExtensionPolicy::for_effect_policy(effect_policy);
-                let expected_trust = if effect_policy == EffectPolicy::UnsafeHost {
+                let expected_trust = if effect_policy == EffectPolicy::UnsafeHost
+                    || source == ExtensionSource::Explicit
+                {
                     ExtensionTrust::Trusted
                 } else {
                     ExtensionTrust::Untrusted
@@ -21602,11 +21638,112 @@ flags = [
                 .activation(
                     "git-tools",
                     Path::new("/one-shot/extension.toml"),
-                    ExtensionSource::Explicit,
+                    ExtensionSource::Project,
                 )
                 .trust,
             ExtensionTrust::Trusted
         );
+    }
+
+    #[test]
+    fn host_authority_startup_truth_table() {
+        use ExtensionStartDecision::{Allowed, Disabled, NeedsHostAuthority, NeedsWorkspaceTrust};
+        let path = Path::new("/selected/extension.toml");
+        // enabled, source, policy, persistent grant, trusted workspace, decision
+        let cases = [
+            (
+                false,
+                ExtensionSource::Global,
+                EffectPolicy::UnsafeHost,
+                false,
+                true,
+                Disabled,
+            ),
+            (
+                true,
+                ExtensionSource::Global,
+                EffectPolicy::UnsafeHost,
+                false,
+                true,
+                Allowed,
+            ),
+            (
+                true,
+                ExtensionSource::Global,
+                EffectPolicy::Controlled,
+                true,
+                true,
+                Allowed,
+            ),
+            (
+                true,
+                ExtensionSource::Global,
+                EffectPolicy::ControlledBashApproval,
+                false,
+                true,
+                NeedsHostAuthority,
+            ),
+            (
+                true,
+                ExtensionSource::Project,
+                EffectPolicy::UnsafeHost,
+                false,
+                false,
+                NeedsWorkspaceTrust,
+            ),
+            (
+                true,
+                ExtensionSource::Project,
+                EffectPolicy::UnsafeHost,
+                false,
+                true,
+                Allowed,
+            ),
+            (
+                true,
+                ExtensionSource::Project,
+                EffectPolicy::Controlled,
+                true,
+                true,
+                Allowed,
+            ),
+            (
+                true,
+                ExtensionSource::Project,
+                EffectPolicy::ControlledBashApproval,
+                false,
+                true,
+                NeedsHostAuthority,
+            ),
+            (
+                true,
+                ExtensionSource::Explicit,
+                EffectPolicy::ControlledBashApproval,
+                false,
+                false,
+                Allowed,
+            ),
+        ];
+        for (enabled, source, effect_policy, grant, workspace_trusted, expected) in cases {
+            let mut policy = ExtensionPolicy::for_effect_policy(effect_policy);
+            if enabled {
+                policy.enable("fixture");
+            }
+            if grant {
+                if source == ExtensionSource::Global {
+                    policy.trust("fixture");
+                } else {
+                    policy.trust_source("fixture", path);
+                }
+            }
+            let actual = policy
+                .activation("fixture", path, source)
+                .start_decision(source, workspace_trusted);
+            assert_eq!(
+                actual, expected,
+                "{enabled:?} {source:?} {effect_policy:?} {grant:?} {workspace_trusted:?}"
+            );
+        }
     }
 
     #[tokio::test]
