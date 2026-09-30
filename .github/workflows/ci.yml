@@ -488,6 +488,64 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  release-candidate:
+    # Unsigned release-candidate archives for attended testing. Built like
+    # release-octet.yml's build job (clean runner, Rust 1.97.1, the release
+    # packager) but never signed, tagged or published, and only when this
+    # workflow is dispatched by hand. The windows job above supplies the
+    # Windows test build from the same run.
+    if: github.event_name == 'workflow_dispatch'
+    name: release candidate (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: source
+          fetch-depth: 0
+      # The release toolchain, independent of the workspace's 1.88 MSRV.
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build optimized octet binaries
+        working-directory: source
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p octet-coding-agent --bins
+      - id: package
+        name: Package and smoke-test the release-candidate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' source/Cargo.toml | head -n 1)
+          source/scripts/package-octet-release.sh "${{ matrix.target }}" "$RUNNER_TEMP/octet-rc" "v$version" source
+          archive="$RUNNER_TEMP/octet-rc/octet-$version-${{ matrix.target }}.tar.gz"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          package="$RUNNER_TEMP/octet-$version-${{ matrix.target }}"
+          test "$("$package/octet" --version)" = "octet $version"
+          home="$RUNNER_TEMP/octet-rc-home"
+          mkdir -p "$home"
+          HOME="$home" "$package/octet" --help >/dev/null
+          printf '%s\n' '{"protocol_version":1,"request_id":"rc-smoke","command":"hello"}' \
+            | HOME="$home" "$package/octet-host" | grep -F '"type":"hello"' >/dev/null
+          commit=$(git -C source rev-parse HEAD)
+          echo "name=octet-rc-${commit:0:12}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+          (cd "$RUNNER_TEMP/octet-rc" && shasum -a 256 *.tar.gz)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ runner.temp }}/octet-rc/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
   msrv:
     runs-on: ubuntu-24.04
     steps:
