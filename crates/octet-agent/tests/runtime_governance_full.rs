@@ -560,8 +560,13 @@ async fn canceled_candidate_reload_restores_waiting_leases_without_switching_gen
     let mut reload = Box::pin(manager.reload("shared"));
     assert!(poll!(reload.as_mut()).is_pending());
     tokio::time::timeout(DEADLINE, async {
-        while starts(root.path(), "shared") < 2 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::select! {
+            () = async {
+                while starts(root.path(), "shared") < 2 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => {}
+            result = reload.as_mut() => panic!("reload finished before its handshake gate: {result:?}"),
         }
     })
     .await
