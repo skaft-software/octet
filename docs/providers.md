@@ -186,6 +186,23 @@ configuration.
 | Qwen Token Plan CN | `QWEN_TOKEN_PLAN_CN_API_KEY`; OpenAI Chat | `qwen-token-plan-cn/<model-id>` |
 | Z.AI Coding CN | `ZAI_CODING_CN_API_KEY`; OpenAI Chat | `zai-coding-cn/<model-id>` |
 
+The built-in OpenRouter route sends these fixed app-attribution defaults on
+model discovery, Chat Completions, and Batch API requests:
+
+| Header | Default value |
+| --- | --- |
+| `HTTP-Referer` | `https://octet.skaft.org` |
+| `X-OpenRouter-Title` | `octet coding agent` |
+| `X-OpenRouter-Categories` | `cli-agent` |
+
+These headers identify the app for [OpenRouter's public rankings and app
+analytics](https://openrouter.ai/docs/app-attribution). They contain no user,
+project, or session identifiers and add no separate telemetry request. The
+same identity is used whether the credential comes from the environment or
+saved setup. Other built-in providers and custom OpenAI-compatible endpoints
+do not inherit these defaults. Explicit model/request header overrides retain
+their normal precedence. Attribution applies to new requests, not past usage.
+
 Bedrock accepts an `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair with an
 optional session token, a web-identity role (`AWS_ROLE_ARN` and
 `AWS_WEB_IDENTITY_TOKEN_FILE`, with optional `AWS_ROLE_SESSION_NAME`; one

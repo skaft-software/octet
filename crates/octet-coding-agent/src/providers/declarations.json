@@ -170,7 +170,11 @@
           "route": 0
         }
       ],
-      "extra_headers": [],
+      "extra_headers": [
+        ["HTTP-Referer", "https://octet.skaft.org"],
+        ["X-OpenRouter-Title", "octet coding agent"],
+        ["X-OpenRouter-Categories", "cli-agent"]
+      ],
       "compatibility": "openrouter",
       "pricing": "openrouter",
       "discovery_capabilities": "default"
