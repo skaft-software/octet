@@ -14,8 +14,6 @@ use tokio::net::{TcpListener, TcpStream};
 use url::Url;
 
 use super::store::CredentialStore;
-#[cfg(test)]
-use super::BROWSER_REDIRECT_URI;
 use super::{login, oauth, CLIENT_ID, ORIGINATOR};
 
 const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -27,8 +25,15 @@ const MARK: &str = include_str!(concat!(
     "/../../docs/assets/octet/marks/mark-gradient.svg"
 ));
 
-pub(super) fn production_address() -> SocketAddr {
-    SocketAddr::from((Ipv4Addr::LOCALHOST, 1455))
+/// The loopback address for one registered callback port.
+pub(super) fn callback_address(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+}
+
+/// The redirect registered for `port`. Like the current Codex CLI it names
+/// `127.0.0.1`, never `localhost`, which can resolve to IPv6 first.
+pub(super) fn redirect_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/auth/callback")
 }
 
 pub(super) struct Authorization {
@@ -84,7 +89,8 @@ fn authorize_url(redirect_uri: &str, verifier: &str, state: &str) -> String {
 
 pub(super) async fn bind(address: SocketAddr) -> std::io::Result<TcpListener> {
     // Never listen on `localhost`: that can resolve to a non-loopback interface
-    // on a misconfigured host. Production always pins IPv4 loopback and port 1455.
+    // on a misconfigured host. Production pins IPv4 loopback and a registered
+    // callback port.
     assert_eq!(address.ip(), Ipv4Addr::LOCALHOST);
     TcpListener::bind(address).await
 }
@@ -343,8 +349,8 @@ mod tests {
     fn authorize_url_has_exact_registration_parameters_and_backend_originator() {
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         let state = "aa".repeat(32);
-        assert_eq!(authorize_url(BROWSER_REDIRECT_URI, verifier, &state), format!(
-            "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid+profile+email+offline_access&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state={state}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=octet"
+        assert_eq!(authorize_url(&redirect_uri(1455), verifier, &state), format!(
+            "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&scope=openid+profile+email+offline_access&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state={state}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=octet"
         ));
         let declarations: serde_json::Value =
             serde_json::from_str(include_str!("../../providers/declarations.json")).unwrap();
@@ -430,14 +436,14 @@ mod tests {
             .and(body_string_contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"))
             .and(body_string_contains("code=browser-secret"))
             .and(body_string_contains("code_verifier=verifier"))
-            .and(body_string_contains("redirect_uri=http%3A%2F%2Flocalhost%3A"))
+            .and(body_string_contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"access_token": access, "refresh_token": "refresh-secret", "expires_in": 3600})))
             .expect(1).mount(&token).await;
         let listener = bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
-        let redirect_uri = format!("http://localhost:{}/auth/callback", addr.port());
+        let redirect_uri = redirect_uri(addr.port());
         let directory = tempfile::tempdir().unwrap();
         let store = CredentialStore::new(directory.path().join("codex.json"));
         let http = super::super::http_client();
@@ -519,7 +525,7 @@ mod tests {
                         &store,
                         &http,
                         error_url,
-                        BROWSER_REDIRECT_URI,
+                        &redirect_uri(1455),
                         &auth,
                     )
                     .await

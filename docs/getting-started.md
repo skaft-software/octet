@@ -171,11 +171,12 @@ octet --login codex
 ```
 
 Choose browser sign-in (recommended) to open the OpenAI page and print its URL;
-octet receives the callback on `127.0.0.1:1455` and displays a signed-in page.
-You can instead choose a device code. Octet prints the verification URL and a
-one-time code; keep it private and enter it only on the OpenAI page. SSH, no
-opener, or a busy callback port selects the device flow by default. To force
-device sign-in without opening a browser:
+octet receives the callback on `127.0.0.1:1455` (or `1457` when 1455 is busy)
+and displays a signed-in page. You can instead choose a device code. Octet
+prints the verification URL and a one-time code; keep it private and enter it
+only on the OpenAI page. SSH, no opener, or both callback ports being busy
+selects the device flow by default. To force device sign-in without opening a
+browser:
 
 ```sh
 octet --login codex --headless

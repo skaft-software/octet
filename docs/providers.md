@@ -307,10 +307,11 @@ octet --model gpt-5.6
 Codex offers **Sign in with your browser (recommended)** and **Use a device code
 (SSH/headless)** instead of a manually managed API key. Browser sign-in opens the
 OpenAI authorization page, also prints its URL, and listens only on
-`127.0.0.1:1455` for up to five minutes. The browser displays a self-contained
-signed-in page after the credential is saved. `--headless`, SSH, an unavailable
-browser opener, or a busy callback port uses the hosted device-code flow; you
-can also choose it explicitly.
+`127.0.0.1:1455` (or the registered fallback port `1457` when 1455 is busy) for
+up to five minutes. The browser displays a self-contained signed-in page after
+the credential is saved. `--headless`, SSH, an unavailable browser opener, or
+both callback ports being busy uses the hosted device-code flow; you can also
+choose it explicitly.
 
 A successful account-scoped live inventory is authoritative. octet does not
 infer Ultra, collaboration, Responses Lite, or model availability from a name

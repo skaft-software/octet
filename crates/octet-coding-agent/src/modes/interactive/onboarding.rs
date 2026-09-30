@@ -443,7 +443,7 @@ where
             match subscription {
                 Subscription::ChatGpt => {
                     let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
-                    crate::auth::codex::login(&store, false).await
+                    crate::auth::codex::login_without_prompt(&store).await
                 }
                 Subscription::Copilot => {
                     let store = crate::auth::copilot::CredentialStore::new(crate::auth::copilot::default_path()?);

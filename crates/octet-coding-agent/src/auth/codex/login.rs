@@ -1,6 +1,13 @@
 #![allow(missing_docs)]
 
 //! Interactive OpenAI Codex login: PKCE browser authorization or device code.
+//!
+//! An earlier octet loopback flow minted credentials that OpenAI routed to a
+//! reduced model pool, surfacing as misleading model 404s. This flow therefore
+//! mirrors the current Codex CLI's authorize parameters (a `127.0.0.1`
+//! redirect on its registered ports) and keeps device code as the fallback.
+//! Re-check a browser-minted credential against the live model inventory
+//! whenever an authorize parameter changes.
 
 use std::io::{self, IsTerminal as _};
 use std::process::{Command, Stdio};
@@ -10,7 +17,7 @@ use anyhow::{bail, Context, Result};
 
 use super::store::{CredentialFile, CredentialStore, Tokens};
 use super::{
-    browser, oauth, BROWSER_REDIRECT_URI, DEVICE_CODE_TIMEOUT_SECS, DEVICE_VERIFICATION_URI,
+    browser, oauth, BROWSER_CALLBACK_PORTS, DEVICE_CODE_TIMEOUT_SECS, DEVICE_VERIFICATION_URI,
     MODELS, TOKEN_URL,
 };
 
@@ -51,9 +58,14 @@ fn opener_available() -> bool {
     std::env::split_paths(&paths).any(|path| path.join(opener_name()).is_file())
 }
 
-fn choose_method(headless: bool, ssh: bool, opener: bool) -> Result<LoginMethod> {
+fn choose_method(headless: bool, ssh: bool, opener: bool, ask: bool) -> Result<LoginMethod> {
     let default = default_method(headless, ssh, opener);
-    if headless || !io::stdin().is_terminal() {
+    if headless || !ask || !io::stdin().is_terminal() {
+        if !headless && default == LoginMethod::Browser {
+            crate::output::stdout_line(
+                "Using browser sign-in. For a device code instead, run `octet --login codex --headless`.",
+            );
+        }
         return Ok(default);
     }
     crate::output::stdout_multiline(format!(
@@ -72,33 +84,51 @@ fn choose_method(headless: bool, ssh: bool, opener: bool) -> Result<LoginMethod>
     }
 }
 
-async fn browser_listener(
-    address: std::net::SocketAddr,
-) -> Result<Option<tokio::net::TcpListener>> {
-    match browser::bind(address).await {
-        Ok(listener) => Ok(Some(listener)),
-        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-            crate::output::stdout_line(format!(
-                "Port {} is already in use; using a device code instead.",
-                address.port()
-            ));
-            Ok(None)
+/// Bind the first free registered callback port; `None` means all are busy.
+async fn browser_listener(ports: &[u16]) -> Result<Option<(tokio::net::TcpListener, u16)>> {
+    for &port in ports {
+        match browser::bind(browser::callback_address(port)).await {
+            Ok(listener) => return Ok(Some((listener, port))),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
+            Err(error) => {
+                return Err(error).context("binding the Codex loopback callback failed");
+            }
         }
-        Err(error) => Err(error).context("binding the Codex loopback callback failed"),
     }
+    let ports = ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    crate::output::stdout_line(format!(
+        "Callback port {ports} is already in use; using a device code instead."
+    ));
+    Ok(None)
 }
 
 /// Sign in via the browser by default when a local opener is available, or use
-/// hosted device authorization for SSH, headless mode, or a busy callback port.
+/// hosted device authorization for SSH, headless mode, or busy callback ports.
+/// An interactive terminal is asked which method to use.
 pub async fn login(store: &CredentialStore, headless: bool) -> Result<()> {
+    login_with(store, headless, true).await
+}
+
+/// [`login`] for callers inside the TUI: never block on a stdin prompt, which
+/// could not observe Ctrl+C there. Uses the default method and names the other.
+pub async fn login_without_prompt(store: &CredentialStore) -> Result<()> {
+    login_with(store, false, false).await
+}
+
+async fn login_with(store: &CredentialStore, headless: bool, ask: bool) -> Result<()> {
     let opener = opener_available();
-    let method = choose_method(headless, ssh_session(), opener)?;
+    let method = choose_method(headless, ssh_session(), opener, ask)?;
     if method == LoginMethod::Browser && opener {
-        if let Some(listener) = browser_listener(browser::production_address()).await? {
+        if let Some((listener, port)) = browser_listener(&BROWSER_CALLBACK_PORTS).await? {
+            let redirect_uri = browser::redirect_uri(port);
             let authorization = browser::Authorization::generate()?;
-            let url = authorization.url(BROWSER_REDIRECT_URI);
+            let url = authorization.url(&redirect_uri);
             crate::output::stdout_multiline(format!(
-                "Opening OpenAI sign-in in your browser. If it does not open, copy this URL:\n\n  {url}\n\nWaiting for a callback on 127.0.0.1:1455 (up to 5 minutes)…"
+                "Opening OpenAI sign-in in your browser. If it does not open, copy this URL:\n\n  {url}\n\nWaiting for a callback on 127.0.0.1:{port} (up to 5 minutes)…"
             ));
             if open_browser(&url) {
                 let http = super::http_client();
@@ -107,7 +137,7 @@ pub async fn login(store: &CredentialStore, headless: bool) -> Result<()> {
                     store,
                     &http,
                     TOKEN_URL,
-                    BROWSER_REDIRECT_URI,
+                    &redirect_uri,
                     &authorization,
                 )
                 .await?;
@@ -228,16 +258,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn busy_browser_port_offers_device_fallback() {
-        let occupied = browser::bind(std::net::SocketAddr::from((
-            std::net::Ipv4Addr::LOCALHOST,
-            0,
-        )))
-        .await
-        .unwrap();
-        let address = occupied.local_addr().unwrap();
-        assert!(browser_listener(address).await.unwrap().is_none());
-        drop(occupied);
-        assert!(browser_listener(address).await.unwrap().is_some());
+    async fn busy_callback_ports_try_the_registered_fallback_then_device_code() {
+        let bind = |port| browser::bind(browser::callback_address(port));
+        let first = bind(0).await.unwrap();
+        let first_port = first.local_addr().unwrap().port();
+        let second_port = bind(0).await.unwrap().local_addr().unwrap().port();
+        assert!(browser_listener(&[first_port]).await.unwrap().is_none());
+        let (fallback, port) = browser_listener(&[first_port, second_port])
+            .await
+            .unwrap()
+            .expect("the fallback port is free");
+        assert_eq!(port, second_port);
+        drop((first, fallback));
+        let (_, port) = browser_listener(&[first_port, second_port])
+            .await
+            .unwrap()
+            .expect("the preferred port is free again");
+        assert_eq!(port, first_port);
+    }
+
+    #[test]
+    fn callback_ports_match_the_codex_client_registration() {
+        assert_eq!(BROWSER_CALLBACK_PORTS, [1455, 1457]);
+        assert_eq!(
+            browser::redirect_uri(1457),
+            "http://127.0.0.1:1457/auth/callback"
+        );
     }
 }

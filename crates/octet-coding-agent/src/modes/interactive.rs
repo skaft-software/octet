@@ -1309,7 +1309,7 @@ fn validate_provider(provider: Option<&str>) -> anyhow::Result<&str> {
     }
 }
 
-/// Run device-code login outside raw primary-screen rendering and return the
+/// Run Codex login outside raw primary-screen rendering and return the
 /// refreshed catalog. The caller decides whether it can install the catalog
 /// into a live Agent or must ask the user to restart from a model-less shell.
 async fn login_codex_catalog(
@@ -1319,7 +1319,7 @@ async fn login_codex_catalog(
     shell.render();
     shell.suspend();
     let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
-    let login_result = crate::auth::codex::login(&store, false).await;
+    let login_result = crate::auth::codex::login_without_prompt(&store).await;
     // Restoring the terminal is mandatory even when OAuth fails.
     shell.resume()?;
     shell.set_run_label("idle");
