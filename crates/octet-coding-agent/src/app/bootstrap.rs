@@ -702,8 +702,67 @@ fn fetch_provider_inventory(
             body: bounded_discovery_json(response, "model discovery")?,
             etag,
         }),
-        _ => anyhow::bail!("model discovery request was rejected"),
+        status => {
+            let mut body = Vec::new();
+            let _ = response
+                .take(MAX_REJECTION_BODY_BYTES as u64)
+                .read_to_end(&mut body);
+            anyhow::bail!("{}", discovery_rejection(status, &body))
+        }
     }
+}
+
+/// How much of a rejected discovery response is read for its diagnostic.
+const MAX_REJECTION_BODY_BYTES: usize = 4096;
+/// How much of the provider's own message the diagnostic repeats.
+const MAX_REJECTION_DETAIL_CHARS: usize = 240;
+
+/// Describe a rejected discovery request by its status and, when the JSON body
+/// carries one, the provider's own error message: an Anthropic 400 that needs
+/// `anthropic-workspace-id` says so instead of a bare "rejected". Only a JSON
+/// message field is repeated, never a raw body, and it is bounded, stripped of
+/// control characters and masked for credential-shaped tokens.
+fn discovery_rejection(status: http::StatusCode, body: &[u8]) -> String {
+    let summary = format!("model discovery request was rejected (HTTP {status})");
+    match rejection_detail(body) {
+        Some(detail) => format!("{summary}: {detail}"),
+        None => summary,
+    }
+}
+
+fn rejection_detail(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let message = ["/error/message", "/message", "/detail", "/error"]
+        .into_iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))?;
+    let words = message
+        .split(|character: char| character.is_whitespace() || character.is_control())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let token = word.trim_matches(|character: char| !character.is_alphanumeric());
+            let secret = token.starts_with("sk-")
+                || token.starts_with("sk_")
+                || (token.len() >= 32
+                    && token.chars().any(|character| character.is_ascii_digit())
+                    && token.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "-_.+/=".contains(character)
+                    }));
+            if secret {
+                "[redacted]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if words.is_empty() {
+        return None;
+    }
+    let mut detail: String = words.chars().take(MAX_REJECTION_DETAIL_CHARS).collect();
+    if words.chars().count() > MAX_REJECTION_DETAIL_CHARS {
+        detail.push('…');
+    }
+    Some(detail)
 }
 
 fn schedule_provider_inventory_refresh(

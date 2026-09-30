@@ -77,6 +77,11 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   and typing one names the extension to open instead. The web UI keeps them for
   now. Menu actions may run for up to 30 minutes instead of the 30-second
   request deadline, so long installs finish.
+- Report why model discovery was rejected. A provider's HTTP error now names
+  its status and the provider's own message, bounded and with
+  credential-shaped tokens masked, instead of only "model discovery request
+  was rejected"; an Anthropic key that needs `anthropic-workspace-id` now
+  says so (#454).
 - Fix deleting sessions from the `/resume` picker. Its default delete binding
   was Ctrl+D, which closes octet from every surface, so it quit octet instead,
   and Mac keyboards have no forward Delete key. Ctrl+X (or Delete) now asks for
