@@ -355,3 +355,5 @@ text sdk/typescript/tsconfig.json
 text third_party/licenses/GROK-MERMAID-APACHE-2.0.txt
 text third_party/licenses/PI-MIT.txt
 text third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt
+text docs/migrations/README.md
+text docs/migrations/external-products.json
