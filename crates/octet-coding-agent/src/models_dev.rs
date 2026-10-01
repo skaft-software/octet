@@ -154,7 +154,11 @@ async fn refresh_at(
     path: &Path,
     now_ms: u64,
 ) -> anyhow::Result<RefreshOutcome> {
-    let cached = read_cache(path);
+    let cached = off_runtime({
+        let path = path.to_owned();
+        move || read_cache(&path)
+    })
+    .await?;
     if !needs_refresh(cached.as_ref().map(|cache| cache.fetched_at_ms), now_ms) {
         return Ok(RefreshOutcome::Fresh);
     }
@@ -165,10 +169,11 @@ async fn refresh_at(
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
     let response = request.send().await?;
+    let path = path.to_owned();
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         let mut cache = cached.ok_or_else(|| anyhow::anyhow!("304 without a cached catalog"))?;
         cache.fetched_at_ms = now_ms;
-        write_cache(path, &cache)?;
+        off_runtime(move || write_cache(&path, &cache)).await??;
         return Ok(RefreshOutcome::NotModified);
     }
     let response = response.error_for_status()?;
@@ -179,7 +184,17 @@ async fn refresh_at(
         .filter(|value| value.len() <= MAX_ETAG_BYTES)
         .map(str::to_owned);
     let body = read_bounded(response).await?;
-    let catalog: serde_json::Value = serde_json::from_slice(&body)?;
+    off_runtime(move || store_catalog(&path, &body, etag, now_ms)).await?
+}
+
+/// Check a fetched catalog against the compiled snapshot and cache what passes.
+fn store_catalog(
+    path: &Path,
+    body: &[u8],
+    etag: Option<String>,
+    now_ms: u64,
+) -> anyhow::Result<RefreshOutcome> {
+    let catalog: serde_json::Value = serde_json::from_slice(body)?;
     let (metadata, rejected) = octet_ai::model_metadata::live_metadata_from_models_dev(&catalog)
         .map_err(anyhow::Error::msg)?;
     let cache = CacheFile {
@@ -187,13 +202,35 @@ async fn refresh_at(
         octet_version: env!("CARGO_PKG_VERSION").to_owned(),
         fetched_at_ms: now_ms,
         etag,
-        source_sha256: format!("{:x}", Sha256::digest(&body)),
+        source_sha256: format!("{:x}", Sha256::digest(body)),
         source_bytes: body.len() as u64,
         rejected,
         metadata,
     };
     write_cache(path, &cache)?;
     Ok(RefreshOutcome::Updated(cache.metadata))
+}
+
+/// Run blocking cache and catalog work on its own detached thread.
+///
+/// Tokio services timers and I/O from whichever worker is parked on its
+/// driver, and that worker runs the task it wakes without handing the driver
+/// on. The interactive frontend reads the terminal on a 10 ms Tokio timer, so
+/// parsing and hashing a multi-megabyte catalog, or a synced cache write
+/// (`F_FULLFSYNC` on macOS), inside this task would freeze typing and Ctrl+D
+/// for as long as the work took. Like the DNS lookup, a detached thread never
+/// holds process exit open, and the cache write is atomic: exiting mid-write
+/// keeps the previous cache.
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("octet-models-dev".into())
+        .spawn(move || {
+            let _ = send.send(work());
+        })?;
+    Ok(receive.await?)
 }
 
 async fn read_bounded(response: reqwest::Response) -> anyhow::Result<Vec<u8>> {

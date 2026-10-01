@@ -102,6 +102,43 @@ fn a_pending_dns_lookup_does_not_delay_runtime_or_process_exit() {
     );
 }
 
+/// Terminal input wakes on a Tokio timer. Blocking cache work that held the
+/// worker driving timers would freeze typing and Ctrl+D until it finished.
+#[test]
+fn blocking_cache_work_leaves_runtime_timers_running() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    // Ends a stall that would otherwise hang the test.
+    let watchdog = release.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(5));
+        let _ = watchdog.send(());
+    });
+    runtime.block_on(async move {
+        let work = tokio::spawn(async move {
+            // A timer wakes this task on the driver's worker, as the response
+            // body wakes the refresh.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            off_runtime(move || released.recv().is_ok()).await.unwrap()
+        });
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let elapsed = start.elapsed();
+        let _ = release.send(());
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "runtime timers stalled for {elapsed:?} behind blocking cache work"
+        );
+        assert!(work.await.unwrap());
+    });
+}
+
 /// A first refresh caches the checked catalog; a fresh cache makes no request;
 /// a stale one revalidates with its ETag and a 304 only renews the timestamp.
 #[tokio::test]
