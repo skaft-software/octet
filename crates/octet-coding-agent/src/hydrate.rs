@@ -285,6 +285,18 @@ pub(crate) fn project_tool_output_images(
     images
 }
 
+/// Read the durable presentation diff a tool attached to its result metadata.
+/// Edit and write keep their diffs out of the model-visible text; the card
+/// renders whatever this returns.
+pub(crate) fn presentation_diff_metadata(output: &octet_agent::ToolOutput) -> Option<String> {
+    output
+        .metadata()
+        .and_then(|value| value.get("diff"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|diff| !diff.trim().is_empty())
+        .map(str::to_owned)
+}
+
 /// Activity families presented as one quiet row in Still. Exploration, edits,
 /// web activity, MCP, and computer-use stay separate; delegation remains on its
 /// existing subagent presentation. A change of family closes the preceding
@@ -467,6 +479,9 @@ pub enum TranscriptItem {
         /// Opaque bounded image projection. Text/copy/plain surfaces ignore
         /// this field and retain their existing payload-free semantics.
         images: Vec<ToolResultImage>,
+        /// Durable presentation diff from the tool's result metadata. This is
+        /// the model-invisible `ToolOutputDetails` channel, not replay text.
+        diff: Option<String>,
     },
     CompactionMarker {
         summary: String,
@@ -536,6 +551,17 @@ fn tool_result_duration_ms(metadata: Option<&EntryMetadata>) -> Option<u64> {
     })
 }
 
+/// Presentation diff recorded in the tool result's durable metadata.
+fn tool_result_diff(metadata: Option<&EntryMetadata>) -> Option<String> {
+    metadata
+        .and_then(|metadata| metadata.tool_output.as_ref())
+        .and_then(|details| details.metadata())
+        .and_then(|value| value.get("diff"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|diff| !diff.is_empty())
+        .map(str::to_owned)
+}
+
 fn push_message(
     items: &mut Vec<TranscriptItem>,
     image_budget: &mut ToolImageBudget,
@@ -599,6 +625,7 @@ fn push_message(
                             text: tool_result_text(&result.content),
                             is_error: result.is_error,
                             duration_ms: tool_result_duration_ms(metadata),
+                            diff: tool_result_diff(metadata),
                             images: project_tool_images(
                                 result
                                     .content
@@ -853,6 +880,7 @@ fn hydrate_entries_with_image_budget(
                                 text: "interrupted before a durable tool result was recorded; this call is not running and will be reconciled before the next prompt".into(),
                                 is_error: true,
                                 duration_ms: None,
+                                diff: None,
                                 images: Vec::new(),
                             });
                         }
@@ -1387,6 +1415,7 @@ mod tests {
                     text: "ok".into(),
                     is_error: false,
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 },
                 TranscriptItem::User {

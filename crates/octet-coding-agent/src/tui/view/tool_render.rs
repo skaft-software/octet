@@ -77,6 +77,14 @@ pub(super) fn tool_diff(panel: &ToolPanel) -> Option<String> {
 }
 
 fn compute_tool_diff(panel: &ToolPanel) -> Option<String> {
+    // Durable metadata channel wins: edit/write no longer put diffs in the
+    // result text, and that text is also replayed into model context.
+    if let Some(diff) = &panel.diff {
+        if !diff.trim().is_empty() {
+            return Some(diff.clone());
+        }
+    }
+    // Legacy sessions recorded diffs inside the result text; keep scanning.
     if looks_like_diff(&panel.output) {
         return Some(panel.output.clone());
     }

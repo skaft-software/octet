@@ -26,6 +26,16 @@ fn fixture() -> Fixture {
     }
 }
 
+fn diff_metadata(output: &ToolOutput) -> String {
+    output
+        .details()
+        .and_then(|details| details.metadata())
+        .and_then(|metadata| metadata.get("diff"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
 impl Fixture {
     fn ctx(&self) -> ToolContext<'_> {
         ToolContext {
@@ -86,24 +96,24 @@ async fn creates_file_and_parent_dirs() {
         .unwrap();
     let expected_hash = content_hash(b"pub fn x() {}\n");
     assert!(
-        out.text.starts_with(&format!(
-            "ok\nsrc/new/mod.rs  created hash={expected_hash}\n"
-        )),
+        out.text
+            .starts_with(&format!("ok\nsrc/new/mod.rs  created hash={expected_hash}")),
         "{}",
         out.text
     );
+    let diff = diff_metadata(&out);
     assert!(
-        out.text.contains("--- /dev/null"),
+        diff.contains("--- /dev/null"),
         "missing diff header: {}",
         out.text
     );
     assert!(
-        out.text.contains("@@ -0,0 +1,1 @@"),
+        diff.contains("@@ -0,0 +1,1 @@"),
         "missing diff hunk: {}",
         out.text
     );
     assert!(
-        out.text.contains("+pub fn x() {}"),
+        diff.contains("+pub fn x() {}"),
         "missing preview line: {}",
         out.text
     );

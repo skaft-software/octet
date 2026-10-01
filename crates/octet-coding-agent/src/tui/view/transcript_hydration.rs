@@ -141,6 +141,7 @@ pub(super) fn append_hydrated_items(
                 text,
                 is_error,
                 duration_ms,
+                diff,
                 images,
             } => {
                 if let Some(name) = state.hidden_hydrated_subagent_calls.get(&id) {
@@ -176,6 +177,7 @@ pub(super) fn append_hydrated_items(
                         {
                             apply_hydrated_tool_result(panel, &text, is_error);
                             panel.images = registered_images;
+                            panel.diff = diff.clone();
                             panel.duration = duration_ms.map(Duration::from_millis);
                         }
                     }
@@ -184,6 +186,7 @@ pub(super) fn append_hydrated_items(
                     if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get_mut(index) {
                         apply_hydrated_tool_result(panel, &text, is_error);
                         panel.images = registered_images;
+                        panel.diff = diff;
                         panel.duration = duration_ms.map(Duration::from_millis);
                     }
                 } else {
@@ -207,6 +210,7 @@ pub(super) fn append_hydrated_items(
                         model_lab,
                     );
                     panel.images = registered_images;
+                    panel.diff = diff;
                     let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
                     state.tool_panels.insert(id, index);
                 }
@@ -291,6 +295,7 @@ mod tests {
                     text: "content".into(),
                     is_error: false,
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 },
                 TranscriptItem::ToolResult {
@@ -298,6 +303,7 @@ mod tests {
                     text: "permission denied".into(),
                     is_error: true,
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 },
             ],
@@ -351,6 +357,7 @@ mod tests {
                     .into(),
                     is_error: path == "src/b.rs",
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 }],
             );
@@ -439,6 +446,7 @@ mod tests {
             text: "ok".into(),
             is_error: false,
             duration_ms: None,
+            diff: None,
             images: Vec::new(),
         };
         append_hydrated_items(
@@ -496,6 +504,7 @@ mod tests {
                 text: "SECRET-WORKER-OUTPUT".into(),
                 is_error: false,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -506,6 +515,7 @@ mod tests {
                 text: "SECRET-FAILURE".into(),
                 is_error: true,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -566,6 +576,7 @@ mod tests {
                 text: "{\"child_id\":\"pending-child\"}".into(),
                 is_error: false,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -607,6 +618,7 @@ mod tests {
                 text: "ordinary output".into(),
                 is_error: false,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -624,6 +636,7 @@ mod tests {
                 text: "updated ordinary output".into(),
                 is_error: false,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -649,6 +662,7 @@ mod tests {
             text: text.into(),
             is_error: false,
             duration_ms: Some(7),
+            diff: None,
             images: Vec::new(),
         };
         append_hydrated_items(

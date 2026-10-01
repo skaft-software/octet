@@ -386,6 +386,7 @@ Scope:
 
 Verification:
 - Inspect the resulting diff and run the relevant tests, checks, or build steps. Investigate failures rather than working around them.
+- Edit and write results already carry their diff; review it there instead of re-printing it with shell commands.
 - Report only observed results. Never claim an unrun check passed; distinguish pre-existing failures from failures caused by your changes.
 
 Response:

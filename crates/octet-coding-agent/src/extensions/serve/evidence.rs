@@ -251,27 +251,34 @@ pub(super) fn project_tool_evidence_inner(
             if trusted_output_hash(&output.text).as_deref() != Some(snapshot_hash.as_str()) {
                 return Ok(Vec::new());
             }
-            let write_created = tool.name == "write" && output_reports_created(&output.text);
+            // Diffs travel in the durable metadata channel, never the
+            // model-visible text. A no-change write attaches none, so bail.
             if tool.name == "write" && output.text.contains("\n(no change)") {
                 return Ok(Vec::new());
             }
-            let diff = if write_created {
-                let Some(content) = tool
-                    .arguments
-                    .get("content")
-                    .and_then(serde_json::Value::as_str)
-                else {
-                    return Ok(Vec::new());
-                };
-                creation_diff(&snapshot.display_path, content)
-            } else {
-                let Some(detail) = output.text.splitn(3, '\n').nth(2) else {
-                    return Ok(Vec::new());
-                };
-                if !detail.starts_with("--- ") {
-                    return Ok(Vec::new());
+            let write_created = tool.name == "write" && output_reports_created(&output.text);
+            let diff = match crate::hydrate::presentation_diff_metadata(output) {
+                Some(diff) => diff,
+                // Legacy sessions kept the diff in the result text.
+                None if tool.name == "write" && output_reports_created(&output.text) => {
+                    let Some(content) = tool
+                        .arguments
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                    else {
+                        return Ok(Vec::new());
+                    };
+                    creation_diff(&snapshot.display_path, content)
                 }
-                detail.to_owned()
+                None => {
+                    let Some(detail) = output.text.splitn(3, '\n').nth(2) else {
+                        return Ok(Vec::new());
+                    };
+                    if !detail.starts_with("--- ") {
+                        return Ok(Vec::new());
+                    }
+                    detail.to_owned()
+                }
             };
             if diff.is_empty() || diff.len() > MAX_OPAQUE_RESOURCE_BYTES {
                 return Ok(Vec::new());
