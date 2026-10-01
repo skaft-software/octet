@@ -89,6 +89,10 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   credential-shaped tokens masked, instead of only "model discovery request
   was rejected"; an Anthropic key that needs `anthropic-workspace-id` now
   says so (#454).
+- Mask the home directory as `~` in the TUI workspace footer on every platform,
+  including native Windows. Use the platform home and its canonical path rather
+  than only `HOME`, so Windows verbatim paths and symlinked homes do not expose
+  the username. This changes display only; workspace and tool paths are unchanged.
 - Fix deleting sessions from the `/resume` picker. Its default delete binding
   was Ctrl+D, which closes octet from every surface, so it quit octet instead,
   and Mac keyboards have no forward Delete key. Ctrl+X (or Delete) now asks for
