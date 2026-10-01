@@ -129,6 +129,30 @@ five-client interactive replay remains outstanding. Report these boundaries
 alongside improvements; no end-to-end constant-time or all-open-code linearity
 claim is supported.
 
+## Scroll and resize work boundary
+
+Octet explicitly enables the preserving Pi renderer. Structural repairs emit
+only the live viewport and do not allocate a replay-output buffer proportional
+to retained history or send `ED 2`/`ED 3`. Saved native rows remain emitted
+snapshots; session/source/copy and application-owned navigation retain canonical
+results. Initial native paint and ordinary append still emit complete history,
+including an eagerly materialized resumed branch.
+
+Resize notifications settle after 75 ms of quiet with a 150 ms maximum delay;
+composer edits/readiness changes bypass settling. Height-only changes keep
+wrapped block caches, and a resize epoch covers away-and-back dimensions.
+Threaded visual anchors are promoted using the old renderer layout before width
+reflow. Tests scale retained history while bounding repair bytes and verify
+semantic reading positions, saved sentinels, and Kitty placement restoration.
+
+This removes history-sized **wire replay and replay-output allocation**, not
+all history-sized work. Width reflow, canonical frame construction, semantic
+source mapping, image-bearing full-component fallbacks, and retrospective layout
+can still depend on history. Saved-row preservation does not establish native
+wheel-offset/selection behavior or GPU
+paint smoothness. Keep physical-terminal and long-duration qualification
+separate from library and PTY evidence.
+
 ## Visual stability is separate from throughput
 
 Streaming regressions also record actual shell/renderer ANSI/vt100 frames. They

@@ -22,8 +22,8 @@ The real-binary contract runs twice, with `--mouse auto` and `--mouse app`:
   starts;
 - the initial splash frame and the first ready frame are parsed through
   `vt100`; the visible stale rows must be gone;
-- a controlled resize to 64x12 must produce a synchronized full redraw with
-  `CSI 2J` and `CSI 3J`;
+- a controlled resize to 64x12 must produce a synchronized absolute-grid repair
+  with neither `CSI 2J` nor `CSI 3J`;
 - Ctrl-D is the only supplied input. It must exit successfully and restore
   cursor visibility, bracketed paste, mouse modes, and termios state;
 - no primary-screen scenario may enter an alternate screen. App mouse capture
@@ -54,9 +54,19 @@ starts, in both mouse modes. Before releasing the response they require:
   even when the response is never released.
 
 The successful-discovery case then releases the gate and checks that the same
-draft survives into the resolved model frame. These are bounded regression
-assertions, not latency distributions or a claim of faster provider discovery or
-large-session replay. The composer is editable before submission is ready.
+draft survives into the resolved model frame. It then submits that draft and
+requires exactly one loopback chat request with the intended text and model.
+These are bounded regression assertions, not latency distributions or a claim of
+faster provider discovery or large-session replay. The composer is editable
+before submission is ready.
+
+## Static short-pane regression
+
+Both mouse modes also run at 48x8 and 80x8 with truecolor enabled. The composed
+VT screen must retain the permission disclosure and draft cursor row through
+typing, backspace, and bracketed paste. After the edit, a 2.35-second observation
+window must have no decorative frames and no `CSI 2J`/`CSI 3J` replay. The normal
+resize contract above requires live-row repair without clearing saved history.
 
 ## Isolation and safety
 
@@ -68,7 +78,8 @@ no prompt. API-wait/plain-prompt cases use a gated loopback chat fixture instead
 of a live model.
 
 Only the discovery cases omit `--offline` and enable `auto_discover` against the
-gated loopback fixture. No inference is submitted. The normal independent,
+gated loopback fixture. After discovery resolves, the successful case submits
+only to that fixture and inspects its recorded request. The normal independent,
 unauthenticated GitHub update check may also run; its success or failure is not
 part of the test's assertions. No user credentials or live model are used.
 
@@ -88,6 +99,7 @@ OCTET_STARTUP_FRAME_BASELINE=/absolute/path/to/ygg-v0.6.7 \
 
 The harness first verifies that the selected binary reports `0.6.7`. It then
 prints the normalized byte/frame delta and requires lifecycle behavior that is
-unrelated to the startup fix (synchronized resize replay, restoration,
-alternate-screen policy, and mouse policy) to remain compatible. The expected
-startup clear/stale-row correction is intentionally allowed to differ.
+unrelated to the rendering fixes (synchronized resize frames, restoration,
+alternate-screen policy, and mouse policy) to remain compatible. Startup
+clear/stale-row correction and preserving live-row resize repair intentionally
+differ from the old baseline's saved-line clear/replay policy.

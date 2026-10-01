@@ -618,14 +618,21 @@ fn pi_full_replay_deletes_previous_kitty_placement() {
 }
 
 #[test]
-fn pi_cursor_marker_positions_ime_after_the_synchronized_frame() {
+fn pi_cursor_marker_positions_ime_inside_the_synchronized_frame() {
     let mut harness = Harness::new(20, 5, vec![format!("界{CURSOR_MARKER}x")]);
     harness.start();
     let output = harness.take_writes();
     assert!(!output.contains(CURSOR_MARKER));
-    let end = output.find(PI_SYNC_END).unwrap();
+    let begin = output.find(PI_SYNC_BEGIN).unwrap();
     let cursor = output.find("\x1b[3G").unwrap();
-    assert!(end < cursor, "{output:?}");
+    let visibility = output.rfind("\x1b[?25l").unwrap();
+    let end = output.find(PI_SYNC_END).unwrap();
+    assert!(
+        begin < cursor && cursor < visibility && visibility < end,
+        "{output:?}"
+    );
+    assert!(output.ends_with(PI_SYNC_END), "{output:?}");
+    assert_eq!(harness.parser.borrow().screen().cursor_position(), (0, 2));
 }
 
 #[test]

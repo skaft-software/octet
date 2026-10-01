@@ -39,6 +39,10 @@ impl Terminal for RecordingTerminal {
         self.stops.set(self.stops.get() + 1);
     }
     fn write(&mut self, data: &str) {
+        // Cursor visibility can be encoded atomically inside a frame, rather
+        // than invoked through Terminal::show_cursor as a separate write.
+        self.shows
+            .set(self.shows.get() + data.matches("\x1b[?25h").count());
         self.writes.borrow_mut().push(data.to_owned());
     }
     fn columns(&self) -> u16 {
@@ -334,6 +338,7 @@ impl Component for LazyReanchoredLines {
 }
 
 // --- Cohesive areas under test ---
+mod history_preservation;
 mod lazy_updates;
 mod native_scrollback;
 mod pinned_frames;

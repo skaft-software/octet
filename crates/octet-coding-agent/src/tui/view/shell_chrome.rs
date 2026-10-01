@@ -193,6 +193,13 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
                 crate::tui::composer_surface::render_composer_surface(state, width, now);
             if crate::tui::composer_surface::status_footer_visible(state, width) {
                 lines.pop();
+                if state.tool_input_prompt.is_none()
+                    && state.panel.is_none()
+                    && state.overlay.is_none()
+                {
+                    // Metadata resolves into this row without moving the draft.
+                    lines.push(String::new());
+                }
             }
             lines
         } else {
@@ -312,11 +319,34 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
     }
 }
 
-/// Before launch readiness, setup is a transient viewport in either mouse
-/// mode. Never render/materialize the provisional transcript as native history.
-/// The same retained renderer replaces this bounded surface with the ready frame.
-pub(super) fn render_startup_surface(state: &ShellState, width: u16) -> Vec<String> {
-    let chrome = shell_chrome(state, width, Instant::now());
+/// Before launch readiness, setup is a transient surface in either mouse mode.
+/// Ordinary native drafts reserve ready geometry; pickers keep a full viewport.
+/// Never materialize the provisional transcript as native history.
+pub(super) fn render_startup_surface(
+    state: &ShellState,
+    width: u16,
+    application_viewport: bool,
+) -> Vec<String> {
+    let mut chrome = shell_chrome(state, width, Instant::now());
+    if !application_viewport
+        && state.panel.is_none()
+        && state.overlay.is_none()
+        && state.tool_input_prompt.is_none()
+    {
+        // Reserve only the ready welcome's local rows, not a screen-height
+        // draft. A lifecycle label can use that neutral reservation in place.
+        let reserved = super::welcome_card::welcome_placeholder_rows(state, width);
+        let mut lines = vec![String::new(); reserved];
+        if state.theme.layout_for_width(width).show_header {
+            // A themed identity header resolves into its own neutral row.
+            chrome.header.resize(1, String::new());
+        } else if reserved > 0 && !chrome.header.is_empty() {
+            lines[reserved - 1] = chrome.header.remove(0);
+        }
+        append_chrome(&mut lines, chrome, 0);
+        lines.truncate(usize::from(state.size.1));
+        return lines;
+    }
     let mut lines = super::viewport::overlay_lines(state, width, chrome.transcript_rows);
     append_viewport_chrome(&mut lines, chrome);
     lines

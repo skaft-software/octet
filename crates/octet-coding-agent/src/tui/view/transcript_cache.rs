@@ -4,7 +4,7 @@ use std::time::Instant;
 use super::transcript_render::{
     render_assistant_update_planned, render_block_planned_with_rainbow,
 };
-use super::welcome_card::render_welcome_card;
+use super::welcome_card::{render_welcome_card, welcome_row_budget};
 use super::{ShellState, TranscriptBlock};
 use sexy_tui_rs::text_editor::{PromptZone, PromptZones};
 
@@ -49,6 +49,9 @@ pub(super) struct TranscriptCache {
     /// active. Overlays suppress that prefix without changing transcript
     /// blocks, so this is part of cache staleness rather than a block revision.
     pub(super) welcome_overlay_active: bool,
+    /// Pane-sized decoration is fixed until a real resize, never a draft edit.
+    welcome_viewport: Option<(u16, u16)>,
+    welcome_rows: usize,
     pub(super) block_starts: Vec<usize>,
     pub(super) block_lengths: Vec<usize>,
     pub(super) block_geometries: Vec<SurfaceGeometry>,
@@ -108,6 +111,8 @@ impl Default for TranscriptCache {
             prompt_zones: PromptZones::default(),
             prompt_zones_generation: None,
             welcome_overlay_active: false,
+            welcome_viewport: None,
+            welcome_rows: 0,
             block_starts: Vec::new(),
             block_lengths: Vec::new(),
             block_geometries: Vec::new(),
@@ -183,11 +188,13 @@ impl ShellState {
     }
 
     pub(super) fn rendered_transcript(&self, width: u16) -> Ref<'_, Vec<String>> {
+        let viewport = (width, self.size.1);
         let width = self.transcript_content_width(width);
         let stale = {
             let cache = self.transcript_cache.borrow();
             cache.dirty
                 || cache.width != Some(width)
+                || cache.welcome_viewport != Some(viewport)
                 || cache.welcome_overlay_active != self.overlay.is_some()
         };
         if stale {
@@ -206,6 +213,11 @@ impl ShellState {
                 .as_ref()
                 .expect("reasoning renderer initialized above");
             let mut cache = self.transcript_cache.borrow_mut();
+            if cache.welcome_viewport != Some(viewport) {
+                cache.welcome_rows = welcome_row_budget(self, viewport.0);
+                cache.welcome_viewport = Some(viewport);
+            }
+            let welcome_rows = cache.welcome_rows;
             let previous_line_count = cache.lines.len();
             let rainbow_strength = self.status_rainbow_strength();
             let overlay_active = self.overlay.is_some();
@@ -226,9 +238,12 @@ impl ShellState {
                 cache.dirty_blocks.clear();
                 cache.width = Some(width);
                 cache.welcome_overlay_active = overlay_active;
-                cache
-                    .lines
-                    .extend(render_welcome_card(self, width, 10, Instant::now()));
+                cache.lines.extend(render_welcome_card(
+                    self,
+                    width,
+                    welcome_rows,
+                    Instant::now(),
+                ));
 
                 for (index, block) in self.transcript.iter().enumerate() {
                     let rendered = render_block_planned_with_rainbow(
@@ -255,12 +270,11 @@ impl ShellState {
                     cache.block_revisions.push(self.block_revisions[index]);
                 }
             } else {
-                // The startup card is a bounded prefix, not a transcript
-                // block. Refresh it independently so a 2.2 s animation or an
-                // overlay transition never reparses historical Markdown.
+                // The static startup card is a bounded prefix. Theme/model and
+                // overlay changes never reparse historical Markdown here.
                 replace_welcome_prefix(
                     &mut cache,
-                    render_welcome_card(self, width, 10, Instant::now()),
+                    render_welcome_card(self, width, welcome_rows, Instant::now()),
                     overlay_active,
                     &mut first_changed,
                 );
@@ -482,6 +496,8 @@ mod tests {
             prompt_zones: PromptZones::default(),
             prompt_zones_generation: None,
             welcome_overlay_active: false,
+            welcome_viewport: Some((80, 24)),
+            welcome_rows: 10,
             block_starts: vec![2],
             block_lengths: vec![1],
             block_geometries: vec![SurfaceGeometry::default()],
@@ -499,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn welcome_animation_and_overlay_changes_replace_one_prefix() {
+    fn static_welcome_and_overlay_changes_replace_one_prefix() {
         let mut shell = InteractiveShell::test_shell();
         let started = Instant::now() - Duration::from_millis(350);
         shell.state.borrow_mut().startup_card_started_at = Some(started);
@@ -512,10 +528,7 @@ mod tests {
             state.invalidate_transcript();
         }
         let second = shell.state.borrow().rendered_transcript(80).clone();
-        assert_ne!(
-            first, second,
-            "animation must replace the cached welcome prefix"
-        );
+        assert_eq!(first, second, "startup colours must not change with time");
         assert_eq!(
             shell
                 .state
@@ -523,8 +536,8 @@ mod tests {
                 .transcript_cache
                 .borrow()
                 .last_update_start,
-            0,
-            "prefix changes must redraw from the first logical row"
+            first.len(),
+            "time-only invalidation must retain the entire static prefix"
         );
 
         shell.show_overlay_text("overlay".into());

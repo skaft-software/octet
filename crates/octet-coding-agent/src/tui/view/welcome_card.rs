@@ -35,15 +35,6 @@ fn welcome_is_mutable(state: &ShellState) -> bool {
         })
 }
 
-pub(super) fn welcome_animating(state: &ShellState, now: Instant) -> bool {
-    welcome_is_mutable(state)
-        && state.theme.capabilities().animation
-        && state.overlay.is_none()
-        && state.startup_card_started_at.is_some_and(|started| {
-            now.saturating_duration_since(started).as_secs_f32() < crate::tui::splash::DURATION
-        })
-}
-
 pub(super) fn restart_welcome_animation(state: &mut ShellState) {
     if welcome_is_mutable(state) {
         state.startup_card_started_at = Some(Instant::now());
@@ -66,7 +57,7 @@ fn render_pi_startup(state: &ShellState, width: u16) -> Vec<String> {
         ),
     ];
     if let Some(hint) = super::startup_update::update_hint(state, width) {
-        lines.insert(2, hint);
+        lines[1] = hint;
     }
     lines
         .into_iter()
@@ -78,11 +69,14 @@ pub(super) fn render_welcome_card(
     state: &ShellState,
     width: u16,
     max_rows: usize,
-    now: Instant,
+    _now: Instant,
 ) -> Vec<String> {
+    if state.startup_card_started_at.is_none() {
+        return Vec::new();
+    }
     let layout = PresentationLayout::new(&state.theme, width);
     let inset = " ".repeat(usize::from(layout.inset));
-    render_welcome_content(state, layout.content_width, max_rows, now)
+    render_welcome_content(state, layout.content_width, max_rows)
         .into_iter()
         .map(|line| {
             if line.is_empty() {
@@ -94,24 +88,74 @@ pub(super) fn render_welcome_card(
         .collect()
 }
 
-fn render_welcome_content(
-    state: &ShellState,
-    width: u16,
-    max_rows: usize,
-    now: Instant,
-) -> Vec<String> {
-    let Some(started) = state.startup_card_started_at else {
+/// Reserve the same local geometry before model/session admission, without
+/// publishing provisional branding or touching the transcript cache.
+pub(super) fn welcome_placeholder_rows(state: &ShellState, width: u16) -> usize {
+    let layout = PresentationLayout::new(&state.theme, width);
+    render_welcome_content(
+        state,
+        layout.content_width,
+        welcome_row_budget(state, width),
+    )
+    .len()
+}
+
+pub(super) fn welcome_row_budget(state: &ShellState, width: u16) -> usize {
+    let composer_rows =
+        crate::tui::composer_surface::render_composer_surface(state, width, Instant::now()).len();
+    let header_rows = usize::from(state.theme.layout_for_width(width).show_header);
+    usize::from(state.size.1)
+        .saturating_sub(composer_rows + header_rows + 1)
+        .min(10)
+}
+
+fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Vec<String> {
+    if state.overlay.is_some() || max_rows == 0 {
         return Vec::new();
-    };
-    if state.overlay.is_some() || max_rows < 7 {
-        return Vec::new();
+    }
+    if max_rows < 7 {
+        let access = if state.safe_mode {
+            "safe mode"
+        } else {
+            "full access"
+        };
+        let role = if state.safe_mode { "accent" } else { "warning" };
+        let detail = if state.model.trim().is_empty() {
+            state
+                .theme
+                .fg("warning", "No models configured. Use /login.")
+        } else {
+            super::startup_update::update_hint(state, width)
+                .unwrap_or_else(|| changelog_hint(state, width))
+        };
+        return [
+            format!(
+                "{} {} {}",
+                state.theme.bold("octet"),
+                state.theme.dim(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+                state.theme.fg(role, access)
+            ),
+            detail,
+            format!(
+                "{} {}",
+                state.theme.bold("Ctrl+D"),
+                state.theme.dim("to exit")
+            ),
+        ]
+        .into_iter()
+        .take(max_rows)
+        .map(|line| fit_line(&line, width))
+        .collect();
     }
     if state
         .theme
         .resolve::<String>("startup")
         .is_some_and(|startup| startup.trim().eq_ignore_ascii_case("pi"))
     {
-        return render_pi_startup(state, width);
+        return render_pi_startup(state, width)
+            .into_iter()
+            .take(max_rows)
+            .collect();
     }
 
     // Custom themes can opt into the compiled default's smaller splash
@@ -123,11 +167,9 @@ fn render_welcome_content(
             .resolve::<bool>("splash_compact")
             .unwrap_or(false);
     let rows = if compact_splash { 4 } else { 6 };
-    let elapsed = if state.theme.capabilities().animation && welcome_is_mutable(state) {
-        now.saturating_duration_since(started).as_secs_f32()
-    } else {
-        crate::tui::splash::DURATION
-    };
+    // Startup identity is static for every theme. Working/Thinking retain their
+    // own liveness clocks; optional welcome colours never mutate native history.
+    let elapsed = crate::tui::splash::DURATION;
     let logo_width = if compact_splash {
         16
     } else {
@@ -181,17 +223,10 @@ fn render_welcome_content(
     } else {
         format!("{model} / {}", state.reasoning)
     };
-    let has_update = state.available_update.is_some();
     let box_color = state.theme.role_rgb("splash_box");
     let text_width =
         width.saturating_sub(logo_width as u16 + 5 + if box_color.is_some() { 2 } else { 0 });
-    if text_width < if has_update { 12 } else { 10 }
-        || max_rows
-            < rows
-                + 2
-                + usize::from(has_update)
-                + usize::from(state.theme.is_compiled_default() && model.trim().is_empty())
-    {
+    if text_width < 10 || max_rows < rows + 2 {
         // A narrow or short terminal cannot fit the two-column card. Keep a compact,
         // bounded identity instead of silently dropping the startup surface.
         let mut compact = Vec::with_capacity(7);
@@ -216,12 +251,18 @@ fn render_welcome_content(
             ),
             width,
         ));
-        compact.push(changelog_hint(state, width));
-        compact.extend(super::startup_update::update_hint(state, width));
-        if model.trim().is_empty() || !state.theme.is_compiled_default() {
+        compact.push(
+            if state.theme.is_compiled_default() && model.trim().is_empty() {
+                fit_line(&state.theme.fg("warning", &identity), width)
+            } else {
+                super::startup_update::update_hint(state, width)
+                    .unwrap_or_else(|| changelog_hint(state, width))
+            },
+        );
+        if !state.theme.is_compiled_default() {
             compact.push(fit_line(&splash_text(&identity), width));
         }
-        if state.theme.is_compiled_default() {
+        {
             compact.push(fit_line(
                 &format!(
                     "{} {}",
@@ -280,7 +321,7 @@ fn render_welcome_content(
             ),
         ];
         if model.trim().is_empty() {
-            text.insert(2, state.theme.fg("warning", &identity));
+            text[1] = state.theme.fg("warning", &identity);
         }
         text
     } else if splash_color.is_some() {
@@ -340,11 +381,12 @@ fn render_welcome_content(
         ]
     };
 
-    if let Some(hint) = super::startup_update::update_hint(state, text_width) {
-        text.insert(2, hint);
+    if !state.theme.is_compiled_default() || !model.trim().is_empty() {
+        if let Some(hint) = super::startup_update::update_hint(state, text_width) {
+            text[1] = hint;
+        }
     }
-    // Only the identity column grows for a newer release. The byte's occupied
-    // cells stay fixed; neither hint becomes a full-width row beneath it.
+    // A release hint replaces the changelog row instead of moving the composer.
     let mut logo = logo;
     logo.resize(text.len(), " ".repeat(logo_width));
     if let Some(color) = box_color {
@@ -450,10 +492,11 @@ mod tests {
             ColorDepth::None,
         ] {
             for unicode in [true, false] {
-                let shell =
+                let mut shell =
                     InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_with(
                         TerminalCapabilities::test(true, unicode, color),
                     ));
+                shell.set_identity("custom", "custom/probe", "off");
                 shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
                 for width in [1, 4, 8, 16, 23, 24, 40, 46, 80, 120] {
                     for height in [7, 8, 10] {
@@ -493,6 +536,69 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn welcome_bytes_are_static_and_short_panes_keep_permissions() {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        for color in [ColorDepth::TrueColor, ColorDepth::Ansi16, ColorDepth::None] {
+            let mut shell = InteractiveShell::test_shell_with_theme(
+                crate::tui::theme::test_theme_with(TerminalCapabilities::test(true, true, color)),
+            );
+            shell.set_identity("custom", "custom/probe", "off");
+            let started = Instant::now();
+            shell.state.borrow_mut().startup_card_started_at = Some(started);
+            for width in [24, 48, 80] {
+                for budget in [1, 2, 3, 6, 7, 10] {
+                    let state = shell.state.borrow();
+                    let first = render_welcome_card(&state, width, budget, started);
+                    assert_eq!(
+                        first,
+                        render_welcome_card(
+                            &state,
+                            width,
+                            budget,
+                            started + std::time::Duration::from_secs(3)
+                        )
+                    );
+                    assert!(first.len() <= budget);
+                    let plain = strip_terminal_sequences(&first.join("\n"));
+                    assert!(plain.contains("full access"), "{width}/{budget}: {plain}");
+                    assert!(first
+                        .iter()
+                        .all(|row| sexy_tui_rs::visible_width(row) <= usize::from(width)));
+                    if color == ColorDepth::None {
+                        assert!(!first.join("").contains('\x1b'));
+                    }
+                }
+            }
+            shell.state.borrow_mut().model.clear();
+            shell.state.borrow_mut().available_update = Some(semver::Version::new(9, 8, 7));
+            let rows = render_welcome_card(&shell.state.borrow(), 48, 3, started);
+            let plain = strip_terminal_sequences(&rows.join("\n"));
+            assert!(plain.contains("No models configured"), "{plain}");
+            assert!(plain.contains("full access"), "{plain}");
+        }
+    }
+
+    #[test]
+    fn late_updates_keep_custom_theme_geometry_even_at_card_breakpoints() {
+        let mut shell = InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_from_source(
+            "[metadata]\nname = \"Small welcome fixture\"\n[colors]\nsplash = \"#d97757\"\nsplash_box = \"#d97757\"\n",
+        ));
+        shell.set_identity("custom", "custom/probe", "off");
+        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        for width in 24..=80 {
+            shell.state.borrow_mut().available_update = None;
+            let first = render_welcome_card(&shell.state.borrow(), width, 10, Instant::now());
+            shell.state.borrow_mut().available_update = Some(semver::Version::new(9, 8, 7));
+            let updated = render_welcome_card(&shell.state.borrow(), width, 10, Instant::now());
+            assert_eq!(
+                first.len(),
+                updated.len(),
+                "hint changed card geometry at {width}"
+            );
         }
     }
 

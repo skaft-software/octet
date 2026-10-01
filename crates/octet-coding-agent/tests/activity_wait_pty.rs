@@ -672,14 +672,15 @@ fn frame_ranges(bytes: &[u8]) -> Vec<Range<usize>> {
 }
 
 fn resize_frame_end(bytes: &[u8]) -> Option<usize> {
-    // A previous frame may finish before the resize repaint has fully arrived.
-    // Require the clear and its following frame end, not independent markers.
+    // A previous animation frame may finish before the live-row repair arrives.
+    // Require the repair's origin address and its following frame end together.
+    const LIVE_REPAIR_ORIGIN: &[u8] = b"\x1b[1;1H";
     frame_ranges(bytes)
         .into_iter()
         .find(|range| {
             bytes[range.clone()]
-                .windows(4)
-                .any(|window| window == b"\x1b[2J")
+                .windows(LIVE_REPAIR_ORIGIN.len())
+                .any(|window| window == LIVE_REPAIR_ORIGIN)
         })
         .map(|range| range.end)
 }
@@ -687,7 +688,7 @@ fn resize_frame_end(bytes: &[u8]) -> Option<usize> {
 #[test]
 fn resize_wait_rejects_a_previous_frame_end() {
     let bytes =
-        b"\x1b[?2026hprevious frame\x1b[?2026l\x1b[?2026h\x1b[2Jdraft remains local\x1b[?2026l";
+        b"\x1b[?2026hprevious frame\x1b[?2026l\x1b[?2026h\x1b[1;1H\x1b[2Kdraft remains local\x1b[?2026l";
     for end in 0..bytes.len() {
         assert!(
             resize_frame_end(&bytes[..end]).is_none(),
@@ -696,7 +697,7 @@ fn resize_wait_rejects_a_previous_frame_end() {
     }
     assert_eq!(resize_frame_end(bytes), Some(bytes.len()));
     let mut with_partial_frame = bytes.to_vec();
-    with_partial_frame.extend_from_slice(b"\x1b[?2026h\x1b[2J");
+    with_partial_frame.extend_from_slice(b"\x1b[?2026h\x1b[1;1H\x1b[2K");
     assert_eq!(resize_frame_end(&with_partial_frame), Some(bytes.len()));
 }
 
@@ -801,12 +802,24 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
     });
     let resize_end =
         resize_start + resize_frame_end(&candidate.pty.output[resize_start..]).unwrap();
+    let repair = &candidate.pty.output[resize_start..resize_end];
+    for clear in [b"\x1b[2J", b"\x1b[3J"] {
+        assert!(
+            !repair.windows(clear.len()).any(|window| window == clear),
+            "activity resize must preserve live content and saved history"
+        );
+    }
     parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
     parser.process(&candidate.pty.output[consumed..resize_end]);
     consumed = resize_end;
     assert!(
         parser.screen().contents().contains("draft remains local"),
         "resize lost local input: {}",
+        parser.screen().contents()
+    );
+    assert!(
+        parser.screen().contents().contains(label),
+        "resize lost active status: {}",
         parser.screen().contents()
     );
 

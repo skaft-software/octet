@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Preserve saved terminal history through resize, PageUp, and historical live-row
+  repairs instead of clearing and replaying the full transcript. Settle resize
+  bursts, reuse height-only wrapping, and promote threaded reading anchors before
+  width reflow. Canonical session/copy history remains authoritative; already
+  emitted native scrollback rows remain snapshots.
+
+- Keep the startup welcome static, budget it for the actual pane height, and
+  reserve fresh-start composer geometry before model admission. Draft edits and
+  update hints no longer drive decorative historical replay. Position the native
+  hardware cursor inside the synchronized frame; active-run animations remain.
+
 ## [0.8.2] - 2026-09-30
 
 See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits.

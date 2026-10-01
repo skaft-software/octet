@@ -40,7 +40,13 @@ OS containment.
 
 Startup keeps routine session lookup, replay, and extension-loading progress off
 screen. The composer accepts typing while startup work finishes; the resolved
-welcome card and saved conversation appear at readiness. Setup prompts, errors,
+welcome card and saved conversation appear at readiness. Fresh-start native
+composer rows are reserved locally before that frame, without provisional model
+branding. The welcome is static and pane-height bounded; ordinary typing and
+late update hints do not move it or clear saved history. Cursor placement is
+included in the synchronized frame. Working/Thinking animations remain active.
+Enter before model/session resolution retains the draft without submitting or
+queuing it; submit after resolution. Setup prompts, errors,
 and cancellation/shutdown diagnostics remain visible. Fresh sessions skip the
 replay worker entirely; resumed sessions still restore their history. `--models`
 inventory discovery also runs after the shell owns input, not before first paint.
@@ -112,10 +118,13 @@ wheel history stays terminal-owned: portable protocols cannot report its offset.
 
 The renderer uses a complete retained frame, synchronized frames, and exact
 first-to-last changed-range repainting. Completions, panels, reports, and streamed
-Markdown participate in the same algorithm. Resize reflows the retained semantic
-transcript, clears saved lines, and replays once; changes above the old viewport
-also require full replay rather than leaving unwritten history. The hardware
-composer cursor stays visible through panels, resizing, and renderer resumes.
+Markdown participate in the same algorithm. Resize bursts settle before repairing
+only live rows; width changes reflow the semantic transcript, while height-only
+changes reuse its wrapping. Resize, PageUp, and historical repairs do not clear
+saved lines or replay the complete history. Already-emitted native history stays
+as snapshots; PageUp, copy, and the session contain the authoritative transcript
+when a historical result changes. The hardware composer cursor stays visible
+through panels, resizing, and renderer resumes.
 [Rendering details](design/octet-tui.md#terminal-guarantees).
 
 Wide/narrow layouts retain semantic structure with Unicode/ASCII, truecolor,
