@@ -132,6 +132,18 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   Python 3.10+ interpreter even when the bundle runs on macOS's Xcode Python
   3.9. Setup failures, including a missing compatible Python, are now reported
   as actionable errors instead of `internal error` (#457).
+- Fix computer use hanging on native Windows when run inside octet. Its driver
+  probes inherited the extension's protocol stdin, and on Windows a child that
+  shares that pipe can stall at startup. The options menu then fell back after
+  5 s to a bare command list with an argument prompt, and **Check status**
+  failed with `internal error`. Every first-party extension subprocess now gets
+  its own stdin, and a repository test enforces it. A driver check that cannot
+  run is reported as a failing self-check with its reason, a failed
+  computer-use action names its error, and a bare `computer-use` command checks
+  status as its default.
+- Stop querying the terminal background (OSC 11) on native Windows. The console
+  host delivers the reply as key records, and Windows Terminal's reply reached
+  the composer as typed text. Auto uses its neutral fallback there.
 - Computer use requires `cua-driver` 0.30.2 or newer. macOS 11
   and 12, which pip used to resolve silently to 0.11.0, and other unsupported
   systems now get a clear error that names the supported platforms.

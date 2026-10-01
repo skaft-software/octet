@@ -53,6 +53,13 @@
 
 ### Fixed
 
+- Status, setup and the options menu no longer hang on native Windows when
+  octet hosts the extension. Driver probes inherited the extension's protocol
+  stdin, and a Windows child that shares that pipe can stall at startup until
+  octet sends another message. Every probe now gets its own stdin. A driver
+  check that cannot run is reported as a failing self-check with its reason
+  instead of `internal error`, a failed `computer-use` action names its error,
+  and `computer-use` with no arguments checks status.
 - Require `cua-driver` 0.30.2 or newer. Unpinned setup used to let pip fall
   back to the newest release with a wheel for the platform, so macOS 11 and 12
   silently received 0.11.0. Setup now refuses older pins and replaces an older

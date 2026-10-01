@@ -52,6 +52,7 @@ const INITIAL: (u16, u16) = (90, 28);
 const RESIZED: (u16, u16) = (120, 32);
 const MARKER: &str = "octetconpty";
 const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+const OSC11_QUERY: &[u8] = b"\x1b]11;?";
 
 /// The persisted custom-provider registry, which the child always reads.
 ///
@@ -594,6 +595,15 @@ fn interactive_round_trip(environment: &[(&str, &str)], rule: char) {
     console.send(b"\x04");
     let code = console.wait_for_exit();
     let raw = console.raw();
+    // Native Windows never sends the OSC 11 background query: a console host
+    // delivers the reply as key records, and Windows Terminal's reply reached
+    // the composer as typed text. A host that answers the query itself never
+    // forwards it, so this only catches a forwarded query.
+    assert!(
+        !raw.windows(OSC11_QUERY.len())
+            .any(|window| window == OSC11_QUERY),
+        "octet sent an OSC 11 background query on native Windows"
+    );
     let frames = raw
         .windows(SYNC_BEGIN.len())
         .filter(|window| *window == SYNC_BEGIN)

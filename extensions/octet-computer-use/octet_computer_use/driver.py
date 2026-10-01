@@ -188,6 +188,12 @@ def _run(
             list(argv),
             cwd=str(cwd) if cwd is not None else None,
             env=dict(env) if env is not None else None,
+            # Never inherit stdin. Inside octet it is the extension's JSON-RPC
+            # pipe, which the protocol reader is blocked reading. On Windows a
+            # child that inherits that synchronous pipe can stall in C runtime
+            # startup until the host happens to send another message, so the
+            # status probe and the options menu hung only when hosted.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1235,9 +1241,29 @@ def _linux_session_state(client: Any) -> Dict[str, Any]:
 
 
 def health(paths: DriverPaths) -> Health:
-    """Report health for the exact binary selected for dispatch, without prompting."""
+    """Report health for the exact binary selected for dispatch, without prompting.
 
-    runtime = active_runtime()
+    A probe that cannot run, because it timed out or failed to start, is
+    reported as a failing self-check with its reason. Status describes such a
+    failure; it never raises it.
+    """
+
+    runtime = "unavailable"
+    try:
+        runtime = active_runtime()
+        return _probe_health(paths, runtime)
+    except (ProvisionError, OSError) as error:
+        return Health(
+            installed=paths.venv_python.is_file(),
+            version=None,
+            permissions="unknown",
+            doctor_ok=False,
+            detail=f"the driver check could not run: {error}",
+            runtime=runtime,
+        )
+
+
+def _probe_health(paths: DriverPaths, runtime: str) -> Health:
     host = desktop_app() if runtime == "desktop-host" else None
     binary = desktop_app_binary(host) if host is not None else (
         installed_binary(paths) if runtime == "direct" else None
@@ -1291,7 +1317,8 @@ def health(paths: DriverPaths) -> Health:
         try:
             payload = json.loads(doctor.stdout or "{}")
             doctor_ok = bool(payload.get("ok"))
-            detail = f"cua-driver {version or 'unknown'}"
+            detail = (f"cua-driver {version or 'unknown'}" if doctor_ok
+                      else "doctor reported a failing probe")
         except json.JSONDecodeError:
             detail = "doctor returned unreadable output"
     else:

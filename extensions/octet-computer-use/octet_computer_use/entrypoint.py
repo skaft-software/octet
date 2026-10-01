@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from octet_extension import Extension, image_content, text_content, tool_result
+from octet_extension import Extension, RpcError, image_content, text_content, tool_result
 
 from octet_computer_use import driver as driver_module
 from octet_computer_use import cursor_theme, gnome_helper, service, jev_use_binding, jev_use_jobs
@@ -977,6 +977,17 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         computer_use.select_model(context)
         parts = [str(part) for part in (arguments or [])]
         action = parts[0] if parts else "status"
+        try:
+            return run_command(action, parts, context)
+        except RpcError:
+            # Cancellation and protocol errors keep their own meaning.
+            raise
+        except Exception as error:  # noqa: BLE001 - name the failure, never an opaque -32603
+            return tool_result(
+                text_content(f"computer-use {action} failed: {error}"), is_error=True
+            )
+
+    def run_command(action: str, parts: List[str], context: Mapping[str, Any]) -> Dict[str, Any]:
         if action == "jev-use":
             try:
                 operation, options = jev_use_binding.command_options(parts[1:])
@@ -987,7 +998,8 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
             return _run_setup(extension, computer_use)
         if action == "jev" and len(parts) <= 2:
             return _run_jev(extension, computer_use, parts[1] if len(parts) == 2 else "setup")
-        if action == "status" and len(parts) == 1:
+        # A bare `computer-use` is a status check, as its default action says.
+        if action == "status" and len(parts) <= 1:
             _progress(extension, "Running the driver self-check and permission probe…")
             result = computer_use.publish_status()
             return tool_result(text_content(_render_status(result)), structured_content=result)
@@ -1522,9 +1534,12 @@ def _render_status(status: Mapping[str, Any]) -> str:
             f"Cua Driver is not installed. To install it, {driver_module.SETUP_HINT} "
             "(or ask for the computer_use_setup tool)."
         )
+    check = "ok" if status.get("doctor_ok") else "needs attention"
+    if not status.get("doctor_ok") and status.get("detail"):
+        check += f" ({status['detail']})"
     lines = [
         f"Cua Driver {status.get('version') or 'unknown'} is installed.",
-        f"driver self-check: {'ok' if status.get('doctor_ok') else 'needs attention'}",
+        f"driver self-check: {check}",
     ]
     # Say plainly which runtime is live, because the permission fix is different
     # for each and a user chasing the wrong one will never succeed.

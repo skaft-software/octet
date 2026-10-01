@@ -1032,6 +1032,48 @@ class OptionsMenuTests(unittest.TestCase):
         self.assertIn("/extensions", result["content"][0]["text"])
 
 
+class StatusCommandTests(unittest.TestCase):
+    """The status command reports every outcome; it never fails opaquely."""
+
+    REPORT = {"installed": True, "version": "0.30.3", "doctor_ok": True,
+              "permissions": "granted", "runtime": "direct", "platform": "windows"}
+
+    def test_a_bare_command_checks_status(self):
+        from unittest import mock
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(computer, "publish_status", return_value=dict(self.REPORT)):
+            result = extension._commands["computer-use"].handler([], {})
+        self.assertFalse(result.get("is_error"))
+        self.assertIn("Cua Driver 0.30.3 is installed.", result["content"][0]["text"])
+
+    def test_a_failing_command_names_its_error(self):
+        from unittest import mock
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(computer, "publish_status",
+                               side_effect=RuntimeError("the driver session wedged")):
+            result = extension._commands["computer-use"].handler(["status"], {})
+        self.assertTrue(result["is_error"])
+        self.assertEqual(result["content"][0]["text"],
+                         "computer-use status failed: the driver session wedged")
+
+    def test_cancellation_is_not_reported_as_a_failure(self):
+        from unittest import mock
+        from octet_extension import CancelledError
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(computer, "publish_status", side_effect=CancelledError("user")):
+            with self.assertRaises(CancelledError):
+                extension._commands["computer-use"].handler(["status"], {})
+
+    def test_a_failing_self_check_says_why(self):
+        report = dict(self.REPORT, doctor_ok=False, version=None,
+                      detail="the driver check could not run: command timed out after 60s")
+        text = _render_status(report)
+        self.assertIn("driver self-check: needs attention (the driver check could not run: "
+                      "command timed out after 60s)", text)
+        self.assertNotIn("(", _render_status(self.REPORT).splitlines()[1])
 
 
 class CursorThemeTests(unittest.TestCase):

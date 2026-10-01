@@ -165,9 +165,14 @@ Known differences on Windows:
   records instead; `Ctrl+J` always inserts a newline, and whether `Shift+Enter`
   does in a given host is part of the checklist. Shortcuts that differ on
   Windows are listed in [commands](commands.md).
-- Crossterm reads Windows console input records and reports no paste event.
-  How a multi-line paste arrives through ConPTY is part of the manual checklist
-  below; until it passes, prefer `@file` references for long text.
+- Crossterm reads Windows console input records and reports no paste event,
+  so a pasted line break arrives as `Enter`: in Windows Terminal a multi-line
+  paste submits once per line. Use `@file` references for long or multi-line
+  text.
+- octet does not query the terminal background (OSC 11) on native Windows. The
+  console host turns the reply into key records, and Windows Terminal's reply
+  reached the composer as typed text. Auto uses its neutral fallback; choose
+  `--theme dark`, `--theme light` or `/theme` instead.
 - Inline images are shown only on Kitty-compatible terminals, so tool images
   use the text fallback in Windows Terminal.
 - Resizing replays the retained transcript once, as on other platforms.
@@ -201,7 +206,8 @@ Windows Terminal. Use a disposable workspace and `--safe-mode`.
 7. **Completion and pickers**: type `/` and `@` to open completion menus, and
    open `/model`. Menus draw and close without leaving residue.
 8. **Paste**: paste a multi-line block with `Ctrl+V` and with a right-click.
-   Record whether it arrives as one composer entry or submits early.
+   Record whether it arrives as one composer entry or submits early. In 0.8.2
+   release testing, Windows Terminal submitted once per line.
 9. **Cancellation**: press `Esc` during a response and `Ctrl+C` during a long
    tool run; work stops and the frontend stays usable.
 10. **Exit and restoration**: exit with `Ctrl+D` or `/exit`, and separately

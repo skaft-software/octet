@@ -482,6 +482,10 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess:
     return subprocess.run(  # noqa: S603 - argv list, shell=False, bounded timeout
         list(argv),
         shell=False,
+        # Never inherit stdin: inside octet it is the extension's JSON-RPC
+        # pipe, and on Windows a child sharing that pipe can stall at startup
+        # while the protocol reader is blocked on it.
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=COMMAND_TIMEOUT_SECONDS,

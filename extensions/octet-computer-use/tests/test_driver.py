@@ -7,8 +7,10 @@ created, no pip index is contacted, and no driver binary is executed.
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from pathlib import Path
@@ -451,6 +453,131 @@ class SitePackagesLayoutTests(unittest.TestCase):
                 driver_module.platform, "system", return_value=system
             ):
                 self.assertEqual(self.paths.site_packages, expected)
+
+
+class ProbeIsolationTests(unittest.TestCase):
+    """Probes never share the extension's protocol stdin with a child."""
+
+    def test_probes_never_inherit_stdin(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(kwargs)
+            return _Completed()
+
+        with patch.object(driver_module.subprocess, "run", run):
+            driver_module._run(["cua-driver", "--version"])
+        self.assertIs(calls[0]["stdin"], subprocess.DEVNULL)
+
+
+class HealthFailureTests(unittest.TestCase):
+    """A probe that cannot run is a failing self-check, never an exception."""
+
+    def setUp(self):
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+        self.paths = DriverPaths.for_home(Path(self._home.name))
+
+    def test_a_probe_that_cannot_run_is_reported_with_its_reason(self):
+        self.paths.venv_python.parent.mkdir(parents=True)
+        self.paths.venv_python.write_text("")
+        failure = ProvisionError("command timed out after 60s: python -c")
+        with patch.object(driver_module, "active_runtime", return_value="direct"), \
+             patch.object(driver_module, "installed_binary", side_effect=failure):
+            health = driver_module.health(self.paths)
+        self.assertTrue(health.installed)
+        self.assertFalse(health.doctor_ok)
+        self.assertEqual(health.permissions, "unknown")
+        self.assertEqual(health.runtime, "direct")
+        self.assertIn("could not run", health.detail)
+        self.assertIn("timed out after 60s", health.detail)
+
+    def test_a_failing_doctor_probe_is_reported_too(self):
+        binary = Path(self._home.name) / "cua-driver"
+
+        def run(argv, **kwargs):
+            if argv[1:] == ["doctor", "--json"]:
+                raise ProvisionError("failed to run cua-driver: access denied")
+            return _Completed()
+
+        with patch.object(driver_module, "active_runtime", return_value="direct"), \
+             patch.object(driver_module, "installed_binary", return_value=binary), \
+             patch.object(driver_module, "driver_version", return_value="0.30.3"), \
+             patch.object(driver_module, "_run", run):
+            health = driver_module.health(self.paths)
+        self.assertFalse(health.doctor_ok)
+        self.assertIn("access denied", health.detail)
+
+    def test_a_runtime_that_cannot_be_probed_is_unavailable(self):
+        failure = ProvisionError("command timed out after 20s: open")
+        with patch.object(driver_module, "active_runtime", side_effect=failure):
+            health = driver_module.health(self.paths)
+        self.assertFalse(health.installed)
+        self.assertEqual(health.runtime, "unavailable")
+        self.assertIn("timed out after 20s", health.detail)
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows pipe semantics")
+class HostedStdinTests(unittest.TestCase):
+    """A probe must finish while the protocol reader is blocked on stdin.
+
+    Inside octet the extension reads JSON-RPC from a synchronous pipe on a
+    reader thread. This reproduces that: the parent below blocks a thread in a
+    read of its stdin, which this test keeps open and never writes to, and then
+    runs a probe.
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def _hosted(self, probe):
+        script = textwrap.dedent(f"""
+            import os, subprocess, sys, threading, time
+            sys.path[:0] = [{str(self.ROOT)!r}, {str(self.ROOT / "vendor")!r}]
+            from octet_computer_use import driver
+            threading.Thread(target=sys.stdin.buffer.readline, daemon=True).start()
+            time.sleep(0.5)
+            started = time.monotonic()
+            try:
+                {probe}
+                outcome = "finished"
+            except (subprocess.TimeoutExpired, driver.ProvisionError):
+                outcome = "stalled"
+            print(outcome, round(time.monotonic() - started, 2), flush=True)
+            # The reader thread still holds stdin; skip interpreter shutdown.
+            os._exit(0)
+        """)
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            # Wait without closing stdin: closing it would end the blocked read.
+            returncode = process.wait(timeout=90)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            process.stdin.close()
+        output = process.stdout.read().strip()
+        errors = process.stderr.read().strip()
+        process.stdout.close()
+        process.stderr.close()
+        self.assertEqual(returncode, 0, errors)
+        return output
+
+    def test_a_probe_finishes_while_stdin_is_being_read(self):
+        output = self._hosted('driver._run([sys.executable, "-c", "pass"], timeout=20)')
+        self.assertTrue(output.startswith("finished"), output)
+
+    def test_an_inheriting_child_is_the_stall_this_prevents(self):
+        # Diagnostic control: the same child with stdin inherited.
+        output = self._hosted(
+            'subprocess.run([sys.executable, "-c", "pass"], stdout=subprocess.PIPE, '
+            'stderr=subprocess.PIPE, timeout=8)'
+        )
+        if not output.startswith("stalled"):
+            self.skipTest(f"an inheriting child did not stall here ({output})")
 
 
 if __name__ == "__main__":

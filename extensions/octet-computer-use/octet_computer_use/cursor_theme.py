@@ -189,7 +189,10 @@ def installed_theme_ids(binary: Path) -> set[str]:
         if root is None:
             raise ValueError("the Cua cursor-theme store is not resolvable")
         return _store_ids(root)
+    # stdin is never inherited: inside octet it is the protocol pipe (see
+    # driver._run).
     result = subprocess.run([str(binary), "cursor-theme", "list", "--json"],
+                            stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, encoding="utf-8",
                             errors="replace", timeout=15, check=True)
     ids = json.loads(result.stdout)
@@ -219,6 +222,7 @@ def install_bundled_themes(binary: Path) -> int:
             raise RuntimeError(f"bundled cursor theme is missing: {lab}")
         command = subprocess.run(
             [str(binary), "cursor-theme", "install", str(artifact)],
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=30, check=False,
         )

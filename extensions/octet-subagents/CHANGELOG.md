@@ -66,6 +66,12 @@
   schema, tool descriptions, README, and reference document the optional
   provider/model/reasoning selection and its fail-closed validation.
 
+### Fixed
+
+- Multiplexer commands no longer inherit the extension's protocol stdin. On
+  Windows a child that shares that pipe can stall at startup while octet's
+  reader waits on it.
+
 ## [0.2.0]
 
 ### Added

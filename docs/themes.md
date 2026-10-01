@@ -113,6 +113,11 @@ ambiguity timeout. A header fragmented more slowly can still pass through as
 input. Use explicit `--theme dark` or `--theme light` to skip the query on such
 terminals. This is not a guarantee for arbitrary terminal-protocol corruption.
 
+Native Windows never sends the query. The console host turns a reply into key
+records, and Windows Terminal's reply reached the composer as typed text, so
+Auto uses the neutral fallback there. Choose `--theme dark`, `--theme light` or
+`/theme` to pick a contrast profile.
+
 ## Variant reference
 
 octet ships a complete reference file for the compiled default theme at

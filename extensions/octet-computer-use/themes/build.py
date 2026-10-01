@@ -119,7 +119,8 @@ def build(binary: str) -> None:
                     output.writestr(name, payload)
             artifact = HERE / f"{lab}.cua-theme"
             subprocess.run([binary, "cursor-theme", "build", str(source_path),
-                            "--output", str(artifact)], check=True, capture_output=True)
+                            "--output", str(artifact)], stdin=subprocess.DEVNULL,
+                           check=True, capture_output=True)
     (HERE / "palette.json").write_text(json.dumps(palette, sort_keys=True, indent=2) + "\n")
     print(f"Built {len(palette)} themes")
 
