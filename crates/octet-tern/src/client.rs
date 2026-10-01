@@ -208,6 +208,26 @@ impl TernClient {
         Ok(s)
     }
 
+    /// Send a frame without waiting for credit.
+    ///
+    /// For callers whose input path already consumes terminal replies (so acks
+    /// never reach this client); the terminal coalesces frames it has not yet
+    /// acknowledged instead of rejecting them.
+    pub fn frame_ops_now(&mut self, surface: &str, ops: Vec<Op>) -> io::Result<u64> {
+        let s = {
+            let next = self.seq.entry(surface.to_owned()).or_insert(0);
+            *next += 1;
+            *next
+        };
+        let frame = Frame {
+            sf: surface.to_owned(),
+            s,
+            ops,
+        };
+        self.write(Verb::Frame, &frame)?;
+        Ok(s)
+    }
+
     /// Block until the surface has room for another frame, bounded to avoid
     /// hanging when a terminal never answers.
     fn await_credit(&mut self, surface: &str) {

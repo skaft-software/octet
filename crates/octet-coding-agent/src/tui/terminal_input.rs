@@ -51,6 +51,8 @@ struct BackgroundReplies {
     color: Option<RgbColor>,
     /// Key-up still owed by a Windows console for the reply's final byte.
     trailing_release: Option<(KeyCode, KeyModifiers)>,
+    /// Always-on terminal → program TSP message filter (Tern surfaces).
+    apc: ApcFilter,
 }
 
 impl BackgroundReplies {
@@ -67,17 +69,31 @@ impl BackgroundReplies {
     }
 
     fn deadline(&self) -> Option<Instant> {
-        if self.text.starts_with(OSC11_PREFIX) {
+        let osc = if self.text.starts_with(OSC11_PREFIX) {
             None
         } else {
             self.prefix_updated
                 .map(|updated| updated + PREFIX_AMBIGUITY_TIMEOUT)
+        };
+        match (osc, self.apc.deadline()) {
+            (Some(osc), Some(apc)) => Some(osc.min(apc)),
+            (osc, apc) => osc.or(apc),
         }
     }
 
     fn replay(&mut self) {
         self.ready.extend(self.held.drain(..));
+        self.ready.extend(self.apc.flush());
         self.clear_fragment();
+    }
+
+    /// Route one event through the always-on APC/TSP filter first: terminal →
+    /// program TSP messages (`ESC _ tsp;… ESC \`) are protocol traffic, never
+    /// octet input. Released events continue through the OSC 11 filter.
+    fn push_filtered(&mut self, event: Event, now: Instant) {
+        for event in self.apc.push(event, now) {
+            self.push(event, now);
+        }
     }
 
     fn clear_fragment(&mut self) {
@@ -87,6 +103,8 @@ impl BackgroundReplies {
     }
 
     fn expire(&mut self, now: Instant) {
+        let released = self.apc.expire(now);
+        self.ready.extend(released);
         if self.deadline().is_some_and(|deadline| now >= deadline) {
             self.replay();
         }
@@ -166,6 +184,141 @@ impl BackgroundReplies {
     }
 }
 
+/// Swallows terminal → program TSP messages (`ESC _ tsp;… ESC \` or a BEL
+/// terminator) that Tern delivers as input. Inactive unless octet is rendering
+/// a native Tern surface, and bounded so a truncated sequence replays as input.
+#[derive(Default)]
+struct ApcFilter {
+    text: String,
+    held: Vec<Event>,
+    active: bool,
+    updated: Option<Instant>,
+}
+
+/// Append a trace line when `OCTET_TUI_TERN_TRACE` names a file.
+fn apc_trace(message: &str) {
+    use std::io::Write;
+    let path = std::env::var("OCTET_TUI_TERN_TRACE");
+    if let Ok(path) = path {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
+
+impl ApcFilter {
+    const PREFIX: &'static str = "\x1b_tsp;";
+    const MAX_BYTES: usize = 1 << 20;
+    /// A TSP message arrives as one burst. If it stalls this long, the held
+    /// events are genuine input (a split escape) and must be replayed rather
+    /// than swallowed indefinitely.
+    const IDLE: Duration = Duration::from_millis(60);
+
+    /// Returns the events that are not part of a TSP reply, in arrival order.
+    fn push(&mut self, event: Event, now: Instant) -> Vec<Event> {
+        if !crate::tui::view::tern::enabled_cached() {
+            return vec![event];
+        }
+        if !self.active {
+            if reply_fragment(&event).as_deref() == Some("\x1b_") {
+                self.active = true;
+                self.updated = Some(now);
+                self.text.push_str("\x1b_");
+                self.held.push(event);
+                return Vec::new();
+            }
+            return vec![event];
+        }
+        match reply_fragment(&event) {
+            Some(fragment) => {
+                self.updated = Some(now);
+                self.text.push_str(&fragment);
+                self.held.push(event);
+                let text = self.text.as_str();
+                if Self::PREFIX.starts_with(text) {
+                    // Still a possible APC opener (`\x1b_`, `\x1b_t`, …).
+                    return Vec::new();
+                }
+                if !text.starts_with(Self::PREFIX) {
+                    // A different escape; the held events were genuine input.
+                    return self.flush_released();
+                }
+                if text.ends_with('\x07') || text.ends_with("\x1b\\") {
+                    // A complete TSP message: protocol traffic, not input.
+                    apc_trace(&format!(
+                        "swallow {} events, {} bytes",
+                        self.held.len(),
+                        self.text.len()
+                    ));
+                    self.active = false;
+                    self.text.clear();
+                    self.held.clear();
+                    return Vec::new();
+                }
+                if self.text.len() > Self::MAX_BYTES {
+                    apc_trace("overflow");
+                    return self.flush_released();
+                }
+                Vec::new()
+            }
+            None => {
+                if is_key_release(&event) {
+                    // A Windows key-up for a held reply byte.
+                    self.held.push(event);
+                    return Vec::new();
+                }
+                let mut released = self.flush_released();
+                released.push(event);
+                released
+            }
+        }
+    }
+
+    fn flush_released(&mut self) -> Vec<Event> {
+        if self.active {
+            apc_trace(&format!(
+                "release {} events, {} bytes: {:?}",
+                self.held.len(),
+                self.text.len(),
+                self.text.chars().take(40).collect::<String>()
+            ));
+        }
+        self.active = false;
+        self.text.clear();
+        std::mem::take(&mut self.held)
+    }
+
+    /// Held events when the input stream ends or errors.
+    fn flush(&mut self) -> Vec<Event> {
+        if self.active {
+            self.flush_released()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// When a stalled partial message must be replayed as input.
+    fn deadline(&self) -> Option<Instant> {
+        self.active
+            .then(|| self.updated.map(|at| at + Self::IDLE))
+            .flatten()
+    }
+
+    /// Replay a partial message that stopped arriving.
+    fn expire(&mut self, now: Instant) -> Vec<Event> {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            apc_trace("idle-release");
+            self.flush_released()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 fn is_key_release(event: &Event) -> bool {
     matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
 }
@@ -183,6 +336,8 @@ fn reply_fragment(event: &Event) -> Option<String> {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, KeyModifiers::NONE) => Some("\x1b".into()),
         (KeyCode::Char(']'), KeyModifiers::ALT) => Some("\x1b]".into()),
+        // APC opener (`ESC _`), the prefix of a Tern Surface Protocol message.
+        (KeyCode::Char('_'), KeyModifiers::ALT) => Some("\x1b_".into()),
         (KeyCode::Char('\\'), KeyModifiers::ALT) => Some("\x1b\\".into()),
         (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some("\x07".into()),
         (KeyCode::Char(character), modifiers)
@@ -359,7 +514,7 @@ impl<S: Stream<Item = io::Result<Event>> + Unpin> TerminalInput<S> {
                 }
                 Err(_) => return None,
             };
-            self.replies.push(event, Instant::now());
+            self.replies.push_filtered(event, Instant::now());
             if let Some(color) = self.replies.color.take() {
                 return Some(color);
             }
@@ -393,7 +548,7 @@ impl<S: Stream<Item = io::Result<Event>> + Unpin> Stream for TerminalInput<S> {
                 return Poll::Ready(None);
             }
             match Pin::new(&mut this.source).poll_next(cx) {
-                Poll::Ready(Some(Ok(event))) => this.replies.push(event, Instant::now()),
+                Poll::Ready(Some(Ok(event))) => this.replies.push_filtered(event, Instant::now()),
                 Poll::Ready(Some(Err(error))) => {
                     this.input_error = Some(error);
                     this.replies.replay();

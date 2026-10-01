@@ -256,6 +256,22 @@ pub fn turn_usage(id: impl Into<String>, parts: &[(&str, &str)]) -> Node {
     )
 }
 
+/// One row of turn facts from owned spans (for callers that build them dynamically).
+pub fn turn_usage_spans(id: impl Into<String>, spans: Vec<Span>) -> Node {
+    parent(
+        id,
+        Kind::Row,
+        Props::new().role("octet.turn.usage").set("gap", Space::Sm),
+        vec![node(
+            "usage.text",
+            Kind::Text,
+            Props::new()
+                .text("spans", Text::Spans(spans))
+                .set("measure", "fill"),
+        )],
+    )
+}
+
 /// A todo HUD for the dock region.
 pub fn todo_hud(id: impl Into<String>, note: &str, phases: serde_json::Value) -> Node {
     node(

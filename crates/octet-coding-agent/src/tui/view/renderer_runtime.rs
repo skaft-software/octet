@@ -501,6 +501,10 @@ pub(super) fn render_loop_with_terminal(
         alternate_screen,
     } = options;
     state.borrow_mut().render_threaded = true;
+    // Native Tern rendering runs on this thread, between ANSI paints, so both
+    // streams share one writer and never interleave mid-sequence. Dropping the
+    // surface (every return path) closes it and keeps its scrollback.
+    let mut tern = super::tern::TernSurface::start();
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
     // policy in `native_scrollback` (not native history) decides which rows stay
@@ -632,6 +636,9 @@ pub(super) fn render_loop_with_terminal(
         sync_window_title(&mut tui, &state, &mut last_title);
         tui.request_render();
         state.frame_written();
+        if let Some(tern) = tern.as_mut() {
+            tern.present(&state);
+        }
         last_render = Some(Instant::now());
     }
 
@@ -640,6 +647,9 @@ pub(super) fn render_loop_with_terminal(
     sync_window_title(&mut tui, &state, &mut last_title);
     tui.request_render();
     state.frame_written();
+    if let Some(tern) = tern.as_mut() {
+        tern.present(&state);
+    }
     tui.stop();
 }
 

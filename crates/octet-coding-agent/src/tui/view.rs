@@ -7496,6 +7496,7 @@ mod status_telemetry;
 mod surface_frame;
 mod surface_layout;
 mod terminal_text;
+pub(crate) mod tern;
 mod tool_render;
 mod transcript_cache;
 mod transcript_navigation;
