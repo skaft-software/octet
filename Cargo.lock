@@ -1628,6 +1628,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "octet-tern"
+version = "0.8.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

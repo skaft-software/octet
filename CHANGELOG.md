@@ -246,6 +246,13 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   `extensions/serve.rs` (9.3K) in `octet-coding-agent`. Public items keep their
   paths through re-exports.
 
+- Add `crates/octet-tern`, a Tern Surface Protocol (TSP) client and native-surface
+  proof of concept: the v1 wire schema and APC framing, a tty session with
+  credit-based flow control, an octet theme file → Tern palette projector, and
+  scene builders for octet's transcript, tool cards, working row, composer and
+  todo HUD. Run `cargo run -p octet-tern --bin octet-tern-demo` inside a Tern
+  pane; outside Tern octet keeps its ANSI path. See `docs/tern.md`.
+
 ## [0.8.1] - 2026-09-27
 
 See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.
