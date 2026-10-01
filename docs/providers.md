@@ -275,8 +275,8 @@ This needs a live, owner-bound child-session service. To rebuild or replace an
 installed bundle, run `./scripts/reinstall-octet-subagents.sh`. `cargo run`
 doesn't update `~/.octet/extensions`. See the [subagents
 package](../extensions/octet-subagents/README.md) and its API 0.4 exact-version
-boundary. Catalog install isn't available yet: [Optional
-packages](installation.md#optional-packages).
+boundary. Catalog install works once the matching release is published:
+[Optional packages](installation.md#optional-packages).
 
 </details>
 

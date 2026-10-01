@@ -71,8 +71,9 @@ Open `/extensions`, then octet-subagents, then **Workers** (or just
 spend and transcript. See [Subagents](../extensions/octet-subagents/README.md).
 
 Extensions need full-access mode, and installing, enabling and trusting are
-separate steps ([Optional packages](installation.md#optional-packages)). The
-bundle declares API 0.4, and exact host-version pins still apply.
+separate steps. Catalog setup works once the matching release is published
+([Optional packages](installation.md#optional-packages)). The bundle declares
+API 0.4, and exact host-version pins still apply.
 
 ## Extend or embed
 
