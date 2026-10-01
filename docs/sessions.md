@@ -2,55 +2,42 @@
 
 [Documentation](README.md) · [Context](context.md) · [Commands](commands.md)
 
-Continue the latest conversation in the current workspace:
-
 ```sh
 octet --continue
 ```
 
-Sessions are bounded, append-only JSONL, namespaced by workspace under the
-configured session directory (`--session-dir PATH`). Complete semantic boundaries
-are durable; provisional streaming deltas are not. Parent links preserve branches
-without rewriting history. Names/tags live in `.metadata/` sidecars so the
-conversation remains readable without changing its format.
+Sessions are append-only JSONL files, grouped by workspace under the session
+directory (`--session-dir PATH`). Only completed steps are saved, not streaming
+deltas. Parent links keep branches without rewriting history. Names and tags
+live in `.metadata/` sidecars, so the conversation file stays unchanged.
 
 ## Resume and branch
 
 ```sh
-octet --resume
+octet --resume                # pick from a list
 octet --resume SESSION_ID
-octet --fork SESSION_ID
-octet --fork
+octet --fork SESSION_ID       # new session from that head
+octet --fork                  # pick, then fork
 ```
 
-Resume restores model/reasoning, prompt identity, tool panels, branches, and
-historical prompt colors. Explicit `--model`/`--reasoning` override recovered
-values. `--fork <id|path>` creates a new session from the selected head before
-startup; bare `--fork` opens the picker.
+Resume restores the model, reasoning, prompt identity, tool panels, branches and
+prompt colors. An explicit `--model` or `--reasoning` overrides the recovered
+value.
 
-| Interactive action | Result |
-| --- | --- |
-| `/resume [id]` | Resume directly or open the picker. |
-| `/fork` | Pick an active-branch user message or the whole conversation for a new session. |
-| `/clone` | New session from the current head without a picker. |
-| `/name [name]` | Show or change the readable name. |
-| `/export [path]` | Redacted portable export. |
+Inside a session, `/resume`, `/fork`, `/clone`, `/name` and `/export` do the
+same ([commands](commands.md)). In the interactive TUI, a name you give a
+session shows in the terminal window title as `octet · <name>`, and unnamed
+sessions use `octet`. Renaming, resuming or starting a session updates the
+title. Plain, print and RPC modes don't set a window title.
 
-In the interactive TUI, a user-assigned name appears in the terminal window
-as `octet · <name>`. Unnamed sessions use `octet`; renaming the current session,
-resuming another session, or starting a new one updates the title. Plain, print,
-and RPC frontends do not set a window title.
-
-The resume picker supports fuzzy, quoted-phrase, and `re:` regex filtering,
-named-only filtering, recent/title/message-count sorting, and optional paths.
-Tab toggles current/all-workspace scope; Ctrl+S cycles ordering, Ctrl+N filters
-named sessions, Ctrl+P toggles paths, and Ctrl+R renames. Ctrl+X (or Delete)
-asks to move the selected session to trash, naming it; Enter confirms and Esc
-cancels. Trash is recoverable: the session stays on disk, hidden from the
-picker, and the web UI's trash can restore it. The current session cannot be
-trashed.
-All-workspace browsing is not a cross-workspace transcript index; a differently
-scoped session cannot be resumed into the same live App.
+In the resume picker, type to filter by fuzzy match, `"quoted phrase"` or `re:`
+regex. Tab switches between this workspace and all workspaces. Ctrl+S cycles the
+sort (recent, title, message count), Ctrl+N shows named sessions only, Ctrl+P
+toggles paths, and Ctrl+R renames. Ctrl+X (or Delete) asks to move the selected
+session to trash, naming it: Enter confirms and Esc cancels. Trash is
+recoverable. The session stays on disk, hidden from the picker, and the web UI's
+trash can restore it. You can't trash the current session. A session from
+another workspace can't be resumed into the same live app.
 
 ## Commands
 
@@ -67,77 +54,89 @@ octet sessions repair SESSION_ID
 octet doctor
 ```
 
-Listing/search is read-only and uses bounded metadata scans or the disposable
-catalog. `list` searches IDs, names, derived titles, tags, internal JSONL paths,
-and dates encoded in IDs, scoped to the selected workspace store. Modified times
-appear as relative ages. `inspect` validates read-only and reports derived
-active-branch title, size, entries, head, checkpoints, usage, and branch roots/leaves;
-its connector tree includes abandoned forks without treating them as active
-context. `doctor` performs read-mostly prerequisite/provider/model checks
-without constructing an Agent or starting executable extensions.
+`list` is read-only. It searches IDs, names, titles, tags, JSONL paths and dates
+in this workspace's store, and shows modified times as relative ages. `inspect`
+reports title, size, entries, head, checkpoints, usage, and branch roots and
+leaves, including abandoned forks (which never count as active context).
+`doctor` runs read-mostly checks without starting an agent or an extension.
 
 ## Recovery
 
-Delete moves JSONL and metadata to `.trash/`, not permanent unlinking. Repair
-first writes an owner-private backup, then removes only an interrupted final
-append. Corruption in a completed record is diagnosed, never automatically
-rewritten. A dropped run never silently replays an unresolved mutating call;
-its outcome is indeterminate. Cancellation cannot undo an already completed
-action. [Network and effect recovery](tools.md#recovery-and-security).
+`delete` moves the files to `.trash/`. `repair` makes an owner-private backup,
+then removes only an interrupted final append. A corrupted completed record is
+reported, never rewritten. A dropped run never silently replays a mutating call,
+so its outcome is indeterminate. Cancelling can't undo what already ran. See
+[network and effect recovery](tools.md#recovery-and-security).
 
 ## Portable export and redaction
 
-Export validates and writes an owner-private `octet-session-export` version 1
-JSON package with source identity, readable metadata, and records. Existing
-paths are not replaced without `--force`.
+`export` writes an owner-private `octet-session-export` version 1 JSON file. It
+won't replace an existing path without `--force`. Redaction is on by default and
+scans prompts, tool arguments and results for credential-like keys and strings.
+It's a safety filter, **not proof that arbitrary prose or media has no secret**.
+`--include-secrets` asks for raw export-eligible values, with a warning. Use it
+only for a trusted destination. Private extension metadata (including
+annotations with no `public` flag) is always left out, in both JSON and HTML,
+even with `--include-secrets`. That filtering doesn't change the private source
+transcript.
 
-Redaction is on by default: credential-like keys and string content in prompts,
-tool arguments, and results are scanned. The bounded deterministic scanner
-covers authorization/cookie headers, common API-token prefixes, credential
+For a shareable page, run
+`octet sessions export SESSION_ID --format html --output ./session.html`. It
+writes one owner-private, script-free file with formatted Markdown, bounded code
+highlighting, branch links and validated inline image previews. Author HTML,
+external links and terminal control characters stay inert, and audio and remote
+media aren't fetched. Metadata keys named `Image` or `Audio` stay literal data,
+not previews. Hosted viewers and cloud sharing are separate from this local
+export. See [media privacy](media.md#privacy-and-remote-reads).
+
+<details>
+<summary>What the scanner covers</summary>
+
+Authorization and cookie headers, common API-token prefixes, credential
 assignments and URL queries, URL userinfo, private-key blocks, and JSON objects
-or arrays serialized inside strings. It preserves surrounding prose and UTF-8
-and reports replaced values/fragments. This is a safety filter, **not proof that
-arbitrary prose or media contains no secret**. `--include-secrets` requests raw
-export-eligible values with an explicit warning; use only for a trusted
-destination. Private extension metadata (including annotations with no `public`
-flag) is always excluded, for both JSON and HTML, even with `--include-secrets`.
-This visibility projection does not modify the private source transcript.
+or arrays serialized inside strings. It keeps surrounding prose and UTF-8 intact
+and reports what it replaced. The scan is bounded and deterministic.
 
-`octet sessions export SESSION_ID --format html --output ./session.html` writes
-one owner-private, script-free file with formatted Markdown, bounded code
-highlighting, branch links, and validated inline raster previews. Author HTML,
-external links and terminal controls remain inert; audio and remote media are
-not fetched. Arbitrary metadata keys named `Image` or `Audio` remain literal
-data, not previews. Hosted viewers and cloud sharing are separate from this
-local export. [Media/privacy](media.md#privacy-and-remote-reads).
+</details>
 
 ## Discovery catalog
 
-Each workspace store may contain `.catalog/sessions-v1.sqlite3`, a private,
-disposable SQLite projection of bounded titles, active-branch message counts,
-and transcript size/mtime fingerprints. JSONL and `.metadata/` remain
-authoritative. Listing/resume need not scan all transcript bytes: only missing
-or stale entries are streamed, the active row refreshes on normal app close,
-and missing sessions lose their rows. The picker enumerates workspace-key
-directories under the shared root and displays their `.workspace` markers.
+Each workspace store keeps a disposable SQLite index,
+`.catalog/sessions-v1.sqlite3`, so listing is fast. JSONL and `.metadata/` stay
+authoritative, and deleting `.catalog/` is safe. It's recreated on demand.
 
-Unavailable, locked, corrupt, oversized, or newer-version catalogs never block
-access: octet falls back to bounded JSONL scans and rebuilds corrupt SQLite
-contents. Removing `.catalog/` is safe; it is recreated on demand.
+<details>
+<summary>How the index is kept</summary>
+
+It holds titles, active-branch message counts and transcript size and mtime
+fingerprints. Only missing or stale entries are streamed. The active row
+refreshes on normal app close, and sessions that no longer exist lose their
+rows. The picker lists the workspace-key directories under the shared root and
+shows their `.workspace` markers. If the index is unavailable, locked, corrupt,
+oversized or from a newer version, octet scans the JSONL instead and rebuilds a
+corrupt one.
+
+</details>
 
 ## JSONL schema
 
-Each physical line is one JSON object with a `type` discriminator:
+Session files are JSONL with five record types: `entry`, `head`, `checkpoint`,
+`usage` and `usage_uncertainty`. The schema is here for tools that read them.
+
+<details>
+<summary>Record types, entry and head examples, and rules</summary>
+
+Each line is one JSON object with a `type`:
 
 | Record | Meaning |
 | --- | --- |
-| `entry` | Immutable parent-linked conversation/state. |
-| `head` | Active branch selection and cumulative cost. |
-| `checkpoint` | Completed prompt and exact restorable head. |
-| `usage` | Provider/model/token/cost accounting for one operation. |
+| `entry` | Immutable, parent-linked conversation or state. |
+| `head` | The active branch and cumulative cost. |
+| `checkpoint` | A completed prompt and its exact restorable head. |
+| `usage` | Provider, model, token and cost accounting for one operation. |
 | `usage_uncertainty` | Accepted-attempt exposure whose usage and cost are unknown. |
 
-Stable entry envelope:
+An entry, where `parent: null` marks a root:
 
 ```json
 {
@@ -153,56 +152,54 @@ Stable entry envelope:
 }
 ```
 
-`parent: null` marks a root. Entry values are `message`, `compaction`, `config`,
-`prompt_template_selected`, `skill_activated`, `skill_resource_read`, and
-`skill_deactivated`. Template name/hash stay outside model-visible context.
-Skill activation/resource events are resumable; compaction snapshots active
-skills and cumulative Pi-compatible `details.readFiles` / `details.modifiedFiles`.
-Older records missing those fields receive empty lists.
+Entry values are `message`, `compaction`, `config`, `prompt_template_selected`,
+`skill_activated`, `skill_resource_read` and `skill_deactivated`. Template name
+and hash stay outside the model's context. Compaction snapshots the active
+skills and the cumulative Pi-compatible `details.readFiles` and
+`details.modifiedFiles`. Older records without those fields get empty lists.
 
-`metadata.prompt_color` is normalized sRGB, assigned at the original user append,
-inert, and never provider input. It remains authoritative through resume,
-checkout, branching, compaction, model switches, and theme reloads. Legacy prompts
-without it may derive a deterministic fallback from their historical
-`prompt_model`, never the currently selected model.
+`metadata.prompt_color` is a normalized sRGB value set when the prompt is first
+appended. It's never sent to the provider, and it survives resume, checkout,
+branching, compaction, model switches and theme reloads. A legacy prompt without
+it may get a fallback from its historical `prompt_model`, never the currently
+selected model.
 
 `usage` kinds include assistant turns, rejected Responses turns, compaction,
-terminal gates, and `delegated_agent`. A delegated record names its host-created
-child, completed turn/tool-call counts, aggregate disjoint token buckets,
-route/model, exact category cost, and picodollar remainder. Child JSONL remains
-the detailed transcript; a root mirror is written **once before the owning
-checkpoint**. Session cost, `/cost`, footer, export, resume, and subsequent
-cost-limit checks therefore include child spend without reopening private paths.
+terminal gates and `delegated_agent`. A delegated record names the child, its
+turn and tool-call counts, token totals (counted separately), route and model,
+and exact cost. The child's JSONL stays the detailed transcript. A root mirror
+is written **once before the owning checkpoint**, so session cost, `/cost`,
+export, resume and cost limits all include child spend.
 
-An accepted inference attempt interrupted before authoritative usage is available
-is recorded separately as `usage_uncertainty`, **not** as zero tokens or zero
-cost. Its `record` contains only trusted `endpoint`, `model`, and `operation`
-identifiers, each bounded to 128 ASCII identifier bytes; no endpoint URLs,
-request/response bodies, prompts, credentials, or error text belong there.
-Unknown exposure uses the same owner-private, locked, synced append path as
-known usage. An append failure must stop automatic replacement.
+An accepted inference attempt that's interrupted before authoritative usage is
+available is recorded as `usage_uncertainty`, **not** as zero tokens or zero
+cost. Its `record` holds only trusted `endpoint`, `model` and `operation`
+identifiers, each at most 128 ASCII identifier bytes. No endpoint URLs, request
+or response bodies, prompts, credentials or error text go in it. Unknown
+exposure uses the same owner-private, locked, synced append path as known usage,
+and a failed append must stop automatic replacement. The writer records each
+failed physical attempt once, not each retry notification, so the records are
+evidence, not provider-confirmed billable-attempt counts.
 
-`Session::has_uncertain_usage()` remains true after later successful turns,
-checkpoints, compaction, checkout (including another branch or the root), and
-reopening. It is session-global accounting, never model-visible context or head
-state. Existing usage and cost totals remain **known subtotals**, not complete
-spend. If `usage_uncertainty.bound` is present, hard ceilings conservatively
-charge its input estimate plus provider-enforced output cap and its worst-case
-cost. Missing bounds still fail closed; missing prices fail the cost ceiling.
-This includes limits enabled after resuming. `usage_uncertainty_records()`
-exposes the bounded identifiers separately from the optional admission bounds;
-neither invents provider-confirmed usage. The writer records each failed
-physical attempt once, not each retry notification; records are evidence, not
-provider-confirmed billable-attempt counts. Delegated exposure is mirrored into
-the owning root ledger by child, recording only increases.
+`Session::has_uncertain_usage()` stays true after later successful turns,
+checkpoints, compaction, checkout (to another branch or the root) and reopening.
+It's session-wide accounting, never model-visible context or head state.
+Existing usage and cost totals are **known subtotals**, not complete spend. If
+`usage_uncertainty.bound` is present, hard ceilings charge its input estimate
+plus the provider-enforced output cap and its worst-case cost, including for
+limits enabled after resuming. Missing bounds still fail closed, and missing
+prices fail the cost ceiling. `usage_uncertainty_records()` exposes the bounded
+identifiers separately from the optional admission bounds, and neither invents
+provider-confirmed usage. Delegated exposure is mirrored into the owning root
+ledger by child, recording only increases.
 
-Older sessions without these records retain their existing known ledger; the
-reader does not fabricate evidence about historical failures. Fork/clone remains
-a new accounting session: like known usage telemetry, uncertainty is not copied
-by the active-branch conversation projection. Restoring within the original
-session never clears its exposure.
+Older sessions without these records keep their known ledger, and the reader
+doesn't invent evidence about past failures. Fork and clone start a new
+accounting session: like known usage telemetry, uncertainty isn't copied by the
+active-branch conversation projection. Restoring within the original session
+never clears its exposure.
 
-The head record is the only branch-selection mutation:
+The head record is the only thing that changes the selected branch:
 
 ```json
 {
@@ -213,8 +210,10 @@ The head record is the only branch-selection mutation:
 }
 ```
 
-Branching/compaction never rewrites entries. Context walks parents from the
+Branching and compaction never rewrite entries. Context walks parents from the
 selected head and applies compaction boundaries. Completed records are strict
-UTF-8 and strict JSON; only a final unterminated record is a recoverable torn
-append. Reads are bounded by bytes and record count.
+UTF-8 and strict JSON, and only a final unterminated record counts as a
+recoverable torn append. Reads are bounded by bytes and record count.
 [Persistence invariants](design/octet-agent.md#sessions).
+
+</details>

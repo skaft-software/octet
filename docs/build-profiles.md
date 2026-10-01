@@ -1,19 +1,18 @@
 # Cargo build profiles
 
-octet keeps Cargo's ordinary `dev`, `test`, and `release` behavior unchanged.
-Two additive profiles make CI test artifacts and profiler builds explicit. The
-root workspace and the independently rooted `extensions/octet-serve` workspace
-each declare them, because Cargo resolves profile definitions from the active
-workspace root.
+octet keeps Cargo's ordinary `dev`, `test` and `release` behavior. Two extra
+profiles make CI test artifacts and profiler builds explicit. The root workspace
+and the separate `extensions/octet-serve` workspace each declare them, because
+Cargo reads profile definitions from the active workspace root.
 
 ## `ci-test`
 
-`ci-test` inherits Cargo's `test` profile, uses `debug = "limited"`, and
-disables incremental compilation. It retains filename and module information
-for useful CI backtraces without full test-profile debug data or an incremental
-cache that a clean CI runner will not reuse.
+`ci-test` inherits Cargo's `test` profile, sets `debug = "limited"` and turns
+off incremental compilation. CI backtraces keep filenames and module names,
+without the full debug data of the test profile or an incremental cache that a
+clean CI runner won't reuse.
 
-The Rust test jobs in CI use this profile. To reproduce their profile locally:
+CI's Rust test jobs use it. To reproduce them locally:
 
 ```sh
 cargo test --workspace --all-targets --all-features --profile ci-test --locked
@@ -21,39 +20,37 @@ cargo test --workspace --doc --profile ci-test --locked
 cargo test --manifest-path extensions/octet-serve/Cargo.toml --profile ci-test --locked
 ```
 
-Omit `--profile ci-test` to keep Cargo's normal local test behavior.
+Leave out `--profile ci-test` for Cargo's normal local test behavior.
 
 ## `profiling`
 
-`profiling` inherits the active workspace's `release` profile, retains its
-release-like optimization choices, and overrides only the settings needed for
-analysis:
+`profiling` inherits the active workspace's `release` profile and its
+optimization choices, and overrides only what analysis needs:
 
-- `debug = "full"` supplies full source and variable debug information;
-- `lto = "off"` disables both cross-crate and local ThinLTO; and
-- `strip = "none"` retains symbols.
+- `debug = "full"`: full source and variable debug info.
+- `lto = "off"`: no cross-crate or local ThinLTO.
+- `strip = "none"`: keep symbols.
 
-Build a profiler-friendly octet binary with:
+Build a profiler-friendly octet binary:
 
 ```sh
 cargo build --profile profiling --locked -p octet-coding-agent --bin octet
 ```
 
-The binary is written to `target/profiling/octet` (or
-`$CARGO_TARGET_DIR/profiling/octet` when that variable is set). Build the
-independent Serve backend with:
+The binary is `target/profiling/octet` (or `$CARGO_TARGET_DIR/profiling/octet`
+if that variable is set). Build the separate Serve backend with:
 
 ```sh
 cargo build --manifest-path extensions/octet-serve/Cargo.toml --profile profiling --locked
 ```
 
-On platforms that split debug information, keep the generated companion debug
-files beside the profiling binary when handing it to a profiler.
+On platforms that split debug info, keep the companion debug files next to the
+profiling binary when you hand it to a profiler.
 
 ## Measuring a profile change
 
-Profiles use separate target subdirectories, so compare the same command under
-both profiles without deleting existing artifacts. For example:
+Each profile has its own target subdirectory, so you can compare the same
+command under both without deleting artifacts:
 
 ```sh
 /usr/bin/time -p cargo test -p sexy-tui-rs --lib --locked
@@ -61,6 +58,6 @@ both profiles without deleting existing artifacts. For example:
 du -sh target/debug target/ci-test
 ```
 
-Run the same test selection in both commands and record the test result,
-elapsed time, and output-directory size. Use a quiet machine or a dedicated
-target directory when collecting a reproducible performance result.
+Run the same test selection in both, and record the result, elapsed time and
+output size. Use a quiet machine or a dedicated target directory for a
+reproducible result.

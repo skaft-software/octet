@@ -1,10 +1,10 @@
 # Custom resource discovery
 
-Prompts, skills, and executable extensions share one filesystem
-resolver. Resource-specific parsers own their schemas; the resolver owns the
-cross-cutting local safety and precedence contract. Built-in `auto`, `light`,
-and `dark` appearances are available through `/theme` without
-theme files. Named theme files follow the separate bounded [theme loader](themes.md).
+Prompts, skills and executable extensions share one filesystem resolver. Each
+type's parser owns its format. The resolver owns the safety and precedence
+rules. The built-in `auto`, `light` and `dark` appearances work through `/theme`
+without theme files. Named theme files follow the separate, bounded [theme
+loader](themes.md).
 
 ## Locations and precedence
 
@@ -14,105 +14,111 @@ theme files. Named theme files follow the separate bounded [theme loader](themes
 | Skill | [Ordered user roots](#skill-roots) | [Ordered project roots](#skill-roots) | `--skill-dir` |
 | Extension | `~/.octet/extensions/*/extension.toml` | `.octet/extensions/*/extension.toml` | `--extension-dir` |
 
-Roots are visited global, project, then explicit in option order. An explicit
-Pi-compatible prompt source may be one `.md`/`.toml` file or a directory.
-Later definitions with the same resource name win, and the shadowed path
-remains in the diagnostic snapshot. Scans and result ordering are
-deterministic. A valid package-manager `install.json` admits an installed
-bundle's nested `skills/` root; merely copying an unmanaged extension directory
-does not. Bundle skills have lower precedence than `~/.octet/skills`, remain
-inactive until explicitly loaded, and disappear from the next discovery
-snapshot after package removal.
+Roots are visited global, then project, then explicit in option order. An
+explicit prompt source can be one `.md` or `.toml` file, or a directory. A later
+definition with the same name wins, and the shadowed path stays in the
+diagnostics. Scans and ordering are deterministic.
 
-Workspace resources are ignored until `--workspace-trusted` is present.
-Explicit paths are an intentional user choice for that invocation. Executable
-extensions add a second boundary: discovery and workspace trust still do not
-launch code. Installed executable extensions remain **disabled by default**.
-Full access (`unsafe_host`, the default) implicitly trusts the selected validated
-source, so an explicitly enabled extension needs no extra trust flag. Trust and
-enablement are separate; implicit trust never writes a grant to configuration.
-Process startup still respects `--no-process`/`--no-shell`.
+A valid package-manager `install.json` admits an installed bundle's nested
+`skills/` root. Copying an extension directory in by hand doesn't. Bundle skills
+rank below `~/.octet/skills`, stay inactive until loaded, and disappear from
+discovery once the package is removed.
 
-`--safe-mode` removes implicit host authority, so enabled extensions start
-only with an explicit grant for the selected source. A grant allows code to
-run as a host process with your OS permissions outside the tool-effect broker;
-safe mode is not an extension sandbox. A project config cannot create a
-persistent host authority grant. Bare persistent trust names apply only to the global
-extension directory; project and explicit sources require an exact absolute
-`name@.../extension.toml` grant to persist host authority. `--trust-extension NAME`
-grants it only for that invocation, never enablement; `--extension-dir`
-is itself an invocation-only grant for that source. These grants do not transfer
-between sources; they permit startup under safe mode. The extension directory
-name must match the manifest name, and source, compatibility, bundle, and
-artifact validation remain mandatory.
+Workspace resources are ignored without `--workspace-trusted`. Explicit paths
+are your choice for that run.
 
-If octet cannot resolve an absolute user home directory, global configuration and
-global resources are disabled with a diagnostic. It never falls back to the
-invocation directory and reclassifies project files as user-owned resources.
+Extensions add a second boundary. Discovery and workspace trust never launch
+code. Installed executable extensions are **disabled by default**. Full access
+(`unsafe_host`, the default) implicitly trusts the selected, validated source,
+so an extension you've enabled needs no extra trust flag. Trust and enablement
+are separate, and implicit trust never writes a grant to config. Process startup
+still respects `--no-process` and `--no-shell`.
+
+`--safe-mode` removes implicit host authority, so enabled extensions start only
+with an explicit grant for the selected source. A grant lets code run as a host
+process with your OS permissions, outside the tool-effect broker. Safe mode
+isn't an extension sandbox. A project config can't create a persistent host
+authority grant. A bare name in persistent trust applies only to the global
+extension directory. Project and explicit sources need an exact absolute
+`name@.../extension.toml` grant to persist host authority.
+`--trust-extension NAME` grants it for that run only, and never enables
+anything. `--extension-dir` is itself a one-run grant for that source. Grants
+don't transfer between sources, and they permit startup under safe mode. The
+extension directory name must match the manifest name, and source,
+compatibility, bundle and artifact validation stay mandatory.
+
+If octet can't resolve an absolute home directory, it disables global config and
+resources with a diagnostic. It never falls back to the invocation directory and
+treats project files as user-owned.
 
 ### Skill roots
 
-Skill discovery uses this **low-to-high precedence** order:
+Skill discovery goes from **lowest to highest precedence**:
 
-1. **User:** `~/.agents/skills`, then `~/.pi/agent/skills`, then managed extension
-   skills, then `~/.octet/skills`.
+1. **User:** `~/.agents/skills`, then `~/.pi/agent/skills`, then managed
+   extension skills, then `~/.octet/skills`.
 2. **Trusted project:** `.agents/skills` roots from the workspace through the
    invocation directory, then the invocation directory's `.pi/skills`, then the
-   workspace's `.octet/skills`. These project roots require `--workspace-trusted`.
-3. **Explicit:** `--skill-dir` sources in command-line option order.
+   workspace's `.octet/skills`. These need `--workspace-trusted`.
+3. **Explicit:** `--skill-dir` sources, in command-line order.
 
-A project root that is also a user skill root is scanned only in the user tier.
+A project root that's also a user skill root is scanned only in the user tier.
 For example, starting in your home directory keeps `~/.agents/skills` and
-`~/.octet/skills` user-installed, without an untrusted-project warning for those
-same roots. This does not trust the workspace: distinct project roots, including
-nested `.agents/skills` and the invocation's `.pi/skills`, remain gated. Root
+`~/.octet/skills` user-installed, with no untrusted-project warning for those
+roots. That doesn't trust the workspace: distinct project roots, including
+nested `.agents/skills` and the invocation's `.pi/skills`, stay gated. Root
 symlinks are still rejected.
 
-Later definitions replace earlier definitions of the same skill name; collisions
-are recorded in discovery diagnostics. Discovery does not activate a skill.
-The octet-native entrypoints remain `~/.octet/skills/*/SKILL.md`,
-`.octet/skills/*/SKILL.md`, and managed
-`~/.octet/extensions/*/skills/*/SKILL.md`.
-
-These lookup locations do not promise full Agent Skills/Pi parser compatibility
-or additional symlink support. Parser-specific shapes and symlink behavior for
-those additional roots require their exact source contract.
+A later definition replaces an earlier one with the same skill name, and
+collisions go in the diagnostics. Discovery never activates a skill. The native
+entrypoints are `~/.octet/skills/*/SKILL.md`, `.octet/skills/*/SKILL.md` and
+managed `~/.octet/extensions/*/skills/*/SKILL.md`. These locations don't promise
+full Agent Skills or Pi parser compatibility, or extra symlink support. Those
+shapes need their own source contract.
 
 ### Skill catalog budgets
 
-Discovery accepts at most 32 KiB of YAML frontmatter per skill and has a
-4096-entry per-root scan limit. Those are per-input limits, not global catalog
-limits. Across **all roots**, the retained discovery catalog additionally has
-these caps:
+The skill catalog the model sees is capped: 1024 bytes per description, 256
+descriptors / 256 KiB of payload, and 64 KiB of rendered text. Leaving a skill
+out of the catalog doesn't deactivate it.
+
+<details>
+<summary>The exact caps and what omission means</summary>
+
+Discovery accepts at most 32 KiB of YAML frontmatter per skill and scans at most
+4096 entries per root. Those are per-input limits. Across **all roots**, the
+retained catalog also has these caps:
 
 - **1024 UTF-8 bytes per description**, including an ellipsis when shortened.
-  Only the metadata excerpt is shortened; the source file and instruction body
-  are unchanged. The full description allocation is not retained.
-- **256 descriptors / 256 KiB of descriptor payload bytes**, whichever is
-  reached first. Payload counts text fields, encoded paths, and JSON-serialized
-  arbitrary metadata, not allocator overhead. Admission follows deterministic
-  root/candidate order. Later definitions still replace earlier ones of the same
-  ID; if a larger replacement
-  does not fit, its predecessor is removed rather than advertised as the winner.
+  Only the metadata excerpt is shortened. The source file and instruction body
+  are unchanged, and the full description allocation isn't kept.
+- **256 descriptors / 256 KiB of descriptor payload**, whichever comes first.
+  Payload counts text fields, encoded paths and JSON-serialized arbitrary
+  metadata, not allocator overhead. Admission follows deterministic root and
+  candidate order. A later definition still replaces an earlier one with the
+  same ID, and if a larger replacement doesn't fit, its predecessor is removed
+  rather than advertised as the winner.
 - **64 KiB of rendered model-catalog text**, including XML escaping, framing,
-  paths, and any cap notice. Rendering uses ID/path order and stops before the
-  first entry that does not fit. Names, location paths, XML entities, and closing
-  tags are never cut. `disable-model-invocation` skills remain excluded.
+  paths and any cap notice. Rendering uses ID and path order and stops before
+  the first entry that doesn't fit. Names, location paths, XML entities and
+  closing tags are never cut. `disable-model-invocation` skills stay excluded.
 
-Description caps and omitted counts appear in discovery diagnostics. Catalog
-omission is not deactivation: winning source locations remain indexed, so a
-known `/skill:NAME` or `/skills load NAME` can still load an omitted skill with
-the usual trust, required-tool, symlink, and 256 KiB file limits. An omitted
-header is parsed on demand; a changed skill ID requires rediscovery. Listing and
-search use the bounded descriptors, not the complete source index. These limits
-bound retained descriptors and model context, not total discovery work or RSS:
-the lightweight source index and diagnostics still grow with discovered inputs.
+Description caps and omitted counts appear in discovery diagnostics. Winning
+source locations stay indexed, so a known `/skill:NAME` or `/skills load NAME`
+can still load an omitted skill, with the usual trust, required-tool, symlink
+and 256 KiB file limits. An omitted header is parsed on demand, and a changed
+skill ID needs rediscovery. Listing and search use the bounded descriptors, not
+the full source index. These limits bound retained descriptors and model
+context, not total discovery work or RSS: the lightweight source index and
+diagnostics still grow with discovered inputs.
+
+</details>
 
 ## Reads and diagnostics
 
-For octet-native resource roots, selected files, and directory entrypoints, the
-existing resolver contract requires regular, non-symlink filesystem objects.
-Parser reads use descriptor-bound no-follow opens and fixed byte limits:
+octet-native resource roots, selected files and directory entrypoints must be
+regular, non-symlink files. Parser reads use descriptor-bound no-follow opens
+and fixed byte limits:
 
 | Kind | Maximum parser input |
 | --- | ---: |
@@ -120,30 +126,34 @@ Parser reads use descriptor-bound no-follow opens and fixed byte limits:
 | Skill entrypoint | 256 KiB |
 | Extension manifest selected by the product resource resolver | 256 KiB |
 
-Prompt expansion, skill resource reads, extension protocol messages, and
-session files have their own narrower purpose-specific limits after discovery.
-The lower-level `ExtensionManifest::load` API has a separate 64 KiB default;
-product discovery reads the selected manifest through the 256 KiB resolver
-bound and then calls `ExtensionManifest::parse`.
-Invalid UTF-8, invalid names, inaccessible roots, rejected links, oversized
-files, parser failures, and precedence decisions become inspectable
-diagnostics. One broken customization does not prevent the core binary from
-starting.
+Invalid UTF-8, bad names, inaccessible roots, rejected links, oversized files,
+parser failures and precedence decisions all show up as diagnostics. One broken
+customization doesn't stop octet starting.
 
-Automatic reload suppresses repeated resource/bootstrap and keybinding problems
-per checked component. A successful check clears that component's remembered
-problem, allowing a later recurrence to appear; skipped checks do not clear it.
-Explicit commands still report their diagnostics, and actual work losses are
-never suppressed as duplicate configuration warnings.
+Automatic reload doesn't repeat resource, bootstrap or keybinding problems for
+each checked component. A successful check clears that component's remembered
+problem, so a later recurrence shows up. Skipped checks don't clear it. Explicit
+commands still report their diagnostics, and real work losses are never hidden
+as duplicate configuration warnings.
+
+<details>
+<summary>Other limits</summary>
+
+After discovery, prompt expansion, skill resource reads, extension protocol
+messages and session files each have their own narrower limits.
+`ExtensionManifest::load` has a separate 64 KiB default. Product discovery reads
+the selected manifest within the 256 KiB bound, then calls
+`ExtensionManifest::parse`.
+
+</details>
 
 ## Reload
 
-Each discovery pass produces an immutable generation snapshot. Consumers build
-a complete replacement from the new snapshot and swap only after validation,
-so an in-flight prompt never observes half of a reload.
+Each discovery pass makes an immutable snapshot. octet builds a complete
+replacement from it and swaps only after validation, so a running prompt never
+sees half a reload.
 
-- `/skills reload` refreshes the shared prompt/skill resource boundary.
-- `/extensions reload` handshakes replacement processes when On/off and host
-  authority allow startup; safe mode starts granted sources, not ungranted ones.
-- `/reload` performs full product resource discovery and rebuilds the active
-  customization boundary.
+- `/skills reload` refreshes prompts and skills.
+- `/extensions reload` handshakes replacement processes when enablement and host
+  authority allow startup. Safe mode starts granted sources, not ungranted ones.
+- `/reload` runs full discovery and rebuilds the active customization.
