@@ -13,6 +13,12 @@
   the input owner so they never reach the editor. Add `crates/octet-tern` (the
   TSP wire schema, APC framing, tty session, theme projector, scene builders)
   and document the protocol and mapping in `docs/tern.md`.
+- Show `/hotkeys` as grouped key/description tables with readable key names
+  (`Ctrl+B`) instead of raw binding ids; unbound ids are listed last. In Tern,
+  Markdown reports such as `/changelog` and `/hotkeys` are typeset natively.
+- Tern: draw user prompts as native cards so the fill never comes out ragged,
+  keep native rendering past the second turn (turn-usage rows no longer reuse a
+  node id), and stop a held Esc from leaking a Tern message into the editor.
 
 ## [0.8.2] - 2026-09-30
 

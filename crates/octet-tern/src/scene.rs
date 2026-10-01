@@ -242,28 +242,22 @@ pub fn turn_usage(id: impl Into<String>, parts: &[(&str, &str)]) -> Node {
             out
         })
         .collect();
-    parent(
-        id,
-        Kind::Row,
-        Props::new().role("octet.turn.usage").set("gap", Space::Sm),
-        vec![node(
-            "usage.text",
-            Kind::Text,
-            Props::new()
-                .text("spans", Text::Spans(spans))
-                .set("measure", "fill"),
-        )],
-    )
+    turn_usage_spans(id, spans)
 }
 
 /// One row of turn facts from owned spans (for callers that build them dynamically).
+///
+/// The text child's id derives from the row's id: node ids are unique within a
+/// surface and every completed turn contributes one row.
 pub fn turn_usage_spans(id: impl Into<String>, spans: Vec<Span>) -> Node {
+    let id = id.into();
+    let text_id = format!("{id}.text");
     parent(
         id,
         Kind::Row,
         Props::new().role("octet.turn.usage").set("gap", Space::Sm),
         vec![node(
-            "usage.text",
+            text_id,
             Kind::Text,
             Props::new()
                 .text("spans", Text::Spans(spans))
@@ -542,5 +536,33 @@ mod tests {
         assert!(kinds.contains(&"shimmer"));
         assert!(kinds.contains(&"elapsed"));
         assert!(kinds.contains(&"rate"));
+    }
+
+    fn collect_ids<'a>(node: &'a Node, ids: &mut Vec<&'a str>) {
+        ids.push(&node.id);
+        for child in node.c.iter().flatten() {
+            collect_ids(child, ids);
+        }
+    }
+
+    #[test]
+    fn turn_usage_rows_of_different_turns_never_share_node_ids() {
+        // Tern rejects a frame that repeats a node id within one surface
+        // ("duplicate id usage.text"), which dropped octet back to ANSI after
+        // the second completed turn. Each row must derive its children's ids
+        // from its own id.
+        let spans = || vec![span("1.9s", tok::DIM)];
+        let rows = [
+            turn_usage("t1.outcome", &[("1.9s", tok::DIM), ("11K tok", tok::DIM)]),
+            turn_usage("t2.outcome", &[("3.1s", tok::DIM)]),
+            turn_usage_spans("t3.outcome", spans()),
+            turn_usage_spans("t4.outcome", spans()),
+        ];
+        let mut ids = Vec::new();
+        for row in &rows {
+            collect_ids(row, &mut ids);
+        }
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "duplicate node ids: {ids:?}");
     }
 }

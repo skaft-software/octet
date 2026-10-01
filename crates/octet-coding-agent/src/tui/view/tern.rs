@@ -29,7 +29,13 @@ pub(crate) fn enabled() -> bool {
     match std::env::var("OCTET_TUI_TERN").ok().as_deref() {
         Some("0" | "off" | "false" | "no") => false,
         Some(_) => true,
-        None => std::env::var("TERM_PROGRAM").is_ok_and(|v| v.eq_ignore_ascii_case("tern")),
+        // Unit tests drive the native surface explicitly; a developer running
+        // `cargo test` inside a Tern pane must not flip every renderer test
+        // onto the protocol path.
+        None => {
+            !cfg!(test)
+                && std::env::var("TERM_PROGRAM").is_ok_and(|v| v.eq_ignore_ascii_case("tern"))
+        }
     }
 }
 
@@ -649,53 +655,20 @@ fn block_node(
     images: &super::tern_images::NativeImages,
 ) -> Option<Node> {
     match block {
-        TranscriptBlock::User {
-            text,
-            model_lab,
-            prompt_color,
-            ..
-        } => {
-            // TSP v1 has no per-card RGB style, so the historical prompt colour
-            // is painted with native ANSI content. Every row is padded to the
-            // transcript measure *before* the wash is applied, so the highlight
-            // reads as a full-width model-coloured card instead of a strip
-            // wrapped tightly around the words.
-            let rich = shell.theme.rich_renderer();
-            let cols = shell.size.0.saturating_sub(6).max(1);
-            let lines = super::render_user_prompt(
-                text,
-                model_lab,
-                prompt_color.as_deref(),
-                &rich,
-                &shell.theme,
-                cols.saturating_sub(2).max(1),
-            );
-            let card = std::iter::once(String::new())
-                .chain(lines.into_iter().map(|line| format!(" {line} ")))
-                .chain(std::iter::once(String::new()))
-                .map(|line| {
-                    let padding = usize::from(cols).saturating_sub(super::visible_width(&line));
-                    format!("{line}{}", " ".repeat(padding))
-                })
-                .map(|line| {
-                    if shell.theme.prompt_wash() {
-                        shell
-                            .theme
-                            .prompt_provenance_card(prompt_color.as_deref(), &line)
-                    } else {
-                        line
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+        TranscriptBlock::User { text, .. } => {
+            // A native card, not ANSI rows painted with the prompt colour: Tern
+            // owns the measure, so a wash padded to octet's PTY width came out
+            // ragged wherever Tern's column was narrower and wrapped the
+            // padding. The card fill is the projected `userMessageBg`, which
+            // already follows the active model family.
             Some(Node::with_children(
                 id(identity, "user"),
-                Kind::Section,
+                Kind::Card,
                 Props::new().role("octet.user").tone(Tone::User),
                 vec![Node::new(
                     id(identity, "user.body"),
-                    Kind::Ansi,
-                    Props::new().set("text", card).set("cols", cols),
+                    Kind::Md,
+                    Props::new().set("text", sanitize_for_terminal(text)),
                 )],
             ))
         }
@@ -992,12 +965,12 @@ fn report(shell: &ShellState) -> Option<Node> {
                         )
                         .set("wrap", "word"),
                 ),
-                super::ReportBody::Markdown(document) => Node::new(
+                // Tern typesets Markdown natively (headings, tables, code),
+                // so it gets the source rather than the flattened text.
+                super::ReportBody::Markdown(_, source) => Node::new(
                     "report.body",
-                    Kind::Text,
-                    Props::new()
-                        .set("text", sanitize_for_terminal(&document.plain_text()))
-                        .set("wrap", "word"),
+                    Kind::Md,
+                    Props::new().set("text", sanitize_for_terminal(source)),
                 ),
                 super::ReportBody::Context(_) => ansi_rows(
                     "report.body",

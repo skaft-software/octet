@@ -228,11 +228,17 @@ fn resize_motion_and_appearance_keep_the_surface_and_transcript_identity() {
         crate::tui::theme::TerminalBackground::Light
     );
     assert!(surface.client.reduce_motion());
-    assert!(!output.last_frame()["ops"]
-        .as_array()
-        .unwrap()
+    // The native card is laid out by Tern, so a resize may send no transcript
+    // ops at all; whatever follows the first frame must never rebuild it.
+    assert!(output
+        .messages("f")
         .iter()
-        .any(|op| (op[0] == "add" || op[0] == "del") && op[1] == user_id));
+        .skip(1)
+        .all(|frame| !frame["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|op| (op[0] == "add" || op[0] == "del") && op[1] == user_id)));
 }
 
 #[test]
@@ -529,39 +535,31 @@ fn hidden_pane_keeps_its_place_and_reasserts_focus_on_return() {
 }
 
 #[test]
-fn user_prompt_is_a_full_width_model_card_not_a_tight_wash() {
-    let (mut shell, mut surface, _) = setup(2);
-    shell.set_size(60, 20);
-    shell.state.borrow_mut().push_block(TranscriptBlock::User {
-        text: "hey what's octet?".into(),
-        model_lab: Some(ModelLab::Anthropic),
-        prompt_color: Some("#d97757".into()),
-        persisted: true,
-    });
-    surface.flush(&shell.state).unwrap();
-    let identity = shell.state.borrow().transcript_commit_ids[0];
-    let body = find_node(&surface.sent.main, &id(identity, "user.body")).unwrap();
-    let text = body.p.as_ref().unwrap().as_map()["text"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let widths = text
-        .lines()
-        .map(super::super::visible_width)
-        .collect::<Vec<_>>();
-    // Cushion row, prompt rows and trailing cushion all span the measure, so
-    // the row wash reads as one card instead of a strip around the words.
-    assert!(widths.len() >= 3, "{widths:?}");
-    assert!(widths.iter().all(|width| *width == 54), "{widths:?}");
-    assert_eq!(
-        find_node(&surface.sent.main, &id(identity, "user"))
-            .unwrap()
-            .p
-            .as_ref()
-            .unwrap()
-            .as_map()["tone"],
-        "user"
-    );
+fn user_prompt_is_a_native_card_tern_sizes_at_any_width() {
+    for cols in [60, 200] {
+        let (mut shell, mut surface, _) = setup(2);
+        shell.set_size(cols, 20);
+        shell.state.borrow_mut().push_block(TranscriptBlock::User {
+            text: "hey what's **octet**?".into(),
+            model_lab: Some(ModelLab::Anthropic),
+            prompt_color: Some("#d97757".into()),
+            persisted: true,
+        });
+        surface.flush(&shell.state).unwrap();
+        let identity = shell.state.borrow().transcript_commit_ids[0];
+        let card = find_node(&surface.sent.main, &id(identity, "user")).unwrap();
+        // No ANSI rows padded to octet's idea of the width: Tern lays the card
+        // out against its own column, so the fill can never come out ragged.
+        assert_eq!(card.k, Kind::Card, "{cols}");
+        let props = card.p.as_ref().unwrap().as_map();
+        assert_eq!(props["tone"], "user");
+        assert_eq!(props["role"], "octet.user");
+        let body = find_node(&surface.sent.main, &id(identity, "user.body")).unwrap();
+        assert_eq!(body.k, Kind::Md, "{cols}");
+        let text = body.p.as_ref().unwrap().as_map()["text"].as_str().unwrap();
+        assert_eq!(text, "hey what's **octet**?");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+    }
 }
 
 #[test]

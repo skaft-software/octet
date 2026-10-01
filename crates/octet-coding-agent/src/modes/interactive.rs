@@ -1526,8 +1526,8 @@ async fn logout_custom(
 }
 
 fn show_hotkeys(shell: &mut InteractiveShell) {
-    let text = shell.hotkeys_text();
-    shell.show_report_text("Hotkeys", "Resolved user keybindings", text);
+    let text = shell.hotkeys_markdown();
+    shell.show_report_markdown("Hotkeys", "Resolved user keybindings", &text);
 }
 
 fn copy_last_assistant(shell: &mut InteractiveShell) {

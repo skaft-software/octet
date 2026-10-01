@@ -145,9 +145,13 @@ thinking, session, fork and subagent pickers reuse the host's catalogues and
 filtering, with panel-epoch-fenced gestures. Settings/help reports are native
 modal content rather than migration `rows` nodes. Internally styled documents
 and approval labels may use native `ansi` content; this never runs or repaints
-an ANSI TUI. A user prompt's stored per-turn colour is padded to the transcript
-measure before the wash is applied, so it reads as a full-width card rather
-than a highlight wrapped around the words. Native pickers publish the
+an ANSI TUI. A user prompt is a native `card` (tone `user`, Markdown body)
+that Tern lays out against its own column, filled with the projected
+`userMessageBg`. An ANSI wash padded to octet's PTY width came out ragged
+wherever Tern's column was narrower. Markdown reports (`/changelog`,
+`/hotkeys`) carry their source, so Tern typesets their headings, tables and
+code rather than showing flattened text. `/hotkeys` groups bound actions by
+area as key/description tables and lists unbound ids last. Native pickers publish the
 catalogue total, the search caret, program-computed match ranges and keyed
 footer actions, so the query reads as hits in the list. Approval consent is published only after the exact native frame
 is acknowledged, and is rejected after an unpainted selection or panel change.
@@ -207,7 +211,8 @@ semantic colors, model accents, native structure and its own identity. ANSI16
 and indexed colors expand through the standard xterm table; terminal-default
 colors are omitted rather than guessed.
 
-Historical prompts retain their stored per-turn color through scoped native
-ANSI content, not the current model's global palette. This is distinct from
+Because TSP v1 has no per-node colour, native prompt cards share the active
+palette's user tint; the stored per-turn prompt colour still paints prompts in
+the ANSI renderer. This is distinct from
 running an ANSI TUI. Extension-defined styled rows also remain native ANSI
 content until those extension contracts provide semantic nodes.

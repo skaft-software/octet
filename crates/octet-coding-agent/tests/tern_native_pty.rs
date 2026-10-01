@@ -177,14 +177,11 @@ impl NativePty {
             self.output.len() < 4 * 1024 * 1024,
             "unbounded native output"
         );
-        loop {
-            let Some(start) = self
-                .pending
-                .windows(TSP_PREFIX.len())
-                .position(|bytes| bytes == TSP_PREFIX.as_bytes())
-            else {
-                break;
-            };
+        while let Some(start) = self
+            .pending
+            .windows(TSP_PREFIX.len())
+            .position(|bytes| bytes == TSP_PREFIX.as_bytes())
+        {
             let Some(end) = self.pending[start..]
                 .windows(TSP_ST.len())
                 .position(|bytes| bytes == TSP_ST.as_bytes())

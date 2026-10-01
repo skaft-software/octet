@@ -247,7 +247,15 @@ impl ApcFilter {
                     return Vec::new();
                 }
                 if !self.identified() {
-                    return self.flush();
+                    // The held bytes are not a Tern opener, so they are the
+                    // user's keys. The event that proved it may itself open a
+                    // message (an Esc held for an interrupt, then `Alt+_`), so
+                    // it is evaluated on its own rather than released with them;
+                    // otherwise the message body leaks into the draft.
+                    self.held.pop();
+                    let mut released = self.flush();
+                    released.extend(self.push(event, now));
+                    return released;
                 }
                 self.held.clear();
                 if self.text.ends_with('\x07') || self.text.ends_with("\x1b\\") {
@@ -675,6 +683,50 @@ mod tests {
             assert!(filter.text.is_empty());
             assert!(filter.held.is_empty());
         }
+    }
+
+    #[test]
+    fn escape_held_before_a_native_message_is_released_and_the_message_stays_protocol() {
+        // A lone Esc (for example interrupting a run) is held while it could
+        // still open a Tern message. When the next read starts a real message,
+        // crossterm reports its opener as Alt+_ rather than a bare Esc then `_`.
+        // The held Esc is the user's key and must be released, and the new opener
+        // must start its own candidate; otherwise the whole message body leaked
+        // into the composer as typed text.
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let mut filter = ApcFilter {
+            force_enabled: true,
+            handler: Some(Arc::new(move |message| {
+                captured.lock().unwrap().push(message);
+                None
+            })),
+            ..Default::default()
+        };
+        let wire = octet_tern::frame::encode_json(
+            octet_tern::wire::Verb::Event,
+            &serde_json::json!({"ev":"ack","sf":"octet.session","s":7}),
+            65536,
+        )
+        .unwrap();
+        let body = wire
+            .strip_prefix("\x1b_")
+            .and_then(|rest| rest.strip_suffix("\x1b\\"))
+            .expect("one APC string");
+        let escape = key(KeyCode::Esc, KeyModifiers::NONE);
+        let mut now = Instant::now();
+        let mut released = filter.push(escape.clone(), now);
+        now += Duration::from_millis(40);
+        let events = std::iter::once(key(KeyCode::Char('_'), KeyModifiers::ALT))
+            .chain(decoded(body, true))
+            .chain(std::iter::once(key(KeyCode::Char('\\'), KeyModifiers::ALT)));
+        for event in events {
+            released.extend(filter.push(event, now));
+            now += Duration::from_millis(5);
+        }
+        assert_eq!(released, vec![escape], "message text leaked as input");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(!filter.active && filter.text.is_empty() && filter.held.is_empty());
     }
 
     #[test]

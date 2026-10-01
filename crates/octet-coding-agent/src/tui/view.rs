@@ -659,9 +659,14 @@ enum ShellOverlay {
 /// only explicit, internally styled content may retain trusted theme ANSI.
 #[derive(Clone, Debug)]
 enum ReportBody {
-    Text { text: Arc<str>, styled: bool },
+    Text {
+        text: Arc<str>,
+        styled: bool,
+    },
     Context(Arc<crate::tui::context::ContextReport>),
-    Markdown(Arc<sexy_tui_rs::Document>),
+    /// The parsed document for the ANSI renderer, plus its source for
+    /// renderers that typeset Markdown themselves (Tern).
+    Markdown(Arc<sexy_tui_rs::Document>, Arc<str>),
 }
 
 /// Mutable presentation state for a report over the transcript viewport.
@@ -5895,7 +5900,25 @@ impl InteractiveShell {
                 format!("Changelog v{}", env!("CARGO_PKG_VERSION")),
                 "Bundled release notes for this version",
             ),
-            ReportBody::Markdown(Arc::new(parse_markdown(crate::commands::CURRENT_CHANGELOG))),
+            ReportBody::Markdown(
+                Arc::new(parse_markdown(crate::commands::CURRENT_CHANGELOG)),
+                crate::commands::CURRENT_CHANGELOG.into(),
+            ),
+        );
+    }
+
+    /// Show a read-only Markdown report. The source is sanitised once and
+    /// kept beside the parsed document so a native renderer can typeset it.
+    pub fn show_report_markdown(
+        &mut self,
+        title: impl Into<String>,
+        purpose: impl Into<String>,
+        source: &str,
+    ) {
+        let source: Arc<str> = sanitize_for_terminal(source).into();
+        self.show_report(
+            OrdinarySurfaceMetadata::with_purpose(title, purpose),
+            ReportBody::Markdown(Arc::new(parse_markdown(&source)), source),
         );
     }
 
