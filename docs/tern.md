@@ -114,8 +114,47 @@ and context meter, and the todo HUD in the dock.
 
 ## Integration
 
-The demo is standalone; wiring octet's own TUI is a native-surface sink beside
-the ANSI writer:
+The demo is standalone on purpose: a faithful TSP client plus a small theme
+reader of its own, so the POC adds no visibility changes to
+`octet-coding-agent`. Wiring octet's own TUI is a second
+`sexy_tui_rs::Component` over the same semantic model — not a second stdout
+path. The renderer thread already drives exactly one `Component` and one
+`OctetTerminal`; a Tern renderer is selected in its place at construction.
+
+Existing anchors (all crate-private today):
+
+- **semantic model** — `hydrate::TranscriptItem`
+  (`crates/octet-coding-agent/src/hydrate.rs:407`) is the canonical display
+  projection (`User`/`Assistant`/`Reasoning`/`ToolCall`/`ToolActivityGroup`/
+  `ToolResult`/`CompactionMarker`); `ShellState.transcript: Vec<TranscriptBlock>`
+  (`tui/view.rs:1179`, the enum at `:358`) is what the renderer consumes.
+- **frame seam** — `ShellComponent: sexy_tui_rs::Component`
+  (`tui/view/renderer_runtime.rs:1287`).
+- **role mapping** — `surface_roles(kind) -> (content, border, label)`
+  (`tui/view/surface_layout.rs:74`) over the eight surface kinds, resolved
+  through `OctetTheme::semantic_style(role) -> sexy_tui_rs::TextStyle`
+  (`tui/theme.rs:663`) and `OctetTheme::glyph(name)` (`:644`).
+- **composer/status** — `render_composer_surface`
+  (`tui/composer_surface.rs:1014`), `render_ordinary_status`
+  (`tui/view/ordinary_surface.rs:178`).
+- **capability probe** — `sexy_tui_rs::CapabilityProbe::from_process()`
+  (`crates/sexy-tui-rs/src/capabilities.rs:375`) exposes `term_program`.
+
+Blockers (private today): `mod tui;` and `mod config;` are private in
+`crates/octet-coding-agent/src/lib.rs`; every file-theme loader takes the private
+`Config` (`tui/theme.rs:2145ff`; only `default_theme()` is config-free);
+`TerminalBackground` and `ModelLab` are `pub(crate)`; `SEMANTIC_ROLE_VOCABULARY`
+is `#[cfg(test)]`; `ShellState`, `TranscriptBlock`, `SurfacePlan` and
+`ShellComponent` are `pub(crate)`/`pub(super)`.
+
+Recommended path: add a curated `pub mod tern` facade **inside**
+`octet-coding-agent` (which has private access) exposing a config-free theme
+loader, a structured `SurfaceFrame` snapshot of the transcript/composer,
+capability data, and the `Component` impl. `crates/octet-tern` then depends on
+`octet_sdk` + `sexy-tui-rs` and consumes only that facade. Widening `tui`/
+`config` to `pub` instead would expose far more surface than a TSP backend needs.
+
+Once wired, the lifecycle is:
 
 1. detect `client::is_tern()` (and keep the ANSI path otherwise),
 2. on start, `open` an inline surface with role `octet.session` and send
