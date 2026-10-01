@@ -57,7 +57,9 @@ impl NativePty {
                     &mut slave_fd,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut size,
+                    // glibc takes `*const winsize`, macOS `*mut`; a raw
+                    // pointer satisfies both without a needless `&mut`.
+                    std::ptr::addr_of_mut!(size),
                 )
             },
             0
