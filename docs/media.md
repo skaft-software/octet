@@ -6,88 +6,92 @@
 
 To ask about a sound and a screenshot:
 
-1. Select a model whose route supports the required media.
-2. Paste/drop each file path through the terminal's paste mechanism, or select
-   an `@` path completion.
-3. Confirm `[Audio #N]` and `[Image #N]` chips before submitting:
+1. Pick a model whose route supports the media.
+2. Paste or drop each file path through the terminal, or select an `@` path
+   completion.
+3. Check for `[Audio #N]` and `[Image #N]` chips before you send.
 
 ```text
 Describe the sound in the audio. Compare the screenshot with this repository's
 player UI, then propose a change. Do not edit yet.
 ```
 
-This is an input recipe, not a recorded/live-provider demonstration. Ordinary
-typed paths—including raw-key terminal drops—remain text, not upload consent.
-A failed attachment leaves the path visible and reports a diagnostic rather
-than creating a chip. An enabled `read` tool can still read a named file under
-its policy; use `--no-tools` for explicitly attached input only.
+A typed path is just text, even a raw-key terminal drop. A failed attachment
+leaves the path visible and reports why, with no chip. An enabled `read` tool
+can still read a file you name, under its policy. Use `--no-tools` for attached
+input only.
 
-To attach several files from one explicit paste/drop, separate the paths with
-whitespace; quote or backslash-escape names containing spaces. The complete
-path list is admitted in order, and each attachable item receives its own chip
-(non-media source paths remain text):
+To attach several files from one paste or drop, separate the paths with
+whitespace, and quote or backslash-escape names that contain spaces. octet
+admits the whole list in order and gives each attachable item its own chip
+(paths that aren't media stay text):
 
 ```text
 /Users/me/first.png '/Users/me/voice memo.wav' /Users/me/last.jpg
 ```
 
-Path-list admission is all-or-nothing: a malformed, missing, or non-local token
-leaves the complete payload as visible text rather than creating partial chips.
-Consecutive explicit drops also receive distinct chips. Editing or deleting a
-chip revokes only that attachment; the remaining chips retain their original
-payload identity and order.
+It's all or nothing: a malformed, missing or non-local token leaves the whole
+payload as visible text, with no partial chips. Consecutive explicit drops get
+separate chips. Editing or deleting a chip revokes only that attachment, and the
+rest keep their order and payload.
 
 ## Formats and limits
 
-| Surface | Supported input |
+| Where | What it accepts |
 | --- | --- |
-| TUI attachment or built-in `read` | PNG/JPEG/GIF/WebP images, **5 MiB each**; native WAV/MP3 audio, **20 MiB each**, only with a compatible model on OpenAI Chat Completions. |
-| Native `octet-host` `media` | Same per-file limits; at most **8 images / 20 MiB total**, **4 audio clips / 40 MiB total**, and **12 items per request**. [Run request contract](sdk.md#run-requests). |
-| Serve web composer | PNG/JPEG/GIF/WebP and bounded document context. Audio attachments are **not implemented**. [Serve](experimental/octet-serve/README.md). |
+| TUI attachment or built-in `read` | PNG, JPEG, GIF and WebP images, **5 MiB each**. WAV and MP3 audio, **20 MiB each**, only with a compatible model on OpenAI Chat Completions. |
+| Native `octet-host` `media` | The same per-file limits. At most **8 images / 20 MiB total**, **4 audio clips / 40 MiB total** and **12 items per request**. [Run requests](sdk.md#run-requests). |
+| Serve web composer | PNG, JPEG, GIF and WebP, plus bounded document context. Audio attachments aren't implemented. [Serve](experimental/octet-serve/README.md). |
 
-Attachments remain ordered with text. Each user submission admits at most
-**8 images / 20 MiB of inline image bytes** before decoding; this does not
-limit independent `read` tool results. Explicit per-model
-`preset.image_input_limits`
-(`max_width`, `max_height`, `max_bytes`) are applied to inline user images;
-models without that declaration use a host safety fallback of **4000×4000 px**
-(maximum **16 million decoded pixels**) and **5 MiB encoded**. The fallback is
-not a claim of provider acceptance. An image over the applicable bound is
-resized within bounded decode, encode and output limits; the resized bytes
-(with a matching PNG media type) are retained in history so later turns replay
-the same image and preserve prompt-cache prefixes. Images already within bounds
-retain their original bytes. A malformed image, decompression bomb, or image
-that still cannot fit is rejected before the user turn is committed; there is
-no provider-only resize or silent image drop. The existing **5 MiB input cap**
+Attachments stay in order with the text. Each submission admits at most **8
+images / 20 MiB of inline image bytes** before decoding. That doesn't limit
+separate `read` tool results. Unsupported formats, unreadable files and
+oversized files fail with a message. Video paths are never native media: an
+explicit video attachment is refused with a diagnostic and stays visible as
+text. Recognizing a file isn't the same as the provider accepting it: FLAC,
+Opus, AAC and PCM16 aren't native inputs just because octet knows the extension.
+Native audio needs both a capable model and the OpenAI Chat WAV or MP3 route.
+Responses, Anthropic, Gemini and arbitrary OpenAI-compatible endpoints aren't
+native-audio routes. There's no automatic transcription or transcoding, and a
+provider may still reject a file octet accepted.
+
+<details>
+<summary>Image size limits and resizing</summary>
+
+A model can declare `preset.image_input_limits` (`max_width`, `max_height`,
+`max_bytes`), which apply to inline user images. Without that, octet uses a
+safety fallback of **4000×4000 px** (at most **16 million decoded pixels**) and
+**5 MiB encoded**. The fallback doesn't claim the provider will accept the
+image.
+
+An image over the limit is resized within bounded decode, encode and output
+limits. The resized bytes (with a matching PNG media type) are kept in history,
+so later turns replay the same image and prompt-cache prefixes survive. Images
+within bounds keep their original bytes. A malformed image, a decompression
+bomb, or an image that still can't fit is rejected before the turn is committed.
+There's no provider-only resize and no silent drop. The **5 MiB input cap**
 still applies before model preparation. A resized animated image may be
-flattened to its first frame. Unsupported modalities/formats, unreadable files,
-and oversized files fail diagnostically. Video paths are never native
-media: an explicit video attachment is refused with a diagnostic and remains
-visible as text. File recognition does not establish provider support:
-FLAC/Opus/AAC and host-recognized PCM16 are not native inputs merely because
-their extensions are recognized. Native audio requires both model capability and
-the OpenAI Chat WAV/MP3 codec. Responses, Anthropic, Gemini, and arbitrary
-OpenAI-compatible endpoints must not be advertised as native-audio routes on
-recognition alone. There is no automatic transcription or transcoding fallback;
-even admitted file contents may be rejected by the provider.
+flattened to its first frame.
 
-Inline tool-result images are visual-only TUI previews, not additional model
-input. On Kitty-compatible terminals they reserve at most 16 rows per image.
-When the terminal supplies no cell-pixel measurement, the preview uses an
-approximate 1:2 cell aspect instead of shrinking a screenshot to one cell;
-fonts with unusual cell proportions may display a slightly different aspect.
-Other terminals retain a text fallback.
+</details>
+
+Inline tool-result images are visual-only previews in the TUI, not extra model
+input. On Kitty-compatible terminals each takes at most 16 rows. If the terminal
+doesn't report cell size in pixels, octet assumes a 1:2 cell aspect rather than
+shrinking a screenshot to one cell, so fonts with unusual cell proportions may
+look slightly off. Other terminals show text.
 
 ## Privacy and remote reads
 
-Only submit media the selected provider may receive. Original bytes become typed
-model/session input. Payload-free transcript summaries and NDJSON events do not
-make stored sessions or exports safe to publish. Review/redact media, paths,
-sessions, recordings, and captures separately; [export redaction](sessions.md#portable-export-and-redaction)
-is not a proof that arbitrary content is secret-free.
+Only send media your provider may receive. The original bytes become model and
+session input. Transcript summaries and NDJSON events carry no payload, but that
+doesn't make stored sessions or exports safe to publish. Review and redact
+media, paths, sessions, recordings and captures yourself. [Export
+redaction](sessions.md#portable-export-and-redaction) isn't proof that arbitrary
+content has no secrets.
 
-Remote HTTPS image/audio `read` is default-off. Explicitly enable it with
-`--allow-remote-read`, `allow_remote_read = true`, or
-`OCTET_ALLOW_REMOTE_READ=true`. `--offline` disables remote reads and optional
-discovery, **not inference network access**. Use OS-level network restrictions
-when actual isolation is required.
+Remote HTTPS image and audio reads by `read` are off by default. Turn them on
+with `--allow-remote-read`, `allow_remote_read = true` or
+`OCTET_ALLOW_REMOTE_READ=true`. `--offline` turns off remote reads and optional
+discovery, **not inference network access**. Use OS network limits when you need
+real isolation.

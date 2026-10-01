@@ -3,94 +3,106 @@
 [Documentation](README.md) · [Commands and keys](commands.md) · [Themes](themes.md)
 
 ```sh
-octet --safe-mode                         # Interactive TUI
-octet --plain --safe-mode                 # Chronological output
-octet -p "Explain this function" --no-tools # Final response on stdout
-octet --mode rpc                          # JSONL automation frontend
+octet --safe-mode                           # interactive
+octet --plain --safe-mode                   # plain, in order
+octet -p "Explain this function" --no-tools # final answer on stdout
+octet --mode rpc                            # JSONL for automation
 ```
 
-## Choose a frontend
+<a id="choose-a-frontend"></a>
 
-| Mode | Use |
+## Choose a mode
+
+| Mode | Use it for |
 | --- | --- |
-| `octet` | Streaming, tools, pickers, branching, steering, and native scrollback. |
-| `octet --plain` | Basic terminals, logs, accessibility tooling, or no cursor control. |
-| `octet -p "prompt"` / `octet --print "prompt"` | Response-only stdout for shell composition. |
-| `octet --mode rpc` | Pi-compatible JSONL commands and responses over stdin/stdout for automation. |
+| `octet` | Streaming, tools, pickers, branching, steering and native scrollback. |
+| `octet --plain` | Basic terminals, logs, accessibility tools, or no cursor control. |
+| `octet -p "prompt"` (or `--print`) | The final answer on stdout, for scripts. |
+| `octet --mode rpc` | JSONL commands and responses over stdin and stdout. |
 
-On native Windows, the console (Windows Terminal or conhost) rather than
-`TERM` selects the frontend; see [Windows](windows.md#terminal).
+On native Windows, the console (Windows Terminal or conhost), not `TERM`, picks
+the frontend. See [Windows](windows.md#terminal).
 
-The interactive, plain, and print frontends share the agent loop, providers,
-sessions, safety policy, and cancellation. Print mode does not remove tool
-authority by itself; use [tool controls](tools.md) when needed. Readiness
-diagnostics go to stderr in plain/print mode.
+The first three share one agent loop, providers, sessions, safety policy and
+cancellation. Print mode still has tools, so add [tool limits](tools.md) if you
+want none. Plain and print send readiness diagnostics to stderr.
 
-RPC is a separate automation frontend, not a terminal UI. Its command and response
-messages use `type` fields, not the native-host `hello` envelope. `--mode rpc`
-conflicts with `--print`. It is independent of both [native-host protocol 1](sdk.md)
-and [extension API 0.4](extensions/API-0.4-REFERENCE.md). Pi-compatible framing does
-not establish blanket command/feature parity or live qualification against a
-pinned Pi release.
+The startup card says `permissions: full access` in bold red by default. With
+`--safe-mode` it says `safe mode` (blue in the default theme) and octet asks
+before running bash or changing files. Neither is a sandbox.
 
-The startup card labels `permissions: full access` in bold red by default.
-`--safe-mode` changes it to bold-accent `safe mode` (blue in the default theme)
-and enables approval gates for bash calls and workspace mutation. Neither is
-OS containment.
+<details>
+<summary>RPC mode</summary>
 
-Startup keeps routine session lookup, replay, and extension-loading progress off
-screen. The composer accepts typing while startup work finishes; the resolved
-welcome card and saved conversation appear at readiness. Setup prompts, errors,
-and cancellation/shutdown diagnostics remain visible. Fresh sessions skip the
-replay worker entirely; resumed sessions still restore their history. `--models`
-inventory discovery also runs after the shell owns input, not before first paint.
-After session resolution, the interactive renderer sets the terminal window title
-to `octet` or `octet · <user-assigned session name>` via OSC 2. It updates on
-rename and session changes without placing controls in plain, print, or RPC output.
-When auto-theme detection needs an OSC 11 background-color reply, the terminal
-probe starts after the first ready frame. A changed background triggers a
-repaint; a timeout or unsupported reply keeps the initial theme.
+RPC isn't a terminal UI. Its messages use `type` fields, not the native host's
+`hello` envelope, and `--mode rpc` can't be combined with `--print`. It's
+independent of [native-host protocol 1](sdk.md) and [extension API
+0.4](extensions/API-0.4-REFERENCE.md). The framing is Pi-compatible, but that
+doesn't mean every Pi command or feature works, and it hasn't been tested
+against a pinned Pi release.
+
+</details>
+
+Startup keeps routine session lookup, replay and extension-loading progress off
+screen. You can type while startup work finishes, and the welcome card and saved
+conversation appear when octet is ready. Setup prompts, errors, and cancel or
+shutdown diagnostics stay visible. Fresh sessions skip the replay worker
+entirely, and resumed sessions still restore their history. `--models` inventory
+discovery also runs after the shell owns input, not before the first paint.
+
+<details>
+<summary>Window title and background detection</summary>
+
+After session resolution, the interactive renderer sets the terminal window
+title to `octet` or `octet · <session name>` (via OSC 2). It updates on rename
+and session changes, and nothing is written to plain, print or RPC output. When
+auto-theme detection needs an OSC 11 background-color reply, the probe starts
+after the first ready frame. A changed background triggers a repaint, and a
+timeout or an unsupported reply keeps the initial theme.
+
+</details>
 
 ## Input and active work
 
-Type `/` for [command discovery](commands.md), `@` for gitignore-aware file
-mentions, or a `./`, `../`, `~/`, or absolute path token for filesystem
-completion. Up/Down selects a visible path or mention suggestion; Tab inserts
-the selected result. Directory completion stays open; spaces are
-backslash-escaped. Without a visible completion menu, arrows retain normal
-editor navigation. Multiline editing, bracketed paste, and large-paste chips are
-supported. Explicitly pasted/dropped
-media needs an attachment chip before submission; [typed paths alone are text](media.md#attach-explicitly).
-Undo and redo each retain at most 64 snapshots / 4 MiB, evicting oldest history
-first. An edit too large for that budget starts a new undo boundary rather than
-retaining an unbounded copy.
+Type `/` for [commands](commands.md) and `@` for file mentions (`.gitignore` is
+respected). A `./`, `../`, `~/` or absolute path token starts filesystem
+completion. Up and Down pick a visible path or mention suggestion, and Tab
+inserts the selected result. Directory completion stays open, and spaces are
+backslash-escaped. Without a visible completion menu, the arrows move through
+the editor as usual. Multiline editing, bracketed paste and large-paste chips
+work. A pasted or dropped file needs an attachment chip before you send it: [a
+typed path is just text](media.md#attach-explicitly). Undo and redo each keep at
+most 64 snapshots / 4 MiB, oldest first. An edit too big for that budget starts
+a new undo boundary instead of keeping an unbounded copy.
 
-Enter submits, or queues a local follow-up while work is active. Follow-ups
-dispatch one at a time in FIFO order after normal completion. Ctrl+S instead
-queues live steering for the next model boundary; both kinds of pending input
-share the bounded hint above the composer. Option+Up (Alt+Up) recalls the newest
-editable queued steering message or follow-up into an empty composer, preserving
-attachment/paste chips. A recalled steering message is withdrawn from the Agent
-before it is persisted, so it is never also delivered; once the Agent has claimed
-it at a model boundary the recall is refused and the entry stays queued. It never
-submits, never interrupts, and never overwrites a nonempty draft.
+While octet works:
 
-Native clipboard reads during active work do not block input, cancellation, or
-run progress. A pending read is discarded when the run settles or is cancelled,
-or when the draft is cleared, submitted, steered, recalled, or consumed by a
-command. Results are also discarded after intervening text/cursor edits or loss
-of composer focus, so late clipboard output cannot enter a replacement draft or
-another input surface.
+- Enter queues a local follow-up. Follow-ups run one at a time, in order, after
+  normal completion.
+- Ctrl+S queues live steering for the next model boundary. Both kinds of pending
+  input share the bounded hint above the input.
+- Option+Up (Alt+Up) recalls the newest editable queued steering message or
+  follow-up into an empty input, keeping attachment and paste chips. A recalled
+  steering message is withdrawn from the agent before it's saved, so it's never
+  also delivered. Once the agent has claimed it at a model boundary, the recall
+  is refused and it stays queued. Recall never submits, never interrupts and
+  never overwrites a draft.
+- Escape first closes the current panel or slash popup. With the input focused,
+  it interrupts active work and sends the oldest queued follow-up **after** the
+  run settles. It never submits an unqueued draft.
+- Ctrl+C clears a draft. With no draft, it aborts active work without sending
+  anything, and does nothing when idle. A Ctrl+C abort also cancels a send that
+  Escape had armed. Failures and closing leave follow-ups unsent.
+- Ctrl+D closes octet from any input, after active work and child processes are
+  cleaned up.
+- Shift+Enter adds a newline if your terminal reports enhanced keys.
 
-Escape first closes the current panel/slash popup; with the composer focused,
-it interrupts active work and dispatches the oldest queued follow-up **after**
-the run settles. It never submits an unqueued draft. Ctrl+C clears a nonempty
-draft, otherwise aborts active work without dispatch and does nothing while idle.
-A Ctrl+C abort also revokes dispatch previously armed by Escape.
-Failures and close also leave follow-ups unsubmitted. Ctrl+D coordinates close
-from any input surface, settling active work and child-process cleanup first.
-Shift+Enter inserts a newline when the terminal reports enhanced keys.
-[Full key table](commands.md#keys).
+Native clipboard reads during active work don't block input, cancellation or run
+progress. A pending read is dropped when the run settles or is cancelled, or
+when the draft is cleared, sent, steered, recalled or consumed by a command.
+Results are also dropped after text or cursor edits in between, or if the input
+loses focus, so a late clipboard result can't land in a replacement draft or
+another input. See [all keys](commands.md#keys).
 
 ## Scrolling and rendering
 
@@ -99,123 +111,130 @@ octet --color auto
 octet --mouse app
 ```
 
-Default `mouse = "auto"`, explicit `terminal`, and `off` leave mouse reporting
-disabled, preserving native drag selection and wheel history. The primary-screen
-renderer follows logical content height, not a fixed full-screen composer/footer.
-It materializes the complete resumed branch and appends into native scrollback.
+By default octet leaves mouse reporting off (`mouse = "auto"`; `terminal` and
+`off` do the same), so your terminal keeps drag selection and wheel history. The
+renderer follows the height of the content, not a fixed full-screen composer and
+footer. It loads the complete resumed branch and appends to native scrollback.
 
-PageUp claims a bounded semantic viewport in every mode. It stays anchored above
-the tail while output grows and reports new output; PageDown returns to live
-output. `--mouse app` selects that viewport from startup, additionally captures
-wheel/drag selection, and permits tail-first lazy resume hydration. Uncaptured
-wheel history stays terminal-owned: portable protocols cannot report its offset.
+PageUp pins the view above the tail while output grows, and shows when there's
+new output. PageDown returns to live output. `--mouse app` starts pinned,
+captures the wheel and drag selection, and lets a resumed session load
+newest-first. Wheel history that octet doesn't capture stays with your terminal,
+because portable protocols can't report its position.
 
-The renderer uses a complete retained frame, synchronized frames, and exact
-first-to-last changed-range repainting. Completions, panels, reports, and streamed
-Markdown participate in the same algorithm. Resize reflows the retained semantic
-transcript, clears saved lines, and replays once; changes above the old viewport
-also require full replay rather than leaving unwritten history. The hardware
-composer cursor stays visible through panels, resizing, and renderer resumes.
-[Rendering details](design/octet-tui.md#terminal-guarantees).
+Repainting is incremental and uses synchronized frames. When you resize, octet
+reflows the transcript, clears the saved lines and replays once. A change above
+the old viewport needs a full replay, so no history is left unwritten. The
+cursor stays visible through panels, resizes and renderer resumes. More in the
+[rendering notes](design/octet-tui.md#terminal-guarantees).
 
-Wide/narrow layouts retain semantic structure with Unicode/ASCII, truecolor,
-256-color, 16-color, and no-color fallbacks. Rich Markdown includes highlighted
-code, tables, task lists, links, and bounded tool intent/lifecycle projections.
-Untrusted terminal controls are sanitized. The vendored `sexy-tui-rs` renderer
-uses `#![forbid(unsafe_code)]`. [Compiled model-aware theme](themes.md).
+Layouts adapt between wide and narrow terminals and fall back from truecolor to
+256 colors, 16 colors and no color, and from Unicode to ASCII. Markdown shows
+highlighted code, tables, task lists and links, plus bounded summaries of tool
+intent and lifecycle. Control sequences in untrusted text are sanitized. The
+vendored `sexy-tui-rs` renderer uses `#![forbid(unsafe_code)]`.
+[Themes](themes.md).
 
 ## Reasoning and progress
 
 `/thinking` can change an explicitly qualified Responses route without stopping
-the root task. A queued label lasts until the durable next-response boundary;
-the effective choice is distinct from the pinned wire baseline. Neither is a
-provider acknowledgement. Other routes retain idle-boundary selection.
-[Control qualification](provider-thinking.md#mid-conversation-changes-unreleased).
+the root task. A queued label lasts until the durable next-response boundary.
+The effective choice is separate from the pinned wire baseline, and neither is a
+provider acknowledgement. Other routes still change at an idle boundary. See the
+[control
+qualification](provider-thinking.md#mid-conversation-changes-unreleased).
 
-Reasoning is collapsed by default; Ctrl+O expands retained content. Each accepted
-run begins a bold, model-adaptive shimmering `Working` row. One trailing
-`Working (<elapsed> • esc to interrupt)` remains even after assistant text until
-the run settles; tool admission replaces it with the tool lifecycle. Retry status
-keeps the interrupt hint but omits the run-elapsed counter, including after its
-backoff countdown reaches zero, so two clocks do not compete on the same row.
+Reasoning is collapsed by default. Ctrl+O expands what octet kept.
 
-While reasoning is active, the bold `Thinking` label shimmers more quietly than
-`Working` on supported terminals. It shows the latest explicit ATX or
-standalone-bold Markdown heading with a subdued expansion hint. Ordinary
-reasoning body text is never promoted to a label; without a heading, only the
-hint appears.
+Each run shows a shimmering `Working` row, and a trailing
+`Working (<elapsed> • esc to interrupt)` stays until the run settles. Retry
+status keeps the interrupt hint but leaves out the run-elapsed counter, even
+after its backoff countdown reaches zero, so two clocks never compete on one
+row. While the model reasons, the bold `Thinking` label shimmers more quietly
+than `Working` on supported terminals. It shows the latest Markdown heading from
+the reasoning (a `#` heading or a standalone bold line), with a dim expand hint.
+Ordinary reasoning text never becomes a label. With no heading, only the hint
+shows.
 
 ```text
 • Thinking
   └ Verifying the implementation (ctrl+o to expand)
 ```
 
-Expanded reasoning retains its inset without an event-margin dot or synthetic
-first-line bullet. Completed reasoning disappears again when collapsed.
-Reasoning/activity dots keep a solid, fixed-size glyph while their foreground
-pulses with the label sweep: the default physical field is a smooth, asymmetric
-raised-cosine band with a central glint on known Dark/Light TrueColor and
-ANSI256 terminals. Activity shimmer is foreground-only and parks briefly after
-crossing the complete label. Set `OCTET_SHIMMER=classic` for the legacy stepped
-field; ANSI16, unknown-background, reduced-motion, and no-color paths retain the
-compatibility/static behavior. Assistant-response dots remain steady; active
-tool/shell dots pulse foreground/muted tones without changing size. Completed
-success is green and failed tools red.
-[Selecting reasoning](providers.md#reasoning).
+Reasoning and activity dots keep a solid, fixed-size glyph while their
+foreground pulses with the label sweep. Tool and shell dots turn green on
+success or red on failure, and assistant-response dots stay steady. To change
+the level, see [Selecting reasoning](providers.md#reasoning).
 
-## Tool evidence and worker activity
+<details>
+<summary>Shimmer details</summary>
 
-In terse mode, a Bash tool command shows its first three rendered lines, followed
-by a count of hidden command lines. Ctrl+O expands the complete retained command
-and collapses it again; this does not alter the executed command or the separate
-output preview.
+By default the shimmer is a smooth, asymmetric raised-cosine band with a central
+glint, on known dark and light TrueColor and ANSI256 terminals. Activity shimmer
+is foreground-only and parks briefly after crossing the whole label. Set
+`OCTET_SHIMMER=classic` for the old stepped field. ANSI16, unknown-background,
+reduced-motion and no-color paths keep the compatibility or static behavior.
+Expanded reasoning keeps its indent, with no margin dot or extra first bullet,
+and completed reasoning disappears again once collapsed.
 
-Worker activity appears in a bounded, tool-like **Subagents** transcript block
-while workers are active. The block updates in place rather than staying pinned
-above the composer; its heading counts worker states, and up to four child lines
-show active tasks with input/output tokens. Ctrl+O retains disclosure, and
-the worker list (`/extensions` → octet-subagents → **Workers**, or `/extensions`
-during a run) exposes the complete roster (up to 32) and failure details on
-demand. Its list rows retain state, model, and available metrics; the `tools`
-column counts tool calls, not model turns.
-Host `limit_reached` belongs to the failed group; `interrupted`, `shutdown`,
-`detached`, and `awaiting_approval` belong to the stopped display group.
-Detached/approval-parked workers remain recoverable, not successful; their exact
-states and reasons remain inspectable after the block settles. Raw first-party
-orchestration calls and results, including errors, stay out of the interactive
-transcript during live execution and replay. Worker state/reason transitions do
-not append automatic notices. This presentation policy does not change worker
-outcomes, model-visible errors, durable results, approval prompts, or ordinary
-tool/run failures. Resume starts a fresh telemetry roster rather than replaying
-raw calls. Already committed child cost is not added again on telemetry refresh.
+</details>
 
-`octet --show-images` (or `show_images = true` in user configuration) opts in to
-bounded inline **tool-result display**, off by default. Validated inline image
-payloads display on Kitty-compatible interactive terminals; unsupported terminals
-fall back to text. Display never loads a URL or path, and copy/plain/print output
-and terminal-write logs remain image-payload-free. This switch neither grants
-automatic media upload nor replaces [explicit input-attachment consent](media.md#attach-explicitly);
-model/codec support remains a separate requirement.
+<a id="tool-evidence-and-worker-activity"></a>
 
-Ctrl+O and `/verbose [on|off]` disclose retained reasoning, compaction, delegated
-activity, bounded search/shell output, and edit/write diffs. They cannot recover
-bytes discarded by capture. Raw arguments/envelopes, unsanitized failures, and
-extension-rendered payloads stay internal and out of transcript copy. Failed
-runs retain `failed · <duration>` and a bounded terminal-safe reason; provider
-diagnostics are credential-redacted before reaching the frontend.
+## Tool output and workers
 
-Final structured tool results are persisted/provider-visible when needed to
-continue the tool protocol. Live progress is neither persisted nor sent to the
-model. [Tool presentation contract](design/octet-tui.md#tool-presentation).
+In terse mode, a Bash command shows its first three rendered lines, then a count
+of hidden command lines. Ctrl+O expands the full retained command and collapses
+it again. That doesn't change the executed command or the separate output
+preview.
 
-Generic extension state is on demand. The subagents exception updates an
-owner-scoped bounded transcript block while workers are active: state counts,
-active tasks, and input/output tokens. Input sums uncached, cache-read, and
-cache-write usage; output estimates are marked until usage settles. Tool-call
-counts, priced spend, transient phases, and tool identities remain in the
-inspector. The nonblocking 250 ms refresh retains its last fenced snapshot on
-failure.
-The worker list is an arrow-key list; Enter opens a scrollable read-only child
-transcript and Ctrl+X stops the selected worker. No extension replaces the cumulative footer. Completed child usage
-is mirrored once into the root ledger before settlement, including later cost
-limits. [Worker presentation and accounting](../extensions/octet-subagents/README.md#tui-and-serve-presentation).
+`--show-images` (or `show_images = true`) shows tool-result images inline. It's
+off by default and works on Kitty-compatible terminals. Others fall back to
+text. It never loads a URL or path, copied, plain and print output never contain
+image data, and it doesn't upload anything or replace [attachment
+consent](media.md#attach-explicitly). The model must still support the format.
+
+Ctrl+O and `/verbose [on|off]` reveal reasoning, compaction, subagent activity,
+bounded search and shell output, and edit and write diffs. They can't recover
+output that was discarded when it was captured. Raw arguments, unsanitized
+failures and extension-rendered payloads stay out of the transcript and out of
+copy. A failed run keeps `failed · <duration>` and a short reason with
+credentials removed.
+
+Tool results the model needs are saved and sent to the provider. Live progress
+is neither. [Tool presentation](design/octet-tui.md#tool-presentation).
+
+While workers are active, a bounded, tool-like **Subagents** block in the
+transcript updates in place. It no longer stays pinned above the input. Its
+heading counts worker states, and up to four child lines show active tasks with
+input and output tokens. Ctrl+O keeps disclosure. The worker list
+(`/extensions`, then octet-subagents, then **Workers**, or just `/extensions`
+during a run) shows the complete roster (up to 32) and failure details. Enter
+opens a worker's read-only transcript and Ctrl+X stops the selected worker.
+Finished workers' usage is added once to the main session's ledger, so cost
+limits count it. [Worker
+display](../extensions/octet-subagents/README.md#tui-and-serve-presentation).
+
+<details>
+<summary>How worker activity is counted and shown</summary>
+
+- List rows keep state, model and available metrics. The `tools` column counts
+  tool calls, not model turns.
+- Host `limit_reached` counts as failed. `interrupted`, `shutdown`, `detached`
+  and `awaiting_approval` count as stopped. Detached and approval-parked workers
+  stay recoverable, not successful, and their exact states and reasons stay
+  inspectable after the block settles.
+- Raw first-party orchestration calls and results, including errors, stay out of
+  the interactive transcript, live and on replay, and worker state or reason
+  transitions add no automatic notices. This doesn't change worker outcomes,
+  model-visible errors, durable results, approval prompts, or ordinary tool and
+  run failures.
+- Resume starts a fresh telemetry roster rather than replaying raw calls.
+  Already committed child cost isn't added again when telemetry refreshes.
+- The block's input tokens sum uncached, cache-read and cache-write usage, and
+  output estimates are marked until usage settles. Tool-call counts, priced
+  spend, transient phases and tool identities stay in the inspector. The
+  nonblocking 250 ms refresh keeps its last fenced snapshot on failure, and no
+  extension replaces the cumulative footer.
+
+</details>

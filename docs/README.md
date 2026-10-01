@@ -1,9 +1,9 @@
 # octet documentation
 
-octet is a fast, small coding host across cloud and local models. Extensions add
-tools and bounded host-shaped integrations; they do not promise Pi execution
-parity or an everything-as-extension platform. These docs describe **octet 0.8.2**;
-see [installation](installation.md) for supported channels.
+octet is a fast, small coding host for cloud and local models. Extensions add
+tools and bounded, host-shaped integrations. They don't promise Pi execution
+parity or an everything-as-extension platform. These docs describe **octet
+0.8.2**. [Installation](installation.md) lists the supported channels.
 
 ## Getting started
 
@@ -54,11 +54,13 @@ see [installation](installation.md) for supported channels.
 
 - [Extension authoring](extensions.md)
 - [Extension event bus (bounded, host-mediated)](extensions/event-bus.md)
-- [Extension API 0.4 and retained wire reference](extensions/API-0.4-REFERENCE.md)
-- [Native embedding — host protocol 1](sdk.md)
+- [Extension API 0.4 and retained wire
+  reference](extensions/API-0.4-REFERENCE.md)
+- [Native embedding: host protocol 1](sdk.md)
 - [Examples and their compatibility status](../examples/README.md)
-- Architecture: [model clients](design/octet-ai.md), [agent runtime](design/octet-agent.md),
-  [application](design/octet-coding-agent.md), [terminal renderer](design/octet-tui.md)
+- Architecture: [model clients](design/octet-ai.md), [agent
+  runtime](design/octet-agent.md), [application](design/octet-coding-agent.md),
+  [terminal renderer](design/octet-tui.md)
 - [Performance and measurement contract](design/performance.md)
 - [Build profiles](build-profiles.md)
 - [Testing lanes](testing/README.md)
@@ -70,17 +72,15 @@ see [installation](installation.md) for supported channels.
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
-- [0.8.2 release notes](releases/v0.8.2.md)
-- [0.8.1 release notes](releases/v0.8.1.md)
-- [0.8.0 release notes](releases/v0.8.0.md)
-- [0.7.6 hotfix notes](releases/v0.7.6.md)
-- [0.7.5 release notes](releases/v0.7.5.md)
-- [0.7.4 release notes and documentation correction](releases/v0.7.4.md)
-- [0.7.3 release notes](releases/v0.7.3.md)
-- [0.7.1 release notes](releases/v0.7.1.md)
+- Release notes: [0.8.2](releases/v0.8.2.md), [0.8.1](releases/v0.8.1.md),
+  [0.8.0](releases/v0.8.0.md), [0.7.6 hotfix](releases/v0.7.6.md),
+  [0.7.5](releases/v0.7.5.md), [0.7.4 and its documentation
+  correction](releases/v0.7.4.md), [0.7.3](releases/v0.7.3.md),
+  [0.7.1](releases/v0.7.1.md)
 - [Benchmarks and performance](benchmarks/README.md)
 - [Download benchmark results](assets/evidence/README.md)
 - [Brand Kit](assets/octet/README.md)
 - [License and attribution](../THIRD_PARTY_NOTICES.md)
 
-[Previous reference headings](current-reference.md) remain available as topic links.
+Looking for an older section name? [Previous reference
+headings](current-reference.md) still work as topic links.
