@@ -204,8 +204,14 @@ pub fn decode_body(verb: &str, body: &str) -> Option<Incoming> {
 /// events.
 #[derive(Debug, Default)]
 pub struct Reader {
-    chunks: HashMap<String, String>,
+    // None is a rejected assembly: consume its remaining fragments rather than
+    // interpreting a valid-looking final fragment as a separate message.
+    chunks: HashMap<(String, String), Option<String>>,
 }
+
+const MAX_INCOMING_BODY: usize = 1 << 20;
+const MAX_INCOMING_CHUNKS: usize = 16;
+const MAX_INCOMING_RETAINED: usize = 4 << 20;
 
 impl Reader {
     /// A fresh reader.
@@ -217,15 +223,43 @@ impl Reader {
     /// otherwise `None`.
     pub fn feed(&mut self, sequence: &str) -> Option<Incoming> {
         let raw = split(sequence)?;
+        if !matches!(raw.verb.as_str(), "r" | "e") {
+            return None;
+        }
         let mut body = raw.body;
         if let Some(chunk_id) = raw.params.get("c") {
-            let mut joined = self.chunks.remove(chunk_id).unwrap_or_default();
-            joined.push_str(&body);
-            if raw.params.get("m").map(String::as_str) == Some("1") {
-                self.chunks.insert(chunk_id.clone(), joined);
+            if chunk_id.len() > 128 {
                 return None;
             }
-            body = joined;
+            let key = (raw.verb.clone(), chunk_id.clone());
+            let mut joined = match self.chunks.remove(&key) {
+                Some(assembly) => assembly,
+                None if self.chunks.len() >= MAX_INCOMING_CHUNKS => return None,
+                None => Some(String::new()),
+            };
+            let retained: usize = self
+                .chunks
+                .values()
+                .filter_map(Option::as_ref)
+                .map(String::len)
+                .sum();
+            if let Some(text) = &mut joined {
+                if text.len() + body.len() > MAX_INCOMING_BODY
+                    || retained + text.len() + body.len() > MAX_INCOMING_RETAINED
+                {
+                    joined = None;
+                } else {
+                    text.push_str(&body);
+                }
+            }
+            if raw.params.get("m").map(String::as_str) == Some("1") {
+                self.chunks.insert(key, joined);
+                return None;
+            }
+            body = joined?;
+        }
+        if body.len() > MAX_INCOMING_BODY {
+            return None;
         }
         decode_body(&raw.verb, &body)
     }
@@ -234,6 +268,55 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_chunk_assemblies_stay_rejected_through_the_final_fragment() {
+        let mut reader = Reader::new();
+        let params = Params::from([("c".into(), "large".into()), ("m".into(), "1".into())]);
+        for _ in 0..3 {
+            assert!(reader
+                .feed(&encode(
+                    Verb::Event,
+                    &"x".repeat(MAX_INCOMING_BODY / 2),
+                    &params,
+                    MAX_INCOMING_BODY
+                ))
+                .is_none());
+        }
+        let ack = r#"{"ev":"ack","sf":"test","s":1}"#;
+        let last = Params::from([("c".into(), "large".into())]);
+        assert!(reader
+            .feed(&encode(Verb::Event, ack, &last, MAX_INCOMING_BODY))
+            .is_none());
+        assert!(reader
+            .feed(&encode(Verb::Event, ack, &Params::new(), MAX_INCOMING_BODY))
+            .is_some());
+        assert!(reader.chunks.is_empty());
+    }
+
+    #[test]
+    fn abandoned_chunk_ids_and_retained_payload_are_bounded() {
+        let mut reader = Reader::new();
+        for index in 0..100 {
+            let params = Params::from([("c".into(), index.to_string()), ("m".into(), "1".into())]);
+            reader.feed(&encode(
+                Verb::Event,
+                &"x".repeat(MAX_INCOMING_BODY / 2),
+                &params,
+                MAX_INCOMING_BODY,
+            ));
+            assert!(reader.chunks.len() <= MAX_INCOMING_CHUNKS);
+            assert!(
+                reader
+                    .chunks
+                    .values()
+                    .filter_map(Option::as_ref)
+                    .map(String::len)
+                    .sum::<usize>()
+                    <= MAX_INCOMING_RETAINED
+            );
+        }
+    }
     use crate::wire::{Event, Text, TSP_DEFAULT_APC_LIMIT};
 
     #[test]

@@ -1,8 +1,7 @@
 # octet-tern
 
 A [Tern Surface Protocol](https://stencil.so/tern) (TSP) client for octet, and a
-proof of concept that octet themes and surfaces render natively inside Tern —
-the same way `omp` does.
+retained native backend for octet's model-adaptive themes and interactive shell.
 
 Tern is Stencil's native multiplexing terminal. When a program describes its UI
 as semantic data over TSP, Tern draws it natively (real layout, typeset math,
@@ -17,6 +16,7 @@ that path:
   the tty, with credit-based flow control.
 - `theme` — projects an octet theme file (`[colors]`/`[tokens]`,
   `[roles."…"]`, `[variants.*]`) onto the Tern theme palette.
+- `reconcile` — stable-ID child and property patches without replacing history.
 - `scene` — builders for octet's coding surfaces: prompt cards, reasoning
   sections, tool cards with native diffs, the clocked working row, the todo HUD
   and the composer.
@@ -48,11 +48,15 @@ flowchart LR
 
 ## Scope and limits
 
-This is a proof of concept: it speaks TSP faithfully but it does not yet replace
-octet's own TUI loop. The integration seam is a native-surface sink beside
-octet's ANSI writer, gated on `client::is_tern()`; the `scene` builders then
-consume octet's existing transcript/tool/composer model. Tern owns the
-background, fonts and layout, so theme geometry (`[surfaces]`, `[layout]`,
-`[glyphs]`) translates to intent rather than exact cells.
+octet's interactive renderer exclusively owns a native surface inside Tern;
+it does not paint a hidden ANSI TUI. Its flat composer, native completions,
+pickers and reports share the existing semantic model and input policy.
+Standalone clients and the demo can still use the scene and theme builders.
 
-See `docs/tern.md` for the protocol details and the octet → Tern token mapping.
+Tern owns widget geometry, typography and base chrome. Theme variants and
+model accents are resolved by octet; arbitrary CSS and exact cell geometry
+are outside TSP v1. Historical prompt colors and internally styled extension
+content use scoped native ANSI nodes, never a parallel terminal renderer.
+
+See [`docs/tern.md`](../../docs/tern.md) for lifecycle, limits and the headless
+protocol/PTY verification lanes.

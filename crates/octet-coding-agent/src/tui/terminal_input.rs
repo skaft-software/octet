@@ -184,50 +184,53 @@ impl BackgroundReplies {
     }
 }
 
-/// Swallows terminal → program TSP messages (`ESC _ tsp;… ESC \` or a BEL
-/// terminator) that Tern delivers as input. Inactive unless octet is rendering
-/// a native Tern surface, and bounded so a truncated sequence replays as input.
+/// Decode TSP traffic under the same input owner as OSC 11. Only ambiguous
+/// openers expire. An identified reply must never become typed composer text.
 #[derive(Default)]
 struct ApcFilter {
     text: String,
     held: Vec<Event>,
     active: bool,
     updated: Option<Instant>,
-}
-
-/// Append a trace line when `OCTET_TUI_TERN_TRACE` names a file.
-fn apc_trace(message: &str) {
-    use std::io::Write;
-    let path = std::env::var("OCTET_TUI_TERN_TRACE");
-    if let Ok(path) = path {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    discarding: bool,
+    trailing_release: Option<(KeyCode, KeyModifiers)>,
+    reader: octet_tern::frame::Reader,
+    handler: Option<crate::tui::view::tern_input::Handler>,
+    #[cfg(test)]
+    force_enabled: bool,
 }
 
 impl ApcFilter {
     const PREFIX: &'static str = "\x1b_tsp;";
     const MAX_BYTES: usize = 1 << 20;
-    /// A TSP message arrives as one burst. If it stalls this long, the held
-    /// events are genuine input (a split escape) and must be replayed rather
-    /// than swallowed indefinitely.
-    const IDLE: Duration = Duration::from_millis(60);
 
-    /// Returns the events that are not part of a TSP reply, in arrival order.
+    fn enabled(&self) -> bool {
+        #[cfg(test)]
+        if self.force_enabled {
+            return true;
+        }
+        crate::tui::view::tern::enabled_cached()
+    }
+
+    fn identified(&self) -> bool {
+        self.discarding || self.text.starts_with(Self::PREFIX)
+    }
+
     fn push(&mut self, event: Event, now: Instant) -> Vec<Event> {
-        if !crate::tui::view::tern::enabled_cached() {
+        if !self.enabled() {
             return vec![event];
         }
+        if let Some((code, modifiers)) = self.trailing_release.take() {
+            if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release && key.code == code && key.modifiers == modifiers)
+            {
+                return Vec::new();
+            }
+        }
         if !self.active {
-            if reply_fragment(&event).as_deref() == Some("\x1b_") {
+            if reply_fragment(&event).is_some_and(|s| s == "\x1b" || s == "\x1b_") {
                 self.active = true;
                 self.updated = Some(now);
-                self.text.push_str("\x1b_");
+                self.text = reply_fragment(&event).expect("recognized opener");
                 self.held.push(event);
                 return Vec::new();
             }
@@ -237,82 +240,90 @@ impl ApcFilter {
             Some(fragment) => {
                 self.updated = Some(now);
                 self.text.push_str(&fragment);
-                self.held.push(event);
-                let text = self.text.as_str();
-                if Self::PREFIX.starts_with(text) {
-                    // Still a possible APC opener (`\x1b_`, `\x1b_t`, …).
+                if !self.identified() {
+                    self.held.push(event.clone());
+                }
+                if Self::PREFIX.starts_with(&self.text) {
                     return Vec::new();
                 }
-                if !text.starts_with(Self::PREFIX) {
-                    // A different escape; the held events were genuine input.
-                    return self.flush_released();
+                if !self.identified() {
+                    return self.flush();
                 }
-                if text.ends_with('\x07') || text.ends_with("\x1b\\") {
-                    // A complete TSP message: protocol traffic, not input.
-                    apc_trace(&format!(
-                        "swallow {} events, {} bytes",
-                        self.held.len(),
-                        self.text.len()
-                    ));
-                    self.active = false;
-                    self.text.clear();
-                    self.held.clear();
-                    return Vec::new();
+                self.held.clear();
+                if self.text.ends_with('\x07') || self.text.ends_with("\x1b\\") {
+                    if let Event::Key(key) = event {
+                        self.trailing_release = Some((key.code, key.modifiers));
+                    }
+                    let sequence = if self.text.ends_with('\x07') {
+                        format!("{}\x1b\\", self.text.trim_end_matches('\x07'))
+                    } else {
+                        std::mem::take(&mut self.text)
+                    };
+                    let message = (!self.discarding)
+                        .then(|| self.reader.feed(&sequence))
+                        .flatten();
+                    self.reset();
+                    return message
+                        .and_then(|message| self.handler.as_ref()?.as_ref()(message))
+                        .into_iter()
+                        .collect();
                 }
-                if self.text.len() > Self::MAX_BYTES {
-                    apc_trace("overflow");
-                    return self.flush_released();
+                if self.text.len() > Self::MAX_BYTES || self.discarding {
+                    // Keep only enough tail to recognize a split ST. Oversized
+                    // protocol traffic is rejected, never replayed as input.
+                    self.discarding = true;
+                    self.text = if self.text.ends_with('\x1b') {
+                        "\x1b".into()
+                    } else {
+                        String::new()
+                    };
                 }
                 Vec::new()
             }
-            None => {
-                if is_key_release(&event) {
-                    // A Windows key-up for a held reply byte.
+            None if is_key_release(&event) => {
+                if !self.identified() {
                     self.held.push(event);
-                    return Vec::new();
                 }
-                let mut released = self.flush_released();
+                Vec::new()
+            }
+            None if self.identified() => vec![event],
+            None => {
+                let mut released = self.flush();
                 released.push(event);
                 released
             }
         }
     }
 
-    fn flush_released(&mut self) -> Vec<Event> {
-        if self.active {
-            apc_trace(&format!(
-                "release {} events, {} bytes: {:?}",
-                self.held.len(),
-                self.text.len(),
-                self.text.chars().take(40).collect::<String>()
-            ));
-        }
+    fn reset(&mut self) {
         self.active = false;
+        self.discarding = false;
         self.text.clear();
-        std::mem::take(&mut self.held)
+        self.held.clear();
+        self.updated = None;
     }
 
-    /// Held events when the input stream ends or errors.
     fn flush(&mut self) -> Vec<Event> {
-        if self.active {
-            self.flush_released()
-        } else {
+        let released = if self.identified() {
             Vec::new()
+        } else {
+            std::mem::take(&mut self.held)
+        };
+        self.reset();
+        released
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        if self.active && !self.identified() {
+            self.updated.map(|at| at + PREFIX_AMBIGUITY_TIMEOUT)
+        } else {
+            None
         }
     }
 
-    /// When a stalled partial message must be replayed as input.
-    fn deadline(&self) -> Option<Instant> {
-        self.active
-            .then(|| self.updated.map(|at| at + Self::IDLE))
-            .flatten()
-    }
-
-    /// Replay a partial message that stopped arriving.
     fn expire(&mut self, now: Instant) -> Vec<Event> {
         if self.deadline().is_some_and(|deadline| now >= deadline) {
-            apc_trace("idle-release");
-            self.flush_released()
+            self.flush()
         } else {
             Vec::new()
         }
@@ -456,6 +467,15 @@ impl<S> TerminalInput<S> {
             input_error: None,
             ceded: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Route decoded native protocol messages without giving up stdin ownership.
+    pub(crate) fn with_tern_handler(
+        mut self,
+        handler: crate::tui::view::tern_input::Handler,
+    ) -> Self {
+        self.replies.apc.handler = Some(handler);
+        self
     }
 
     /// Park this stream on a shared cede flag owned by the shell.
@@ -611,6 +631,77 @@ mod tests {
             });
         }
         events
+    }
+
+    #[test]
+    fn native_apc_is_routed_once_across_slow_fragments_and_key_releases() {
+        for releases in [false, true] {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = seen.clone();
+            let mut filter = ApcFilter {
+                force_enabled: true,
+                handler: Some(Arc::new(move |message| {
+                    captured.lock().unwrap().push(message);
+                    None
+                })),
+                ..Default::default()
+            };
+            let wire = octet_tern::frame::encode_json(
+                octet_tern::wire::Verb::Event,
+                &serde_json::json!({"ev":"ack","sf":"octet.session","s":12}),
+                12,
+            )
+            .unwrap();
+            let mut now = Instant::now();
+            let events = if releases {
+                windows_decoded(&wire)
+            } else {
+                decoded(&wire, true)
+            };
+            for event in events {
+                now += Duration::from_millis(100);
+                assert!(filter.expire(now).is_empty());
+                assert!(filter.push(event, now).is_empty());
+            }
+            assert_eq!(
+                seen.lock().unwrap().as_slice(),
+                &[octet_tern::frame::Incoming::Event(
+                    octet_tern::wire::Event::Ack {
+                        sf: "octet.session".into(),
+                        s: 12
+                    }
+                )]
+            );
+            assert!(filter.text.is_empty());
+            assert!(filter.held.is_empty());
+        }
+    }
+
+    #[test]
+    fn native_oversize_and_malformed_messages_never_replay_into_the_draft() {
+        let now = Instant::now();
+        let mut filter = ApcFilter {
+            force_enabled: true,
+            ..Default::default()
+        };
+        for event in decoded("\x1b_tsp;e;malformed\x1b\\", true) {
+            assert!(filter.push(event, now).is_empty());
+        }
+        filter.text = format!("{}{}", ApcFilter::PREFIX, "x".repeat(ApcFilter::MAX_BYTES));
+        filter.active = true;
+        assert!(filter
+            .push(key(KeyCode::Char('x'), KeyModifiers::NONE), now)
+            .is_empty());
+        assert!(filter.discarding);
+        let paste = Event::Paste("genuine pasted 雪".into());
+        assert_eq!(filter.push(paste.clone(), now), vec![paste]);
+        assert!(filter.expire(now + Duration::from_secs(3600)).is_empty());
+        assert!(filter
+            .push(key(KeyCode::Char('\\'), KeyModifiers::ALT), now)
+            .is_empty());
+        assert!(!filter.active);
+        let enter = key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(filter.push(enter.clone(), now), vec![enter]);
     }
 
     #[test]

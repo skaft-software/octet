@@ -363,6 +363,9 @@ pub struct OctetTheme {
     layout: ThemeLayout,
     metadata: ThemeMetadata,
     source: ThemeSource,
+    // Already validated, bounded source; native palettes resolve both variants
+    // from the same snapshot, without rereading a changed file during paint.
+    native_source: Option<std::sync::Arc<str>>,
 }
 
 /// Semantic roles rendered as thinking prose. Code, diff, and syntax roles
@@ -615,6 +618,7 @@ impl OctetTheme {
                 ..ThemeMetadata::default()
             },
             source: ThemeSource::CompiledDefault,
+            native_source: None,
         }
     }
 
@@ -780,6 +784,29 @@ impl OctetTheme {
                 load_theme_path_for(path, self.capabilities, self.background)
             }
         }
+    }
+
+    /// Resolve this exact theme snapshot for Tern's native RGB appearance.
+    /// Runtime model styling is applied by the native projector afterwards.
+    pub(crate) fn for_native_background(
+        &self,
+        background: TerminalBackground,
+    ) -> anyhow::Result<Self> {
+        let mut capabilities = self.capabilities;
+        if capabilities.color != ColorDepth::None {
+            capabilities.color = ColorDepth::TrueColor;
+        }
+        let Some(source) = &self.native_source else {
+            return Ok(default_theme_for(background, capabilities));
+        };
+        load_theme_source_for(
+            source,
+            "native theme snapshot",
+            self.source.clone(),
+            &self.metadata.name,
+            capabilities,
+            background,
+        )
     }
 
     pub fn fg(&self, token: &str, text: &str) -> String {
@@ -1431,7 +1458,9 @@ fn load_theme_source_for(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let parsed = theme_schema::parse_theme(source_text, source_name, background)?;
-    build_parsed_theme(parsed, source, fallback_name, capabilities, background)
+    let mut theme = build_parsed_theme(parsed, source, fallback_name, capabilities, background)?;
+    theme.native_source = Some(std::sync::Arc::from(source_text));
+    Ok(theme)
 }
 
 fn load_theme_path_for(

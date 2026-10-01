@@ -111,6 +111,15 @@ impl TerminalImage {
         &self.metadata
     }
 
+    /// Stream the validated, bounded source to a native terminal transport.
+    ///
+    /// Like `ImageTerminalCommand::write_to`, this is an output-boundary API:
+    /// never place the payload in semantic rows, diagnostic output or logs.
+    /// No path is opened and no payload-sized copy is made by this method.
+    pub fn write_payload_to(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        writer.write_all(&self.bytes)
+    }
+
     pub(super) fn bytes(&self) -> &[u8] {
         &self.bytes
     }

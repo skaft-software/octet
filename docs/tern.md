@@ -67,17 +67,23 @@ the surfaces look native rather than ANSI.
 
 Each surface allows `credits` unacknowledged frames (default 2). The terminal
 returns `{"ev":"ack","sf","s"}` per frame; a sender waits when the window is
-full. `client::TernClient` tracks this and reads events in raw mode.
+full. `client::TernClient` tracks this. Standalone clients may own raw stdin;
+octet uses `connect_shared_input` and supplies replies from its single frontend
+input owner. Failed writes do not advance the sequence or retained tree.
 
 ## Theme projection
 
 Tern "wears" a program's theme: the `t` palette maps token names to `#rrggbb`,
 and the terminal derives its chrome (surface fills, card tints, composer, chart
-colours) from them. octet themes are projected via `theme::from_toml`:
+colours) from them. The interactive renderer resolves octet's validated theme
+snapshot separately for dark and light appearances, then applies the active
+model family. It does not re-read theme files on model changes. The standalone
+demo uses `theme::from_toml`; the interactive adapter uses the compiled semantic
+roles in `tui/view/tern_theme.rs`:
 
 | octet | Tern palette token |
 | --- | --- |
-| `accent` / `success` / `error` / `warning` | `accent` / `success` / `error` / `warning` |
+| runtime `model_accent` / `success` / `error` / `warning` | `accent` / `success` / `error` / `warning` |
 | `muted` / `dim` / `foreground` | `muted` / `dim` / `text` |
 | `border` / `border_idle` / `border_focused` | `border` / `borderMuted` / `borderAccent` |
 | `user_msg_bg` / `user_msg_text` | `userMessageBg` / `userMessageText` |
@@ -114,68 +120,85 @@ and context meter, and the todo HUD in the dock.
 
 ## Integration
 
-Implemented: `crates/octet-coding-agent/src/tui/view/tern.rs` runs on the
-render thread and projects `ShellState` + `TranscriptBlock` into TSP nodes,
-sends the resolved octet theme as the surface palette, and replaces one subtree
-per change on a bounded cadence. Because a live inline surface replaces the
-pane's ANSI grid, the existing renderer keeps running untouched and every
-non-Tern terminal is unaffected. `terminal_input.rs` consumes terminal →
-program TSP messages so they never reach the editor.
+Inside Tern, octet's renderer thread owns one retained inline surface,
+`octet.session`. It does **not** start an ANSI TUI underneath that surface.
+`RenderModel` publishes immutable accepted source; `RenderOwner` materializes
+streaming text outside the frontend lock. Stable transcript commit IDs survive
+prepends, streaming and model changes. The reconciler patches changed props
+and adds/removes/reorders only the affected nodes; appending a turn does not
+move the preceding history.
 
-An earlier standalone demo also exists (`octet-tern-demo`), a faithful TSP
-client with its own theme reader, useful for protocol work without octet.
+- `main` owns the welcome mark and transcript.
+- `dock` owns working status and the composer.
+- `layer` owns native autocomplete, picker sheets and report overlays.
 
-The paragraphs below record the seam for the deeper work: replacing (rather
-than paralleling) the ANSI renderer as a second `sexy_tui_rs::Component` over
-the same semantic model.
+The composer uses flat `octet.composer.*` primitives: a rule, native editor,
+model-colored text controls, effort and context facts, and Send/Stop. It does
+not opt into `omp.editor` liquid-glass CSS or inject omp branding. Tern still
+owns typography and the base appearance of its native controls.
 
-Existing anchors (all crate-private today):
+Slash, path and extension completions are bounded native lists anchored above
+the composer. Their gestures are fenced by the draft revision. Model, theme,
+thinking, session, fork and subagent pickers reuse the host's catalogues and
+filtering, with panel-epoch-fenced gestures. Settings/help reports are native
+modal content rather than migration `rows` nodes. Internally styled documents
+and approval labels may use native `ansi` content; this never runs or repaints
+an ANSI TUI. Approval consent is published only after the exact native frame
+is acknowledged, and is rejected after an unpainted selection or panel change.
 
-- **semantic model** — `hydrate::TranscriptItem`
-  (`crates/octet-coding-agent/src/hydrate.rs:407`) is the canonical display
-  projection (`User`/`Assistant`/`Reasoning`/`ToolCall`/`ToolActivityGroup`/
-  `ToolResult`/`CompactionMarker`); `ShellState.transcript: Vec<TranscriptBlock>`
-  (`tui/view.rs:1179`, the enum at `:358`) is what the renderer consumes.
-- **frame seam** — `ShellComponent: sexy_tui_rs::Component`
-  (`tui/view/renderer_runtime.rs:1287`).
-- **role mapping** — `surface_roles(kind) -> (content, border, label)`
-  (`tui/view/surface_layout.rs:74`) over the eight surface kinds, resolved
-  through `OctetTheme::semantic_style(role) -> sexy_tui_rs::TextStyle`
-  (`tui/theme.rs:663`) and `OctetTheme::glyph(name)` (`:644`).
-- **composer/status** — `render_composer_surface`
-  (`tui/composer_surface.rs:1014`), `render_ordinary_status`
-  (`tui/view/ordinary_surface.rs:178`).
-- **capability probe** — `sexy_tui_rs::CapabilityProbe::from_process()`
-  (`crates/sexy-tui-rs/src/capabilities.rs:375`) exposes `term_program`.
+The frontend remains the sole stdin owner. It reassembles and routes TSP
+replies, credit, appearance, disclosure, picker and editor gestures. Editor
+gesture offsets are checked UTF-16 boundaries before conversion to UTF-8;
+stale lengths and invalid ranges are rejected and the draft is re-synchronized.
+Pointer controls use resolved keybindings, including disabled bindings.
+Identified protocol fragments, malformed messages and oversized assemblies
+are consumed rather than replayed into a draft. Only an ambiguous opening
+Escape prefix has a short input-latency timeout. Genuine bracketed paste and
+Enter/Escape keys remain frontend input.
 
-Blockers (private today): `mod tui;` and `mod config;` are private in
-`crates/octet-coding-agent/src/lib.rs`; every file-theme loader takes the private
-`Config` (`tui/theme.rs:2145ff`; only `default_theme()` is config-free);
-`TerminalBackground` and `ModelLab` are `pub(crate)`; `SEMANTIC_ROLE_VOCABULARY`
-is `#[cfg(test)]`; `ShellState`, `TranscriptBlock`, `SurfacePlan` and
-`ShellComponent` are `pub(crate)`/`pub(super)`.
+Tool images respect the existing opt-in image preference. Validated bounded
+payloads are hashed and uploaded once per content address; retained frames
+contain only blob references, dimensions and safe descriptions. Unsupported
+image kinds and rejected/disabled payloads retain text placeholders.
 
-Recommended path: add a curated `pub mod tern` facade **inside**
-`octet-coding-agent` (which has private access) exposing a config-free theme
-loader, a structured `SurfaceFrame` snapshot of the transcript/composer,
-capability data, and the `Component` impl. `crates/octet-tern` then depends on
-`octet_sdk` + `sexy-tui-rs` and consumes only that facade. Widening `tui`/
-`config` to `pub` instead would expose far more surface than a TSP backend needs.
+Resize, zoom and appearance events preserve native ownership and retained
+identity. Explicit eviction reopens the surface and replays its regions. Credit
+exhaustion coalesces changes until acknowledgements arrive; negotiation,
+unsupported required kinds, protocol errors and acknowledgement timeouts
+produce an explicit notice before handing ownership to the ANSI renderer.
+Normal exit keeps native transcript history; suspension removes the active
+surface and a resumed renderer negotiates a fresh one.
 
-Once wired, the lifecycle is:
+Detection uses `TERM_PROGRAM=tern`. Set `OCTET_TUI_TERN=0` to disable the native
+backend; other explicit values force negotiation. Outside Tern, the existing
+ANSI renderer is unchanged.
 
-1. detect `client::is_tern()` (and keep the ANSI path otherwise),
-2. on start, `open` an inline surface with role `octet.session` and send
-   `OctetPalette::to_wire` for the loaded theme,
-3. drive `scene` builders from octet's transcript/tool/composer model and send
-   frames, re-sending `t` when the theme changes,
-4. route terminal events (`resize`, `theme`, `toggle`, `select`, `action`,
-   `edit`) back into the TUI.
+## Verification without desktop controls
+
+```console
+cargo test -p octet-tern --locked
+cargo test -p octet-coding-agent --lib --locked tui::view::tern
+cargo test -p octet-coding-agent --test tern_native_pty --locked
+```
+
+The PTY lane uses the real octet binary and input parser, a synthetic TSP
+terminal, isolated HOME/workspace, and an inert loopback-only provider record.
+It exercises paste, Unicode, fragmented replies, Escape, slash completion,
+settings and theme selection without GUI automation or live provider calls.
+Protocol/tree tests cover retained streaming, credit, eviction, appearance,
+prompt provenance and acknowledgement-gated approval consent. These tests do
+not establish the pixel appearance of a particular Tern version.
 
 ## Limits
 
-Tern owns the background, fonts and layout, so octet's `[metadata].terminal`,
-font intent, `[surfaces]` geometry, `[layout]` and `[glyphs]` translate to
-intent (card vs band, compact vs airy) rather than exact cells; glyphs are
-replaced by Tern's native icons and box drawing. The `role` namespace is
-program-defined, so octet uses `octet.*`.
+TSP v1 has no arbitrary CSS or per-node RGB card styles. Tern owns fonts,
+spacing, corner radii and base widget chrome; octet theme geometry and surface
+recipes cannot be reproduced cell for cell. Octet supplies resolved dark/light
+semantic colors, model accents, native structure and its own identity. ANSI16
+and indexed colors expand through the standard xterm table; terminal-default
+colors are omitted rather than guessed.
+
+Historical prompts retain their stored per-turn color through scoped native
+ANSI content, not the current model's global palette. This is distinct from
+running an ANSI TUI. Extension-defined styled rows also remain native ANSI
+content until those extension contracts provide semantic nodes.

@@ -31,6 +31,7 @@ pub fn has_pane_socket() -> bool {
 
 /// A TSP connection writing to stdout and reading events from stdin.
 pub struct TernClient {
+    output: Box<dyn Write + Send>,
     limit: usize,
     credits: u32,
     seq: HashMap<String, u64>,
@@ -50,8 +51,26 @@ impl TernClient {
     ///
     /// No surface is opened yet; call [`TernClient::open`] then send a frame.
     pub fn connect(app: &str, version: Option<&str>) -> io::Result<TernClient> {
-        let raw = tty::RawGuard::enable(0)?;
+        let mut client = Self::connect_shared_input(app, version)?;
+        client._raw = tty::RawGuard::enable(0)?;
+        Ok(client)
+    }
+
+    /// Announce without owning stdin or changing its modes. The application's
+    /// single input owner must deliver replies through [`Self::observe`].
+    pub fn connect_shared_input(app: &str, version: Option<&str>) -> io::Result<TernClient> {
+        Self::with_writer(app, version, io::stdout())
+    }
+
+    /// Announce through a terminal-owned output sink without taking stdin.
+    /// Replies must be supplied by the application's input owner via `observe`.
+    pub fn with_writer(
+        app: &str,
+        version: Option<&str>,
+        output: impl Write + Send + 'static,
+    ) -> io::Result<Self> {
         let mut client = TernClient {
+            output: Box::new(output),
             limit: TSP_DEFAULT_APC_LIMIT,
             credits: TSP_DEFAULT_CREDITS,
             seq: HashMap::new(),
@@ -66,7 +85,7 @@ impl TernClient {
                 .iter()
                 .map(|k| (*k).to_owned())
                 .collect(),
-            _raw: raw,
+            _raw: None,
         };
         client.write(
             Verb::Query,
@@ -99,6 +118,47 @@ impl TernClient {
         self.dark
     }
 
+    /// Whether the terminal requests reduced motion.
+    pub fn reduce_motion(&self) -> bool {
+        self.reduce_motion
+    }
+
+    /// Whether there is credit to send without reading from the shared stdin.
+    pub fn has_credit(&self, surface: &str) -> bool {
+        let sent = self.seq.get(surface).copied().unwrap_or(0);
+        let acked = self.acked.get(surface).copied().unwrap_or(0);
+        sent.saturating_sub(acked) < u64::from(self.credits)
+    }
+
+    /// Forget credit state after reopening an evicted surface.
+    pub fn reset_surface(&mut self, surface: &str) {
+        self.seq.remove(surface);
+        self.acked.remove(surface);
+    }
+
+    /// Upload a content-addressed blob whose body is already base64 encoded.
+    pub fn blob(&mut self, id: &str, mime: &str, body: &str) -> io::Result<()> {
+        if id.len() != 64
+            || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || mime.is_empty()
+            || !mime.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'+' | b'.')
+            })
+            || !body
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid native blob address, MIME type or base64 body",
+            ));
+        }
+        let params = frame::Params::from([("id".into(), id.into()), ("mime".into(), mime.into())]);
+        let encoded = frame::encode(Verb::Blob, body, &params, self.limit);
+        self.output.write_all(encoded.as_bytes())?;
+        self.output.flush()
+    }
+
     /// Whether the terminal draws a kind (optimistic before the real `hello`).
     pub fn supports(&self, kind: Kind) -> bool {
         self.kinds.iter().any(|k| k == kind.as_str())
@@ -107,9 +167,8 @@ impl TernClient {
     fn write<T: serde::Serialize>(&mut self, verb: Verb, value: &T) -> io::Result<()> {
         let encoded = frame::encode_json(verb, value, self.limit)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let mut stdout = io::stdout().lock();
-        stdout.write_all(encoded.as_bytes())?;
-        stdout.flush()
+        self.output.write_all(encoded.as_bytes())?;
+        self.output.flush()
     }
 
     /// Apply the terminal's `hello` reply.
@@ -193,53 +252,47 @@ impl TernClient {
 
     /// Send a frame of ops, respecting credit-based flow control.
     pub fn frame_ops(&mut self, surface: &str, ops: Vec<Op>) -> io::Result<u64> {
-        self.await_credit(surface);
-        let s = {
-            let next = self.seq.entry(surface.to_owned()).or_insert(0);
-            *next += 1;
-            *next
-        };
-        let frame = Frame {
-            sf: surface.to_owned(),
-            s,
-            ops,
-        };
-        self.write(Verb::Frame, &frame)?;
-        Ok(s)
+        self.await_credit(surface)?;
+        self.frame_ops_now(surface, ops)
     }
 
     /// Send a frame without waiting for credit.
     ///
-    /// For callers whose input path already consumes terminal replies (so acks
-    /// never reach this client); the terminal coalesces frames it has not yet
-    /// acknowledged instead of rejecting them.
+    /// For a shared input owner. The caller must check [`Self::has_credit`]
+    /// and deliver acknowledgements through [`Self::observe`].
     pub fn frame_ops_now(&mut self, surface: &str, ops: Vec<Op>) -> io::Result<u64> {
-        let s = {
-            let next = self.seq.entry(surface.to_owned()).or_insert(0);
-            *next += 1;
-            *next
-        };
+        if !self.has_credit(surface) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Tern frame credit exhausted",
+            ));
+        }
+        let s = self.seq.get(surface).copied().unwrap_or(0) + 1;
         let frame = Frame {
             sf: surface.to_owned(),
             s,
             ops,
         };
         self.write(Verb::Frame, &frame)?;
+        self.seq.insert(surface.to_owned(), s);
         Ok(s)
     }
 
     /// Block until the surface has room for another frame, bounded to avoid
     /// hanging when a terminal never answers.
-    fn await_credit(&mut self, surface: &str) {
-        let in_flight = |this: &Self| {
-            let sent = this.seq.get(surface).copied().unwrap_or(0);
-            let acked = this.acked.get(surface).copied().unwrap_or(0);
-            sent.saturating_sub(acked)
-        };
+    fn await_credit(&mut self, surface: &str) -> io::Result<()> {
         let mut waited = 0u32;
-        while in_flight(self) >= u64::from(self.credits) && waited < 2000 {
+        while !self.has_credit(surface) && waited < 2000 {
             let _ = self.read_one(250);
             waited += 250;
+        }
+        if self.has_credit(surface) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Tern stopped acknowledging frames",
+            ))
         }
     }
 
@@ -270,12 +323,14 @@ impl TernClient {
         first
     }
 
-    fn observe(&mut self, message: &Incoming) {
+    /// Apply a message delivered by the application's single input owner.
+    pub fn observe(&mut self, message: &Incoming) {
         match message {
             Incoming::Reply(Reply::Hello(hello)) => self.apply_hello(hello),
             Incoming::Event(Event::Ack { sf, s }) => {
                 let entry = self.acked.entry(sf.clone()).or_insert(0);
-                *entry = (*entry).max(*s);
+                let sent = self.seq.get(sf).copied().unwrap_or(0);
+                *entry = (*entry).max((*s).min(sent));
             }
             Incoming::Event(Event::Resize { cols, .. }) => self.columns = *cols,
             Incoming::Event(Event::Theme { dark }) => self.dark = *dark,
@@ -292,5 +347,68 @@ impl TernClient {
     /// Send an `add` of a node under a parent, returning the frame sequence.
     pub fn add(&mut self, surface: &str, parent: &str, node: Node) -> io::Result<u64> {
         self.frame_ops(surface, vec![Op::add(parent, node)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    struct Output(Arc<AtomicBool>);
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.0.load(Ordering::Relaxed) {
+                return Err(io::Error::other("write failed"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn credit_and_sequences_advance_only_after_successful_writes() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let mut client = TernClient::with_writer("test", None, Output(fail.clone())).unwrap();
+        fail.store(true, Ordering::Relaxed);
+        assert!(client.frame_ops_now("test", Vec::new()).is_err());
+        assert!(!client.seq.contains_key("test"));
+        fail.store(false, Ordering::Relaxed);
+        assert_eq!(client.frame_ops_now("test", Vec::new()).unwrap(), 1);
+        assert_eq!(client.frame_ops_now("test", Vec::new()).unwrap(), 2);
+        assert_eq!(
+            client.frame_ops_now("test", Vec::new()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        client.observe(&Incoming::Event(Event::Ack {
+            sf: "test".into(),
+            s: 1,
+        }));
+        client.observe(&Incoming::Event(Event::Ack {
+            sf: "test".into(),
+            s: 0,
+        }));
+        assert_eq!(client.acked["test"], 1);
+        assert_eq!(client.frame_ops_now("test", Vec::new()).unwrap(), 3);
+        client.observe(&Incoming::Event(Event::Ack {
+            sf: "test".into(),
+            s: u64::MAX,
+        }));
+        assert_eq!(client.acked["test"], 3);
+        client.reset_surface("test");
+        assert_eq!(client.frame_ops_now("test", Vec::new()).unwrap(), 1);
+    }
+    #[test]
+    fn native_blob_headers_and_bodies_cannot_inject_escape_sequences() {
+        let mut client = TernClient::with_writer("test", None, io::sink()).unwrap();
+        let hash = "f".repeat(64);
+        assert!(client.blob(&hash, "image/png", "YWJj").is_ok());
+        assert!(client.blob("wrong", "image/png", "YWJj").is_err());
+        assert!(client.blob(&hash, "image/png;bad", "YWJj").is_err());
+        assert!(client.blob(&hash, "image/png", "\x1b[200~").is_err());
     }
 }

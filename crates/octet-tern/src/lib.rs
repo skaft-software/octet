@@ -37,6 +37,7 @@
 
 pub mod client;
 pub mod frame;
+pub mod reconcile;
 pub mod scene;
 pub mod theme;
 mod tty;

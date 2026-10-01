@@ -134,6 +134,11 @@ impl InteractiveShell {
     /// executable resource is loaded here.
     pub fn reload_keybindings(&mut self) {
         self.input_dispatch.bindings.reload();
+        self.state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .bindings = Some(self.input_dispatch.bindings.clone());
         self.input_dispatch.jump_forward = None;
     }
 
@@ -163,7 +168,9 @@ impl InteractiveShell {
     /// Resolved hotkeys, not a static table that silently ignores user overrides.
     pub fn hotkeys_text(&self) -> String {
         let bindings = &self.input_dispatch.bindings;
-        let mut text = String::from("Keybindings (~/.octet/keybindings.json)\nCtrl+D always coordinates close. /reload applies changes.\n\n");
+        let mut text = String::from(
+            "Keybindings (~/.octet/keybindings.json)\nCtrl+D always coordinates close. /reload applies changes.\n\n",
+        );
         for definition in bindings.definitions() {
             let keys = bindings.get_keys(&definition.id);
             text.push_str(&format!(
