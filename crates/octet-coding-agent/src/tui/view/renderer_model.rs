@@ -461,7 +461,6 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         slash_popup_dismissed,
         extension_ui,
         extension_autocomplete,
-        extension_autocomplete_selection,
         status_detail,
         error,
         overlay,

@@ -51,8 +51,6 @@ struct BackgroundReplies {
     color: Option<RgbColor>,
     /// Key-up still owed by a Windows console for the reply's final byte.
     trailing_release: Option<(KeyCode, KeyModifiers)>,
-    /// Always-on terminal → program TSP message filter (Tern surfaces).
-    apc: ApcFilter,
 }
 
 impl BackgroundReplies {
@@ -69,31 +67,17 @@ impl BackgroundReplies {
     }
 
     fn deadline(&self) -> Option<Instant> {
-        let osc = if self.text.starts_with(OSC11_PREFIX) {
+        if self.text.starts_with(OSC11_PREFIX) {
             None
         } else {
             self.prefix_updated
                 .map(|updated| updated + PREFIX_AMBIGUITY_TIMEOUT)
-        };
-        match (osc, self.apc.deadline()) {
-            (Some(osc), Some(apc)) => Some(osc.min(apc)),
-            (osc, apc) => osc.or(apc),
         }
     }
 
     fn replay(&mut self) {
         self.ready.extend(self.held.drain(..));
-        self.ready.extend(self.apc.flush());
         self.clear_fragment();
-    }
-
-    /// Route one event through the always-on APC/TSP filter first: terminal →
-    /// program TSP messages (`ESC _ tsp;… ESC \`) are protocol traffic, never
-    /// octet input. Released events continue through the OSC 11 filter.
-    fn push_filtered(&mut self, event: Event, now: Instant) {
-        for event in self.apc.push(event, now) {
-            self.push(event, now);
-        }
     }
 
     fn clear_fragment(&mut self) {
@@ -103,8 +87,6 @@ impl BackgroundReplies {
     }
 
     fn expire(&mut self, now: Instant) {
-        let released = self.apc.expire(now);
-        self.ready.extend(released);
         if self.deadline().is_some_and(|deadline| now >= deadline) {
             self.replay();
         }
@@ -184,160 +166,6 @@ impl BackgroundReplies {
     }
 }
 
-/// Decode TSP traffic under the same input owner as OSC 11. Only ambiguous
-/// openers expire. An identified reply must never become typed composer text.
-#[derive(Default)]
-struct ApcFilter {
-    text: String,
-    held: Vec<Event>,
-    active: bool,
-    updated: Option<Instant>,
-    discarding: bool,
-    trailing_release: Option<(KeyCode, KeyModifiers)>,
-    reader: octet_tern::frame::Reader,
-    handler: Option<crate::tui::view::tern_input::Handler>,
-    #[cfg(test)]
-    force_enabled: bool,
-}
-
-impl ApcFilter {
-    const PREFIX: &'static str = "\x1b_tsp;";
-    const MAX_BYTES: usize = 1 << 20;
-
-    fn enabled(&self) -> bool {
-        #[cfg(test)]
-        if self.force_enabled {
-            return true;
-        }
-        crate::tui::view::tern::enabled_cached()
-    }
-
-    fn identified(&self) -> bool {
-        self.discarding || self.text.starts_with(Self::PREFIX)
-    }
-
-    fn push(&mut self, event: Event, now: Instant) -> Vec<Event> {
-        if !self.enabled() {
-            return vec![event];
-        }
-        if let Some((code, modifiers)) = self.trailing_release.take() {
-            if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release && key.code == code && key.modifiers == modifiers)
-            {
-                return Vec::new();
-            }
-        }
-        if !self.active {
-            if reply_fragment(&event).is_some_and(|s| s == "\x1b" || s == "\x1b_") {
-                self.active = true;
-                self.updated = Some(now);
-                self.text = reply_fragment(&event).expect("recognized opener");
-                self.held.push(event);
-                return Vec::new();
-            }
-            return vec![event];
-        }
-        match reply_fragment(&event) {
-            Some(fragment) => {
-                self.updated = Some(now);
-                self.text.push_str(&fragment);
-                if !self.identified() {
-                    self.held.push(event.clone());
-                }
-                if Self::PREFIX.starts_with(&self.text) {
-                    return Vec::new();
-                }
-                if !self.identified() {
-                    // The held bytes are not a Tern opener, so they are the
-                    // user's keys. The event that proved it may itself open a
-                    // message (an Esc held for an interrupt, then `Alt+_`), so
-                    // it is evaluated on its own rather than released with them;
-                    // otherwise the message body leaks into the draft.
-                    self.held.pop();
-                    let mut released = self.flush();
-                    released.extend(self.push(event, now));
-                    return released;
-                }
-                self.held.clear();
-                if self.text.ends_with('\x07') || self.text.ends_with("\x1b\\") {
-                    if let Event::Key(key) = event {
-                        self.trailing_release = Some((key.code, key.modifiers));
-                    }
-                    let sequence = if self.text.ends_with('\x07') {
-                        format!("{}\x1b\\", self.text.trim_end_matches('\x07'))
-                    } else {
-                        std::mem::take(&mut self.text)
-                    };
-                    let message = (!self.discarding)
-                        .then(|| self.reader.feed(&sequence))
-                        .flatten();
-                    self.reset();
-                    return message
-                        .and_then(|message| self.handler.as_ref()?.as_ref()(message))
-                        .into_iter()
-                        .collect();
-                }
-                if self.text.len() > Self::MAX_BYTES || self.discarding {
-                    // Keep only enough tail to recognize a split ST. Oversized
-                    // protocol traffic is rejected, never replayed as input.
-                    self.discarding = true;
-                    self.text = if self.text.ends_with('\x1b') {
-                        "\x1b".into()
-                    } else {
-                        String::new()
-                    };
-                }
-                Vec::new()
-            }
-            None if is_key_release(&event) => {
-                if !self.identified() {
-                    self.held.push(event);
-                }
-                Vec::new()
-            }
-            None if self.identified() => vec![event],
-            None => {
-                let mut released = self.flush();
-                released.push(event);
-                released
-            }
-        }
-    }
-
-    fn reset(&mut self) {
-        self.active = false;
-        self.discarding = false;
-        self.text.clear();
-        self.held.clear();
-        self.updated = None;
-    }
-
-    fn flush(&mut self) -> Vec<Event> {
-        let released = if self.identified() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut self.held)
-        };
-        self.reset();
-        released
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        if self.active && !self.identified() {
-            self.updated.map(|at| at + PREFIX_AMBIGUITY_TIMEOUT)
-        } else {
-            None
-        }
-    }
-
-    fn expire(&mut self, now: Instant) -> Vec<Event> {
-        if self.deadline().is_some_and(|deadline| now >= deadline) {
-            self.flush()
-        } else {
-            Vec::new()
-        }
-    }
-}
-
 fn is_key_release(event: &Event) -> bool {
     matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
 }
@@ -355,8 +183,6 @@ fn reply_fragment(event: &Event) -> Option<String> {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, KeyModifiers::NONE) => Some("\x1b".into()),
         (KeyCode::Char(']'), KeyModifiers::ALT) => Some("\x1b]".into()),
-        // APC opener (`ESC _`), the prefix of a Tern Surface Protocol message.
-        (KeyCode::Char('_'), KeyModifiers::ALT) => Some("\x1b_".into()),
         (KeyCode::Char('\\'), KeyModifiers::ALT) => Some("\x1b\\".into()),
         (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some("\x07".into()),
         (KeyCode::Char(character), modifiers)
@@ -477,15 +303,6 @@ impl<S> TerminalInput<S> {
         }
     }
 
-    /// Route decoded native protocol messages without giving up stdin ownership.
-    pub(crate) fn with_tern_handler(
-        mut self,
-        handler: crate::tui::view::tern_input::Handler,
-    ) -> Self {
-        self.replies.apc.handler = Some(handler);
-        self
-    }
-
     /// Park this stream on a shared cede flag owned by the shell.
     ///
     /// The flag is the one piece of terminal authority a granted extension can
@@ -542,7 +359,7 @@ impl<S: Stream<Item = io::Result<Event>> + Unpin> TerminalInput<S> {
                 }
                 Err(_) => return None,
             };
-            self.replies.push_filtered(event, Instant::now());
+            self.replies.push(event, Instant::now());
             if let Some(color) = self.replies.color.take() {
                 return Some(color);
             }
@@ -576,7 +393,7 @@ impl<S: Stream<Item = io::Result<Event>> + Unpin> Stream for TerminalInput<S> {
                 return Poll::Ready(None);
             }
             match Pin::new(&mut this.source).poll_next(cx) {
-                Poll::Ready(Some(Ok(event))) => this.replies.push_filtered(event, Instant::now()),
+                Poll::Ready(Some(Ok(event))) => this.replies.push(event, Instant::now()),
                 Poll::Ready(Some(Err(error))) => {
                     this.input_error = Some(error);
                     this.replies.replay();
@@ -639,121 +456,6 @@ mod tests {
             });
         }
         events
-    }
-
-    #[test]
-    fn native_apc_is_routed_once_across_slow_fragments_and_key_releases() {
-        for releases in [false, true] {
-            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let captured = seen.clone();
-            let mut filter = ApcFilter {
-                force_enabled: true,
-                handler: Some(Arc::new(move |message| {
-                    captured.lock().unwrap().push(message);
-                    None
-                })),
-                ..Default::default()
-            };
-            let wire = octet_tern::frame::encode_json(
-                octet_tern::wire::Verb::Event,
-                &serde_json::json!({"ev":"ack","sf":"octet.session","s":12}),
-                12,
-            )
-            .unwrap();
-            let mut now = Instant::now();
-            let events = if releases {
-                windows_decoded(&wire)
-            } else {
-                decoded(&wire, true)
-            };
-            for event in events {
-                now += Duration::from_millis(100);
-                assert!(filter.expire(now).is_empty());
-                assert!(filter.push(event, now).is_empty());
-            }
-            assert_eq!(
-                seen.lock().unwrap().as_slice(),
-                &[octet_tern::frame::Incoming::Event(
-                    octet_tern::wire::Event::Ack {
-                        sf: "octet.session".into(),
-                        s: 12
-                    }
-                )]
-            );
-            assert!(filter.text.is_empty());
-            assert!(filter.held.is_empty());
-        }
-    }
-
-    #[test]
-    fn escape_held_before_a_native_message_is_released_and_the_message_stays_protocol() {
-        // A lone Esc (for example interrupting a run) is held while it could
-        // still open a Tern message. When the next read starts a real message,
-        // crossterm reports its opener as Alt+_ rather than a bare Esc then `_`.
-        // The held Esc is the user's key and must be released, and the new opener
-        // must start its own candidate; otherwise the whole message body leaked
-        // into the composer as typed text.
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let captured = seen.clone();
-        let mut filter = ApcFilter {
-            force_enabled: true,
-            handler: Some(Arc::new(move |message| {
-                captured.lock().unwrap().push(message);
-                None
-            })),
-            ..Default::default()
-        };
-        let wire = octet_tern::frame::encode_json(
-            octet_tern::wire::Verb::Event,
-            &serde_json::json!({"ev":"ack","sf":"octet.session","s":7}),
-            65536,
-        )
-        .unwrap();
-        let body = wire
-            .strip_prefix("\x1b_")
-            .and_then(|rest| rest.strip_suffix("\x1b\\"))
-            .expect("one APC string");
-        let escape = key(KeyCode::Esc, KeyModifiers::NONE);
-        let mut now = Instant::now();
-        let mut released = filter.push(escape.clone(), now);
-        now += Duration::from_millis(40);
-        let events = std::iter::once(key(KeyCode::Char('_'), KeyModifiers::ALT))
-            .chain(decoded(body, true))
-            .chain(std::iter::once(key(KeyCode::Char('\\'), KeyModifiers::ALT)));
-        for event in events {
-            released.extend(filter.push(event, now));
-            now += Duration::from_millis(5);
-        }
-        assert_eq!(released, vec![escape], "message text leaked as input");
-        assert_eq!(seen.lock().unwrap().len(), 1);
-        assert!(!filter.active && filter.text.is_empty() && filter.held.is_empty());
-    }
-
-    #[test]
-    fn native_oversize_and_malformed_messages_never_replay_into_the_draft() {
-        let now = Instant::now();
-        let mut filter = ApcFilter {
-            force_enabled: true,
-            ..Default::default()
-        };
-        for event in decoded("\x1b_tsp;e;malformed\x1b\\", true) {
-            assert!(filter.push(event, now).is_empty());
-        }
-        filter.text = format!("{}{}", ApcFilter::PREFIX, "x".repeat(ApcFilter::MAX_BYTES));
-        filter.active = true;
-        assert!(filter
-            .push(key(KeyCode::Char('x'), KeyModifiers::NONE), now)
-            .is_empty());
-        assert!(filter.discarding);
-        let paste = Event::Paste("genuine pasted 雪".into());
-        assert_eq!(filter.push(paste.clone(), now), vec![paste]);
-        assert!(filter.expire(now + Duration::from_secs(3600)).is_empty());
-        assert!(filter
-            .push(key(KeyCode::Char('\\'), KeyModifiers::ALT), now)
-            .is_empty());
-        assert!(!filter.active);
-        let enter = key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(filter.push(enter.clone(), now), vec![enter]);
     }
 
     #[test]

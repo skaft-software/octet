@@ -101,7 +101,7 @@ fn report_body_lines(report: &ReportOverlay, state: &ShellState, width: u16) -> 
         ReportBody::Text { text, styled } => {
             super::panel_render::document_visual_lines_styled(text, &state.theme, width, *styled)
         }
-        ReportBody::Markdown(document, _) => {
+        ReportBody::Markdown(document) => {
             let inset = " ".repeat(usize::from(plan.inset));
             let mut renderer = state.rich_renderer.borrow_mut();
             let renderer = renderer.get_or_insert_with(|| state.theme.rich_renderer());

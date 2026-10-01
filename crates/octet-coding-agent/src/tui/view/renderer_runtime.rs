@@ -85,7 +85,6 @@ pub(super) struct SharedState(
     /// Shared with the shell state so a finished workspace walk is detectable
     /// without taking the state lock on every renderer wake.
     Arc<AtomicBool>,
-    Arc<Mutex<super::tern_input::Mailbox>>,
 );
 
 impl SharedState {
@@ -105,7 +104,6 @@ impl SharedState {
             Arc::new(Mutex::new(state)),
             Arc::new(Mutex::new(None)),
             file_index_ready,
-            Arc::new(Mutex::new(super::tern_input::Mailbox::default())),
         )
     }
 
@@ -154,10 +152,6 @@ impl SharedState {
         if geometry.is_current(&state) {
             state.render_geometry = Some(geometry);
         }
-    }
-
-    pub(super) fn native(&self) -> &Arc<Mutex<super::tern_input::Mailbox>> {
-        &self.3
     }
 
     pub(super) fn borrow(&self) -> MutexGuard<'_, ShellState> {
@@ -516,7 +510,7 @@ pub(super) struct RenderLoopOptions {
 // The same loop is exercised with an in-memory terminal and resize probe in
 // tests, without reading/changing the test runner's physical terminal state.
 pub(super) fn render_loop_with_terminal(
-    mut terminal: impl sexy_tui_rs::Terminal + 'static,
+    terminal: impl sexy_tui_rs::Terminal + 'static,
     state: SharedState,
     size: TerminalSize,
     rx: Receiver<RenderCommand>,
@@ -529,21 +523,6 @@ pub(super) fn render_loop_with_terminal(
         alternate_screen,
     } = options;
     state.borrow_mut().render_threaded = true;
-    if super::tern::enabled() {
-        match render_native_loop(&mut terminal, &state, &size, &rx, &synchronize_size) {
-            Ok(()) => return,
-            Err(error) => {
-                // Fallback is explicit and only follows failed negotiation or
-                // protocol I/O. Resizes never create an ANSI presentation.
-                state
-                    .borrow_mut()
-                    .push_block(super::TranscriptBlock::Notice(format!(
-                        "Native Tern rendering unavailable: {error}. Using terminal rendering."
-                    )));
-                terminal.show_cursor();
-            }
-        }
-    }
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
     // policy in `native_scrollback` (not native history) decides which rows stay
@@ -719,100 +698,6 @@ pub(super) fn render_loop_with_terminal(
     tui.request_render();
     state.frame_written();
     tui.stop();
-}
-
-/// Native presentation has its own scheduler and the same lifecycle command
-/// channel. In particular it never starts TUI, enters the alternate screen,
-/// clears the grid, or paints a shadow transcript behind the native surface.
-fn render_native_loop(
-    terminal: &mut impl sexy_tui_rs::Terminal,
-    state: &SharedState,
-    size: &TerminalSize,
-    rx: &Receiver<RenderCommand>,
-    synchronize_size: &impl Fn(&SharedState, &TerminalSize) -> bool,
-) -> std::io::Result<()> {
-    let surface = super::tern::TernSurface::start()?;
-    render_native_loop_with_surface(terminal, state, size, rx, synchronize_size, surface)
-}
-
-fn render_native_loop_with_surface(
-    terminal: &mut impl sexy_tui_rs::Terminal,
-    state: &SharedState,
-    size: &TerminalSize,
-    rx: &Receiver<RenderCommand>,
-    synchronize_size: &impl Fn(&SharedState, &TerminalSize) -> bool,
-    mut surface: super::tern::TernSurface,
-) -> std::io::Result<()> {
-    struct InputGuard(Arc<Mutex<super::tern_input::Mailbox>>);
-    impl Drop for InputGuard {
-        fn drop(&mut self) {
-            self.0
-                .lock()
-                .expect("native mailbox poisoned")
-                .accepting_input = false;
-        }
-    }
-    let _input_guard = InputGuard(state.native().clone());
-    state
-        .native()
-        .lock()
-        .expect("native mailbox poisoned")
-        .accepting_input = true;
-    terminal.hide_cursor();
-    let mut last_title = None;
-    let mut last_progress = false;
-    let mut last_resize = Instant::now();
-    loop {
-        if state.file_index_ready() {
-            super::poll_file_index_scan(&mut state.borrow_mut());
-        }
-        if last_resize.elapsed() >= RESIZE_POLL_INTERVAL {
-            synchronize_size(state, size);
-            last_resize = Instant::now();
-        }
-        let (startup_pending, name, active) = {
-            let shell = state.borrow();
-            (
-                shell.startup_pending,
-                shell.session_name.clone(),
-                shell.run.is_active(),
-            )
-        };
-        if !startup_pending && last_title.as_ref() != Some(&name) {
-            terminal.set_title(
-                &name
-                    .as_deref()
-                    .map_or_else(|| "octet".into(), |name| format!("octet · {name}")),
-            );
-            last_title = Some(name);
-        }
-        if active != last_progress {
-            terminal.set_progress(active);
-            last_progress = active;
-        }
-        surface.present(state)?;
-        match rx.recv_timeout(RENDER_INTERVAL) {
-            Ok(RenderCommand::Render) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Ok(RenderCommand::DumpFrame(reply)) => {
-                let _ = reply.send(surface.dump());
-            }
-            Ok(RenderCommand::Suspend(reply)) => {
-                surface.flush(state)?;
-                surface.close(false)?;
-                terminal.set_progress(false);
-                terminal.stop();
-                let _ = reply.send(());
-                return Ok(());
-            }
-            Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                surface.flush(state)?;
-                surface.close(true)?;
-                terminal.set_progress(false);
-                terminal.stop();
-                return Ok(());
-            }
-        }
-    }
 }
 
 #[cfg(test)]
