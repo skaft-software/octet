@@ -160,8 +160,14 @@ fn queued_follow_up_heading_advertises_the_platform_edit_hint() {
     shell.queue_follow_up(ComposedInput::from_text("local follow-up".into()));
     let with_follow_up = input_overlays::render_pending_steering(&shell.state.borrow(), 80, 2);
     let heading = strip_terminal_sequences(&with_follow_up[0]);
+    // Windows and WSL use the Windows-flavoured key set, which binds Alt+Q.
+    let wsl = cfg!(target_os = "linux")
+        && (std::env::var_os("WSL_DISTRO_NAME").is_some()
+            || std::env::var_os("WSL_INTEROP").is_some());
     let expected = if cfg!(target_os = "macos") {
         "option+↑ to edit"
+    } else if cfg!(windows) || wsl {
+        "alt+q to edit"
     } else {
         "alt+↑ to edit"
     };

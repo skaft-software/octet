@@ -161,7 +161,7 @@ extension processes stopped. [Discovery and trust](resources.md).
 | Shift+Tab | Cycle through the active model's supported thinking levels from lowest to highest, wrapping at the end. During a run, update the queued selection immediately. |
 | Ctrl+S | Steer at the next model boundary; in the resume picker, cycle sorting. |
 | Escape | Interrupt active work, then dispatch the oldest queued follow-up after settlement (never the draft); close/back out of a panel or slash popup first. |
-| Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty composer; no submission or interruption. |
+| Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty composer; no submission or interruption. Alt+Q on Windows/WSL, where Windows Terminal uses Alt+arrows for panes; the queued-message hint names the key in use. |
 | Ctrl+C | Clear a nonempty draft; otherwise abort active work, no-op while idle. |
 | Ctrl+D | Close from any interactive input surface after active-work and child-process cleanup. |
 | Ctrl+P / Ctrl+Shift+P | Cycle models within the available resolved `--models` scope (or the available catalog without a scope); backward is Alt+P on Windows/WSL. Drafts are preserved. |

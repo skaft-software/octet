@@ -789,6 +789,28 @@ mod tests {
     }
 
     #[test]
+    fn windows_and_wsl_restore_queued_messages_with_the_hinted_alt_q() {
+        for (platform, wsl) in [("win32", false), ("linux", true)] {
+            let bindings = keybindings::KeybindingsManager::with_platform(
+                platform,
+                wsl,
+                std::collections::BTreeMap::new(),
+            );
+            assert_eq!(
+                translate_with_bindings(
+                    Some(key(KeyCode::Char('q'), KeyModifiers::ALT)),
+                    true,
+                    "",
+                    false,
+                    &bindings
+                ),
+                InputAction::EditQueued,
+                "{platform} (wsl: {wsl})"
+            );
+        }
+    }
+
+    #[test]
     fn queued_controls_are_one_shot_and_slash_escape_keeps_ownership() {
         for active in [false, true] {
             for kind in [

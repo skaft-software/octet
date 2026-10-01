@@ -144,6 +144,9 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
 - Stop querying the terminal background (OSC 11) on native Windows. The console
   host delivers the reply as key records, and Windows Terminal's reply reached
   the composer as typed text. Auto uses its neutral fallback there.
+- The queued-message hint names Alt+Q on Windows and WSL, the key their key set
+  binds to restore a queued message, instead of Alt+Up, which does nothing
+  there.
 - Computer use requires `cua-driver` 0.30.2 or newer. macOS 11
   and 12, which pip used to resolve silently to 0.11.0, and other unsupported
   systems now get a clear error that names the supported platforms.
