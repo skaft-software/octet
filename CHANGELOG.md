@@ -141,6 +141,12 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   run is reported as a failing self-check with its reason, a failed
   computer-use action names its error, and a bare `computer-use` command checks
   status as its default.
+- The computer-use options menu now shows what each action reported. Setup,
+  **Check status**, the Jev actions and the jev-use actions returned a
+  tool-shaped result, and the menu's result document renders only a `text`
+  field, so a completed action showed just "<label> finished" with no report.
+  Every menu command now returns rendered text; the agent tools keep the
+  structured content.
 - Stop querying the terminal background (OSC 11) on native Windows. The console
   host delivers the reply as key records, and Windows Terminal's reply reached
   the composer as typed text. Auto uses its neutral fallback there.

@@ -992,11 +992,11 @@ class OptionsMenuTests(unittest.TestCase):
              mock.patch.object(gnome_helper, "is_gnome_wayland", return_value=True), \
              mock.patch.object(gnome_helper, "install", return_value={"gnome_helper": "active"}):
             result = extension._commands["computer-use"].handler(["setup"], {})
-        self.assertFalse(result.get("is_error"))
+        self.assertNotIn("content", result)
         self.assertEqual(steps[0], "Downloading and installing cua-driver>=0.30.2 (this can take a minute)…")
         self.assertIn("Installing the model-colored cursor themes…", steps)
         self.assertIn("Installing the GNOME Shell helper…", steps)
-        self.assertIn("Jev setup declined", result["content"][0]["text"])
+        self.assertIn("Jev setup declined", result["text"])
 
     def test_progress_is_optional(self):
         extension, _ = entrypoint.create_extension()
@@ -1017,19 +1017,18 @@ class OptionsMenuTests(unittest.TestCase):
                 stored = command(["jev", "key"], {})
             ask.assert_called_once()
             self.assertTrue(ask.call_args.kwargs["secret"])
-            self.assertFalse(stored.get("is_error"))
+            self.assertIn("configured", stored["text"])
             self.assertNotIn("sk-test", str(stored))
             self.assertEqual(jev.key_path().read_text(encoding="utf-8"), "sk-test")
             forgotten = command(["jev", "forget"], {})
-            self.assertIn("Forgot the stored Jev API key", forgotten["content"][0]["text"])
+            self.assertIn("Forgot the stored Jev API key", forgotten["text"])
             self.assertFalse(jev.key_path().exists())
-            self.assertTrue(command(["jev", "unknown"], {})["is_error"])
+            self.assertIn("Unknown Jev action", command(["jev", "unknown"], {})["text"])
 
     def test_unknown_actions_point_at_the_menu(self):
         extension, _ = entrypoint.create_extension()
         result = extension._commands["computer-use"].handler(["bogus"], {})
-        self.assertTrue(result["is_error"])
-        self.assertIn("/extensions", result["content"][0]["text"])
+        self.assertIn("/extensions", result["text"])
 
 
 class StatusCommandTests(unittest.TestCase):
@@ -1044,8 +1043,8 @@ class StatusCommandTests(unittest.TestCase):
         extension, computer = entrypoint.create_extension()
         with mock.patch.object(computer, "publish_status", return_value=dict(self.REPORT)):
             result = extension._commands["computer-use"].handler([], {})
-        self.assertFalse(result.get("is_error"))
-        self.assertIn("Cua Driver 0.30.3 is installed.", result["content"][0]["text"])
+        self.assertNotIn("content", result)
+        self.assertIn("Cua Driver 0.30.3 is installed.", result["text"])
 
     def test_a_failing_command_names_its_error(self):
         from unittest import mock
@@ -1054,8 +1053,8 @@ class StatusCommandTests(unittest.TestCase):
         with mock.patch.object(computer, "publish_status",
                                side_effect=RuntimeError("the driver session wedged")):
             result = extension._commands["computer-use"].handler(["status"], {})
-        self.assertTrue(result["is_error"])
-        self.assertEqual(result["content"][0]["text"],
+        self.assertNotIn("content", result)
+        self.assertEqual(result["text"],
                          "computer-use status failed: the driver session wedged")
 
     def test_cancellation_is_not_reported_as_a_failure(self):
@@ -1107,15 +1106,18 @@ class CursorThemeTests(unittest.TestCase):
              mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install:
             command = extension._commands["computer-use"].handler
             result = command(["setup"], context)
-            self.assertEqual(result["structured_content"]["cursor_themes_installed"], 24)
+            # The command channel renders text only; details stay in the log.
+            self.assertNotIn("content", result)
+            self.assertIn("Cua Driver 0.29.1 is installed.", result["text"])
             install.assert_called_once_with(Path("/tmp/cua-driver"))
             install.reset_mock()
             extension._tools["computer_use_setup"].handler({}, context)
             install.assert_not_called()
             install.side_effect = RuntimeError("invalid artifact")
             failed = command(["setup"], context)
-            self.assertTrue(failed["is_error"])
-            self.assertIn("cursor theme setup failed", failed["content"][0]["text"])
+            self.assertNotIn("content", failed)
+            self.assertIn("cursor theme setup failed", failed["text"])
+            self.assertIn("invalid artifact", failed["text"])
 
     def test_setup_reports_provisioning_failures_instead_of_raising(self):
         from unittest import mock
@@ -1126,12 +1128,13 @@ class CursorThemeTests(unittest.TestCase):
             "cua-driver needs Python 3.10 or newer, but octet's computer-use "
             "extension runs on Python 3.9 (/usr/bin/python3)")
         with mock.patch.object(computer, "provision", side_effect=failure):
-            for result in (extension._commands["computer-use"].handler(["setup"], {}),
-                           extension._tools["computer_use_setup"].handler({}, {})):
-                self.assertTrue(result["is_error"])
-                text = result["content"][0]["text"]
-                self.assertIn("Cua Driver setup failed", text)
-                self.assertIn("needs Python 3.10 or newer", text)
+            command = extension._commands["computer-use"].handler(["setup"], {})
+            tool = extension._tools["computer_use_setup"].handler({}, {})
+        self.assertTrue(tool["is_error"])
+        self.assertIn("Cua Driver setup failed", tool["content"][0]["text"])
+        self.assertIn("needs Python 3.10 or newer", tool["content"][0]["text"])
+        self.assertIn("Cua Driver setup failed", command["text"])
+        self.assertIn("needs Python 3.10 or newer", command["text"])
 
     def test_linux_setup_installs_themes_and_the_gnome_helper(self):
         # The Linux wheel has no cursor-theme compiler, so setup must install
@@ -1154,9 +1157,13 @@ class CursorThemeTests(unittest.TestCase):
             result = extension._commands["computer-use"].handler(["setup"], {})
         install.assert_called_once_with(Path("/tmp/cua-driver"))
         helper.assert_called_once_with()
-        self.assertFalse(result.get("is_error"))
-        self.assertEqual(result["structured_content"]["cursor_themes_installed"], 24)
-        self.assertEqual(result["structured_content"]["gnome_helper"], "restart-required")
+        # The menu renders text; the agent tool keeps the structured report.
+        # The tool provisions only, so themes and the helper stay command-only.
+        tool = extension._tools["computer_use_setup"].handler({}, {})
+        self.assertTrue(tool["structured_content"]["provisioned"])
+        self.assertNotIn("content", result)
+        self.assertIn("Cua Driver 0.30.2 is installed.", result["text"])
+        install.assert_called_once_with(Path("/tmp/cua-driver"))
 
     # TEMPORARY for the 0.8.2 release: this asserts the driver-CLI install route,
     # which is only taken when a Cua compiler sidecar is present. Windows has no
@@ -2299,6 +2306,60 @@ class NoDriverFailClosedTests(unittest.TestCase):
                 self.assertIn("not installed", result["content"][0]["text"], tool)
             # Status and refusals are read-only: nothing was provisioned.
             self.assertEqual(list(home.iterdir()), [])
+
+
+
+class MenuCommandResultShapeTests(unittest.TestCase):
+    """Options-menu commands return {"text": ...}, never a tool-shaped dict.
+
+    The command/execute channel renders the ``text`` field; a tool-shaped
+    ``{"content": [...]}`` result has none, so the host showed only
+    "<label> finished" and the status/setup report was invisible.
+    """
+
+    def test_menu_result_extracts_the_first_text_part(self):
+        from octet_computer_use.entrypoint import _menu_result
+
+        shaped = _menu_result({"content": [{"type": "text", "text": "hello"}],
+                               "structured_content": {"a": 1}})
+        self.assertEqual(shaped, {"text": "hello"})
+        self.assertEqual(_menu_result({"text": "kept"}), {"text": "kept"})
+        self.assertEqual(_menu_result({"content": []}), {"text": ""})
+        self.assertEqual(_menu_result(None), {"text": ""})
+
+    def test_menu_status_and_unknown_actions_render_their_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            extension, _ = entrypoint.create_extension(home=home)
+            command = extension._commands["computer-use"].handler
+
+            status = command(["status"], {})
+            self.assertNotIn("content", status)
+            self.assertTrue(status["text"])
+            self.assertIn("not installed", status["text"])
+
+            unknown = command(["bogus"], {})
+            self.assertNotIn("content", unknown)
+            self.assertIn("Unknown computer-use action", unknown["text"])
+            # Read-only: the menu never provisions.
+            self.assertEqual(list(home.iterdir()), [])
+
+    def test_menu_setup_failure_names_its_reason(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            extension, computer_use = entrypoint.create_extension(home=home)
+            command = extension._commands["computer-use"].handler
+            with mock.patch.object(
+                computer_use, "provision",
+                side_effect=driver.ProvisionError("no interpreter"),
+            ):
+                result = command(["setup"], {})
+            self.assertNotIn("content", result)
+            self.assertIn("setup failed", result["text"])
+            self.assertIn("no interpreter", result["text"])
 
 
 

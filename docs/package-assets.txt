@@ -229,6 +229,7 @@ text docs/pi-migration.md
 text docs/provider-thinking.md
 text docs/providers.md
 text docs/qualification/v0.8.0-reduction-rc.md
+text docs/qualification/v0.8.2-windows-rc.md
 text docs/reference/historical-installation.md
 text docs/release/npm-trusted-publishing.md
 text docs/releases/v0.1.0-alpha.md

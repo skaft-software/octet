@@ -53,6 +53,12 @@
 
 ### Fixed
 
+- The options menu now shows what each action reported. Setup, **Check
+  status**, the Jev actions and the jev-use actions returned a tool-shaped
+  result, and the menu's result document renders only a `text` field, so a
+  completed action showed just "<label> finished" and the report was
+  invisible. Every menu command now returns rendered text; the agent tools
+  keep the structured content.
 - Status, setup and the options menu no longer hang on native Windows when
   octet hosts the extension. Driver probes inherited the extension's protocol
   stdin, and a Windows child that shares that pipe can stall at startup until

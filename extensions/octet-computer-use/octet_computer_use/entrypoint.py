@@ -983,17 +983,17 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
             # Cancellation and protocol errors keep their own meaning.
             raise
         except Exception as error:  # noqa: BLE001 - name the failure, never an opaque -32603
-            return tool_result(
+            return _menu_result(tool_result(
                 text_content(f"computer-use {action} failed: {error}"), is_error=True
-            )
+            ))
 
     def run_command(action: str, parts: List[str], context: Mapping[str, Any]) -> Dict[str, Any]:
         if action == "jev-use":
             try:
                 operation, options = jev_use_binding.command_options(parts[1:])
             except ValueError as error:
-                return tool_result(text_content(str(error)), is_error=True)
-            return jev_jobs.handle(operation, options, context, gated=confirmations_enabled())
+                return _menu_result(tool_result(text_content(str(error)), is_error=True))
+            return _menu_result(jev_jobs.handle(operation, options, context, gated=confirmations_enabled()))
         if action == "setup" and len(parts) == 1:
             return _run_setup(extension, computer_use)
         if action == "jev" and len(parts) <= 2:
@@ -1002,12 +1002,12 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         if action == "status" and len(parts) <= 1:
             _progress(extension, "Running the driver self-check and permission probe…")
             result = computer_use.publish_status()
-            return tool_result(text_content(_render_status(result)), structured_content=result)
-        return tool_result(
+            return _menu_result(tool_result(text_content(_render_status(result)), structured_content=result))
+        return _menu_result(tool_result(
             text_content(f"Unknown computer-use action. {driver_module.SETUP_HINT[0].upper()}"
                          f"{driver_module.SETUP_HINT[1:]}."),
             is_error=True,
-        )
+        ))
 
     extension.command(
         name="computer-use",
@@ -1042,6 +1042,30 @@ def _setup_failed(error: BaseException) -> Dict[str, Any]:
     return tool_result(text_content(f"Cua Driver setup failed: {error}"), is_error=True)
 
 
+def _menu_result(value: Any) -> Dict[str, Any]:
+    """Shape a menu-command outcome for the host's result document.
+
+    The `command/execute` channel renders the ``text`` field; a tool-shaped
+    ``{"content": [...]}`` dict has none, so the host would show only
+    "<label> finished" and the report would be invisible. Every
+    options-menu return path goes through here. Tool handlers keep the tool
+    shape untouched.
+    """
+
+    if isinstance(value, Mapping):
+        if isinstance(value.get("text"), str):
+            return {"text": value["text"]}
+        content = value.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, Mapping) and part.get("type") == "text":
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        return {"text": text}
+    text = value if isinstance(value, str) else ""
+    return {"text": text}
+
+
 #: Where a person configures the optional Jev integration.
 JEV_HINT = "open /extensions, choose octet-computer-use, then Jev"
 
@@ -1062,17 +1086,17 @@ def _run_setup(extension: Any, computer_use: "ComputerUse") -> Dict[str, Any]:
     try:
         result = computer_use.provision(progress=step)
     except (driver_module.ProvisionError, OSError) as error:
-        return _setup_failed(error)
+        return _menu_result(_setup_failed(error))
     step("Installing the model-colored cursor themes…")
     try:
         result["cursor_themes_installed"] = cursor_theme.install_bundled_themes(
             Path(result["binary"]))
         computer_use._theme_ids = {entry["id"] for entry in cursor_theme.PALETTE.values()}
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-        return tool_result(
+        return _menu_result(tool_result(
             text_content(f"Cua Driver was provisioned, but cursor theme setup failed: {error}"),
             is_error=True,
-        )
+        ))
     if gnome_helper.is_gnome_wayland():
         # GNOME's compositor exposes window geometry, activation, and the
         # cursor only to its own Shell extensions.
@@ -1087,10 +1111,10 @@ def _run_setup(extension: Any, computer_use: "ComputerUse") -> Dict[str, Any]:
     jev_outcome = _setup_jev(extension, computer_use)
     result.update(jev_outcome)
     result["jev_note"] = _render_jev_setup(jev_outcome)
-    return tool_result(
+    return _menu_result(tool_result(
         text_content(_render_status(result) + "\n\n" + result["jev_note"]),
         structured_content=result,
-    )
+    ))
 
 
 def _run_jev(extension: Any, computer_use: "ComputerUse", action: str) -> Dict[str, Any]:
@@ -1104,11 +1128,11 @@ def _run_jev(extension: Any, computer_use: "ComputerUse", action: str) -> Dict[s
         clear_key()
         outcome = {"jev_setup": "forgotten", "jev": jev_status()}
     else:
-        return tool_result(text_content(f"Unknown Jev action. To configure Jev, {JEV_HINT}."),
-                           is_error=True)
+        return _menu_result(tool_result(text_content(f"Unknown Jev action. To configure Jev, {JEV_HINT}."),
+                           is_error=True))
     failed = outcome.get("jev_setup") in {"sdk_unavailable", "store_failed"}
-    return tool_result(text_content(_render_jev_setup(outcome)),
-                       structured_content=outcome, is_error=failed)
+    return _menu_result(tool_result(text_content(_render_jev_setup(outcome)),
+                       structured_content=outcome, is_error=failed))
 
 
 def _setup_jev(

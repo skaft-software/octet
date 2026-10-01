@@ -106,9 +106,10 @@ class BindingTests(unittest.TestCase):
 
     def test_command_routes_to_same_binding(self):
         extension, computer = entrypoint.create_extension(home=Path('/test-home'))
-        with mock.patch.object(entrypoint.jev_use_jobs.Jobs, 'handle', return_value={'ok': True}) as dispatch:
+        with mock.patch.object(entrypoint.jev_use_jobs.Jobs, 'handle', return_value={
+                'content': [{'type': 'text', 'text': 'ran'}]}) as dispatch:
             result = extension._commands['computer-use'].handler(['jev-use', 'run', '--live'], {})
-        self.assertEqual(result, {'ok': True})
+        self.assertEqual(result, {'text': 'ran'})
         self.assertEqual(dispatch.call_args.args, ('run', {'live': True}, {}))
 
 
