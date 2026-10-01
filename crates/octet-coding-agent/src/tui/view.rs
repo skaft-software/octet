@@ -26,8 +26,8 @@ use sexy_tui_rs::{
 use crate::config::Config;
 use crate::hydrate::{
     hydrate_transcript_at_with_image_budget, hydrate_transcript_tail_with_image_budget,
-    project_tool_output_images, tool_image_limits, ToolImageBudget, ToolImagePlaceholder,
-    ToolResultImage,
+    presentation_diff_metadata, project_tool_output_images, tool_image_limits, ToolImageBudget,
+    ToolImagePlaceholder, ToolResultImage,
 };
 #[cfg(test)]
 use crate::presentation::summarize_tool;
@@ -498,6 +498,9 @@ struct ToolPanel {
     /// Validated opaque image media, kept separate from text/copy output.
     images: Vec<ToolResultImage>,
     image_rendering: ToolImageRendering,
+    /// Durable presentation diff from the result's `ToolOutputDetails`
+    /// metadata. Never model-visible and never session-replay text.
+    diff: Option<String>,
     /// Child of a compact exploration summary; Ctrl+O reveals the ordinary row.
     grouped_child: bool,
     finished: bool,
@@ -548,6 +551,7 @@ impl ToolPanel {
             output,
             images: Vec::new(),
             image_rendering: ToolImageRendering::default(),
+            diff: None,
             grouped_child: false,
             finished,
             is_error,
@@ -4173,6 +4177,10 @@ impl InteractiveShell {
                     Vec::new()
                 };
                 let completed_images = state.register_tool_images(completed_images);
+                let completed_diff = match result {
+                    Ok(output) => presentation_diff_metadata(output),
+                    Err(_) => None,
+                };
                 let estimated_result_tokens = match result {
                     Ok(output) => output.media().iter().fold(
                         crate::compaction::estimate_text_tokens(&output.text),
@@ -4191,12 +4199,14 @@ impl InteractiveShell {
                     panel.is_error = tool_result_is_failure(&panel.name, result);
                     panel.failure_reason = tool_failure_reason(&panel.name, result);
                     panel.images = completed_images;
+                    panel.diff = completed_diff;
                     panel.progress_decoration = None;
                     match result {
                         Ok(output) => {
                             panel.display.mark_media_read(output.media_kinds());
                             panel.output.clear();
                             panel.output.push_str(&output.text);
+                            panel.diff = presentation_diff_metadata(output);
                         }
                         Err(error) => {
                             panel.output.clear();

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Keep edit and write diffs out of model-visible tool results. An edit or write
+  now returns one concise line (`ok`, path, verb, and content hash) and carries
+  its unified diff in the durable result metadata that the model never sees and
+  that session replay does not turn into context. Tool cards render the same
+  diffs from that channel, so the UI is unchanged, and sessions recorded before
+  this change still show their diffs. Stale-file detection, exact-match
+  reporting, and diff resource evidence are unchanged.
+
 ## [0.8.2] - 2026-09-30
 
 See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits.

@@ -293,9 +293,22 @@ fn replace(
         .commit_if(updated.as_bytes(), || cancellation.is_cancelled())
         .map_err(|error| file_error(display_path, error))?;
     let hash = content_hash(updated.as_bytes());
-    Ok(ToolOutput::new(format!(
-        "ok modified=1\n{display_path}  +{added} -{removed} hash={hash}\n{diff}"
-    )))
+    let output = ToolOutput::new(format!(
+        "ok modified=1\n{display_path}  +{added} -{removed} hash={hash}"
+    ));
+    // The diff stays available to presentation/session surfaces without being
+    // replayed to the model: the model already supplied the old/new text, and
+    // the exact-match result plus content hash guard the applied mutation.
+    let diff = if diff.is_empty() { None } else { Some(diff) };
+    // Metadata is durable/presentation-only; the model-visible text stays
+    // concise. The exact-match result plus content hash guard the mutation.
+    match diff {
+        Some(diff) => match output.try_with_metadata(serde_json::json!({ "diff": diff })) {
+            Ok(output) => Ok(output),
+            Err(error) => Err(ToolError::new(format!("error internal\n{error}"))),
+        },
+        None => Ok(output),
+    }
 }
 
 /// Builds the `no_match` error, suggesting nearby lines that resemble the

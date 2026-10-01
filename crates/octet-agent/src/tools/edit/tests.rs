@@ -41,6 +41,16 @@ impl Fixture {
     }
 }
 
+fn edit_diff_metadata(output: &ToolOutput) -> String {
+    output
+        .details()
+        .and_then(|details| details.metadata())
+        .and_then(|metadata| metadata.get("diff"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
 #[test]
 fn effect_uses_ambient_path_authority_without_resolving_the_target() {
     let mut fixture = fixture();
@@ -89,10 +99,19 @@ async fn replace_exact_unique_match() {
         .await
         .unwrap();
     assert!(out.text.starts_with("ok modified=1\nm.rs  +1 -1 hash="));
+    assert!(
+        !out.text.contains("\n@@"),
+        "diff must not be model-visible: {}",
+        out.text
+    );
     assert_eq!(
         std::fs::read_to_string(f.workspace.join("m.rs")).unwrap(),
         "fn a() {}\nfn b() -> u8 { 1 }\n"
     );
+    let diff = edit_diff_metadata(&out);
+    assert!(diff.contains("@@"), "metadata diff missing hunk: {diff}");
+    assert!(diff.contains("+fn b() -> u8 { 1 }"), "{diff}");
+    assert!(diff.contains("-fn b() {}"), "{diff}");
 }
 
 #[test]
@@ -231,6 +250,12 @@ async fn empty_new_deletes_matched_text() {
         .await
         .unwrap();
     assert!(out.text.starts_with("ok modified=1\nm.rs  +0 -1 hash="));
+    // A pure deletion still changes content, so its diff stays available for
+    // presentation even though no text remains to show.
+    assert!(
+        edit_diff_metadata(&out).contains("-remove me"),
+        "deletion diff missing"
+    );
     assert_eq!(
         std::fs::read_to_string(f.workspace.join("m.rs")).unwrap(),
         "keep\nkeep\n"

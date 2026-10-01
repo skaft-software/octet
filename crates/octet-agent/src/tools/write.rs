@@ -192,17 +192,13 @@ fn create_or_replace(
     }
 
     // Generate a diff for every content-changing write. Creation previews are
-    // bounded, but still carry a real hunk header so the TUI recognizes and
-    // renders them through the same diff path as replacements.
+    // bounded, but still carry a real hunk header so presentation recognizes
+    // and renders them through the same diff path as replacements.
     let detail = if let Some(ref current) = old_content {
         let old_text = String::from_utf8_lossy(current).into_owned();
-        if old_text == content {
-            String::from("(no change)")
-        } else {
-            format_unified_diff(path, &old_text, content, &old_text)
-        }
+        (old_text != content).then(|| format_unified_diff(path, &old_text, content, &old_text))
     } else {
-        format_unified_creation_diff(path, content)
+        Some(format_unified_creation_diff(path, content))
     };
 
     prepared
@@ -210,9 +206,19 @@ fn create_or_replace(
         .map_err(|error| file_error(display_path, error))?;
     let verb = if exists { "replaced" } else { "created" };
     let hash = content_hash(content.as_bytes());
-    Ok(ToolOutput::new(format!(
-        "ok\n{display_path}  {verb} hash={hash}\n{detail}"
-    )))
+    let output = ToolOutput::new(format!("ok\n{display_path}  {verb} hash={hash}"));
+    // The diff stays presentation-only. The model already produced the full
+    // content, so replaying it back as text only spends context tokens.
+    let diff = detail;
+    // Metadata is durable/presentation-only; the model-visible text stays
+    // concise. The exact-match result plus content hash guard the mutation.
+    match diff {
+        Some(diff) => match output.try_with_metadata(serde_json::json!({ "diff": diff })) {
+            Ok(output) => Ok(output),
+            Err(error) => Err(ToolError::new(format!("error internal\n{error}"))),
+        },
+        None => Ok(output),
+    }
 }
 
 #[cfg(test)]
