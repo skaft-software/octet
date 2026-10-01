@@ -665,6 +665,12 @@ impl PrimaryTrace {
     }
 }
 
+fn resize_frame_end(output: &[u8]) -> Option<usize> {
+    // Old explicit baselines clear/replay; Octet now repairs absolute rows.
+    synchronized_frame_end_containing(output, b"\x1b[1;1H\x1b[2K")
+        .or_else(|| synchronized_frame_end_containing(output, b"\x1b[2J"))
+}
+
 fn run_primary(binary: &Path, mode: MouseMode) -> PrimaryTrace {
     let mut octet = PtyOctet::spawn(binary, mode);
     octet.wait_until(STARTUP_TIMEOUT, |output| nth_frame_end(output, 1).is_some());
@@ -693,12 +699,11 @@ fn run_primary(binary: &Path, mode: MouseMode) -> PrimaryTrace {
     octet.wait_until(STARTUP_TIMEOUT, |output| {
         output
             .get(resize_start..)
-            .and_then(|bytes| synchronized_frame_end_containing(bytes, b"\x1b[2J"))
+            .and_then(resize_frame_end)
             .is_some()
     });
     let resize_end = resize_start
-        + synchronized_frame_end_containing(&octet.pty.output[resize_start..], b"\x1b[2J")
-            .expect("resize redraw frame");
+        + resize_frame_end(&octet.pty.output[resize_start..]).expect("resize redraw frame");
     let (resize_redraw_synchronized, resize_clear_screen, resize_clear_saved_lines) = {
         let resize_frame = &octet.pty.output[resize_start..resize_end];
         parser.process(&octet.pty.output[ready_end..resize_start]);
@@ -1440,11 +1445,9 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             octet.resize(columns, rows);
             parser.set_size(rows, columns);
             octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-                synchronized_frame_end_containing(&bytes[start..], b"\x1b[2J").is_some()
+                resize_frame_end(&bytes[start..]).is_some()
             });
-            let end = start
-                + synchronized_frame_end_containing(&octet.pty.output[start..], b"\x1b[2J")
-                    .unwrap();
+            let end = start + resize_frame_end(&octet.pty.output[start..]).unwrap();
             parser.process(&octet.pty.output[start..end]);
             consumed = end;
             assert_unbranded_startup(&parser, columns);
@@ -2120,19 +2123,26 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
     parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
     octet.resize(RESIZED_COLUMNS, RESIZED_ROWS);
     octet.wait_until(INPUT_BUDGET, |bytes| {
-        synchronized_frame_end_containing(&bytes[resize_start..], b"\x1b[2J").is_some()
+        resize_frame_end(&bytes[resize_start..]).is_some()
     });
     parser.process(&octet.pty.output[consumed..]);
     consumed = octet.pty.output.len();
     assert!(parser.screen().contents().contains("draft remains local"));
-    let replay = sexy_tui_rs::strip_terminal_sequences(&String::from_utf8_lossy(
-        &octet.pty.output[resize_start..],
-    ));
+    let repair_bytes = &octet.pty.output[resize_start..];
+    assert_eq!(count_bytes(repair_bytes, b"\x1b[2J"), 0);
+    assert_eq!(count_bytes(repair_bytes, b"\x1b[3J"), 0);
+    assert!(parser.screen().contents().contains(label));
     assert_eq!(
-        replay.matches("permissions:").count(),
+        parser
+            .screen()
+            .contents()
+            .matches("draft remains local")
+            .count(),
         1,
-        "resize replays exactly one welcome card"
+        "resize must retain one composer and the held activity"
     );
+    // The welcome can already be above the live viewport. Repair must not
+    // retransmit it merely to prove that canonical history is retained.
     octet.pty.write_input(b"\x1b");
     await_screen(
         &mut octet,
@@ -2246,16 +2256,6 @@ fn assert_baseline_structural_compatibility(
             "resize synchronized redraw",
             current.resize_redraw_synchronized,
             baseline.resize_redraw_synchronized,
-        ),
-        (
-            "resize screen clear",
-            current.resize_clear_screen,
-            baseline.resize_clear_screen,
-        ),
-        (
-            "resize saved-line clear",
-            current.resize_clear_saved_lines,
-            baseline.resize_clear_saved_lines,
         ),
         (
             "shutdown cursor restoration",
@@ -2642,19 +2642,14 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                 parser.set_size(24, 80);
                 if (columns, rows) != (80, 24) {
                     octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-                        synchronized_frame_end_containing(&bytes[resize_start..], b"\x1b[2J")
-                            .is_some()
+                        resize_frame_end(&bytes[resize_start..]).is_some()
                     });
                     // Old-width frames may already be queued when the PTY
                     // resizes. Replay them, but apply the new geometry contract
-                    // from the first complete clearing redraw, not to those
+                    // from the first complete absolute-grid repair, not to those
                     // in-flight frames. Every subsequent frame is still checked.
-                    let resize_end = resize_start
-                        + synchronized_frame_end_containing(
-                            &octet.pty.output[resize_start..],
-                            b"\x1b[2J",
-                        )
-                        .unwrap();
+                    let resize_end =
+                        resize_start + resize_frame_end(&octet.pty.output[resize_start..]).unwrap();
                     parser.process(&octet.pty.output[consumed..resize_end]);
                     consumed = resize_end;
                     assert_single_welcome(&parser, 80, &format!("{label}-resize-first"));

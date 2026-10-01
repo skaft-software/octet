@@ -12,6 +12,7 @@ pub(super) struct GeometryFence {
     tool_input: u64,
     panel: u64,
     size: (u16, u16),
+    resize_epoch: u64,
     content_width: u16,
     verbose: bool,
     overlay: bool,
@@ -29,6 +30,7 @@ impl GeometryFence {
             tool_input: state.tool_input_revision,
             panel: state.panel_epoch,
             size: state.size,
+            resize_epoch: state.resize_epoch,
             content_width: state.transcript_content_width(state.size.0),
             verbose: state.verbose_tools,
             overlay: state.overlay.is_some(),
@@ -259,6 +261,7 @@ impl RenderedGeometry {
             && self.fence.semantic == state.transcript_semantic_revision
             && self.fence.theme == state.theme_epoch
             && self.fence.size == state.size
+            && self.fence.resize_epoch == state.resize_epoch
             && self.fence.verbose == state.verbose_tools
             && !self.fence.overlay
             && state.overlay.is_none()

@@ -324,7 +324,18 @@ impl RenderOwner {
         let state = &mut self.state;
         let structural = model.reset || state.transcript_epoch != model.chrome.transcript_epoch;
         let theme_changed = state.theme_epoch != model.chrome.theme_epoch;
-        let size_changed = state.size != model.chrome.size;
+        let width_changed = state.size.0 != model.chrome.size.0;
+        // Input captures only bounded visual geometry. Promote that receipt
+        // against the old renderer-owned source/layout before accepting a
+        // resize, hydration prepend, or streaming mutation.
+        state
+            .viewport_anchor
+            .set(model.chrome.viewport_anchor.get());
+        super::viewport::upgrade_viewport_anchor(state);
+        model
+            .chrome
+            .viewport_anchor
+            .set(state.viewport_anchor.get());
         copy_presentation(&model.chrome, state);
         if structural {
             state.transcript.clear();
@@ -378,7 +389,7 @@ impl RenderOwner {
         if theme_changed {
             state.invalidate_rich_text();
         }
-        if size_changed {
+        if width_changed {
             state.invalidate_transcript_layout();
         }
         self.root = model.root;
@@ -496,6 +507,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         run_label,
         verbose_tools,
         size,
+        resize_epoch,
         startup_pending,
         startup_card_started_at,
     );

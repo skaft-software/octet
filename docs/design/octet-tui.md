@@ -14,9 +14,11 @@ vocabulary that uses that hierarchy without adding a second TUI.
 
 - The interactive frontend renders on the primary screen. `auto`, `terminal`,
   and `off` use the complete logical-frame renderer: the first frame writes
-  every materialized row, pure appends flow naturally into terminal scrollback,
-  and a width/height change or mutation above the previous viewport clears the
-  screen and saved lines before replaying the complete frame. PageUp transfers
+  every materialized row and pure appends flow naturally into terminal scrollback.
+  Resize and historical mutations repair only addressable live rows, without
+  clearing saved lines or replaying history. Saved terminal rows are emitted
+  snapshots; semantic navigation and copy retain the canonical transcript.
+  PageUp transfers
   rendering to the bounded, application-owned semantic viewport for the rest of
   that shell. Explicit `--mouse app` selects that viewport from startup.
 - Auto, Light, and Dark use the compiled default layout. Auto adapts to the
@@ -114,36 +116,42 @@ renderer retains its own shrink policy. Optional dot/shimmer/timer ticks do not 
 headings already above the native live-screen seam.
 
 An active roster never clips subsequent unrelated conversation: only an ordinary
-trailing pending tool may use the bounded preview, while genuine historical
-roster updates can still require full replay.
+trailing pending tool may use the bounded preview. Genuine historical roster
+updates change the canonical transcript and repair its live viewport; already
+emitted saved rows remain snapshots rather than being destructively replaced.
 
-The current deterministic shell/renderer/VT matrix also tests fragmented table
-rows through narrow/wide width and height changes, exactly one required replay
-per resize, and late-reference finalization with exactly one historical repair.
-Repeated no-change frames remain quiet; source/copy and exactly-once history
-sentinels remain authoritative. These tests model emitted VT and saved-line
-reset, not a physical emulator's reflow, paint, or native selection.
+The deterministic shell/renderer/VT matrix tests fragmented table rows through
+narrow/wide width and height changes and late-reference finalization. Separate
+preserving-Pi regressions check bounded live-row repair, saved-history retention,
+Kitty placements, height-only layout reuse, and threaded semantic anchors.
+Repeated no-change frames remain quiet; source/copy remain authoritative. The
+generic renderer keeps its opt-in-independent replay compatibility tests. These
+tests model emitted VT, not physical emulator reflow, paint, or native selection.
 
-This covers the tested pending → progress → result/error case, not every historical update.
-Real updates to historical concurrent tools or aggregate run outcomes,
-retrospective Markdown changes, resize, and other structural transitions can
-still take the replay path below. Worker-roster metric updates revise only the
-mutable orchestration tail, not earlier parent rows; moving that tail behind new
-parent output can still require a full replay above the native viewport. Do not
-suppress that path without an emitted-history policy that preserves real results. Maintainer-reported Terminal.app, Ghostty and
-Ghostty → SSH acceptance preceded 0.7.4 publication, but a subsequent model-switch
-regression showed stale splash
-rows. Acceptance of one journey does not qualify every reader/selection path.
+This covers tested pending → progress → result/error journeys, not every
+historical update. Concurrent tools, aggregate outcomes, retrospective Markdown,
+and retry rollback can revise content already in saved history. Portable cursor
+addressing cannot replace those saved rows. Octet preserves them as historical
+snapshots and keeps canonical results in session, semantic PageUp, and copy;
+native saved rows must not be treated as the current authoritative document.
+Maintainer-reported Terminal.app, Ghostty and Ghostty → SSH acceptance preceded
+0.7.4 publication, but later regressions showed that acceptance of one journey
+does not qualify every reader/selection path.
 
-A change above the old viewport cannot be repaired with cursor addressing.
-That path emits `ED 2`, homes, clears saved lines with `ED 3`, and
-replays the complete materialized frame. Width changes do the same because line
-wrapping changed; height changes do so outside Termux. Disclosure contraction,
-theme repaint, overlays, and dynamic composer chrome therefore cannot leave an
-unwritten semantic gap in terminal history: they either take the visible-row
-differential path or the authoritative full replay path. Kitty image placements
-participate in the same changed-range expansion, targeted deletion, reserved-row
-painting, and full-replay fallback.
+Octet opts into `TUI::set_preserve_scrollback(true)`. Structural repairs erase
+individual live rows and paint only the current viewport inside one synchronized
+frame, restoring the composer cursor before its end. They emit neither `ED 2`
+nor `ED 3`. Kitty visible placements are deleted and restored with the repaired
+rows. Initial paint and normal append still emit the complete native document;
+resume does not become tail-only. The generic renderer's default remains the
+legacy clear/replay policy unless a caller explicitly enables preservation.
+
+Resize requests settle after 75 ms of quiet, with a 150 ms maximum delay. Composer
+edits and readiness changes bypass that delay. A resize epoch repairs away-and-back
+geometry and fences stale receipts even when final dimensions match the old
+frame. Height-only changes reuse wrapped transcript rows; width changes still
+reflow canonical layout. No total-history-independent CPU or memory bound is
+claimed for width reflow or canonical frame materialization.
 
 Default terminal-owned resume materializes the complete active branch before it
 is rendered, because terminal scrollback cannot prepend a deferred prefix later.
@@ -153,16 +161,20 @@ that mode without claiming they already exist in native history.
 Application-owned mode—selected at startup by `--mouse app` or claimed by
 PageUp—uses `follow_tail` plus a monotonic transcript commit ID, semantic copy
 text offset/affinity, visual fallback, and desired screen row to select one
-bounded viewport. `scroll_from_bottom` remains only the cheap navigation delta;
+bounded viewport. A threaded visual receipt is promoted to a text position using
+the renderer's old content width before accepting the next model or reflowing;
+padding/separator rows search within the old viewport for semantic text.
+`scroll_from_bottom` remains only the cheap navigation delta;
 the semantic anchor rebases it after growth, contraction, deferred-history
 prepends, and width/height changes. Scrolling above the tail keeps semantic rows
 fixed while one Markdown block continues to grow, increments the new-output
 state, and exposes the PageDown return-to-live affordance.
 
 Terminal-owned modes preserve native selection and ordinary append scrollback,
-but octet cannot observe or freeze a reader's position. A full replay replaces
-the application's saved-line presentation and therefore returns the terminal to
-the live frame. Semantic copy retains stable coordinates in either renderer;
+but octet cannot observe or freeze a reader's native position. Preserving saved
+rows avoids destructive application replay; the terminal still owns native
+reflow, selection, and wheel-offset behavior. Semantic copy retains stable
+coordinates in either renderer;
 application-owned drag selection is available only while mouse capture is
 enabled. Terminal-owned resume eagerly loads the complete active branch;
 application-owned resume loads a bounded tail and materializes older blocks when
@@ -555,8 +567,9 @@ The countdown still uses the existing one-second refresh cadence.
 compaction/tool transitions, cancellation admission, and settlement end that
 backoff presentation. Raw causes remain with the event/diagnostic consumers;
 print, plain, and RPC output retain their existing contracts. Removing rejected
-output already above the native viewport can require saved-line clear and full
-replay. Quiet notices do not promise an undisturbed native scrollback position.
+output already above the native viewport updates the canonical transcript while
+saved terminal snapshots remain unchanged. Quiet notices do not promise an
+undisturbed native scrollback position.
 
 API waiting is independently scheduled from animation: the real renderer thread
 wakes for status shimmer at 80 ms, elapsed time at one-second boundaries, and

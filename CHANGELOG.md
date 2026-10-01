@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Preserve saved terminal history through resize, PageUp, and historical live-row
+  repairs instead of clearing and replaying the full transcript. Settle resize
+  bursts, reuse height-only wrapping, and promote threaded reading anchors before
+  width reflow. Canonical session/copy history remains authoritative; already
+  emitted native scrollback rows remain snapshots.
+
 - Keep the startup welcome static, budget it for the actual pane height, and
   reserve fresh-start composer geometry before model admission. Draft edits and
   update hints no longer drive decorative historical replay. Position the native

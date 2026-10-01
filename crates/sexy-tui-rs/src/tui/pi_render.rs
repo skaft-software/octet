@@ -109,8 +109,8 @@ impl<'a> TUI<'a> {
     /// `20be4b18d4c57487f8993d2762bace129f0cf7c6`.
     /// Keep this control flow structurally aligned with
     /// `packages/tui/src/tui.ts`; named upstream cases live in
-    /// `tests/pi_tui_render.rs`. octet-specific native-scrollback policy belongs
-    /// only to the explicit `inline_scrollback` compatibility path below.
+    /// `tests/pi_tui_render.rs`. Octet explicitly opts into saved-history
+    /// preservation; callers otherwise retain the upstream clear/replay policy.
     pub(super) fn render_pi_frame(&mut self) {
         let width_u16 = self.terminal.columns();
         let height_u16 = self.terminal.rows().max(1);
@@ -137,81 +137,74 @@ impl<'a> TUI<'a> {
         let previous_len = self.previous_frame.len();
         let mut lazy_stable_prefix = None;
         let mut lazy_previous_tail = None;
+        let mut reanchor_requested = false;
         #[cfg(test)]
         {
             self.last_pi_lazy_inspected_rows = 0;
         }
-        let (new_lines, logical_cursor_position) =
-            if !self.first_render && !width_changed && !height_changed {
-                let update = self
-                    .root_render_update_without_cursor(width_u16)
-                    .filter(|update| {
-                        update.stable_prefix <= previous_len
-                        // The normal Pi renderer owns its own scrollback ledger;
-                        // these flags describe the extended/pinned renderer's
-                        // physical reanchor contract and are not safe to reuse as
-                        // a partial Pi frame.
-                        && !update.reanchor_viewport
-                        && !update.rebuild_scrollback
-                        && update.resize_replay.is_none()
+        let (new_lines, logical_cursor_position) = if !self.first_render
+            && !width_changed
+            && (!height_changed || self.preserve_scrollback)
+        {
+            let update = self.root_render_update_without_cursor(width_u16);
+            if self.preserve_scrollback {
+                // A full-component fallback (including Kitty frames) must not
+                // consume and lose a physical reanchor requested by the root.
+                reanchor_requested = update
+                    .as_ref()
+                    .is_some_and(|update| update.reanchor_viewport || update.rebuild_scrollback);
+            }
+            let update = update.filter(|update| {
+                update.stable_prefix <= previous_len
+                        // History-preserving repair consumes the component's
+                        // reanchor flags instead of rejecting its lazy prefix.
+                        && (self.preserve_scrollback
+                            || (!update.reanchor_viewport
+                                && !update.rebuild_scrollback
+                                && update.resize_replay.is_none()))
                         // Kitty row reservations and delete-by-ID semantics are
                         // already covered by the full-component Pi path. Until
                         // a seam-aware metadata algorithm has equivalent
                         // coverage, keep image-bearing frames on that path.
                         && !self.previous_frame_has_kitty
                         && !update.replacement.iter().any(|line| is_image_line(line))
-                    });
-                if let Some(update) = update {
-                    let stable_prefix = update.stable_prefix;
-                    let mut replacement = update.replacement;
-                    let replacement_cursor =
-                        extract_logical_cursor_position_from(&mut replacement, stable_prefix);
-                    let retained_cursor = self
-                        .logical_cursor_position
-                        .filter(|cursor| cursor.row < stable_prefix);
-                    let logical_cursor_position = replacement_cursor.or(retained_cursor);
-                    #[cfg(test)]
-                    {
-                        self.last_pi_lazy_inspected_rows = replacement.len();
-                    }
-                    let replacement = replacement
-                        .into_iter()
-                        .map(|line| {
-                            if is_image_line(&line) {
-                                line
-                            } else {
-                                format!(
-                                    "{}{}",
-                                    crate::utils::normalize_terminal_output(&line),
-                                    PI_LINE_RESET
-                                )
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    // Move the old frame's strings into two owned vectors rather
-                    // than cloning the stable history. The old tail is retained
-                    // only for bounded comparisons.
-                    let mut previous = std::mem::take(&mut self.previous_frame);
-                    let previous_tail = previous.split_off(stable_prefix);
-                    previous.extend(replacement);
-                    lazy_stable_prefix = Some(stable_prefix);
-                    lazy_previous_tail = Some(previous_tail);
-                    (previous, logical_cursor_position)
-                } else {
-                    let mut rendered = self.root_render(width_u16);
-                    let logical_cursor_position =
-                        extract_logical_cursor_position_from(&mut rendered, 0);
-                    for line in &mut rendered {
-                        if !is_image_line(line) {
-                            *line = format!(
-                                "{}{}",
-                                crate::utils::normalize_terminal_output(line),
-                                PI_LINE_RESET
-                            );
-                        }
-                    }
-                    (rendered, logical_cursor_position)
+            });
+            if let Some(update) = update {
+                let stable_prefix = update.stable_prefix;
+                let mut replacement = update.replacement;
+                let replacement_cursor =
+                    extract_logical_cursor_position_from(&mut replacement, stable_prefix);
+                let retained_cursor = self
+                    .logical_cursor_position
+                    .filter(|cursor| cursor.row < stable_prefix);
+                let logical_cursor_position = replacement_cursor.or(retained_cursor);
+                #[cfg(test)]
+                {
+                    self.last_pi_lazy_inspected_rows = replacement.len();
                 }
+                let replacement = replacement
+                    .into_iter()
+                    .map(|line| {
+                        if is_image_line(&line) {
+                            line
+                        } else {
+                            format!(
+                                "{}{}",
+                                crate::utils::normalize_terminal_output(&line),
+                                PI_LINE_RESET
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                // Move the old frame's strings into two owned vectors rather
+                // than cloning the stable history. The old tail is retained
+                // only for bounded comparisons.
+                let mut previous = std::mem::take(&mut self.previous_frame);
+                let previous_tail = previous.split_off(stable_prefix);
+                previous.extend(replacement);
+                lazy_stable_prefix = Some(stable_prefix);
+                lazy_previous_tail = Some(previous_tail);
+                (previous, logical_cursor_position)
             } else {
                 let mut rendered = self.root_render(width_u16);
                 let logical_cursor_position =
@@ -226,25 +219,67 @@ impl<'a> TUI<'a> {
                     }
                 }
                 (rendered, logical_cursor_position)
-            };
+            }
+        } else {
+            let mut rendered = self.root_render(width_u16);
+            let logical_cursor_position = extract_logical_cursor_position_from(&mut rendered, 0);
+            for line in &mut rendered {
+                if !is_image_line(line) {
+                    *line = format!(
+                        "{}{}",
+                        crate::utils::normalize_terminal_output(line),
+                        PI_LINE_RESET
+                    );
+                }
+            }
+            (rendered, logical_cursor_position)
+        };
         self.logical_cursor_position = logical_cursor_position;
         let cursor_position = pi_cursor_position(logical_cursor_position, new_lines.len(), height);
         // Pi's first render writes the complete frame without touching saved
-        // lines. Subsequent structural fallbacks clear and replay it.
+        // lines. Structural fallbacks replay it unless preservation is enabled.
         if self.first_render && !width_changed && !height_changed {
-            self.pi_full_render(new_lines, width_u16, height_u16, false, cursor_position);
+            self.pi_full_render(
+                new_lines,
+                width_u16,
+                height_u16,
+                false,
+                cursor_position,
+                lazy_stable_prefix.is_some(),
+            );
             return;
         }
-        if width_changed {
-            self.pi_full_render(new_lines, width_u16, height_u16, true, cursor_position);
+        if width_changed || reanchor_requested {
+            self.pi_full_render(
+                new_lines,
+                width_u16,
+                height_u16,
+                true,
+                cursor_position,
+                lazy_stable_prefix.is_some(),
+            );
             return;
         }
         if height_changed && !is_termux_session() {
-            self.pi_full_render(new_lines, width_u16, height_u16, true, cursor_position);
+            self.pi_full_render(
+                new_lines,
+                width_u16,
+                height_u16,
+                true,
+                cursor_position,
+                lazy_stable_prefix.is_some(),
+            );
             return;
         }
         if self.clear_on_shrink && new_lines.len() < self.max_lines_rendered && !self.first_render {
-            self.pi_full_render(new_lines, width_u16, height_u16, true, cursor_position);
+            self.pi_full_render(
+                new_lines,
+                width_u16,
+                height_u16,
+                true,
+                cursor_position,
+                lazy_stable_prefix.is_some(),
+            );
             return;
         }
 
@@ -326,12 +361,26 @@ impl<'a> TUI<'a> {
             if previous_len > new_lines.len() {
                 let target_row = new_lines.len().saturating_sub(1);
                 if target_row < previous_viewport_top {
-                    self.pi_full_render(new_lines, width_u16, height_u16, true, cursor_position);
+                    self.pi_full_render(
+                        new_lines,
+                        width_u16,
+                        height_u16,
+                        true,
+                        cursor_position,
+                        lazy_stable_prefix.is_some(),
+                    );
                     return;
                 }
                 let extra_lines = previous_len.saturating_sub(new_lines.len());
                 if extra_lines > height {
-                    self.pi_full_render(new_lines, width_u16, height_u16, true, cursor_position);
+                    self.pi_full_render(
+                        new_lines,
+                        width_u16,
+                        height_u16,
+                        true,
+                        cursor_position,
+                        lazy_stable_prefix.is_some(),
+                    );
                     return;
                 }
 
@@ -401,7 +450,14 @@ impl<'a> TUI<'a> {
         }
 
         if first_changed < previous_viewport_top {
-            self.pi_full_render(new_lines, width_u16, height_u16, true, cursor_position);
+            self.pi_full_render(
+                new_lines,
+                width_u16,
+                height_u16,
+                true,
+                cursor_position,
+                lazy_stable_prefix.is_some(),
+            );
             return;
         }
 
@@ -479,7 +535,14 @@ impl<'a> TUI<'a> {
                 if image_start_screen_row
                     .is_none_or(|row| row.saturating_add(image_reserved_rows) > height)
                 {
-                    self.pi_full_render(new_lines, width_u16, height_u16, true, cursor_position);
+                    self.pi_full_render(
+                        new_lines,
+                        width_u16,
+                        height_u16,
+                        true,
+                        cursor_position,
+                        lazy_stable_prefix.is_some(),
+                    );
                     return;
                 }
                 buffer.push_str("\x1b[2K");
@@ -539,7 +602,12 @@ impl<'a> TUI<'a> {
         height: u16,
         clear: bool,
         cursor_position: Option<(usize, usize)>,
+        known_image_free: bool,
     ) {
+        if clear && self.preserve_scrollback {
+            self.pi_reanchor_visible(new_lines, width, height, cursor_position, known_image_free);
+            return;
+        }
         self.full_redraw_count = self.full_redraw_count.saturating_add(1);
         let height_rows = usize::from(height.max(1));
         let mut buffer = String::from("\x1b[?2026h");
@@ -586,6 +654,52 @@ impl<'a> TUI<'a> {
         buffer.push_str("\x1b[?2026l");
         self.terminal.write(&buffer);
         self.pi_record_kitty_state(&new_lines, false);
+        self.previous_frame = new_lines;
+        self.previous_size = Some((width, height));
+        self.first_render = false;
+    }
+
+    /// Repair only the addressable grid. Neither ED 2 (which some multiplexers
+    /// save as history) nor ED 3 is history-neutral. Absolute row erases also
+    /// prevent a shrink or ownership transition from scrolling mutable chrome.
+    fn pi_reanchor_visible(
+        &mut self,
+        new_lines: Vec<String>,
+        width: u16,
+        height: u16,
+        cursor_position: Option<(usize, usize)>,
+        known_image_free: bool,
+    ) {
+        let rows = usize::from(height.max(1));
+        let top = new_lines.len().saturating_sub(rows);
+        let mut buffer = String::from("\x1b[?2026h");
+        if self.previous_frame_has_kitty {
+            let old_top = self.previous_viewport_top.min(self.previous_frame.len());
+            let ids = Self::pi_collect_kitty_image_ids(&self.previous_frame[old_top..]);
+            buffer.push_str(&self.pi_delete_kitty_images(&ids));
+        }
+        for row in 0..rows {
+            buffer.push_str(&format!("\x1b[{};1H\x1b[2K", row + 1));
+        }
+        for (row, line) in new_lines[top..].iter().enumerate() {
+            if !is_image_line(line) && visible_width(line) > usize::from(width) {
+                self.stop();
+                panic!("rendered line exceeds terminal width; components must wrap or truncate");
+            }
+            buffer.push_str(&format!("\x1b[{};1H", row + 1));
+            buffer.push_str(line);
+        }
+        // Establish a known physical origin even for an empty/short document
+        // or an image command that moved the terminal cursor.
+        buffer.push_str(&format!("\x1b[{rows};1H"));
+        self.cursor_row = new_lines.len().saturating_sub(1);
+        self.hardware_cursor_row = top + rows - 1;
+        self.max_lines_rendered = new_lines.len();
+        self.previous_viewport_top = top;
+        self.pi_append_hardware_cursor(&mut buffer, cursor_position, new_lines.len());
+        buffer.push_str("\x1b[?2026l");
+        self.terminal.write(&buffer);
+        self.pi_record_kitty_state(&new_lines, known_image_free);
         self.previous_frame = new_lines;
         self.previous_size = Some((width, height));
         self.first_render = false;

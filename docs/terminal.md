@@ -118,10 +118,13 @@ wheel history stays terminal-owned: portable protocols cannot report its offset.
 
 The renderer uses a complete retained frame, synchronized frames, and exact
 first-to-last changed-range repainting. Completions, panels, reports, and streamed
-Markdown participate in the same algorithm. Resize reflows the retained semantic
-transcript, clears saved lines, and replays once; changes above the old viewport
-also require full replay rather than leaving unwritten history. The hardware
-composer cursor stays visible through panels, resizing, and renderer resumes.
+Markdown participate in the same algorithm. Resize bursts settle before repairing
+only live rows; width changes reflow the semantic transcript, while height-only
+changes reuse its wrapping. Resize, PageUp, and historical repairs do not clear
+saved lines or replay the complete history. Already-emitted native history stays
+as snapshots; PageUp, copy, and the session contain the authoritative transcript
+when a historical result changes. The hardware composer cursor stays visible
+through panels, resizing, and renderer resumes.
 [Rendering details](design/octet-tui.md#terminal-guarantees).
 
 Wide/narrow layouts retain semantic structure with Unicode/ASCII, truecolor,

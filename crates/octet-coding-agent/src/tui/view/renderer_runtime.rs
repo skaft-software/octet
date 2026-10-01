@@ -36,6 +36,44 @@ const STATUS_TIMER_INTERVAL: Duration = Duration::from_secs(1);
 /// Resize events are normally delivered by crossterm, but polling while idle
 /// also catches terminal-manager resizes that do not emit an event.
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const RESIZE_SETTLE_INTERVAL: Duration = Duration::from_millis(75);
+const RESIZE_MAX_DELAY: Duration = Duration::from_millis(150);
+
+/// A quiet resize burst needs one reflow, but continuous dragging must not
+/// starve output. Composer edits/readiness bypass this bounded settling window.
+struct ResizeSchedule {
+    epoch: u64,
+    pending: Option<(Instant, Instant)>,
+}
+
+impl ResizeSchedule {
+    fn new(epoch: u64) -> Self {
+        Self {
+            epoch,
+            pending: None,
+        }
+    }
+
+    fn observe(&mut self, epoch: u64, now: Instant) {
+        if epoch != self.epoch {
+            self.epoch = epoch;
+            let (start, _) = self.pending.unwrap_or((now, now));
+            self.pending = Some((start, now));
+        }
+    }
+
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.pending.map(|(start, last)| {
+            (last + RESIZE_SETTLE_INTERVAL)
+                .min(start + RESIZE_MAX_DELAY)
+                .saturating_duration_since(now)
+        })
+    }
+
+    fn painted(&mut self) {
+        self.pending = None;
+    }
+}
 
 /// Thread-safe handle to the mutable shell model. The TUI renderer owns a
 /// clone of this handle and performs all expensive layout work away from the
@@ -411,16 +449,15 @@ pub(super) fn reconcile_terminal_size(
     }
 
     let mut shell = state.borrow_mut();
+    let width_changed = shell.size.0 != dimensions.0;
     shell.size = dimensions;
+    shell.resize_epoch = shell.resize_epoch.wrapping_add(1);
     shell.reset_transcript_navigation_pointer();
-    // Deferred history remains lazy; only the materialized tail participates
-    // in this resize reflow. Semantic navigation can hydrate older blocks
-    // later without delaying the resize or replaying them through the PTY.
-    // Do not ask for transcript geometry here: that would synchronously reflow
-    // the complete history and then invalidate it, paying the resize cost
-    // twice. Viewport readers clamp the retained scroll offset after the render
-    // thread performs the single required layout pass.
-    shell.invalidate_transcript_layout();
+    // Height-only repair reuses historical block layouts. Do not compute
+    // geometry or invalidate wrapping on the input/polling path.
+    if width_changed {
+        shell.invalidate_transcript_layout();
+    }
     true
 }
 
@@ -491,21 +528,21 @@ pub(super) fn render_loop_with_terminal(
     // policy in `native_scrollback` (not native history) decides which rows stay
     // mutable, so the same live blocks survive the renderer change.
     tui.set_alternate_screen(alternate_screen);
-    // Removing bounded live activity must not clear saved lines merely because
-    // the frame contracted. Offscreen semantic mutations still use Pi's replay.
+    // Octet keeps saved-line snapshots; only the live grid is repaired when
+    // historical presentation changes. The generic Pi policy stays unchanged.
     tui.set_clear_on_shrink(false);
+    tui.set_preserve_scrollback(true);
     // octet's composer uses the terminal cursor itself; unlike Pi's editor, it
     // does not paint a separate inverted cursor cell around CURSOR_MARKER.
-    // Restore visibility after panels, resize replays, and renderer resumes.
+    // Restore visibility after panels, resize repairs, and renderer resumes.
     tui.set_show_hardware_cursor(true);
     tui.add_child(Box::new(ShellComponent::isolated(
         state.clone(),
         application_viewport,
     )));
     if clear_on_start {
-        // A resumed renderer has no copy of Pi's physical cursor/viewport
-        // state. Force one authoritative clear-and-replay instead of treating
-        // the retained transcript as a fresh append and duplicating it.
+        // A resumed renderer has no copy of the physical cursor/viewport state.
+        // Re-anchor the current grid without duplicating or clearing history.
         tui.request_render_force(true);
     }
     tui.start();
@@ -521,6 +558,7 @@ pub(super) fn render_loop_with_terminal(
     let mut last_editor_revision = state.borrow().editor.revision();
     let mut last_startup_pending = state.borrow().startup_pending;
     let mut animations = AnimationSchedule::new();
+    let mut resize_schedule = ResizeSchedule::new(state.borrow().resize_epoch);
     // A suspend is decided by the coalescer but finalized here, where the
     // final frame and the terminal handback belong.
     let mut suspended: Option<mpsc::Sender<()>> = None;
@@ -541,11 +579,13 @@ pub(super) fn render_loop_with_terminal(
         // every event/layout. Model, tool, input and Stop preempt the timeout.
         let now = Instant::now();
         let scrollbar_deadline = state.borrow().transcript_scrollbar_deadline();
-        let poll = animations.remaining(now).min(
-            scrollbar_deadline
-                .map(|deadline| deadline.saturating_duration_since(now))
-                .unwrap_or(RESIZE_POLL_INTERVAL),
-        );
+        let poll = resize_schedule.remaining(now).unwrap_or_else(|| {
+            animations.remaining(now).min(
+                scrollbar_deadline
+                    .map(|deadline| deadline.saturating_duration_since(now))
+                    .unwrap_or(RESIZE_POLL_INTERVAL),
+            )
+        });
         let command = match rx.recv_timeout(poll) {
             Ok(command) => Some(command),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -571,6 +611,23 @@ pub(super) fn render_loop_with_terminal(
         } else {
             false
         };
+        let now = Instant::now();
+        let (resize_epoch, input_changed) = {
+            let shell = state.borrow();
+            (
+                shell.resize_epoch,
+                shell.editor.revision() != last_editor_revision
+                    || shell.startup_pending != last_startup_pending,
+            )
+        };
+        resize_schedule.observe(resize_epoch, now);
+        if !input_changed
+            && resize_schedule
+                .remaining(now)
+                .is_some_and(|delay| !delay.is_zero())
+        {
+            continue;
+        }
         // The idle poll also services diagnostics emitted by lifecycle workers.
         // They enter semantic rows, never the physical terminal stream.
         let semantic_command = index_loaded
@@ -578,7 +635,7 @@ pub(super) fn render_loop_with_terminal(
             || (crate::output::has_tui_diagnostics() && !state.borrow().startup_pending);
         if !render_wake_requires_frame(
             semantic_command,
-            resized,
+            resized || resize_schedule.pending.is_some(),
             animations.remaining(Instant::now()).is_zero()
                 || scrollbar_deadline.is_some_and(|deadline| deadline <= Instant::now()),
         ) {
@@ -604,6 +661,19 @@ pub(super) fn render_loop_with_terminal(
             }
             break;
         }
+        let now = Instant::now();
+        let shell = state.borrow();
+        resize_schedule.observe(shell.resize_epoch, now);
+        let input_changed = shell.editor.revision() != last_editor_revision
+            || shell.startup_pending != last_startup_pending;
+        drop(shell);
+        if !input_changed
+            && resize_schedule
+                .remaining(now)
+                .is_some_and(|delay| !delay.is_zero())
+        {
+            continue;
+        }
         {
             let mut shell = state.borrow_mut();
             let now = Instant::now();
@@ -618,6 +688,7 @@ pub(super) fn render_loop_with_terminal(
         sync_window_title(&mut tui, &state, &mut last_title);
         tui.request_render();
         state.frame_written();
+        resize_schedule.painted();
         last_render = Some(Instant::now());
     }
 
@@ -628,6 +699,10 @@ pub(super) fn render_loop_with_terminal(
     state.frame_written();
     tui.stop();
 }
+
+#[cfg(test)]
+#[path = "scroll_resize_tests.rs"]
+mod scroll_resize_tests;
 
 #[cfg(test)]
 #[path = "renderer_shutdown_tests.rs"]
@@ -1132,6 +1207,7 @@ pub(super) struct ShellFrameState {
     pub(super) initialized: bool,
     pub(super) width: u16,
     pub(super) height: u16,
+    pub(super) resize_epoch: u64,
     pub(super) theme_epoch: u64,
     pub(super) transcript_epoch: u64,
     pub(super) transcript_generation: u64,
@@ -1283,6 +1359,7 @@ impl Component for ShellComponent {
             frame.initialized = true;
             frame.width = width;
             frame.height = state.size.1;
+            frame.resize_epoch = state.resize_epoch;
             frame.theme_epoch = state.theme_epoch;
             frame.transcript_epoch = state.transcript_epoch;
             frame.verbose_tools = state.verbose_tools;
@@ -1559,7 +1636,10 @@ mod commit_metadata_tests {
         }
         let resized = check_unpinned_update(&component, &mut retained);
         assert!(resized.reanchor_viewport);
-        assert!(resized.resize_replay.is_some());
+        assert!(
+            resized.resize_replay.is_none(),
+            "Pi repair must not clone an overlay history replay"
+        );
         shell.state.borrow_mut().overlay = None;
         assert!(check_unpinned_update(&component, &mut retained).reanchor_viewport);
     }

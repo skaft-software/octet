@@ -338,6 +338,7 @@ impl Component for LazyReanchoredLines {
 }
 
 // --- Cohesive areas under test ---
+mod history_preservation;
 mod lazy_updates;
 mod native_scrollback;
 mod pinned_frames;

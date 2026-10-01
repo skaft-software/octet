@@ -223,6 +223,10 @@ pub struct TUI<'a> {
     full_redraw_count: usize,
     /// Pi's optional full-redraw-on-shrink policy.
     clear_on_shrink: bool,
+    /// Keep already-emitted native history on structural changes. The live grid
+    /// is repaired in place; canonical historical edits remain in the retained
+    /// document rather than erasing the terminal's emitted snapshots.
+    preserve_scrollback: bool,
     /// Pi tracks Kitty placements by image ID so redraws delete only affected
     /// images before retransmitting their rows.
     previous_kitty_image_ids: BTreeSet<u32>,
@@ -300,6 +304,7 @@ impl<'a> TUI<'a> {
             full_redraw_count: 0,
             clear_on_shrink: std::env::var_os("PI_CLEAR_ON_SHRINK")
                 .is_some_and(|value| value == "1"),
+            preserve_scrollback: false,
             previous_kitty_image_ids: BTreeSet::new(),
             previous_frame_has_kitty: false,
             #[cfg(test)]
@@ -369,6 +374,16 @@ impl<'a> TUI<'a> {
     /// Number of Pi-compatible full redraws performed by this TUI.
     pub fn full_redraws(&self) -> usize {
         self.full_redraw_count
+    }
+
+    /// Opt the primary-screen Pi renderer into preserving terminal-owned saved
+    /// lines on resize, historical edits, and viewport transitions. Structural
+    /// repair paints at most one live grid without ED 2/3 or document replay.
+    /// Saved lines retain their emitted presentation; [`TUI::rendered_frame`]
+    /// remains canonical. Legacy inline and alternate-screen paths are unchanged.
+    /// Disabled by default to retain Pi's destructive-replay compatibility.
+    pub fn set_preserve_scrollback(&mut self, preserve: bool) {
+        self.preserve_scrollback = preserve;
     }
 
     /// Whether Pi's optional full redraw on frame shrink is enabled.
@@ -452,13 +467,17 @@ impl<'a> TUI<'a> {
     /// viewport assumption before rendering.
     pub fn request_render_force(&mut self, force: bool) {
         if force {
-            self.previous_frame.clear();
+            if !self.preserve_scrollback || !self.uses_pi_renderer() {
+                self.previous_frame.clear();
+                self.previous_viewport_top = 0;
+            }
+            // Preserving Pi repair addresses the grid absolutely, but still
+            // needs its old visible image rows to retire their placements.
             self.previous_size = Some((u16::MAX, u16::MAX));
             self.logical_cursor_position = None;
             self.cursor_row = 0;
             self.hardware_cursor_row = 0;
             self.max_lines_rendered = 0;
-            self.previous_viewport_top = 0;
             if let Some(session) = self.alternate_screen_session.as_mut() {
                 session.invalidate();
             }

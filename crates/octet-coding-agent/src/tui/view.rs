@@ -1489,6 +1489,9 @@ pub(crate) struct ShellState {
     /// Global transcript disclosure mode. Ctrl+O and `/verbose` toggle this.
     pub(crate) verbose_tools: bool,
     pub(crate) size: (u16, u16),
+    /// A resize away and back still invalidates the physical grid, even when
+    /// coalescing observes the same final dimensions as the previous frame.
+    resize_epoch: u64,
     /// Until launch selection, workspace and appearance are resolved, render
     /// only the startup input owner, never provisional branded chrome/history.
     /// Kept in shared state so renderer resumes obey the same readiness gate.
@@ -5148,17 +5151,27 @@ impl InteractiveShell {
     }
 
     pub fn set_size(&mut self, columns: u16, rows: u16) {
-        *self.size.lock().expect("terminal size mutex poisoned") = (columns, rows);
+        let dimensions = (columns, rows);
+        let mut size = self.size.lock().expect("terminal size mutex poisoned");
+        if *size == dimensions {
+            return;
+        }
+        *size = dimensions;
+        drop(size);
         let mut state = self.state.borrow_mut();
-        state.size = (columns, rows);
+        if !state.render_threaded {
+            viewport::upgrade_viewport_anchor(&state);
+        }
+        let width_changed = state.size.0 != columns;
+        state.size = dimensions;
+        state.resize_epoch = state.resize_epoch.wrapping_add(1);
         state.reset_transcript_navigation_pointer();
-        // Deferred session history remains semantic and lazy. Resize reflows
-        // only the materialized branch tail; PageUp/select-all loads older
-        // blocks if and when the user asks for them.
-        // Reflow belongs exclusively to `octet-tui-render`. Computing the scroll
-        // maximum here used to rebuild a long transcript on the input thread,
-        // immediately discard that layout, and rebuild it again for paint.
-        state.invalidate_transcript_layout();
+        // Height changes affect bounded chrome/welcome budgeting, not block
+        // wrapping. Let the cache update that prefix without reparsing history.
+        // Width reflow remains exclusively on the renderer thread.
+        if width_changed {
+            state.invalidate_transcript_layout();
+        }
     }
 
     pub fn theme(&self) -> OctetTheme {
