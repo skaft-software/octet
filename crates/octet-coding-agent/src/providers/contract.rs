@@ -80,6 +80,18 @@ pub enum ModelDiscovery {
     DeepSeekModels,
     /// Query the authenticated Codex subscription catalog.
     CodexSubscription,
+    /// Query a subscription provider's ordinary inventory with the credential
+    /// its inference requests use.
+    ///
+    /// The `models` resource is not bespoke to the login, so this differs from
+    /// [`ModelDiscovery::CodexSubscription`] only in that no entitlement claims
+    /// have to be decoded. The declared shape says which wire form the provider
+    /// speaks; the credential itself is resolved by the product's private
+    /// authentication lifecycle and is never named here.
+    SubscriptionInventory {
+        /// Wire form of the provider's `models` resource.
+        shape: SubscriptionInventoryShape,
+    },
     /// Ask an embedding host for an authenticated subscription inventory.
     ///
     /// The host owns the OAuth state and transport; declarations only define
@@ -87,6 +99,23 @@ pub enum ModelDiscovery {
     HostOwnedSubscription,
     /// Do not populate models automatically.
     None,
+}
+
+/// Wire form of a subscription provider's `models` resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionInventoryShape {
+    /// An OpenAI-compatible `GET /models` resource.
+    OpenAi {
+        /// Filter applied to returned API model identifiers.
+        filter: ModelFilter,
+    },
+    /// An Anthropic-compatible `GET /models` resource.
+    Anthropic {
+        /// Filter applied to returned API model identifiers.
+        filter: ModelFilter,
+    },
+    /// OpenRouter's catalog, which also carries per-model pricing.
+    OpenRouter,
 }
 
 /// Filter applied to OpenAI-compatible model inventories.
@@ -840,9 +869,9 @@ impl From<ModelDiscovery> for ProviderCatalogKind {
             }
             ModelDiscovery::AnthropicModels { .. } => Self::AnthropicCompatible,
             ModelDiscovery::OpenRouterModels => Self::OpenRouter,
-            ModelDiscovery::CodexSubscription | ModelDiscovery::HostOwnedSubscription => {
-                Self::Subscription
-            }
+            ModelDiscovery::CodexSubscription
+            | ModelDiscovery::HostOwnedSubscription
+            | ModelDiscovery::SubscriptionInventory { .. } => Self::Subscription,
             ModelDiscovery::None => Self::None,
         }
     }

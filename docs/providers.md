@@ -389,6 +389,69 @@ does not update `~/.octet/extensions`. See the
 [subagents package](../extensions/octet-subagents/README.md), including its API
 0.4 exact-version boundary. Catalog installation is [publication-gated](installation.md#optional-packages).
 
+<a id="subscription-oauth-logins"></a>
+
+## Subscription OAuth logins
+
+Beyond Codex, octet signs in to paid plans directly rather than asking for a
+long-lived API key. Each provider gets its own owner-private credential file
+under `~/.octet/credentials/`, and its models appear in the catalog only while
+that file says you are signed in.
+
+| Command | Plan | Flow |
+| --- | --- | --- |
+| `octet --login grok` | SuperGrok or X Premium | xAI device code |
+| `octet --login kimi` | Kimi Code | Kimi device code |
+| `octet --login meta` | Meta Muse | Meta device code, then an API-key mint |
+| `octet --login openrouter` | OpenRouter account | PKCE in a browser, pasted redirect |
+
+These are separate providers from the same vendors' API-key presets, so signing
+in with a plan never replaces a key you already configured:
+
+| Plan | API key |
+| --- | --- |
+| `xai-subscription/<model>` | `xai/<model>` |
+| `kimi-coding-subscription/<model>` | `kimi-coding/<model>` |
+| `meta-subscription/<model>` | `meta/<model>` |
+| `openrouter-oauth/<model>` | `openrouter/<model>` |
+
+`--headless` prints the verification URL and code without opening a browser, so
+the device flows work over SSH. `--logout <provider>` removes only that
+provider's credential and never contacts the provider; for the plans, revoke
+access from the vendor's own account page.
+
+Meta is worth calling out because its grant is two steps. The device flow yields
+an identity token that the inference surface will not accept, so octet
+immediately exchanges it for a short-lived Model API key. The identity token is
+what makes the exchange repeatable; when Meta rejects it, the session is over and
+octet asks you to sign in again rather than retrying. OpenRouter is the opposite:
+its login mints a durable API key with no refresh token, so octet never renews it
+and `--logout` only deletes the local copy.
+
+Credentials are refreshed automatically. A refresh is serialized both within one
+octet process and across octet processes, and the credential file is re-read
+after the cross-process lock is taken, so two concurrent launches cannot spend
+the same single-use refresh token and leave you signed out. A provider that
+rotates its refresh token but does not return a new one is treated as a failure
+and the existing credential is left untouched, because that provider has already
+revoked it.
+
+### Not yet available
+
+- **Anthropic (Claude Pro/Max).** The login is a PKCE grant rather than a device
+  code, which octet does not yet support end to end. It also needs a request-path
+  change: the Anthropic Messages codec decides whether to send the
+  `claude-code-*` and `oauth-*` beta headers from the credential that is bound to
+  the route, and it currently recognizes only an environment bearer token. A
+  privately resolved OAuth credential therefore would not receive the betas a
+  subscription token needs. Fixing that means teaching the codec about a
+  dynamically resolved Anthropic route, which is a change to `octet-ai` and is
+  tracked separately rather than approximated here. `ANTHROPIC_AUTH_TOKEN` and
+  `ANTHROPIC_OAUTH_TOKEN` continue to work today.
+- **Radius.** Its login is defined against a Pi-hosted gateway that also serves
+  Pi's own wire protocol. octet has no such codec, and adding one is a separate
+  change.
+
 <a id="github-copilot-unreleased-candidate"></a>
 
 ## GitHub Copilot

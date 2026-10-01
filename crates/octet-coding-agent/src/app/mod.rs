@@ -2,6 +2,7 @@
 
 pub mod bootstrap;
 mod delegation_models;
+pub(crate) mod subscriptions;
 
 use std::path::PathBuf;
 use std::sync::Arc;

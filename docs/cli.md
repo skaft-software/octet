@@ -84,8 +84,8 @@ other supported OAuth subscriptions**, **Local/self-hosted models**, and
 open that wizard on demand; the current model/session and default stay in place
 until the user explicitly switches with `/model`. API-key entry is masked and
 saved only after review to owner-private, recoverable storage; it is not a
-command-line secret argument. Subscription choices are ChatGPT (Codex) and
-GitHub Copilot. See
+command-line secret argument. Subscription choices are ChatGPT (Codex), GitHub
+Copilot, Grok, Kimi Code, Meta, and OpenRouter. See
 [first-run behavior and credential privacy](providers.md#first-run-setup-unreleased).
 The `octet setup` subcommand below still configures explicit custom endpoints;
 print/RPC modes never open onboarding.
@@ -99,223 +99,15 @@ octet setup --preset lm-studio --manual-model ID [--yes]
 octet setup --endpoint URL [--api-key-env VAR] [--model ID|--manual-model ID] [--offline] [--yes]
 ```
 
-For Codex, `--login codex` offers browser sign-in (PKCE on `127.0.0.1:1455`, or
-the registered fallback port `1457`) and device-code sign-in. `--headless`
-selects the device flow and prints its verification URL/code without opening a
-browser. SSH, no opener, or both callback ports being busy also
-defaults/falls back to device code.
-The Copilot integration accepts `--login copilot [--headless]` and
-`--logout copilot`, also under the alias `github-copilot`. It uses only its private
-OAuth store, not environment or editor credentials. Online shared catalogs can
-then discover eligible `github-copilot/<id>` models; offline adds none. First-run
-subscription setup also offers this device flow through `/setup`, but TUI
-`/login copilot` is not integrated. Native-host protocol 1 gains no auth command or
-credential field. [Limits and unrun live qualification](providers.md#github-copilot-unreleased-candidate).
 
-Setup reviews without writing by default. `--yes` commits only the reviewed
-transaction; `--cancel` leaves the registry unchanged. An explicit `--preset
-lm-studio` permits its default endpoint; otherwise choose `--endpoint URL`.
-`--api-key-env VAR` references a credential rather than embedding one.
-`--model ID` selects discovered inventory; `--manual-model ID` supplies a model
-when discovery is unsuitable. Use `--offline --manual-model ID` for no-probe
-recovery.
+`--headless` prints the device verification URL/code without opening a browser.
+`--login`/`--logout` accept `codex` (`openai-codex`, `openai`), `copilot`
+(`github-copilot`), `grok` (`xai-subscription`, `supergrok`), `kimi`
+(`kimi-code`), `meta` (`muse`), `openrouter`, and `custom` (`openai-custom`). An
+unknown provider is rejected with the full list. Each subscription provider
+stores one owner-private credential and never reads another provider's.
+`--logout` removes only the named provider's credential and makes no network
+call. Grok, Kimi, and Meta use a device code, so `--headless` applies to them;
+OpenRouter's browser login prints the URL either way. See
+[subscription OAuth logins](providers.md#subscription-oauth-logins).
 
-Additional setup options apply to either recipe:
-
-| Form | Contract |
-| --- | --- |
-| `--provider ID` | Choose the custom registry provider ID, not a display label or model transport ID. |
-| `--label LABEL` | Set the provider display label. |
-| `--no-auth` | Explicitly select no authentication instead of `--api-key-env VAR`. |
-| `--replace` | Permit replacement of an existing provider entry; does not bypass confirmation or stale-snapshot checks. |
-| `--cancel` | Cancel without writing the registry; not an offline/no-probe switch. |
-
-The pairs `--api-key-env` / `--no-auth`, `--yes` / `--cancel`, and `--model` /
-`--manual-model` conflict. Preview is not a write: `--yes` confirms the prepared
-transaction, whose compare-and-swap rejects a registry changed since its snapshot.
-Review/cancel/stale-snapshot failures leave the registry unchanged.
-[Privacy, discovery bounds, and transaction failures](providers.md#local-and-custom-endpoints).
-
-## Sessions and diagnostics
-
-```text
-octet --continue
-octet --resume [SESSION_ID]
-octet --fork [ID|PATH]
-octet --session-dir PATH
-
-octet sessions list [--query TEXT]
-octet sessions inspect ID
-octet sessions rename ID "NAME"
-octet sessions tag ID TAG...
-octet sessions export ID [--format json|html] [--output PATH] [--force] [--include-secrets]
-octet sessions delete ID
-octet sessions repair ID
-octet doctor
-```
-
-`--continue` selects the latest current-workspace session; bare `--resume` or
-`--fork` opens a picker. `--continue` and `--resume` conflict; `--fork` conflicts
-with both. Fork creates a new session before startup. Listing and
-inspection are read-only. Delete moves to recoverable trash; repair backs up
-before removing only a torn final append. Export redacts by default, refuses an
-existing destination without `--force`, and warns for `--include-secrets`.
-Both formats always exclude private extension metadata; opting out of credential
-scrubbing does not widen that visibility boundary.
-`doctor` performs read-mostly prerequisite/provider/model checks without an Agent
-or executable-extension startup. [Sessions](sessions.md).
-
-## Local evaluation
-
-```text
-octet eval run SUITE [--artifact-dir DIR] [--baseline REPORT.json]
-octet eval run SUITE --model-profile /absolute/private-model.json
-```
-
-The default is a harness-owned scripted fixture, **not** a model benchmark.
-`--model-profile` explicitly selects an independently running local model server.
-The owner-private regular JSON file (maximum 16 KiB, no symlinks/hardlinks) has
-this shape:
-
-```json
-{
-  "schema": "octet-eval-model-1",
-  "base_url": "http://127.0.0.1:8000/v1/",
-  "model": "operator-selected-model",
-  "api_key": "",
-  "context_window": 32768,
-  "max_output_tokens": 1024,
-  "pricing": {"input": 0, "output": 0, "cache_read": 0, "cache_write_5m": 0}
-}
-```
-
-The endpoint must be literal-loopback HTTP, with an explicit non-default port
-and `/v1/` path: no DNS names, remote destinations, redirects, query strings,
-custom headers or ambient credentials. `api_key` is required; empty means none.
-Pricing is optional. When present, all four integer rates are required, in
-microdollars per million tokens; explicit zeros declare a free server. Missing
-pricing remains **unknown**, not free. Local routing does not prove the server
-itself avoids downstream paid inference. Model mode rejects scripted fixture
-replies in the suite.
-
-Each case uses a new private HOME/workspace/session, cleared environment, no
-tools/context files, one model turn, and the literal prompt on stdin. The
-profile's token limit and any known-price case cost ceiling constrain admission;
-unknown pricing with a cost ceiling refuses before inference. There is no
-aggregate run-wide cost ceiling.
-
-`--case-timeout-ms N` defaults to 60000 (range 1–120000);
-`--max-output-bytes N` defaults to 262144 per stdout/stderr stream (range
-1–1048576). Exceeding either bound terminates/reaps the case. A suite is bounded
-to 1 MiB, 64 cases and 32 KiB per prompt. Private reports record backend, selected
-model, pass/latency/token/cost measurements and baseline deltas. Failed or
-interrupted calls retain available durable accounting; missing usage or pricing
-is uncertain, never a fabricated exact zero. Failed cases are observations in
-the report, not necessarily a nonzero harness exit.
-
-## Instructions and resources
-
-| Form | Contract |
-| --- | --- |
-| `--system-prompt [TEXT]` | Entire composed-instruction override; no argument means explicit empty text. AGENTS/context/skills are ignored. |
-| `--prompt NAME` | Select a named startup/print prompt. |
-| `--debug-prompt` | Show exact final expansion and template hash before provider submission; can expose sensitive included content. |
-| `--prompt-template FILE-OR-DIR` | Explicit prompt source, repeatable in order. |
-| `--theme-dir FILE-OR-DIR` | Additional theme directory or TOML file; repeated paths use normal resource precedence. [Themes](themes.md). |
-| `--skill-dir PATH` | Explicit skill root. |
-| `--extension-dir PATH` | Explicit executable-extension source. |
-| `--enable-extension NAME` | One-invocation activation; not trust. |
-| `--trust-extension NAME` | One-invocation trust of the selected exact source; not activation. |
-
-[Instructions/prompts/skills](instructions.md) and [resource discovery](resources.md)
-cover precedence, file bounds, trust, and reload.
-
-## Packages and Serve
-
-For reviewed local archives:
-
-```text
-octet extension install --path ARCHIVE
-octet extension update --path ARCHIVE
-octet extension list
-```
-
-The five executable bundles and separate Serve application are pinned to the
-running host exactly. This checkout's source manifests require `=0.8.2`;
-previously published 0.8.0 bundles require `=0.8.0`. The
-[0.8.2 release](https://github.com/skaft-software/octet/releases/tag/v0.8.2)
-records signed assets and public-install evidence. Catalog forms below require
-verified published assets matching the running host version:
-
-```text
-octet extension install NAME
-octet extension update NAME
-octet extension remove NAME
-```
-
-The executable catalog is `octet-browse`, `octet-computer-use`, `octet-mcp`,
-`octet-subagents`, and `octet-web-search`. Checksummed bundles publish atomically under
-`~/.octet/extensions/<id>`; local updates must match the managed package ID.
-No install hook, dependency provisioning, activation, trust, or process launch
-occurs. Packaged skills require explicit loading. [Packaging contract](extensions.md).
-
-Serve is a separate version-matched application package. With a reviewed,
-compatible package installed, `octet serve` starts its loopback web interface;
-`octet serve --no-open --port 0` avoids opening a browser and lets the OS select a
-port. `extension install/update/remove octet-serve` use the published catalog;
-local archive forms above also apply. Removal leaves sessions
-and other Serve data intact. [Serve setup and limits](experimental/octet-serve/README.md).
-
-`--experimental-streamable-http-mcp` is a conspicuous **one-shot process-owner**
-opt-in for otherwise-blocked remote MCP. It is not required for local stdio MCP.
-Read the [MCP package's gate and defects](../extensions/octet-mcp/README.md#experimental-streamable-http-gate)
-before use; this is not stable transport qualification.
-
-## Pi interoperability
-
-```text
-octet migrate pi --dry-run [--json] [--pi-home PATH] [--project PATH] [--npm-root PATH]
-```
-
-Inventory reads bounded Pi settings/manifests and local/npm/git package locations,
-parses JS/TS/TSX with tree-sitter, and consumes zero model tokens. It executes no
-package code, starts no provider/model, changes no files, and does not copy
-resources/apply recipes. `--json` is versioned machine output; `--npm-root` adds
-only an explicit legacy `node_modules` search root.
-
-Separate explicit `octet migrate import pi` and `octet migrate restore` cover a
-bounded portable subset without copying credentials or modifying Pi sources.
-Pi extension execution and its former install/plan/preflight/publish commands are
-not supported. Inventory classifications are not runtime compatibility claims.
-Import/restore bounds stay in [Pi migration](pi-migration.md); [native provider
-support](providers.md) is independent of Pi extensions.
-
-## Updates and legacy inputs
-
-`/changelog` opens this binary's **current-version** release notes in the
-interactive TUI, including without a configured model. The read-only report uses
-rich Markdown, starts at the first row, and supports Up/Down, PageUp/PageDown,
-Home, and End; Escape or Left closes it. It remains available during active work
-without interrupting the run or adding notes to the conversation. The muted
-`/changelog · what's new` hint sits directly below the splash version, with a
-shorter fallback in narrow terminals. When startup finds a newer stable release,
-an accent update hint follows it; `octet update` uses rich Markdown inline-code
-styling rather than visible backticks. A late result appears once as a UI-only
-notice with the same rich action instead of repainting historical splash rows.
-
-Release notes are compiled into the binary: no network fetch, workspace file, or
-model request is used. Plain and print modes reject the command with guidance to
-open the interactive TUI; RPC returns its existing error response for prompt,
-steer, or follow-up invocations. Serve treats it as an unsupported boundary,
-without inferring an answer. None of these paths sends release-note requests to
-a provider or changes an API version.
-
-`/update` checks for a newer release and directs you to `octet update` to install;
-that is an update command contract, not a verified octet channel. Do not treat it
-as a source-build release-promotion path. [Current availability](installation.md#binary-availability)
-and [historical Ygg update behavior](reference/historical-installation.md#updating)
-are deliberately separate.
-
-`--safe` is hidden compatibility for `--safe-mode`; `--yolo` is rejected.
-`--reasoning-mode pro` loads legacy state only. Built-in and file theme
-selection are documented in [Themes](themes.md). See [compatibility inputs](configuration.md#compatibility-inputs).
