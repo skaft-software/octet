@@ -16,11 +16,10 @@ use super::native_scrollback::{
 };
 use super::shell_chrome::render_startup_surface;
 use super::viewport::{render_shell_viewport_at, render_shell_viewport_update};
-use super::welcome_card::welcome_animating;
 use super::ShellState;
 use crate::tui::terminal::{OctetTerminal, TerminalSize};
 
-/// Welcome-card motion is short-lived and limited to roughly 60 fps.
+/// Bound semantic stream painting to roughly 60 fps; input/readiness preempt it.
 const RENDER_INTERVAL: Duration = Duration::from_millis(16);
 /// Transcript activity shares one restrained one-second cycle: streaming
 /// response and active tool or shell dots breathe between foreground and muted
@@ -158,13 +157,8 @@ pub(super) fn status_timer_active(state: &ShellState) -> bool {
     state.theme.capabilities().interactive && state.has_active_status_timer()
 }
 
-fn render_wake_requires_frame(
-    semantic_command: bool,
-    resized: bool,
-    welcome: bool,
-    animation_due: bool,
-) -> bool {
-    semantic_command || resized || welcome || animation_due
+fn render_wake_requires_frame(semantic_command: bool, resized: bool, animation_due: bool) -> bool {
+    semantic_command || resized || animation_due
 }
 
 fn frame_coalesce_delay(
@@ -263,15 +257,6 @@ impl AnimationSchedule {
             .into_iter()
             .filter_map(|clock| clock.remaining(now))
             .fold(RESIZE_POLL_INTERVAL, Duration::min)
-    }
-
-    fn poll_interval(&self, welcome: bool, now: Instant) -> Duration {
-        let remaining = self.remaining(now);
-        if welcome {
-            remaining.min(RENDER_INTERVAL)
-        } else {
-            remaining
-        }
     }
 
     fn advance(&mut self, state: &mut ShellState, now: Instant) {
@@ -534,6 +519,7 @@ pub(super) fn render_loop_with_terminal(
     // Capture before each paint: an edit admitted during a slow terminal write
     // still differs on the next wake, even when that write was not current.
     let mut last_editor_revision = state.borrow().editor.revision();
+    let mut last_startup_pending = state.borrow().startup_pending;
     let mut animations = AnimationSchedule::new();
     // A suspend is decided by the coalescer but finalized here, where the
     // final frame and the terminal handback belong.
@@ -547,17 +533,15 @@ pub(super) fn render_loop_with_terminal(
             let mut shell = state.borrow_mut();
             super::poll_file_index_scan(&mut shell)
         };
-        let welcome = {
+        {
             let shell = state.borrow();
-            let now = Instant::now();
-            animations.observe(&shell, now);
-            welcome_animating(&shell, now)
-        };
+            animations.observe(&shell, Instant::now());
+        }
         // Sleep only to the next deadline, not for a fresh full interval after
         // every event/layout. Model, tool, input and Stop preempt the timeout.
         let now = Instant::now();
         let scrollbar_deadline = state.borrow().transcript_scrollbar_deadline();
-        let poll = animations.poll_interval(welcome, now).min(
+        let poll = animations.remaining(now).min(
             scrollbar_deadline
                 .map(|deadline| deadline.saturating_duration_since(now))
                 .unwrap_or(RESIZE_POLL_INTERVAL),
@@ -595,7 +579,6 @@ pub(super) fn render_loop_with_terminal(
         if !render_wake_requires_frame(
             semantic_command,
             resized,
-            welcome,
             animations.remaining(Instant::now()).is_zero()
                 || scrollbar_deadline.is_some_and(|deadline| deadline <= Instant::now()),
         ) {
@@ -607,7 +590,11 @@ pub(super) fn render_loop_with_terminal(
             last_render,
             &tui,
             &mut suspended,
-            || state.borrow().editor.revision() != last_editor_revision,
+            || {
+                let shell = state.borrow();
+                shell.editor.revision() != last_editor_revision
+                    || shell.startup_pending != last_startup_pending
+            },
             animations.remaining(Instant::now()),
         ) {
             if let Some(reply) = suspended.take() {
@@ -620,15 +607,14 @@ pub(super) fn render_loop_with_terminal(
         {
             let mut shell = state.borrow_mut();
             let now = Instant::now();
-            if welcome_animating(&shell, now) {
-                // The animated card is a bounded cache prefix, not a reason to
-                // reflow the complete transcript on every 16 ms tick.
-                shell.invalidate_transcript();
-            }
             animations.advance(&mut shell, now);
             shell.expire_transcript_scrollbar(now);
         }
-        last_editor_revision = state.borrow().editor.revision();
+        {
+            let shell = state.borrow();
+            last_editor_revision = shell.editor.revision();
+            last_startup_pending = shell.startup_pending;
+        }
         sync_window_title(&mut tui, &state, &mut last_title);
         tui.request_render();
         state.frame_written();
@@ -658,15 +644,14 @@ mod scheduler_tests {
 
     #[test]
     fn active_state_without_a_concrete_wake_never_requests_a_frame() {
-        assert!(!render_wake_requires_frame(false, false, false, false));
+        assert!(!render_wake_requires_frame(false, false, false));
     }
 
     #[test]
     fn semantic_work_and_due_visual_transitions_each_request_a_frame() {
-        assert!(render_wake_requires_frame(true, false, false, false));
-        assert!(render_wake_requires_frame(false, true, false, false));
-        assert!(render_wake_requires_frame(false, false, true, false));
-        assert!(render_wake_requires_frame(false, false, false, true));
+        assert!(render_wake_requires_frame(true, false, false));
+        assert!(render_wake_requires_frame(false, true, false));
+        assert!(render_wake_requires_frame(false, false, true));
     }
 
     #[test]
@@ -741,7 +726,7 @@ mod scheduler_tests {
         assert_eq!(state.status_shimmer_frame, 25);
         assert_eq!(state.block_revisions[0], revision + 16);
         assert_eq!(
-            schedule.poll_interval(false, start + Duration::from_millis(2050)),
+            schedule.remaining(start + Duration::from_millis(2050)),
             Duration::from_millis(30)
         );
     }
@@ -767,7 +752,7 @@ mod scheduler_tests {
         schedule.advance(&mut state, start + Duration::from_secs(300));
         assert_eq!(state.block_revisions[1], revisions[1] + 1);
         assert_eq!(
-            schedule.poll_interval(false, start + Duration::from_secs(300)),
+            schedule.remaining(start + Duration::from_secs(300)),
             RESIZE_POLL_INTERVAL
         );
     }
@@ -779,7 +764,7 @@ mod scheduler_tests {
         let start = Instant::now();
         let mut schedule = AnimationSchedule::new();
         schedule.observe(&shell.state.borrow(), start);
-        assert_eq!(schedule.poll_interval(false, start), RESIZE_POLL_INTERVAL);
+        assert_eq!(schedule.remaining(start), RESIZE_POLL_INTERVAL);
         // The status appears after the receiver wakes, before the frame lock.
         shell
             .state
@@ -790,7 +775,7 @@ mod scheduler_tests {
             start + Duration::from_millis(10),
         );
         assert_eq!(
-            schedule.poll_interval(true, start + Duration::from_millis(89)),
+            schedule.remaining(start + Duration::from_millis(89)),
             Duration::from_millis(1)
         );
         schedule.advance(
@@ -801,7 +786,7 @@ mod scheduler_tests {
         // A semantic frame at 89 ms may coalesce beyond the 90 ms deadline;
         // selecting the due phase uses 95 ms, not a stale pre-coalescing flag.
         assert_eq!(
-            schedule.poll_interval(false, start + Duration::from_millis(95)),
+            schedule.remaining(start + Duration::from_millis(95)),
             Duration::from_millis(75)
         );
         shell.state.borrow_mut().close_activity_status("Working");
@@ -910,7 +895,7 @@ mod scheduler_tests {
         assert!(schedule.status.last_tick.is_none());
         assert!(schedule.event_dot.last_tick.is_none());
         assert_eq!(
-            schedule.poll_interval(false, start + Duration::from_millis(990)),
+            schedule.remaining(start + Duration::from_millis(990)),
             Duration::from_millis(10)
         );
         let revisions = state.block_revisions.clone();
@@ -1288,10 +1273,8 @@ impl Component for ShellComponent {
     fn render(&self, width: u16) -> Vec<String> {
         let state = self.borrow_for_render();
         if state.startup_pending {
-            // TUI::start paints immediately. Keep the renderer/input lifecycle
-            // live for onboarding, but do not cache or publish a provisional
-            // transcript/model frame. The ready frame starts from row zero.
-            return render_startup_surface(&state, width);
+            // Reserve the ready geometry without publishing a provisional model.
+            return render_startup_surface(&state, width, self.uses_application_viewport(&state));
         }
         if self.uses_application_viewport(&state) {
             state.native_animation_viewport_top.set(None);
@@ -1314,6 +1297,20 @@ impl Component for ShellComponent {
 
     fn render_update(&self, width: u16) -> Option<FrameUpdate> {
         let state = self.borrow_for_render();
+        if state.startup_pending {
+            return Some(FrameUpdate {
+                stable_prefix: 0,
+                replacement: render_startup_surface(
+                    &state,
+                    width,
+                    self.uses_application_viewport(&state),
+                ),
+                pinned: None,
+                resize_replay: None,
+                reanchor_viewport: false,
+                rebuild_scrollback: false,
+            });
+        }
         Some(if self.uses_application_viewport(&state) {
             state.native_animation_viewport_top.set(None);
             render_shell_viewport_update(
@@ -1347,7 +1344,11 @@ impl Component for ShellComponent {
             // the retained TUI diff removes all previous setup rows on release.
             return Some(FrameUpdate {
                 stable_prefix: 0,
-                replacement: render_startup_surface(&state, width),
+                replacement: render_startup_surface(
+                    &state,
+                    width,
+                    self.uses_application_viewport(&state),
+                ),
                 pinned: None,
                 resize_replay: None,
                 reanchor_viewport: false,

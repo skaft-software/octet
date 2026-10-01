@@ -1670,10 +1670,101 @@ fn real_octet_model_discovery_keeps_startup_editable() {
         );
         assert!(parser.screen().contents().contains("startup draft pasted"));
         assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A branded frame is not admission evidence: actually submit the held
+        // draft after resolution and inspect the single loopback request.
+        octet.pty.write_input(b"\r");
+        api.wait_for_request(&mut octet, 2);
+        assert_plain_user_messages(&api, 0, &["startup draft pasted"]);
+        assert_eq!(api.requests.lock().unwrap()[0]["model"], "probe");
+        api.release.send(()).unwrap();
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "fixture response done",
+            STARTUP_TIMEOUT,
+        );
+        octet.pty.drain_for(DRAIN_TIME);
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(api.requests.lock().unwrap().len(), 1);
         let capture = octet.shutdown();
         assert!(capture.status.success());
         assert!(capture.termios_restored);
         assert!(!uses_alternate_screen(&capture.output));
+    }
+}
+
+#[test]
+fn real_octet_short_pane_startup_is_static_and_keeps_the_draft_cursor() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        for columns in [48, 80] {
+            let mut octet = PtyOctet::spawn_at(
+                Path::new(env!("CARGO_BIN_EXE_octet")),
+                mode,
+                None,
+                true,
+                (columns, 8),
+                (2, false, false),
+                StartupFixture::Model("probe"),
+            );
+            octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                synchronized_frame_end_containing(bytes, b"custom/probe").is_some()
+            });
+            let ready_end =
+                synchronized_frame_end_containing(&octet.pty.output, b"custom/probe").unwrap();
+            let mut parser = vt100::Parser::new(8, columns, 512);
+            parser.process(&octet.pty.output[..ready_end]);
+            let cursor_row = parser.screen().cursor_position().0;
+            assert!(parser.screen().contents().contains("full access"));
+            let mut consumed = ready_end;
+            octet.pty.write_input(b"earlyX\x7f\x1b[200~ draft\x1b[201~");
+            await_screen(
+                &mut octet,
+                &mut parser,
+                &mut consumed,
+                "early draft",
+                STARTUP_TIMEOUT,
+            );
+            octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                synchronized_frame_end_containing(bytes, b"early draft").is_some()
+            });
+            parser.process(&octet.pty.output[consumed..]);
+            let edited_end =
+                synchronized_frame_end_containing(&octet.pty.output, b"early draft").unwrap();
+            assert_eq!(
+                parser.screen().cursor_position().0,
+                cursor_row,
+                "typing moved composer"
+            );
+            octet.pty.drain_for(Duration::from_millis(2350));
+            let settled = &octet.pty.output[edited_end..];
+            assert_eq!(
+                count_bytes(settled, FRAME_BEGIN),
+                0,
+                "decorative repaint in {mode:?}/{columns}x8"
+            );
+            assert_eq!(
+                count_bytes(&octet.pty.output[ready_end..], b"\x1b[3J"),
+                0,
+                "startup cleared saved history"
+            );
+            assert_eq!(
+                count_bytes(&octet.pty.output[ready_end..], b"\x1b[2J"),
+                0,
+                "startup replayed screen"
+            );
+            let capture = octet.shutdown();
+            assert!(capture.status.success());
+            assert!(capture.termios_restored);
+            assert_eq!(
+                count_bytes(&capture.output, FRAME_BEGIN),
+                count_bytes(&capture.output, FRAME_END)
+            );
+            assert!(!uses_alternate_screen(&capture.output));
+        }
     }
 }
 
@@ -1771,13 +1862,13 @@ impl HeldChatApi {
                     }
                 };
                 let headers = String::from_utf8_lossy(&request[..header_end]);
-                assert!(headers.starts_with(if models {
-                    "GET /v1/models HTTP/1.1"
-                } else {
-                    "POST /v1/chat/completions HTTP/1.1"
-                }));
+                let inventory = headers.starts_with("GET /v1/models HTTP/1.1");
+                assert!(
+                    (models && inventory)
+                        || headers.starts_with("POST /v1/chat/completions HTTP/1.1")
+                );
                 assert!(!headers.to_ascii_lowercase().contains("authorization:"));
-                let length: usize = if models {
+                let length: usize = if inventory {
                     0
                 } else {
                     headers
@@ -1796,12 +1887,12 @@ impl HeldChatApi {
                     assert!(n > 0);
                     request.extend_from_slice(&bytes[..n]);
                 }
-                if !models {
+                if !inventory {
                     recorded.lock().unwrap().push(
                         serde_json::from_slice(&request[header_end..header_end + length]).unwrap(),
                     );
                 }
-                let (content_type, body) = if models {
+                let (content_type, body) = if inventory {
                     ("application/json", r#"{"data":[{"id":"probe"}]}"#)
                 } else {
                     ("text/event-stream", concat!(

@@ -100,7 +100,7 @@ Custom ANSI16 palettes can also change perceived contrast.
 ## Startup and terminal replies
 
 The first branded frame waits for resolved model/setup state, workspace, and
-appearance; the welcome animation starts at that boundary. SSH alone does not
+appearance; the welcome is static at that boundary. SSH alone does not
 reduce the advertised terminal color capability.
 
 Auto can issue one OSC 11 background query and use a neutral fallback after its
@@ -187,11 +187,15 @@ every terminal-background profile.
 The startup welcome card follows the theme's content width and leading inset,
 just like the transcript, composer, and pickers. Width-capped custom themes
 center the splash; uncapped themes such as `Still` use the available width.
+The welcome fits the actual pane height after reserving the composer and gap.
+Short panes use a compact identity and permission disclosure instead of sending
+an oversized decorative card into native history. Late update hints replace
+existing hint rows rather than moving the composer.
 
 Three optional top-level tokens shape the startup splash:
 
-- `splash` — colour for the byte-mark and splash text. With a truecolor,
-  animation-capable terminal it shades into a column gradient.
+- `splash` — colour for the byte-mark and splash text. On a truecolor terminal
+  it uses a static column gradient.
 - `splash_compact` — `true` selects the default's smaller geometry (4-tall
   mark at 16 columns) instead of the larger file-theme presentation.
 - `splash_model_adaptive` — `true` keeps the default's model-adaptive

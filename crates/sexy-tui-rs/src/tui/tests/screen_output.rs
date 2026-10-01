@@ -94,7 +94,7 @@ fn pi_cursor_marker_uses_unclipped_display_cells() {
 }
 
 #[test]
-fn pi_synchronized_frame_precedes_ime_cursor_positioning() {
+fn pi_synchronized_frame_includes_ime_cursor_positioning() {
     let size = Rc::new(Cell::new((20, 8)));
     let capabilities = crate::capabilities::TerminalCapabilities::interactive(
         crate::capabilities::ColorDepth::Ansi16,
@@ -110,7 +110,7 @@ fn pi_synchronized_frame_precedes_ime_cursor_positioning() {
     let begin = output.find("\x1b[?2026h").expect("Pi frame begin");
     let end = output.find("\x1b[?2026l").expect("Pi frame end");
     let cursor = output.rfind("\x1b[3G").expect("IME cursor column");
-    assert!(begin < end && end < cursor, "{output:?}");
+    assert!(begin < cursor && cursor < end, "{output:?}");
     assert_eq!(shows.get(), 0, "Pi hides the hardware cursor by default");
     drop(output);
 
@@ -118,6 +118,61 @@ fn pi_synchronized_frame_precedes_ime_cursor_positioning() {
     assert_eq!(stops.get(), 1);
     assert_eq!(shows.get(), 1, "stop restores the user's cursor");
     assert!(writes.borrow().join("").contains("\r\n"));
+}
+
+#[test]
+fn pi_cursor_and_visibility_are_atomic_for_full_diff_shrink_and_resize() {
+    let size = Rc::new(Cell::new((20, 8)));
+    let capabilities = crate::capabilities::TerminalCapabilities::interactive(
+        crate::capabilities::ColorDepth::Ansi16,
+        true,
+    );
+    let (terminal, _, _, _, _, writes) = recording_terminal(size.clone(), capabilities);
+    let lines = Rc::new(RefCell::new(vec![
+        "heading".to_owned(),
+        format!("draft{CURSOR_MARKER}"),
+        "tail".to_owned(),
+    ]));
+    let mut tui = TUI::new(Box::new(terminal));
+    tui.set_show_hardware_cursor(true);
+    tui.add_child(Box::new(MutableLines(lines.clone())));
+    for phase in 0..4 {
+        writes.borrow_mut().clear();
+        match phase {
+            0 => tui.start(),
+            1 => {
+                lines.borrow_mut()[0] = "changed".into();
+                tui.request_render();
+            }
+            2 => {
+                lines.borrow_mut().pop();
+                tui.request_render();
+            }
+            _ => {
+                size.set((24, 9));
+                tui.request_render();
+            }
+        }
+        let output = writes.borrow().join("");
+        let begin = output.find("\x1b[?2026h").unwrap();
+        let end = output.find("\x1b[?2026l").unwrap();
+        let cursor = output.rfind("\x1b[6G").unwrap();
+        let visible = output.rfind("\x1b[?25h").unwrap();
+        assert!(
+            begin < cursor && cursor < visible && visible < end,
+            "phase={phase}: {output:?}"
+        );
+        assert_eq!(output.matches("\x1b[?2026h").count(), 1);
+        assert!(
+            writes
+                .borrow()
+                .iter()
+                .any(|write| write.contains("\x1b[?2026h")
+                    && write.contains("\x1b[6G")
+                    && write.contains("\x1b[?2026l")),
+            "split frame write"
+        );
+    }
 }
 
 #[test]

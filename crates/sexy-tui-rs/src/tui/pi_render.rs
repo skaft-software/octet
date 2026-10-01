@@ -386,12 +386,12 @@ impl<'a> TUI<'a> {
                 if move_back > 0 {
                     push_cursor_up(&mut buffer, move_back);
                 }
-                buffer.push_str("\x1b[?2026l");
-                self.terminal.write(&buffer);
                 self.cursor_row = target_row;
                 self.hardware_cursor_row = target_row;
+                self.pi_append_hardware_cursor(&mut buffer, cursor_position, new_lines.len());
+                buffer.push_str("\x1b[?2026l");
+                self.terminal.write(&buffer);
             }
-            self.pi_position_hardware_cursor(cursor_position, new_lines.len());
             self.pi_record_kitty_state(&new_lines, lazy_stable_prefix.is_some());
             self.previous_frame = new_lines;
             self.previous_size = Some((width_u16, height_u16));
@@ -518,15 +518,14 @@ impl<'a> TUI<'a> {
             }
             push_cursor_up(&mut buffer, extra_lines);
         }
-        buffer.push_str("\x1b[?2026l");
-        self.terminal.write(&buffer);
-
         self.cursor_row = new_lines.len().saturating_sub(1);
         self.hardware_cursor_row = final_cursor_row;
         self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
         self.previous_viewport_top =
             previous_viewport_top.max(final_cursor_row.saturating_sub(height.saturating_sub(1)));
-        self.pi_position_hardware_cursor(cursor_position, new_lines.len());
+        self.pi_append_hardware_cursor(&mut buffer, cursor_position, new_lines.len());
+        buffer.push_str("\x1b[?2026l");
+        self.terminal.write(&buffer);
         self.pi_record_kitty_state(&new_lines, lazy_stable_prefix.is_some());
         self.previous_frame = new_lines;
         self.previous_size = Some((width_u16, height_u16));
@@ -574,9 +573,6 @@ impl<'a> TUI<'a> {
             buffer.push_str(line);
             index = index.saturating_add(1);
         }
-        buffer.push_str("\x1b[?2026l");
-        self.terminal.write(&buffer);
-
         self.cursor_row = new_lines.len().saturating_sub(1);
         self.hardware_cursor_row = self.cursor_row;
         self.max_lines_rendered = if clear {
@@ -586,7 +582,9 @@ impl<'a> TUI<'a> {
         };
         let buffer_length = height_rows.max(new_lines.len());
         self.previous_viewport_top = buffer_length.saturating_sub(height_rows);
-        self.pi_position_hardware_cursor(cursor_position, new_lines.len());
+        self.pi_append_hardware_cursor(&mut buffer, cursor_position, new_lines.len());
+        buffer.push_str("\x1b[?2026l");
+        self.terminal.write(&buffer);
         self.pi_record_kitty_state(&new_lines, false);
         self.previous_frame = new_lines;
         self.previous_size = Some((width, height));
@@ -598,23 +596,33 @@ impl<'a> TUI<'a> {
         cursor_position: Option<(usize, usize)>,
         total_lines: usize,
     ) {
+        let mut buffer = String::new();
+        self.pi_append_hardware_cursor(&mut buffer, cursor_position, total_lines);
+        self.terminal.write(&buffer);
+    }
+
+    /// Finish cursor geometry and visibility in the caller's frame transaction.
+    fn pi_append_hardware_cursor(
+        &mut self,
+        buffer: &mut String,
+        cursor_position: Option<(usize, usize)>,
+        total_lines: usize,
+    ) {
         let Some((row, column)) = cursor_position.filter(|_| total_lines > 0) else {
-            self.terminal.hide_cursor();
+            buffer.push_str("\x1b[?25l");
             return;
         };
         let target_row = row.min(total_lines.saturating_sub(1));
-        let mut buffer = String::new();
         push_vertical_move(
-            &mut buffer,
+            buffer,
             signed_difference(target_row, self.hardware_cursor_row),
         );
         buffer.push_str(&format!("\x1b[{}G", column.saturating_add(1)));
-        self.terminal.write(&buffer);
         self.hardware_cursor_row = target_row;
-        if self.show_hardware_cursor {
-            self.terminal.show_cursor();
+        buffer.push_str(if self.show_hardware_cursor {
+            "\x1b[?25h"
         } else {
-            self.terminal.hide_cursor();
-        }
+            "\x1b[?25l"
+        });
     }
 }

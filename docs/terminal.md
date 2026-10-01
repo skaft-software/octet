@@ -40,7 +40,13 @@ OS containment.
 
 Startup keeps routine session lookup, replay, and extension-loading progress off
 screen. The composer accepts typing while startup work finishes; the resolved
-welcome card and saved conversation appear at readiness. Setup prompts, errors,
+welcome card and saved conversation appear at readiness. Fresh-start native
+composer rows are reserved locally before that frame, without provisional model
+branding. The welcome is static and pane-height bounded; ordinary typing and
+late update hints do not move it or clear saved history. Cursor placement is
+included in the synchronized frame. Working/Thinking animations remain active.
+Enter before model/session resolution retains the draft without submitting or
+queuing it; submit after resolution. Setup prompts, errors,
 and cancellation/shutdown diagnostics remain visible. Fresh sessions skip the
 replay worker entirely; resumed sessions still restore their history. `--models`
 inventory discovery also runs after the shell owns input, not before first paint.

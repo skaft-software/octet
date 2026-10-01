@@ -66,20 +66,20 @@ cells with eight contiguous columns and the `01101111` silhouette. The footer,
 not the splash, owns the current model/reasoning row. Full access is a
 warning-class permission mode, not an ordinary failure.
 
-The eight-bar byte mark retains its model-blended gradient and finite colour
-sweep on true-colour terminals. ANSI256 and ANSI16 instead use one
+The eight-bar byte mark retains its model-blended static gradient on true-colour
+terminals. ANSI256 and ANSI16 instead use one
 background-balanced model accent uniformly across all bars, without brightening
 animation. With no model accent, the theme's model accent is used. Explicit
 custom splash colours keep precedence; no-colour output uses terminal-default
-foreground. Custom-theme fallback geometry remains unchanged; short compiled
-cards prioritize update and permission state over the changelog hint. The
-terminal background remains unchanged. User-customized ANSI16 palettes can
-still affect actual contrast.
+foreground. Pane-height budgeting reserves the composer and gap; very short
+cards prioritize identity, setup, and permission state. The budget changes on
+resize, not draft edits. The terminal background remains unchanged.
+User-customized ANSI16 palettes can still affect actual contrast.
 
 Interactive startup performs one best-effort newer-stable-release check outside
 the input and renderer loops, skipped in offline mode and cancelled on exit.
-A newer release adds an accent hint immediately below the muted
-`/changelog · what's new` row in the splash's right-hand version column:
+A newer release replaces the changelog hint in the splash's right-hand version
+column without adding a row:
 `↑ v<VERSION> available · run` followed by `octet update` rendered as Markdown
 inline code. Both hints use bounded compact/ASCII fallbacks; neither occupies a
 full-width footer beneath the logo. If conversation history has already frozen

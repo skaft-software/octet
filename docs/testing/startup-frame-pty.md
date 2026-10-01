@@ -54,9 +54,20 @@ starts, in both mouse modes. Before releasing the response they require:
   even when the response is never released.
 
 The successful-discovery case then releases the gate and checks that the same
-draft survives into the resolved model frame. These are bounded regression
-assertions, not latency distributions or a claim of faster provider discovery or
-large-session replay. The composer is editable before submission is ready.
+draft survives into the resolved model frame. It then submits that draft and
+requires exactly one loopback chat request with the intended text and model.
+These are bounded regression assertions, not latency distributions or a claim of
+faster provider discovery or large-session replay. The composer is editable
+before submission is ready.
+
+## Static short-pane regression
+
+Both mouse modes also run at 48x8 and 80x8 with truecolor enabled. The composed
+VT screen must retain the permission disclosure and draft cursor row through
+typing, backspace, and bracketed paste. After the edit, a 2.35-second observation
+window must have no decorative frames and no `CSI 2J`/`CSI 3J` replay. The normal
+resize contract above still requires legitimate history replay; this test does
+not disable the renderer's replay policy.
 
 ## Isolation and safety
 
@@ -68,7 +79,8 @@ no prompt. API-wait/plain-prompt cases use a gated loopback chat fixture instead
 of a live model.
 
 Only the discovery cases omit `--offline` and enable `auto_discover` against the
-gated loopback fixture. No inference is submitted. The normal independent,
+gated loopback fixture. After discovery resolves, the successful case submits
+only to that fixture and inspects its recorded request. The normal independent,
 unauthenticated GitHub update check may also run; its success or failure is not
 part of the test's assertions. No user credentials or live model are used.
 

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Keep the startup welcome static, budget it for the actual pane height, and
+  reserve fresh-start composer geometry before model admission. Draft edits and
+  update hints no longer drive decorative historical replay. Position the native
+  hardware cursor inside the synchronized frame; active-run animations remain.
+
 ## [0.8.2] - 2026-09-30
 
 See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits.
