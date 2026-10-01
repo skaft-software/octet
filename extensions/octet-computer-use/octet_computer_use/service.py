@@ -216,7 +216,7 @@ def sanitize(driver_tool: str, values: Mapping[str, Any]) -> Dict[str, Any]:
             if driver_tool == "move_cursor" and coordinate < 0:
                 raise ArgumentError(f"{name} must be a non-negative window-local coordinate")
             forwarded[name] = coordinate
-        elif name in {"include_screenshot", "include_accessibility_tree"}:
+        elif name in {"include_screenshot", "include_accessibility_tree", "on_screen_only"}:
             if not isinstance(value, bool):
                 raise ArgumentError(f"{name} must be a boolean")
             forwarded[name] = value

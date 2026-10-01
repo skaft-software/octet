@@ -258,7 +258,7 @@ matters, run octet inside a VM.
 | `computer_use_status` | local | Provisioning, version, permissions, self-check. |
 | `computer_use_setup` | local | Install the driver from the package index. |
 | `computer_use_installed_apps` | `list_apps` | Read-only. |
-| `computer_use_windows` | `list_windows` | Read-only. |
+| `computer_use_windows` | `list_windows` | Read-only. Optional `on_screen_only: true` filters to visible windows; `false` includes off-screen windows. |
 | `computer_use_window_state` | `get_window_state` | Read-only. Accessibility tree by default; screenshot with `include_screenshot: true`. |
 | `computer_use_desktop_state` | `get_desktop_state` | Read-only. Full-screen capture. |
 | `computer_use_click` | `click` | Effectful; follows Octet's effect-confirmation policy. |

@@ -212,7 +212,7 @@ def _schema_for(driver_tool: str) -> Dict[str, Any]:
                      service.MAX_INTEGER)
             minimum = 0 if driver_tool == "move_cursor" and name in {"x", "y"} else -limit
             properties[name] = {"type": "integer", "minimum": minimum, "maximum": limit}
-        elif name in {"include_screenshot", "include_accessibility_tree"}:
+        elif name in {"include_screenshot", "include_accessibility_tree", "on_screen_only"}:
             properties[name] = {"type": "boolean"}
         elif name in {"key", "query", "session", "direction", "button", "delivery_mode",
                       "name", "bundle_id", "capture_scope", "version"}:

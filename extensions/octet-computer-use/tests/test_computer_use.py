@@ -45,6 +45,20 @@ class SanitizeTests(unittest.TestCase):
             False,
         )
 
+    def test_window_visibility_filter_requires_a_boolean(self):
+        for visible in (True, False):
+            with self.subTest(on_screen_only=visible):
+                self.assertEqual(
+                    sanitize("list_windows", {"pid": 42, "on_screen_only": visible}),
+                    {"pid": 42, "on_screen_only": visible},
+                )
+        self.assertEqual(sanitize("list_windows", {}), {})
+        self.assertEqual(sanitize("list_windows", {"on_screen_only": None}), {})
+        for invalid in ("true", "false", "yes", 1, 0, [], {}):
+            with self.subTest(on_screen_only=invalid):
+                with self.assertRaisesRegex(ArgumentError, "on_screen_only must be a boolean"):
+                    sanitize("list_windows", {"on_screen_only": invalid})
+
     def test_unreviewed_tool_is_refused_outright(self):
         with self.assertRaises(ArgumentError):
             sanitize("totally_unknown_tool", {})
@@ -229,6 +243,20 @@ class ConfirmationGateTests(unittest.TestCase):
         self.assertEqual(extension.confirmations, [])
         self.assertEqual(client.calls[0][0], "get_window_state")
 
+    def test_window_visibility_filter_reaches_driver_unchanged(self):
+        client = FakeClient(read_only=["list_windows"])
+        computer_use, extension = self.use(client)
+        for arguments in ({}, {"on_screen_only": True}, {"pid": 42, "on_screen_only": False}):
+            with self.subTest(arguments=arguments):
+                computer_use.call("list_windows", arguments)
+                self.assertEqual(client.calls[-1], ("list_windows", arguments))
+        for invalid in ("true", "false", 1, 0):
+            with self.subTest(on_screen_only=invalid):
+                with self.assertRaises(ArgumentError):
+                    computer_use.call("list_windows", {"on_screen_only": invalid})
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(extension.confirmations, [])
+
     def test_effectful_tool_prompts_once_and_dispatches_when_approved(self):
         client = FakeClient(effectful=["click"])
         computer_use, extension = self.use(client, confirm=True)
@@ -287,6 +315,11 @@ class RegistrationTests(unittest.TestCase):
             self.assertIn(name, _DRIVER_TOOLS)
             self.assertTrue(description.strip())
             self.assertIn(driver_tool, service._ARGUMENTS, f"{name} has no argument allowlist")
+
+    def test_window_visibility_filter_is_an_optional_boolean(self):
+        schema = entrypoint._schema_for("list_windows")
+        self.assertEqual(schema["properties"]["on_screen_only"], {"type": "boolean"})
+        self.assertNotIn("on_screen_only", schema.get("required", []))
 
     def test_manifest_environment_matches_the_runtime_allowlist(self):
         import tomllib
