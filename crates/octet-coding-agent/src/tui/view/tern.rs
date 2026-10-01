@@ -76,6 +76,9 @@ pub(super) struct TernSurface {
     verbose: bool,
     last_resync: u64,
     last_editor_revision: u64,
+    /// The pane was hidden and came back: re-assert native keyboard focus even
+    /// if the focused control did not change.
+    force_focus: bool,
     credit_blocked: Option<Instant>,
     images: super::tern_images::NativeImages,
     receipts:
@@ -109,9 +112,25 @@ impl TernSurface {
             verbose: false,
             last_resync: 0,
             last_editor_revision: 0,
+            force_focus: false,
             credit_blocked: None,
             receipts: Default::default(),
             images: Default::default(),
+        }
+    }
+
+    /// Track pane visibility. Hiding suspends presentation only; becoming
+    /// visible again forces a frame and re-asserts native keyboard focus,
+    /// because the terminal may have moved it while another tab was in front.
+    fn set_visible(&mut self, visible: bool) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        self.last_key = None;
+        if visible {
+            self.force_focus = true;
+            self.credit_blocked = None;
         }
     }
 
@@ -151,7 +170,12 @@ impl TernSurface {
             Incoming::Event(Event::Error { sf, msg, .. })
                 if sf.as_deref().is_none_or(|id| id == SURFACE) =>
             {
-                return Err(io::Error::other(format!("Tern surface: {msg}")));
+                // A suspended pane may reject background frames; that is not a
+                // protocol failure, and returning to the tab must not find the
+                // renderer already fallen back to ANSI.
+                if self.visible {
+                    return Err(io::Error::other(format!("Tern surface: {msg}")));
+                }
             }
             Incoming::Event(Event::Gone { sf, .. })
                 if sf.as_deref().is_none_or(|id| id == SURFACE) =>
@@ -174,12 +198,16 @@ impl TernSurface {
             Incoming::Event(Event::Visible { sf, visible })
                 if sf.as_deref().is_none_or(|id| id == SURFACE) =>
             {
-                self.visible = *visible;
-                self.last_key = None;
+                self.set_visible(*visible);
             }
-            Incoming::Event(Event::Theme { .. } | Event::Motion { .. } | Event::Resize { .. }) => {
-                self.last_key = None
+            Incoming::Event(Event::Theme { .. } | Event::Motion { .. }) => self.last_key = None,
+            Incoming::Event(Event::Resize {
+                visible: Some(visible),
+                ..
+            }) => {
+                self.set_visible(*visible);
             }
+            Incoming::Event(Event::Resize { .. }) => self.last_key = None,
             Incoming::Event(Event::Toggle {
                 sf, id, collapsed, ..
             }) if sf == SURFACE => {
@@ -230,17 +258,13 @@ impl TernSurface {
             }
             return Ok(());
         }
-        if !self.visible {
-            self.credit_blocked = None;
-            return Ok(());
-        }
         if !self.client.has_credit(SURFACE) {
-            if self
-                .credit_blocked
-                .get_or_insert_with(Instant::now)
-                .elapsed()
-                >= HELLO_TIMEOUT
-            {
+            // A hidden pane stops acknowledging frames while the terminal keeps
+            // it suspended: that is not a failure, and returning to the tab must
+            // not find the renderer already fallen back. Only a *visible* surface
+            // that has stopped being acknowledged is a real timeout.
+            let blocked = self.credit_blocked.get_or_insert_with(Instant::now);
+            if self.visible && blocked.elapsed() >= HELLO_TIMEOUT {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "Tern stopped acknowledging native frames",
@@ -374,10 +398,11 @@ impl TernSurface {
                 });
             }
         }
-        if !self.regions || self.sent.focus != next.focus {
+        if !self.regions || self.force_focus || self.sent.focus != next.focus {
             ops.push(Op::Focus {
                 id: next.focus.clone(),
             });
+            self.force_focus = false;
         }
         if !ops.is_empty() {
             let sequence = self.client.frame_ops_now(SURFACE, ops)?;
@@ -630,23 +655,28 @@ fn block_node(
             prompt_color,
             ..
         } => {
-            // TSP v1 has no per-card RGB style. Use its native ANSI component
-            // for the scoped, historical wash rather than recolouring every
-            // prior prompt with the currently selected model's global palette.
+            // TSP v1 has no per-card RGB style, so the historical prompt colour
+            // is painted with native ANSI content. Every row is padded to the
+            // transcript measure *before* the wash is applied, so the highlight
+            // reads as a full-width model-coloured card instead of a strip
+            // wrapped tightly around the words.
             let rich = shell.theme.rich_renderer();
+            let cols = shell.size.0.saturating_sub(6).max(1);
             let lines = super::render_user_prompt(
                 text,
                 model_lab,
                 prompt_color.as_deref(),
                 &rich,
                 &shell.theme,
-                shell.size.0.saturating_sub(6).max(1),
+                cols.saturating_sub(2).max(1),
             );
-            let mut cushioned = vec![" ".to_owned()];
-            cushioned.extend(lines.into_iter().map(|line| format!(" {line} ")));
-            cushioned.push(" ".to_owned());
-            let body = cushioned
-                .into_iter()
+            let card = std::iter::once(String::new())
+                .chain(lines.into_iter().map(|line| format!(" {line} ")))
+                .chain(std::iter::once(String::new()))
+                .map(|line| {
+                    let padding = usize::from(cols).saturating_sub(super::visible_width(&line));
+                    format!("{line}{}", " ".repeat(padding))
+                })
                 .map(|line| {
                     if shell.theme.prompt_wash() {
                         shell
@@ -661,13 +691,11 @@ fn block_node(
             Some(Node::with_children(
                 id(identity, "user"),
                 Kind::Section,
-                Props::new().role("octet.user"),
+                Props::new().role("octet.user").tone(Tone::User),
                 vec![Node::new(
                     id(identity, "user.body"),
                     Kind::Ansi,
-                    Props::new()
-                        .set("text", body)
-                        .set("cols", shell.size.0.saturating_sub(6).max(1)),
+                    Props::new().set("text", card).set("cols", cols),
                 )],
             ))
         }
@@ -893,7 +921,12 @@ fn composer(shell: &ShellState) -> Node {
     Node::with_children(
         "composer",
         Kind::Col,
-        Props::new().role("octet.composer").set("gap", "sm"),
+        // Tone is octet's model accent, so Tern tints this node's chrome with
+        // the active model instead of its own fixed terminal accent.
+        Props::new()
+            .role("octet.composer")
+            .tone(Tone::Accent)
+            .set("gap", "sm"),
         vec![
             Node::new("composer.rule", Kind::Rule, Props::new().tone(Tone::Accent)),
             Node::new(

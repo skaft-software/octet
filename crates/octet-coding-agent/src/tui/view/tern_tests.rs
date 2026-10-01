@@ -497,3 +497,103 @@ fn coalesced_drafts_keep_frontend_completion_revisions_and_pointer_selection() {
     assert!(shell.accept_extension_autocomplete());
     assert_eq!(shell.pending(), "beta");
 }
+
+#[test]
+fn hidden_pane_keeps_its_place_and_reasserts_focus_on_return() {
+    let (shell, mut surface, output) = setup(1);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 1);
+    surface
+        .observe(&Incoming::Event(Event::Visible {
+            sf: Some(SURFACE.into()),
+            visible: false,
+        }))
+        .unwrap();
+    // Hidden with credit exhausted: suspension, never a renderer failure.
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 1);
+    ack(&shell, 1);
+    surface
+        .observe(&Incoming::Event(Event::Visible {
+            sf: Some(SURFACE.into()),
+            visible: true,
+        }))
+        .unwrap();
+    surface.flush(&shell.state).unwrap();
+    let frame = output.last_frame();
+    assert!(frame["ops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|op| op[0] == "focus" && op[1] == "composer.editor"));
+}
+
+#[test]
+fn user_prompt_is_a_full_width_model_card_not_a_tight_wash() {
+    let (mut shell, mut surface, _) = setup(2);
+    shell.set_size(60, 20);
+    shell.state.borrow_mut().push_block(TranscriptBlock::User {
+        text: "hey what's octet?".into(),
+        model_lab: Some(ModelLab::Anthropic),
+        prompt_color: Some("#d97757".into()),
+        persisted: true,
+    });
+    surface.flush(&shell.state).unwrap();
+    let identity = shell.state.borrow().transcript_commit_ids[0];
+    let body = find_node(&surface.sent.main, &id(identity, "user.body")).unwrap();
+    let text = body.p.as_ref().unwrap().as_map()["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let widths = text
+        .lines()
+        .map(super::super::visible_width)
+        .collect::<Vec<_>>();
+    // Cushion row, prompt rows and trailing cushion all span the measure, so
+    // the row wash reads as one card instead of a strip around the words.
+    assert!(widths.len() >= 3, "{widths:?}");
+    assert!(widths.iter().all(|width| *width == 54), "{widths:?}");
+    assert_eq!(
+        find_node(&surface.sent.main, &id(identity, "user"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["tone"],
+        "user"
+    );
+}
+
+#[test]
+fn native_picker_carries_totals_focus_and_match_hits() {
+    let (mut shell, mut surface, _) = setup(2);
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Select model"),
+        items: vec!["claude-opus".into(), "gpt-5".into()],
+        descriptions: vec![None, None],
+        selected: 0,
+        filter: "op".into(),
+        action: PanelAction::SelectModel(Vec::new()),
+    });
+    surface.flush(&shell.state).unwrap();
+    let picker = surface
+        .sent
+        .layer
+        .iter()
+        .find(|node| node.k == Kind::Picker)
+        .expect("native picker");
+    let props = picker.p.as_ref().unwrap().as_map();
+    assert_eq!(
+        props["total"], 2,
+        "total is the catalogue, not the filter result"
+    );
+    assert_eq!(props["noun"], "results");
+    assert_eq!(props["focus"], "list");
+    assert_eq!(props["cursor"], 2, "search caret tracks the filter length");
+    assert_eq!(
+        props["hits"]["0"],
+        json!([[7, 9]]),
+        "provider-agnostic hit range"
+    );
+    assert_eq!(props["actions"][0]["keys"][0], "enter");
+}

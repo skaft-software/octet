@@ -135,7 +135,9 @@ move the preceding history.
 The composer uses flat `octet.composer.*` primitives: a rule, native editor,
 model-colored text controls, effort and context facts, and Send/Stop. It does
 not opt into `omp.editor` liquid-glass CSS or inject omp branding. Tern still
-owns typography and the base appearance of its native controls.
+owns typography and the base appearance of its native controls; the accent
+chrome octet *can* control is the node `tone`, so the composer carries the
+active model accent while Tern's own focus ring stays the terminal's.
 
 Slash, path and extension completions are bounded native lists anchored above
 the composer. Their gestures are fenced by the draft revision. Model, theme,
@@ -143,7 +145,11 @@ thinking, session, fork and subagent pickers reuse the host's catalogues and
 filtering, with panel-epoch-fenced gestures. Settings/help reports are native
 modal content rather than migration `rows` nodes. Internally styled documents
 and approval labels may use native `ansi` content; this never runs or repaints
-an ANSI TUI. Approval consent is published only after the exact native frame
+an ANSI TUI. A user prompt's stored per-turn colour is padded to the transcript
+measure before the wash is applied, so it reads as a full-width card rather
+than a highlight wrapped around the words. Native pickers publish the
+catalogue total, the search caret, program-computed match ranges and keyed
+footer actions, so the query reads as hits in the list. Approval consent is published only after the exact native frame
 is acknowledged, and is rejected after an unpainted selection or panel change.
 
 The frontend remains the sole stdin owner. It reassembles and routes TSP
@@ -161,6 +167,9 @@ payloads are hashed and uploaded once per content address; retained frames
 contain only blob references, dimensions and safe descriptions. Unsupported
 image kinds and rejected/disabled payloads retain text placeholders.
 
+A hidden pane suspends presentation without failing the renderer: credit
+starvation and rejected background frames while hidden are not timeouts, and
+returning to the tab forces a frame and re-asserts native keyboard focus.
 Resize, zoom and appearance events preserve native ownership and retained
 identity. Explicit eviction reopens the surface and replays its regions. Credit
 exhaustion coalesces changes until acknowledgements arrive; negotiation,
