@@ -2,23 +2,21 @@
 
 ## [Unreleased]
 
-- Sign in to paid plans without a long-lived API key, the way Codex sign-in
-  already works. `--login grok`, `--login kimi`, `--login meta`, and
-  `--login openrouter` each run the provider's own OAuth grant and store one
-  owner-private credential under `~/.octet/credentials/`;
-  `--logout <provider>` removes only that credential. Grok, Kimi, and Meta use a
-  device code and honor `--headless`, so they work over SSH; OpenRouter's browser
-  login asks you to paste the redirect URL your browser lands on. Each is a
-  separate provider from the same vendor's API-key preset
-  (`xai-subscription/…` alongside `xai/…`), so signing in never replaces a key you
-  configured, and a provider's models appear only while you are signed in.
-  Meta's grant is two steps — the device flow yields an identity token, which is
-  exchanged for a short-lived API key — and OpenRouter mints a durable key that
-  octet never renews. Refresh-token rotation is serialized within and across
-  octet processes and re-checks the credential after taking the cross-process
-  lock, so two concurrent launches cannot spend the same single-use token.
-  Anthropic (Claude Pro/Max) is deliberately not included: it needs a request-path
-  change in the Anthropic Messages codec before a privately resolved OAuth
-  credential would receive the beta headers a subscription token requires.
-  `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN` are unchanged.
+- Render octet's shell natively inside Tern. In a Tern pane
+  (`TERM_PROGRAM=tern`; `OCTET_TUI_TERN=0` disables, `=1` forces) octet opens a
+  Tern Surface Protocol surface from its render thread and draws its transcript
+  (prompt cards, reasoning, tool cards with native diffs, shell output,
+  outcomes, notices, compaction), composer and context meter with Tern's native
+  components, wearing the resolved octet theme as the surface palette. A live
+  surface replaces the pane's ANSI grid, so every other terminal keeps the
+  existing renderer untouched. Terminal → program TSP messages are consumed by
+  the input owner so they never reach the editor. Add `crates/octet-tern` (the
+  TSP wire schema, APC framing, tty session, theme projector, scene builders)
+  and document the protocol and mapping in `docs/tern.md`.
+- Show `/hotkeys` as grouped key/description tables with readable key names
+  (`Ctrl+B`) instead of raw binding ids; unbound ids are listed last. In Tern,
+  Markdown reports such as `/changelog` and `/hotkeys` are typeset natively.
+- Tern: draw user prompts as native cards so the fill never comes out ragged,
+  keep native rendering past the second turn (turn-usage rows no longer reuse a
+  node id), and stop a held Esc from leaking a Tern message into the editor.
 

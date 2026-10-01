@@ -1,0 +1,27 @@
+[package]
+name = "octet-tern"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tern Surface Protocol client for octet: native surfaces and theme projection."
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["terminal", "tern", "tsp", "tui"]
+categories = ["development-tools"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "octet-tern-demo"
+path = "src/bin/octet_tern_demo.rs"

@@ -34,6 +34,7 @@ see [installation](installation.md) for supported channels.
 - [Themes](themes.md)
 - [Shell aliases](shell-aliases.md)
 - [tmux setup](tmux.md)
+- [Tern native surfaces](tern.md)
 - [Herdr integration](herdr.md)
 - [Linux setup (Omarchy/Hyprland)](linux.md)
 - [Windows setup](windows.md)

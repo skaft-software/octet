@@ -131,7 +131,7 @@ class SourceDistributionVersionTests(unittest.TestCase):
         for name in ("Cargo.lock", "extensions/octet-serve/Cargo.lock"):
             entries = re.findall(r'name = "(octet-[^"]+)"\nversion = "([^"]+)"',
                                  (self.root / name).read_text())
-            self.assertEqual(len(entries), 5 if name == "Cargo.lock" else 3)
+            self.assertEqual(len(entries), 6 if name == "Cargo.lock" else 3)
             for package, version in entries:
                 with self.subTest(path=name, package=package):
                     self.assertEqual(version, self.version)

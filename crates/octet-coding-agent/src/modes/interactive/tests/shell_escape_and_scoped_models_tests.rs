@@ -368,7 +368,7 @@ async fn session_and_hotkeys_reports_remain_read_only_during_runs() {
     shell.begin_run("test");
     for (command, expected) in [
         ("/session info", "Active-branch messages: 1"),
-        ("/hotkeys", "app.model.cycleForward"),
+        ("/hotkeys", "| `Ctrl+P` | Cycle to next model |"),
     ] {
         let (queue, quit) =
             run_active_command(&mut shell, commands::parse(command), &inspection).await;
@@ -376,7 +376,7 @@ async fn session_and_hotkeys_reports_remain_read_only_during_runs() {
         assert!(!quit);
         assert!(shell.has_overlay());
         let text = if command == "/hotkeys" {
-            shell.hotkeys_text()
+            shell.hotkeys_markdown()
         } else {
             commands::session_text(&inspection.read_only_session().unwrap())
         };

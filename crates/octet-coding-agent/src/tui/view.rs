@@ -663,9 +663,14 @@ enum ShellOverlay {
 /// only explicit, internally styled content may retain trusted theme ANSI.
 #[derive(Clone, Debug)]
 enum ReportBody {
-    Text { text: Arc<str>, styled: bool },
+    Text {
+        text: Arc<str>,
+        styled: bool,
+    },
     Context(Arc<crate::tui::context::ContextReport>),
-    Markdown(Arc<sexy_tui_rs::Document>),
+    /// The parsed document for the ANSI renderer, plus its source for
+    /// renderers that typeset Markdown themselves (Tern).
+    Markdown(Arc<sexy_tui_rs::Document>, Arc<str>),
 }
 
 /// Mutable presentation state for a report over the transcript viewport.
@@ -1374,6 +1379,8 @@ pub(crate) struct ShellState {
     extension_ui: ShellExtensionUi,
     /// One bounded extension autocomplete result awaiting explicit host accept.
     extension_autocomplete: Option<ShellAutocompleteOverlay>,
+    /// Native selection, fenced to the same draft revision as the overlay.
+    extension_autocomplete_selection: Option<(u64, usize)>,
     status_detail: String,
     pub(crate) error: Option<String>,
     overlay: Option<ShellOverlay>,
@@ -1531,6 +1538,7 @@ fn is_provider_lifecycle_status(heading: &str) -> bool {
 
 fn invalidate_editor_autocomplete(state: &mut ShellState) {
     state.extension_autocomplete = None;
+    state.extension_autocomplete_selection = None;
     state.path_selection = 0;
 }
 
@@ -5295,6 +5303,7 @@ impl InteractiveShell {
         if !current || items.is_empty() {
             return false;
         }
+        state.extension_autocomplete_selection = None;
         state.extension_autocomplete = Some(ShellAutocompleteOverlay {
             text: snapshot.text.clone(),
             cursor: snapshot.cursor,
@@ -5305,8 +5314,8 @@ impl InteractiveShell {
         true
     }
 
-    /// Accept the first extension autocomplete choice through a normal host
-    /// editor mutation. Selection/navigation remains host-owned for now.
+    /// Accept the current extension choice through a normal host editor mutation.
+    /// Without a native selection, retain the first-choice keyboard default.
     pub fn accept_extension_autocomplete(&mut self) -> bool {
         let mut state = self.state.borrow_mut();
         let Some(overlay) = state.extension_autocomplete.clone() else {
@@ -5325,7 +5334,11 @@ impl InteractiveShell {
             state.extension_autocomplete = None;
             return false;
         }
-        let Some(item) = overlay.items.first() else {
+        let selected = state
+            .extension_autocomplete_selection
+            .filter(|(revision, _)| *revision == overlay.revision)
+            .map_or(0, |(_, index)| index);
+        let Some(item) = overlay.items.get(selected) else {
             state.extension_autocomplete = None;
             return false;
         };
@@ -5910,7 +5923,25 @@ impl InteractiveShell {
                 format!("Changelog v{}", env!("CARGO_PKG_VERSION")),
                 "Bundled release notes for this version",
             ),
-            ReportBody::Markdown(Arc::new(parse_markdown(crate::commands::CURRENT_CHANGELOG))),
+            ReportBody::Markdown(
+                Arc::new(parse_markdown(crate::commands::CURRENT_CHANGELOG)),
+                crate::commands::CURRENT_CHANGELOG.into(),
+            ),
+        );
+    }
+
+    /// Show a read-only Markdown report. The source is sanitised once and
+    /// kept beside the parsed document so a native renderer can typeset it.
+    pub fn show_report_markdown(
+        &mut self,
+        title: impl Into<String>,
+        purpose: impl Into<String>,
+        source: &str,
+    ) {
+        let source: Arc<str> = sanitize_for_terminal(source).into();
+        self.show_report(
+            OrdinarySurfaceMetadata::with_purpose(title, purpose),
+            ReportBody::Markdown(Arc::new(parse_markdown(&source)), source),
         );
     }
 
@@ -7519,6 +7550,12 @@ mod status_telemetry;
 mod surface_frame;
 mod surface_layout;
 mod terminal_text;
+pub(crate) mod tern;
+mod tern_completion;
+mod tern_images;
+pub(crate) mod tern_input;
+mod tern_picker;
+mod tern_theme;
 mod tool_render;
 mod transcript_cache;
 mod transcript_navigation;

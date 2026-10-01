@@ -560,10 +560,10 @@ fn published_panels_and_reports_share_immutable_bodies() {
     let Some(ShellOverlay::Report(report)) = state.overlay.as_mut() else {
         panic!()
     };
-    report.body = ReportBody::Markdown(document.clone());
+    report.body = ReportBody::Markdown(document.clone(), "# shared markdown\n\ncontent".into());
     owner.accept(RenderModel::capture(&mut state));
     let Some(ShellOverlay::Report(ReportOverlay {
-        body: ReportBody::Markdown(published),
+        body: ReportBody::Markdown(published, _),
         ..
     })) = &owner.state.overlay
     else {
