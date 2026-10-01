@@ -114,12 +114,20 @@ and context meter, and the todo HUD in the dock.
 
 ## Integration
 
-The demo is standalone on purpose: a faithful TSP client plus a small theme
-reader of its own, so the POC adds no visibility changes to
-`octet-coding-agent`. Wiring octet's own TUI is a second
-`sexy_tui_rs::Component` over the same semantic model — not a second stdout
-path. The renderer thread already drives exactly one `Component` and one
-`OctetTerminal`; a Tern renderer is selected in its place at construction.
+Implemented: `crates/octet-coding-agent/src/tui/view/tern.rs` runs on the
+render thread and projects `ShellState` + `TranscriptBlock` into TSP nodes,
+sends the resolved octet theme as the surface palette, and replaces one subtree
+per change on a bounded cadence. Because a live inline surface replaces the
+pane's ANSI grid, the existing renderer keeps running untouched and every
+non-Tern terminal is unaffected. `terminal_input.rs` consumes terminal →
+program TSP messages so they never reach the editor.
+
+An earlier standalone demo also exists (`octet-tern-demo`), a faithful TSP
+client with its own theme reader, useful for protocol work without octet.
+
+The paragraphs below record the seam for the deeper work: replacing (rather
+than paralleling) the ANSI renderer as a second `sexy_tui_rs::Component` over
+the same semantic model.
 
 Existing anchors (all crate-private today):
 

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- Render octet's shell natively inside Tern. In a Tern pane
+  (`TERM_PROGRAM=tern`; `OCTET_TUI_TERN=0` disables, `=1` forces) octet opens a
+  Tern Surface Protocol surface from its render thread and draws its transcript
+  (prompt cards, reasoning, tool cards with native diffs, shell output,
+  outcomes, notices, compaction), composer and context meter with Tern's native
+  components, wearing the resolved octet theme as the surface palette. A live
+  surface replaces the pane's ANSI grid, so every other terminal keeps the
+  existing renderer untouched. Terminal → program TSP messages are consumed by
+  the input owner so they never reach the editor. Add `crates/octet-tern` (the
+  TSP wire schema, APC framing, tty session, theme projector, scene builders)
+  and document the protocol and mapping in `docs/tern.md`.
+
 ## [0.8.2] - 2026-09-30
 
 See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits.
@@ -245,13 +257,6 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   `delegation.rs` (8.6K) in `octet-agent`, and `extensions.rs` (7.9K) and
   `extensions/serve.rs` (9.3K) in `octet-coding-agent`. Public items keep their
   paths through re-exports.
-
-- Add `crates/octet-tern`, a Tern Surface Protocol (TSP) client and native-surface
-  proof of concept: the v1 wire schema and APC framing, a tty session with
-  credit-based flow control, an octet theme file → Tern palette projector, and
-  scene builders for octet's transcript, tool cards, working row, composer and
-  todo HUD. Run `cargo run -p octet-tern --bin octet-tern-demo` inside a Tern
-  pane; outside Tern octet keeps its ANSI path. See `docs/tern.md`.
 
 ## [0.8.1] - 2026-09-27
 
