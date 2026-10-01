@@ -78,20 +78,6 @@ available, and that doesn't clear historical usage uncertainty.
 
 ## Provider setup
 
-<<<<<<< HEAD
-In the interactive first-run flow, an empty catalog with no explicit
-model selection opens **Add an API key** first, then **Sign in with ChatGPT /
-other supported OAuth subscriptions**, **Local/self-hosted models**, and
-**Continue without a provider**. Use `/setup` in an existing TUI session to
-open that wizard on demand; the current model/session and default stay in place
-until the user explicitly switches with `/model`. API-key entry is masked and
-saved only after review to owner-private, recoverable storage; it is not a
-command-line secret argument. Subscription choices are ChatGPT (Codex), GitHub
-Copilot, Grok, Kimi Code, Meta, and OpenRouter. See
-[first-run behavior and credential privacy](providers.md#first-run-setup-unreleased).
-The `octet setup` subcommand below still configures explicit custom endpoints;
-print/RPC modes never open onboarding.
-=======
 In the interactive first-run flow, an empty catalog with no explicit model
 selection opens **Add an API key** first, then **Sign in with ChatGPT / other
 supported OAuth subscriptions**, **Local/self-hosted models** and **Continue
@@ -99,12 +85,11 @@ without a provider**. Use `/setup` in an existing TUI session to open that
 wizard on demand. Your current model, session and default stay in place until
 you switch with `/model`. API-key entry is masked and saved only after review,
 to owner-private, recoverable storage. It's never a command-line secret
-argument. The subscription choices are ChatGPT (Codex) and GitHub Copilot. See
+argument. The subscription choices are ChatGPT (Codex), GitHub Copilot, Grok, Kimi Code, Meta and OpenRouter. See
 [first-run behavior and credential
 privacy](providers.md#first-run-setup-unreleased). The `octet setup` subcommand
 below still configures explicit custom endpoints, and print and RPC modes never
 open onboarding.
->>>>>>> origin/docs/plain-language-rewrite
 
 ```text
 octet --login codex
@@ -113,8 +98,6 @@ octet --logout PROVIDER
 octet setup --preset lm-studio --manual-model ID [--yes]
 octet setup --endpoint URL [--api-key-env VAR] [--model ID|--manual-model ID] [--offline] [--yes]
 ```
-
-<<<<<<< HEAD
 
 `--headless` prints the device verification URL/code without opening a browser.
 `--login`/`--logout` accept `codex` (`openai-codex`, `openai`), `copilot`
@@ -127,7 +110,6 @@ call. Grok, Kimi, and Meta use a device code, so `--headless` applies to them;
 OpenRouter's browser login prints the URL either way. See
 [subscription OAuth logins](providers.md#subscription-oauth-logins).
 
-=======
 For Codex, `--login codex` offers browser sign-in (PKCE on `127.0.0.1:1455`, or
 the registered fallback port `1457`) and device-code sign-in. `--headless` picks
 the device flow and prints its verification URL and code without opening a
@@ -359,4 +341,3 @@ Ygg update behavior](reference/historical-installation.md#updating).
 `--reasoning-mode pro` only loads old state. Built-in and file theme selection
 are in [Themes](themes.md). See [compatibility
 inputs](configuration.md#compatibility-inputs).
->>>>>>> origin/docs/plain-language-rewrite

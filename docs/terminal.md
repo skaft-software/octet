@@ -34,26 +34,6 @@ before running bash or changing files. Neither is a sandbox.
 <details>
 <summary>RPC mode</summary>
 
-<<<<<<< HEAD
-Startup keeps routine session lookup, replay, and extension-loading progress off
-screen. The composer accepts typing while startup work finishes; the resolved
-welcome card and saved conversation appear at readiness. Fresh-start native
-composer rows are reserved locally before that frame, without provisional model
-branding. The welcome is static and pane-height bounded; ordinary typing and
-late update hints do not move it or clear saved history. Cursor placement is
-included in the synchronized frame. Working/Thinking animations remain active.
-Enter before model/session resolution retains the draft without submitting or
-queuing it; submit after resolution. Setup prompts, errors,
-and cancellation/shutdown diagnostics remain visible. Fresh sessions skip the
-replay worker entirely; resumed sessions still restore their history. `--models`
-inventory discovery also runs after the shell owns input, not before first paint.
-After session resolution, the interactive renderer sets the terminal window title
-to `octet` or `octet · <user-assigned session name>` via OSC 2. It updates on
-rename and session changes without placing controls in plain, print, or RPC output.
-When auto-theme detection needs an OSC 11 background-color reply, the terminal
-probe starts after the first ready frame. A changed background triggers a
-repaint; a timeout or unsupported reply keeps the initial theme.
-=======
 RPC isn't a terminal UI. Its messages use `type` fields, not the native host's
 `hello` envelope, and `--mode rpc` can't be combined with `--print`. It's
 independent of [native-host protocol 1](sdk.md) and [extension API
@@ -70,6 +50,13 @@ shutdown diagnostics stay visible. Fresh sessions skip the replay worker
 entirely, and resumed sessions still restore their history. `--models` inventory
 discovery also runs after the shell owns input, not before the first paint.
 
+Fresh-start composer rows are reserved before the welcome, without provisional
+model branding. The welcome is static and fits the pane height. Typing and late
+update hints do not move it or clear saved history. Cursor placement is part of
+the synchronized frame; Working and Thinking animations remain active. Enter
+before model/session resolution keeps the draft without submitting or queuing
+it. Submit after resolution.
+
 <details>
 <summary>Window title and background detection</summary>
 
@@ -81,7 +68,6 @@ after the first ready frame. A changed background triggers a repaint, and a
 timeout or an unsupported reply keeps the initial theme.
 
 </details>
->>>>>>> origin/docs/plain-language-rewrite
 
 ## Input and active work
 
@@ -143,7 +129,6 @@ captures the wheel and drag selection, and lets a resumed session load
 newest-first. Wheel history that octet doesn't capture stays with your terminal,
 because portable protocols can't report its position.
 
-<<<<<<< HEAD
 The renderer uses a complete retained frame, synchronized frames, and exact
 first-to-last changed-range repainting. Completions, panels, reports, and streamed
 Markdown participate in the same algorithm. Resize bursts settle before repairing
@@ -154,13 +139,6 @@ as snapshots; PageUp, copy, and the session contain the authoritative transcript
 when a historical result changes. The hardware composer cursor stays visible
 through panels, resizing, and renderer resumes.
 [Rendering details](design/octet-tui.md#terminal-guarantees).
-=======
-Repainting is incremental and uses synchronized frames. When you resize, octet
-reflows the transcript, clears the saved lines and replays once. A change above
-the old viewport needs a full replay, so no history is left unwritten. The
-cursor stays visible through panels, resizes and renderer resumes. More in the
-[rendering notes](design/octet-tui.md#terminal-guarantees).
->>>>>>> origin/docs/plain-language-rewrite
 
 Layouts adapt between wide and narrow terminals and fall back from truecolor to
 256 colors, 16 colors and no color, and from Unicode to ASCII. Markdown shows

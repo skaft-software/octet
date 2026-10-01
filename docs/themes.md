@@ -120,13 +120,8 @@ also change perceived contrast.
 
 ## Startup and terminal replies
 
-<<<<<<< HEAD
-The first branded frame waits for resolved model/setup state, workspace, and
-appearance; the welcome is static at that boundary. SSH alone does not
-reduce the advertised terminal color capability.
-=======
 The first branded frame waits for resolved model and setup state, workspace and
-appearance, and the welcome animation starts at that boundary. SSH alone doesn't
+appearance, and the welcome is static at that boundary. SSH alone doesn't
 reduce the advertised terminal color capability. Native Windows never sends the
 background query: the console host turns a reply into key records, and Windows
 Terminal's reply reached the composer as typed text. Auto uses the neutral
@@ -135,7 +130,6 @@ contrast profile.
 
 <details>
 <summary>How the OSC 11 background query behaves</summary>
->>>>>>> origin/docs/plain-language-rewrite
 
 Auto can issue one OSC 11 background query and use a neutral fallback after its
 short detection deadline. The shared input owner keeps recognizing a late reply
@@ -231,7 +225,6 @@ every terminal-background profile.
 </details>
 
 The startup welcome card follows the theme's content width and leading inset,
-<<<<<<< HEAD
 just like the transcript, composer, and pickers. Width-capped custom themes
 center the splash; uncapped themes such as `Still` use the available width.
 The welcome fits the actual pane height after reserving the composer and gap.
@@ -249,19 +242,6 @@ Three optional top-level tokens shape the startup splash:
   splash: the byte-mark follows the active model family and the splash text
   uses the model accent. It claims the whole splash, so `splash` is not used.
   `Cards` uses it.
-=======
-like the transcript, composer and pickers. Width-capped custom themes center the
-splash, and uncapped themes such as `Still` use the available width. Three
-optional top-level tokens shape it:
-
-- `splash`: the color for the byte-mark and splash text. With a truecolor,
-  animation-capable terminal it shades into a column gradient.
-- `splash_compact`: `true` selects the default's smaller geometry (a 4-tall mark
-  at 16 columns) instead of the larger file-theme presentation.
-- `splash_model_adaptive`: `true` keeps the default's model-adaptive splash. The
-  byte-mark follows the active model family and the splash text uses the model
-  accent. It claims the whole splash, so `splash` isn't used. `Cards` uses it.
->>>>>>> origin/docs/plain-language-rewrite
 
 A theme file is a bounded TOML document (256 KiB) with these typed sections:
 
