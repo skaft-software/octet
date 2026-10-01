@@ -79,6 +79,7 @@ Scope:
 
 Verification:
 - Inspect the resulting diff and run the relevant tests, checks, or build steps. Investigate failures rather than working around them.
+- Edit and write results already carry their diff; review it there instead of re-printing it with shell commands.
 - Report only observed results. Never claim an unrun check passed; distinguish pre-existing failures from failures caused by your changes.
 
 Response:
@@ -262,10 +263,10 @@ fn base_prompt_contract_is_exact_and_bounded() {
 
     let dynamic_bytes = prompt_path(root.path()).len() + prompt_path(&nested).len();
     let scaffold_bytes = prompt.len() - dynamic_bytes;
-    assert_eq!(scaffold_bytes, 3_033, "reviewed stable prompt byte budget");
+    assert_eq!(scaffold_bytes, 3_147, "reviewed stable prompt byte budget");
     assert_eq!(
         scaffold_bytes.div_ceil(4),
-        759,
+        787,
         "estimated stable token budget"
     );
 }
