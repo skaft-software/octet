@@ -18,7 +18,7 @@ use super::renderer_model::{RenderModel, RenderOwner};
 use super::renderer_runtime::SharedState;
 use super::terminal_text::sanitize_for_terminal;
 use super::tern_theme::NativeTheme;
-use super::{NoticeTone, ShellState, TranscriptBlock};
+use super::{AssistantBlock, NoticeTone, ShellState, TranscriptBlock};
 use crate::tui::theme::ModelLab;
 
 pub(super) const SURFACE: &str = "octet.session";
@@ -681,6 +681,42 @@ fn id(identity: u64, suffix: &str) -> String {
     format!("t{identity}.{suffix}")
 }
 
+/// A follow-up assistant message.
+///
+/// A bare `md` node is Tern's default prose: no label, no fill, so a turn's
+/// replies read as one wall of text. `omp` draws each reply as a labelled
+/// custom message — a card carrying the model label over the `customMessage*`
+/// palette tokens, which `tern_theme` already projects but nothing consumed.
+/// Projecting that same shape gives each message its own identity instead of
+/// the default look, and keeps streaming on the single `md` leaf so a growing
+/// reply still patches one node.
+fn assistant_node(identity: u64, block: &AssistantBlock, shell: &ShellState) -> Node {
+    let label = if shell.model_display.is_empty() {
+        &shell.model
+    } else {
+        &shell.model_display
+    };
+    Node::with_children(
+        id(identity, "assistant"),
+        Kind::Card,
+        Props::new()
+            .role("octet.assistant")
+            .text(
+                "head",
+                Text::Spans(vec![Span::styled(sanitize_for_terminal(label), "accent")]),
+            )
+            .set("frame", "card")
+            .set("gap", "sm"),
+        vec![Node::new(
+            id(identity, "assistant.md"),
+            Kind::Md,
+            Props::new()
+                .set("text", tighten_markdown(&block.text))
+                .set("stream", !block.finished),
+        )],
+    )
+}
+
 /// Collapse excess vertical whitespace in native Markdown projections.
 ///
 /// Tern typesets Markdown with its own paragraph rhythm, so stacked blank
@@ -753,14 +789,7 @@ fn block_node(
                 )],
             ))
         }
-        TranscriptBlock::Assistant(block) => Some(Node::new(
-            id(identity, "assistant"),
-            Kind::Md,
-            Props::new()
-                .role("octet.assistant")
-                .set("text", tighten_markdown(&block.text))
-                .set("stream", !block.finished),
-        )),
+        TranscriptBlock::Assistant(block) => Some(assistant_node(identity, block, shell)),
         TranscriptBlock::Reasoning(block) => Some(Node::with_children(
             id(identity, "reasoning"),
             Kind::Section,

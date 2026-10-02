@@ -26,6 +26,9 @@
   OS returns focus without a TSP `Visible` event (screen recording, space
   switch). Native Markdown also caps stacked blank lines at one (code fences
   untouched) and the welcome/composer gaps tighten from `lg`/`md` to `sm`.
+- Tern: draw follow-up assistant messages as labelled native cards (model label
+  over the projected `customMessage*` palette) instead of a bare Markdown node
+  in Tern's default prose look.
 
 ## [0.8.2] - 2026-09-30
 

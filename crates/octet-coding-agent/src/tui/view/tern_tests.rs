@@ -125,7 +125,7 @@ fn streaming_materializes_source_and_only_patches_the_retained_leaf() {
     surface.flush(&shell.state).unwrap();
     let identity = shell.state.borrow().transcript_commit_ids[0];
     assert_eq!(
-        find_node(&surface.sent.main, &id(identity, "assistant"))
+        find_node(&surface.sent.main, &id(identity, "assistant.md"))
             .unwrap()
             .p
             .as_ref()
@@ -148,13 +148,40 @@ fn streaming_materializes_source_and_only_patches_the_retained_leaf() {
         .unwrap()
         .iter()
         .any(|op| op[0] == "set"
-            && op[1] == id(identity, "assistant")
+            && op[1] == id(identity, "assistant.md")
             && op[2]["text"] == "hello 🦀 world"));
     assert!(!frame["ops"]
         .as_array()
         .unwrap()
         .iter()
         .any(|op| op[0] == "add" || op[0] == "del"));
+}
+
+#[test]
+fn assistant_replies_are_labelled_cards_not_default_prose() {
+    let (shell, mut surface, _) = setup(2);
+    shell.state.borrow_mut().model_display = "Sonnet 4.5".into();
+    shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Assistant(Box::new(
+            AssistantBlock::streaming("the fix is a checked subtraction"),
+        )));
+    surface.flush(&shell.state).unwrap();
+    let identity = shell.state.borrow().transcript_commit_ids[0];
+    let card = find_node(&surface.sent.main, &id(identity, "assistant")).unwrap();
+    // A labelled custom-message card, like omp's replies, instead of a bare
+    // `md` node that Tern renders with its default prose look.
+    assert_eq!(card.k, Kind::Card);
+    let props = card.p.as_ref().unwrap().as_map();
+    assert_eq!(props["role"], "octet.assistant");
+    assert_eq!(props["frame"], "card");
+    assert_eq!(props["head"][0]["t"], "Sonnet 4.5");
+    // Streaming still lives on the single Markdown leaf, so a growing reply
+    // patches one node instead of re-sending the card.
+    let body = find_node(&surface.sent.main, &id(identity, "assistant.md")).unwrap();
+    assert_eq!(body.k, Kind::Md);
+    assert_eq!(body.p.as_ref().unwrap().as_map()["stream"], true);
 }
 
 #[test]
