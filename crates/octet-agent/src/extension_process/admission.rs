@@ -310,6 +310,7 @@ pub(super) fn insert_child_request(
         state: AtomicU8::new(CHILD_ACTIVE),
         changed: Notify::new(),
         cancel_on_response_abort: StdMutex::new(None),
+        composition_cancellation: StdMutex::new(None),
     });
     match children.entry(id) {
         std::collections::hash_map::Entry::Vacant(entry) => {
@@ -337,6 +338,7 @@ pub(super) fn settle_child_request(
 ) -> bool {
     let child = lock_std_mutex(child_requests).remove(id);
     if let Some(child) = child {
+        cancel_composition_work(&child.response_state);
         child
             .response_state
             .state
@@ -435,8 +437,15 @@ pub(super) fn try_queue_child_response_line(
             Ok(ChildResponseAdmission::Queued)
         }
         Err(error) => {
-            response_state.state.store(CHILD_ACTIVE, Ordering::Release);
-            response_state.changed.notify_waiters();
+            // Do not restore a dead parent's child if queue admission loses
+            // a race with cancellation. Match the async response claim path.
+            drop(ChildResponseClaim {
+                child_requests: Arc::clone(child_requests),
+                id: id.clone(),
+                response_state,
+                admitted: false,
+                abort_cancel: None,
+            });
             Err(error)
         }
     }
@@ -488,6 +497,7 @@ pub(super) fn cancel_active_children(
                     )
                     .is_ok() =>
             {
+                cancel_composition_work(&response_state);
                 settled.push((id, response_state));
             }
             CHILD_RESPONDING => {

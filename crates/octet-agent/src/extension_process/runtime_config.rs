@@ -14,6 +14,9 @@ pub struct ExtensionRuntimeConfig {
     /// Offer the optional host-owned child model-session service. The product
     /// must bind an enabled delegation runtime before the service is usable.
     pub agent_sessions: bool,
+    /// Offer API `0.4` request-scoped tool composition. A model-tool parent
+    /// must separately supply the host dispatcher through its progress sink.
+    pub tool_composition: bool,
     /// Optional bounded API 0.3 active-session lifecycle driver. It is offered
     /// only when configured; it remains inactive until the product binds a safe
     /// interactive idle boundary. Legacy processes never retain this service.
@@ -70,6 +73,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
                 &self.flag_values.keys().collect::<Vec<_>>(),
             )
             .field("agent_sessions", &self.agent_sessions)
+            .field("tool_composition", &self.tool_composition)
             .field(
                 "session_lifecycle_configured",
                 &self.session_lifecycle.is_some(),
@@ -107,6 +111,7 @@ impl ExtensionRuntimeConfig {
             host_state: ExtensionHostState::default(),
             flag_values: BTreeMap::new(),
             agent_sessions: false,
+            tool_composition: false,
             session_lifecycle: None,
             event_bus: None,
             approvals: false,
@@ -130,6 +135,7 @@ impl ExtensionRuntimeConfig {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct OfferedHostServices {
     pub(super) agent_sessions: bool,
+    pub(super) tool_composition: bool,
     pub(super) session_lifecycle: bool,
     pub(super) approvals: bool,
     pub(super) secrets: bool,

@@ -150,7 +150,7 @@ class SourceDistributionVersionTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
                          self.version)
         self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
-        for package in ("octet-browse", "octet-computer-use", "octet-mcp", "octet-subagents", "octet-web-search"):
+        for package in ("octet-browse", "octet-codemode", "octet-computer-use", "octet-mcp", "octet-subagents", "octet-web-search"):
             manifest = (self.root / "extensions" / package / "extension.toml").read_text()
             with self.subTest(package=package):
                 self.assertIn(f'\nversion = "{self.version}"\n', manifest)

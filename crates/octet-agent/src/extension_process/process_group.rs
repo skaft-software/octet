@@ -143,6 +143,9 @@ pub const EXTENSION_FEATURE_MODEL_CATALOG: &str = "model_catalog";
 /// API 0.4 host-owned local compaction replacement (vision models only).
 pub const EXTENSION_FEATURE_COMPACTION_STRATEGY: &str = "compaction_strategy";
 
+/// Optional API `0.4` request-scoped host tool composition service.
+pub const EXTENSION_FEATURE_TOOL_COMPOSITION: &str = "tool_composition_v1";
+
 pub(super) const API_0_2_REQUIRED_FEATURES: &[&str] = &[
     EXTENSION_FEATURE_REQUEST_CANCELLATION,
     EXTENSION_FEATURE_CONTENT_PARTS,

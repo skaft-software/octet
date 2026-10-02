@@ -876,6 +876,7 @@ mod tests {
             ids,
             vec![
                 "octet-browse",
+                "octet-codemode",
                 "octet-computer-use",
                 "octet-mcp",
                 "octet-subagents",

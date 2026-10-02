@@ -79,6 +79,31 @@ other API version negotiates this replacement hook.
 
 </details>
 
+## Tool composition
+
+The optional first-party [octet-codemode](../extensions/octet-codemode/README.md)
+bundle runs Pi's pinned offline QuickJS/WASM runtime (Node 22.19+). It adds
+single-shot JavaScript batching/chaining/filtering of the host's existing tools,
+not a new model, shell, filesystem or network authority. The guest cannot access
+Node APIs; the trusted launcher remains an ordinary OS process subject to the
+extension trust rules below.
+
+Enable explicitly with `--enable-extension octet-codemode`. Startup flags
+`--codemode-mode on|only` and `--codemode-inline-budget 0..16000` control
+presentation, not policy. The default `on` preserves ordinary direct tools;
+`only` keeps them in a separate frozen nested registry. Excluded/disabled tools
+stay unavailable in either mode. `/codemode status` and the menu are read-only
+help surfaces.
+
+Embedders opt into the generic API `0.4` `tool_composition_v1` service through
+`ExtensionRuntimeConfig.tool_composition`; it defaults false. The coding host
+offers it to enabled trusted API `0.4` processes. The host binds dispatch only
+to live model-tool parents, preserving schema validation, effects, approvals,
+hooks, cancellation, session budgets, private durable receipts and branch-store
+ancestry. Commands, hooks, stale/foreign parents and recursive compositions
+cannot use it. See the [wire contract](extensions/PROTOCOL-REFERENCE.md#225-compositioncontext-compositioncall-compositionstore-api-04-feature-tool_composition_v1)
+for declarations, limits and secure oversized JSON transport.
+
 ## Kernel boundary
 
 The host owns model conversations, sessions and tool-result persistence,
@@ -158,7 +183,7 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, SDK source packages and five executable
+names or imports. The local host, SDK source packages and six executable
 bundles have distribution version **0.8.2**. That doesn't select an extension
 API or publish SDK registries. Catalog installation needs version-matched
 published assets: see [installation](installation.md) and the [release

@@ -1121,11 +1121,7 @@ impl ExtensionHost {
 
     /// Returns the exact provider schemas currently registered, in wire order.
     pub fn tool_definitions(&self) -> Vec<ToolDef> {
-        self.tool_snapshot()
-            .1
-            .iter()
-            .map(|tool| tool.definition())
-            .collect()
+        crate::tool_composition::advertised_surface(&self.tool_snapshot().1)
     }
 }
 

@@ -422,9 +422,11 @@ fn progress_payload(progress: ToolProgress) -> serde_json::Value {
             "bytes": bytes,
             "events": events,
         }),
-        ToolProgress::SessionEvent(_, _) => serde_json::json!({
-            "type": "session_event",
-        }),
+        ToolProgress::SessionEvent(_, _) | ToolProgress::SessionMetadataEvent(_, _) => {
+            serde_json::json!({
+                "type": "session_event",
+            })
+        }
     }
 }
 

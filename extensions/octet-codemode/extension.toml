@@ -1,0 +1,24 @@
+name = "octet-codemode"
+version = "0.8.2"
+api_version = "0.4"
+requires_octet = "=0.8.2"
+description = "Pi's offline QuickJS/WASM JavaScript sandbox for bounded host-brokered tool composition"
+
+[entrypoint]
+command = "extension.py"
+
+[capabilities]
+# Trusted launcher reads this bundle and writes only host-owned private scratch.
+# Guest JavaScript has no filesystem/process/network authority.
+filesystem = "unrestricted"
+process = false
+network = false
+
+[contributes]
+tools = ["codemode"]
+commands = ["codemode"]
+menu = true
+flags = [
+  { name = "codemode-mode", type = "string", default = "on", description = "Tool presentation: on or only" },
+  { name = "codemode-inline-budget", type = "integer", default = 3000, description = "Estimated token budget for inline tool declarations (0..16000)" },
+]

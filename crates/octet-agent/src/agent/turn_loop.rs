@@ -154,10 +154,7 @@ impl Agent {
         // leaves a frontend free to revise and retry the same draft.
         let (initial_tool_revision, initial_tools) = self.extensions.tool_snapshot();
         let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
-            initial_tools
-                .iter()
-                .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
-                .collect()
+            advertised_tool_surface(&initial_tools, &self.model)
         } else {
             Vec::new()
         };
@@ -338,7 +335,8 @@ impl Agent {
             let run_context = run_guard.context();
 
             let mut tool_revision = initial_tool_revision;
-            let tools = initial_tools;
+            let mut composition_tools = initial_tools;
+            let tools = crate::tool_composition::direct_surface(&composition_tools);
             let mut tool_defs = initial_tool_defs;
             let mut tool_map: HashMap<String, Arc<dyn Tool>> =
                 HashMap::with_capacity(if tools_enabled { tools.len() } else { 0 });
@@ -646,10 +644,7 @@ impl Agent {
                 if current_revision != tool_revision {
                     tool_revision = current_revision;
                     if tools_enabled && !answer_only {
-                        let next_tool_defs: Vec<ToolDef> = current_tools
-                            .iter()
-                            .map(|tool| advertised_tool_definition(tool.as_ref(), &model))
-                            .collect();
+                        let next_tool_defs = advertised_tool_surface(&current_tools, &model);
                         if let Err(error) = require_tool_schema_budget(
                             &next_tool_defs,
                             tool_schema_budget_bytes,
@@ -657,6 +652,8 @@ impl Agent {
                             break 'run FinishReason::Failed(error);
                         }
                         tool_defs = next_tool_defs;
+                        composition_tools = current_tools;
+                        let current_tools = crate::tool_composition::direct_surface(&composition_tools);
                         tool_map.clear();
                         tool_map.reserve(current_tools.len());
                         for tool in &current_tools {
@@ -2331,6 +2328,18 @@ impl Agent {
                                     .and_then(|head| session.resolve_active_skills(&head).ok())
                                     .map(|state| state.active_skills)
                                     .unwrap_or_default();
+                                let composition_scope = tool.composition_config().map(|_| CompositionDispatcher::scope(
+                                    call.id.clone(), call.name.clone(), composition_tools.clone(),
+                                    sandbox.clone(), tool_scope.clone(), resource_owner.clone(),
+                                    effect_run_id.clone(), tool_revision, active_skills.clone(),
+                                    tool_call_hooks.clone(), effect_broker.clone(), progress_sink.clone(),
+                                    abort.cancellation.clone(), session, model.clone(),
+                                    max_session_tokens, max_session_cost_microdollars,
+                                ));
+                                let tool_progress = match &composition_scope {
+                                    Some(scope) => progress_sink.clone().with_composition(scope.0.clone()),
+                                    None => progress_sink.clone(),
+                                };
                                 let tool_ctx = ToolContext {
                                     workspace: &sandbox.workspace,
                                     sandbox: &sandbox,
@@ -2338,7 +2347,7 @@ impl Agent {
                                     resource_owner: &resource_owner,
                                     active_skills: &active_skills,
                                     registered_tools: &registered_tools,
-                                    progress: progress_sink.clone(),
+                                    progress: tool_progress,
                                     cancellation: abort.cancellation.clone(),
                                 };
                                 let hook_arguments = args.clone();
@@ -2427,7 +2436,14 @@ impl Agent {
                                     committed_marker.store(true, Ordering::Release);
                                     started_at_marker
                                         .store(crate::session::now_unix_millis(), Ordering::Release);
-                                    tool.execute(args, &tool_ctx).await
+                                    if composition_scope.is_some() {
+                                        tokio::time::timeout(
+                                            std::time::Duration::from_millis(crate::tool_composition::COMPOSITION_TIMEOUT_MS),
+                                            tool.execute(args, &tool_ctx),
+                                        ).await.unwrap_or_else(|_| Err(ToolError::new("composition exceeded the 30 second host deadline; state may be partially changed")))
+                                    } else {
+                                        tool.execute(args, &tool_ctx).await
+                                    }
                                 };
                                 tokio::pin!(operation);
                                 // Cancellation drops the pinned future, which
@@ -2552,6 +2568,13 @@ impl Agent {
                                         Err(cancelled_tool_error())
                                     }
                                 };
+                                if let Some(scope) = &composition_scope {
+                                    scope.0.stop.cancel();
+                                }
+                                let result = match &composition_scope {
+                                    Some(scope) => scope.0.collect_usage(result),
+                                    None => result,
+                                };
                                 // Terminal boundary: the call is over, so the
                                 // panel gets the collapsed latest decoration
                                 // now, whatever the pace deadline says.
@@ -2625,6 +2648,19 @@ impl Agent {
 
                     apply_execution_policy_denial(&mut policy_decision, &result);
 
+                    // A failed/cancelled script can still have completed billed
+                    // nested calls. Persist their aggregate before another
+                    // script is admitted; checkpoints alone are not the hard
+                    // session-limit ledger.
+                    let usage_commit = if composition_tools.iter().any(|tool| {
+                        tool.definition().name == call.name && tool.composition_config().is_some()
+                    }) {
+                        if let Some(usage) = result.as_ref().ok().and_then(|output| output.usage()).copied() {
+                            run_cost.add(None);
+                            session.record_tool_composition_usage(call.id.0.clone(), usage)
+                        } else { Ok(()) }
+                    } else { Ok(()) };
+
                     // Emit policy metadata before the durable result commit: a
                     // session-write failure must not hide a decision already
                     // made for this exact call.
@@ -2636,6 +2672,10 @@ impl Agent {
                         };
                         notify_observers(&observers, &ev);
                         yield ev;
+                    }
+
+                    if let Err(error) = usage_commit {
+                        break 'run FinishReason::Failed(error.into());
                     }
 
                     // ── COMMIT BOUNDARY ──────────────────────────────────
@@ -2652,6 +2692,7 @@ impl Agent {
                     // execution (extension/MCP registrations). Later requests
                     // exclude announced schemas under deferred tool loading.
                     let (_, snapshot_tools) = extension_host.tool_snapshot();
+                    let snapshot_tools = crate::tool_composition::direct_surface(&snapshot_tools);
                     let newly_added: Vec<String> = snapshot_tools
                         .iter()
                         .map(|tool| tool.definition().name)

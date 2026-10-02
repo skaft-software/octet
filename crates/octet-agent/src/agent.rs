@@ -91,6 +91,7 @@ use crate::tools::{SummarizationRetryPolicy, SummarizationRetryScheduled};
 
 mod budget;
 mod compaction;
+mod composition;
 mod context_estimate;
 mod control;
 mod deferred;
@@ -108,6 +109,7 @@ mod turn_loop;
 
 use self::budget::*;
 use self::compaction::*;
+use self::composition::*;
 use self::context_estimate::*;
 pub use self::control::PreparedSteering;
 pub use self::control::RunControl;
@@ -919,6 +921,7 @@ impl Agent {
             display_text: self.prompt_display_text.take(),
             run_outcome: None,
             tool_output: None,
+            tool_composition: None,
             tool_started_unix_ms: None,
             tool_finished_unix_ms: None,
             native_steering: None,
@@ -1155,6 +1158,7 @@ impl Agent {
     /// prompt from the tools that will actually execute.
     pub fn tool_prompt_contributions(&self) -> Vec<ToolPromptContribution> {
         let (_, tools) = self.extensions.tool_snapshot();
+        let tools = crate::tool_composition::direct_surface(&tools);
         collect_tool_prompt_contributions(tools.iter().map(|tool| tool.as_ref()))
     }
 
@@ -1169,6 +1173,7 @@ impl Agent {
             return self.system.clone();
         }
         let (_, tools) = self.extensions.tool_snapshot();
+        let tools = crate::tool_composition::direct_surface(&tools);
         let section = render_tool_prompt_section(tools.iter().map(|tool| tool.as_ref()));
         match section {
             None => self.system.clone(),
@@ -1427,6 +1432,9 @@ impl Agent {
         Err(AgentError::RunEnded)
     }
 }
+
+#[cfg(test)]
+mod composition_host_tests;
 
 #[cfg(test)]
 mod tests;

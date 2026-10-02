@@ -136,6 +136,7 @@ pub(super) struct PendingRequest {
     pub(super) resource_owner: Option<ExtensionResourceOwner>,
     pub(super) last_progress_sequence: Option<u64>,
     pub(super) tool_call_policy_digest: Option<[u8; 32]>,
+    pub(super) composition_files: Arc<CompositionFiles>,
 }
 
 pub(super) fn tool_call_policy_digest(tool: &str, arguments: &serde_json::Value) -> [u8; 32] {
@@ -170,6 +171,7 @@ pub(super) struct ChildResponseState {
     pub(super) state: AtomicU8,
     pub(super) changed: Notify,
     pub(super) cancel_on_response_abort: StdMutex<Option<String>>,
+    pub(super) composition_cancellation: StdMutex<Option<CancellationToken>>,
 }
 
 pub(super) struct ChildResponseClaim {
@@ -213,6 +215,7 @@ impl Drop for ChildResponseClaim {
             let deferred_cancel =
                 lock_std_mutex(&self.response_state.cancel_on_response_abort).take();
             if deferred_cancel.is_some() {
+                cancel_composition_work(&self.response_state);
                 self.response_state
                     .state
                     .store(CHILD_SETTLED, Ordering::Release);
@@ -961,6 +964,7 @@ impl ProcessConnection {
                     child_interaction_progress,
                     resource_owner,
                     last_progress_sequence: None,
+                    composition_files: Arc::new(CompositionFiles::default()),
                     tool_call_policy_digest: (method == methods::TOOL_CALL)
                         .then(|| {
                             Some(tool_call_policy_digest(
