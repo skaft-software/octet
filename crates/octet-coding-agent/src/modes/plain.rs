@@ -272,7 +272,11 @@ async fn run_prompt(
     }
     app.agent.set_system_prompt(composition.system);
     app.agent.set_prompt_display_text(Some(display_prompt));
-    let mut run = match app.agent.prompt(composition.prompt).await {
+    let mut run = match app
+        .agent
+        .prompt_with_responses_prewarm(composition.prompt)
+        .await
+    {
         Ok(run) => run,
         Err(error) => {
             // Pending extension context remains uncommitted. A later TTY

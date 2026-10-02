@@ -1733,7 +1733,7 @@ async fn run_rpc_loop(
         settings.registered_tools = app.agent.registered_tool_names();
         app.agent
             .set_provider_retries_enabled(settings.auto_retry_enabled);
-        let mut run = match app.agent.prompt(prompt).await {
+        let mut run = match app.agent.prompt_with_responses_prewarm(prompt).await {
             Ok(run) => run,
             Err(error) => {
                 output.error(

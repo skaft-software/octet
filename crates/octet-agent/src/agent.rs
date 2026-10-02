@@ -682,6 +682,7 @@ impl Agent {
         if self.session.has_unsettled_native_steering() {
             return Ok(None);
         }
+        let system = self.model_visible_system(true);
         let responses = match self.auto_compaction_mode {
             AgentCompactionMode::NativeResponses
                 if !self.model.responses_features().reasoning_effort_updates =>
@@ -689,18 +690,15 @@ impl Agent {
                 Some(native_responses_options(
                     &self.session,
                     &self.model,
-                    &self.system,
+                    &system,
                     self.service_tier,
                 )?)
             }
             AgentCompactionMode::NativeResponses
             | AgentCompactionMode::Local
-            | AgentCompactionMode::Disabled => durable_responses_options(
-                &self.session,
-                &self.model,
-                &self.system,
-                self.service_tier,
-            )?,
+            | AgentCompactionMode::Disabled => {
+                durable_responses_options(&self.session, &self.model, &system, self.service_tier)?
+            }
         };
         let tools: Vec<_> = self
             .extensions
@@ -711,7 +709,7 @@ impl Agent {
             .collect();
         require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
         let request = Request {
-            system: (!self.system.is_empty()).then(|| self.system.clone()),
+            system: (!system.is_empty()).then_some(system),
             messages: self.session.context()?,
             tools,
             tool_choice: ToolChoice::Auto,
@@ -1315,7 +1313,22 @@ impl Agent {
     /// failed, or max-turns — is reported by exactly one
     /// [`AgentEvent::RunFinished`].
     pub async fn prompt(&mut self, input: impl Into<UserInput>) -> Result<Run<'_>, AgentError> {
-        self.prompt_with_tools(input.into(), true).await
+        self.prompt_with_tools(input.into(), true, false).await
+    }
+
+    /// Begins a run with best-effort Responses WebSocket prewarming before
+    /// its first admitted provider request. Only the pre-submission durable
+    /// context is warmed, without generating or persisting an assistant turn.
+    ///
+    /// Prewarming is driven by the run stream, shares its cancellation, and
+    /// is bounded to thirty seconds (or the shorter endpoint timeout). Errors
+    /// do not prevent ordinary inference or its HTTP/SSE fallback. Non-WebSocket
+    /// routes are unchanged; an already-live connection needs no new warmup.
+    pub async fn prompt_with_responses_prewarm(
+        &mut self,
+        input: impl Into<UserInput>,
+    ) -> Result<Run<'_>, AgentError> {
+        self.prompt_with_tools(input.into(), true, true).await
     }
 
     /// Begins a run whose provider requests expose no tools. This is used for
@@ -1324,7 +1337,7 @@ impl Agent {
         &mut self,
         input: impl Into<UserInput>,
     ) -> Result<Run<'_>, AgentError> {
-        self.prompt_with_tools(input.into(), false).await
+        self.prompt_with_tools(input.into(), false, false).await
     }
 
     /// Declares the Agent's static tool overlay complete and releases queued

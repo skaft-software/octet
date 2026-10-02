@@ -156,7 +156,7 @@ async fn run_prompt(
     parts.extend(media.into_iter().map(InputPart::Media));
     let input = UserInput::from(parts);
     let mut events = json.then(|| JsonEventStream::new(app, &input));
-    let mut run = match app.agent.prompt(input.clone()).await {
+    let mut run = match app.agent.prompt_with_responses_prewarm(input.clone()).await {
         Ok(run) => run,
         Err(error) => anyhow::bail!(
             "{}",
