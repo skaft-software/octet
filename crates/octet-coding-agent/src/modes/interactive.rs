@@ -124,6 +124,38 @@ struct InteractiveExtensionConfirmations<'a> {
 }
 
 impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionConfirmations<'_> {
+    fn command_shell(&mut self) -> Option<&mut InteractiveShell> { Some(self.shell) }
+
+    fn wait_for_command_event<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => Ok(None),
+                event = self.input.next() => match event {
+                    Some(Ok(event)) => Ok(Some(event)),
+                    Some(Err(error)) => Err(error.into()),
+                    None => Ok(None),
+                },
+            }
+        })
+    }
+
+    fn command_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Key(key) if keymap::is_close_key(&key) => {
+                self.shell.request_close();
+                true
+            }
+            Event::Key(key) if is_ctrl_c(&key) => true,
+            Event::Resize(columns, rows) => {
+                self.shell.set_size(columns, rows);
+                self.shell.render();
+                false
+            }
+            event => { let _ = handle_cancellable_wait_input(self.shell, event); self.shell.render(); false }
+        }
+    }
+
     fn wait_for_cancel<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
             loop {
@@ -317,6 +349,7 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let mut scroll_dirty = false;
+    let remote_ui_wake = executable_extensions.remote_ui_wake();
     loop {
         if shell.close_requested() {
             return Ok(Idle::Quit);
@@ -332,6 +365,9 @@ where
                     Some(Err(error)) => return Err(error.into()),
                     None => return Ok(Idle::Quit),
                 };
+                if executable_extensions.route_remote_ui_event(shell, &event) {
+                    continue;
+                }
                 // Search owns its query before any extension or clipboard
                 // admission; pasted paths/text must not become composer input.
                 if shell.intercept_transcript_input(&event) {
@@ -511,6 +547,9 @@ where
                     None => std::future::pending::<()>().await,
                 }
             } => return Ok(Idle::GoalContinuation),
+            _ = crate::extensions::remote_ui::notified(&remote_ui_wake) => {
+                if apply_extension_background(shell, executable_extensions) { shell.render(); }
+            }
             _ = extension_tick.tick() => {
                 // A modal is an in-progress interactive action, not a safe
                 // active-session replacement boundary. Keep the bounded
@@ -3020,6 +3059,7 @@ where
         Pin<Box<dyn Future<Output = anyhow::Result<crate::update::UpdateStatus>>>>,
     > = None;
     let mut update_report_open = false;
+    let remote_ui_wake = executable_extensions.remote_ui_wake();
     let mut modal_refresh = tokio::time::interval(Duration::from_secs(1));
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -3220,6 +3260,9 @@ where
                 } else { refresh_active_subagent_list(shell, executable_extensions); }
                 shell.render();
             }
+            _ = crate::extensions::remote_ui::notified(&remote_ui_wake) => {
+                if apply_extension_background(shell, executable_extensions) { shell.render(); }
+            }
             _ = extension_tick.tick() => {
                 if apply_extension_background(shell, executable_extensions) {
                     shell.render();
@@ -3255,6 +3298,9 @@ where
                         continue;
                     }
                 };
+                if !clipboard_replay && executable_extensions.route_remote_ui_event(shell, &event) {
+                    continue;
+                }
                 if clipboard_replay {
                     // A higher-priority branch may have changed ownership since
                     // the failed read settled on the preceding select iteration.

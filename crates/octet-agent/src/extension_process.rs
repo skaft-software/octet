@@ -71,6 +71,13 @@ use crate::extension_presentation::ExtensionPresentationSnapshot;
 use crate::extension_provider::{
     ExtensionProviderOwner, ExtensionProviderRegistry, ExtensionProviderRegistryError,
 };
+use crate::extension_remote_ui::{
+    ExtensionRemoteUiClosed, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiFrame,
+    ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey, ExtensionRemoteUiMouse,
+    ExtensionRemoteUiOpenRequest,
+    ExtensionRemoteUiOperation, ExtensionRemoteUiResize, RemoteUiChildRequest, RemoteUiMailbox,
+    EXTENSION_FEATURE_REMOTE_UI,
+};
 use crate::extension_secret::{ExtensionSecretBroker, ExtensionSecretRequest};
 use crate::tool::{
     CancellationToken, OutputStream, ReplaySafety, Tool, ToolContext, ToolError, ToolOutput,
@@ -5177,6 +5184,17 @@ pub enum ExtensionEvent {
         /// Bounded handoff operation.
         operation: ExtensionTerminalOperation,
     },
+    /// One owner-fenced cached UI operation awaiting the foreground frontend.
+    RemoteUiRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the operation.
+        generation: u64,
+        /// Complete host-issued resource owner.
+        owner: ExtensionResourceOwner,
+        /// Validated open or close operation; frames use a separate mailbox.
+        operation: ExtensionRemoteUiOperation,
+    },
     /// One read-only context snapshot awaiting the foreground session.
     ///
     /// The child request stays registered until the frontend answers through
@@ -5416,6 +5434,9 @@ pub struct ExtensionRuntimeConfig {
     pub session_lifecycle: Option<ExtensionSessionLifecycleService>,
     /// Optional session-isolated data bus; never bind to workspace-shared processes.
     pub event_bus: Option<Arc<ExtensionEventBus>>,
+    /// Optional frontend wake/consumer binding for cached API 0.4 remote UI.
+    /// Without this binding the host never offers or admits `remote_ui`.
+    pub remote_ui: Option<Arc<Notify>>,
     /// Offer single-use approval redemption. A trusted frontend can issue a
     /// capability with [`ExtensionProcess::respond_to_policy_approval`].
     pub approvals: bool,
@@ -5471,6 +5492,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
                 &self.session_lifecycle.is_some(),
             )
             .field("event_bus_configured", &self.event_bus.is_some())
+            .field("remote_ui_configured", &self.remote_ui.is_some())
             .field("approvals", &self.approvals)
             .field("secret_broker_configured", &self.secret_broker.is_some())
             .field(
@@ -5505,6 +5527,7 @@ impl ExtensionRuntimeConfig {
             agent_sessions: false,
             session_lifecycle: None,
             event_bus: None,
+            remote_ui: None,
             approvals: false,
             secret_broker: None,
             provider_registry: None,
@@ -5525,6 +5548,7 @@ impl ExtensionRuntimeConfig {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct OfferedHostServices {
+    remote_ui: bool,
     agent_sessions: bool,
     session_lifecycle: bool,
     approvals: bool,
@@ -5695,6 +5719,20 @@ pub mod methods {
     pub const UI_TERMINAL_INPUT: &str = "ui/terminal-input";
     /// Host-to-extension observer-only terminal resize.
     pub const UI_RESIZE: &str = "ui/resize";
+    /// Extension request to open a cached host-rendered surface.
+    pub const UI_OPEN: &str = "ui/open";
+    /// Extension request to close its cached surface.
+    pub const UI_CLOSE: &str = "ui/close";
+    /// Extension-to-host complete cached line snapshot notification.
+    pub const UI_FRAME: &str = "ui/frame";
+    /// Host-to-extension focused normalized key notification.
+    pub const UI_KEY: &str = "ui/key";
+    /// Host-to-extension normalized fullscreen mouse notification.
+    pub const UI_MOUSE: &str = "ui/mouse";
+    /// Host-to-extension surface closure notification.
+    pub const UI_CLOSED: &str = "ui/closed";
+    /// Owner-fenced host-state replacement for retained API 0.4 UI contexts.
+    pub const CONTEXT_UPDATED: &str = "context/updated";
     /// Extension-to-host autocomplete registration request.
     pub const AUTOCOMPLETE_REGISTER: &str = "ui/autocomplete/register";
     /// Host-to-extension bounded autocomplete query.
@@ -6145,6 +6183,7 @@ fn candidate_event_requires_host_response(event: &ExtensionEvent) -> bool {
         ExtensionEvent::ConfirmationRequested { .. }
             | ExtensionEvent::PolicyEvaluationRequested { .. }
             | ExtensionEvent::InputRequested { .. }
+            | ExtensionEvent::RemoteUiRequested { .. }
     )
 }
 
@@ -6433,10 +6472,45 @@ impl ExtensionProcess {
     }
 
     /// Updates the session/model/skill snapshot attached to future calls and
-    /// future reload initialization. Existing child state changes only when a
-    /// typed request is made or the process reloads.
+    /// future reload initialization. Negotiated API 0.4 remote UI owners also
+    /// receive a bounded `context/updated {resource_owner, host}` replacement.
     pub fn set_host_state(&self, state: ExtensionHostState) {
-        *write_std_lock(&self.inner.host_state) = state;
+        let replaced_session;
+        {
+            let mut current = write_std_lock(&self.inner.host_state);
+            if *current == state {
+                return;
+            }
+            replaced_session = current.session_id != state.session_id;
+            *current = state.clone();
+        }
+        let connection = read_std_lock(&self.inner.connection);
+        let protocol = read_std_lock(&connection.protocol);
+        if protocol.version != EXTENSION_API_VERSION_0_4
+            || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
+            || !connection_is_usable(&connection)
+            || connection.draining.load(Ordering::Acquire)
+        {
+            return;
+        }
+        drop(protocol);
+        if replaced_session {
+            for surface_id in connection.remote_ui.surface_ids() {
+                let _ = connection.queue_notification(methods::UI_CLOSED,
+                    serde_json::json!({"surface_id":surface_id,"reason":"foreground owner replaced"}));
+            }
+            connection.remote_ui.clear();
+            lock_std_mutex(&connection.issued_resource_owners).clear();
+            return;
+        }
+        // Only already-admitted UI owners receive retained context updates.
+        // The bounded surface map supplies at most sixteen distinct owners.
+        for owner in connection.remote_ui.owners() {
+            if lock_std_mutex(&connection.issued_resource_owners).contains(&owner) {
+                let _ = connection.queue_notification(methods::CONTEXT_UPDATED,
+                    serde_json::json!({"resource_owner": owner, "host": state}));
+            }
+        }
     }
 
     /// Returns whether the current process transport is open.
@@ -6488,20 +6562,16 @@ impl ExtensionProcess {
         context
     }
 
-    /// Returns whether this API `0.3` process declared the paired typed
-    /// `session_start` and `session_end` lifecycle hooks.
+    /// Returns whether this process declared host-owned session hooks. Canonical
+    /// API 0.3 requires the pair; API 0.4 may declare either hook independently.
     pub fn declares_session_hooks(&self) -> bool {
-        self.api_version() == EXTENSION_API_VERSION_0_3
-            && self
-                .inner
-                .contributions
-                .hooks
-                .contains(&ExtensionHook::SessionStart)
-            && self
-                .inner
-                .contributions
-                .hooks
-                .contains(&ExtensionHook::SessionEnd)
+        let hooks = &self.inner.contributions.hooks;
+        match self.api_version() {
+            EXTENSION_API_VERSION_0_3 => hooks.contains(&ExtensionHook::SessionStart)
+                && hooks.contains(&ExtensionHook::SessionEnd),
+            EXTENSION_API_VERSION_0_4 => hooks.iter().any(|hook| hook.is_session_hook()),
+            _ => false,
+        }
     }
 
     /// Starts one declared, owner-scoped session-hook binding exactly once.
@@ -6634,6 +6704,9 @@ impl ExtensionProcess {
         &self,
         binding: &ActiveSessionHookBinding,
     ) -> Result<(), ExtensionRuntimeError> {
+        if !self.inner.contributions.hooks.contains(&ExtensionHook::SessionStart) {
+            return Ok(());
+        }
         let params = api_v03::SessionHookParams::SessionStart {
             payload: api_v03::SessionStart {
                 binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
@@ -6658,8 +6731,19 @@ impl ExtensionProcess {
                 duration_ms: session_hook_duration_millis(binding.started_at.elapsed()),
             },
         };
-        self.dispatch_session_hook(endpoint, &binding.session_id, params)
-            .await
+        let result = if self.inner.contributions.hooks.contains(&ExtensionHook::SessionEnd) {
+            self.dispatch_session_hook(endpoint, &binding.session_id, params).await
+        } else {
+            Ok(())
+        };
+        let owner = ExtensionResourceOwner {
+            session_id: binding.session_id.clone(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: endpoint.generation,
+        };
+        endpoint.connection.remote_ui.discard_owner(&owner);
+        lock_std_mutex(&endpoint.connection.issued_resource_owners).remove(&owner);
+        result
     }
 
     async fn dispatch_session_hook(
@@ -6674,13 +6758,20 @@ impl ExtensionProcess {
         let params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let params = api_v03::parse_session_hook_params(params).map_err(api_v03_protocol_error)?;
-        let params = serde_json::to_value(params)
+        let mut params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let resource_owner = ExtensionResourceOwner {
             session_id: session_id.to_owned(),
             extension_instance_id: self.inner.instance_id.clone(),
             process_generation: endpoint.generation,
         };
+        let canonical = read_std_lock(&endpoint.connection.protocol).version == EXTENSION_API_VERSION_0_3;
+        if !canonical {
+            let mut context = self.execution_context();
+            context.resource_owner = Some(resource_owner.clone());
+            params["context"] = serde_json::to_value(context)
+                .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        }
         let result = endpoint
             .connection
             .request_lifecycle(
@@ -6690,14 +6781,18 @@ impl ExtensionProcess {
                 resource_owner,
             )
             .await?;
-        let result = api_v03::parse_session_hook_result(result).map_err(api_v03_protocol_error)?;
-        api_v03::validate_disposition(&result.disposition).map_err(api_v03_protocol_error)?;
-        if result.disposition.kind != "continue" {
+        let continued = if canonical {
+            let result = api_v03::parse_session_hook_result(result).map_err(api_v03_protocol_error)?;
+            api_v03::validate_disposition(&result.disposition).map_err(api_v03_protocol_error)?;
+            result.disposition.kind == "continue"
+        } else {
+            let result: ExtensionHookOutput = serde_json::from_value(result)
+                .map_err(|error| ExtensionRuntimeError::Protocol(format!("invalid session hook response: {error}")))?;
+            result.disposition == ExtensionHookDisposition::Continue
+        };
+        if !continued {
             let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
-                message: format!(
-                    "session hook returned non-veto disposition `{}`; ignored",
-                    result.disposition.kind
-                ),
+                message: "session hook returned a non-veto disposition; ignored".into(),
             });
         }
         Ok(())
@@ -7048,7 +7143,7 @@ impl ExtensionProcess {
     ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
         if hook.is_session_hook() {
             return Err(ExtensionRuntimeError::Protocol(
-                "session_start and session_end are host-owned API 0.3 lifecycle hooks".into(),
+                "session_start and session_end are host-owned API 0.3/0.4 lifecycle hooks".into(),
             ));
         }
         if !self.inner.contributions.hooks.contains(&hook) {
@@ -7281,6 +7376,104 @@ impl ExtensionProcess {
             methods::UI_TERMINAL_INPUT,
             &input,
         )
+    }
+
+    /// Takes at most one latest validated frame per surface from the current
+    /// generation. Frames never pass through the broadcast/model event stream.
+    pub fn take_remote_ui_frames(&self) -> Vec<ExtensionRemoteUiFrame> {
+        let connection = read_std_lock(&self.inner.connection);
+        if !connection_is_usable(&connection) || connection.draining.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        connection.remote_ui.take_frames()
+    }
+
+    /// Tests whether an admitted open or active surface still belongs to this
+    /// owner. Frontends use this on wake to restore UI after request cancellation
+    /// even when the extension's generation itself remains healthy.
+    pub fn remote_ui_surface_is_current(&self, owner: &ExtensionResourceOwner, surface_id: &str) -> bool {
+        let connection = read_std_lock(&self.inner.connection);
+        connection_is_usable(&connection)
+            && !connection.draining.load(Ordering::Acquire)
+            && owner.process_generation == connection.generation
+            && owner.extension_instance_id == self.inner.instance_id
+            && connection.remote_ui.contains(owner, surface_id)
+    }
+
+    /// Queues focused input without waiting for extension rendering or stdin IO.
+    pub fn notify_remote_ui_key(&self, key: ExtensionRemoteUiKey) -> Result<(), ExtensionRuntimeError> {
+        key.validate().map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        self.remote_ui_notification_owner(&connection, &key.surface_id)?;
+        Self::queue_remote_ui_notification(&connection, methods::UI_KEY, &key)
+    }
+
+    /// Queues normalized mouse input only for an admitted fullscreen capture
+    /// lease, without touching the terminal or waiting for extension rendering.
+    pub fn notify_remote_ui_mouse(&self, mouse: ExtensionRemoteUiMouse) -> Result<(), ExtensionRuntimeError> {
+        mouse.validate().map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        let owner = self.remote_ui_notification_owner(&connection, &mouse.surface_id)?;
+        connection.remote_ui.validate_mouse(&owner, &mouse)
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        Self::queue_remote_ui_notification(&connection, methods::UI_MOUSE, &mouse)
+    }
+
+    /// Invalidates cached old-size frames and queues the host's new geometry.
+    pub fn notify_remote_ui_resize(&self, resize: ExtensionRemoteUiResize) -> Result<(), ExtensionRuntimeError> {
+        resize.validate().map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        let owner = self.remote_ui_notification_owner(&connection, &resize.surface_id)?;
+        // Host geometry is authoritative even if bounded delivery is refused.
+        connection.remote_ui.resize(&owner, &resize);
+        Self::queue_remote_ui_notification(&connection, methods::UI_RESIZE, &resize)
+    }
+
+    /// Discards the surface immediately; host restoration never waits for the
+    /// best-effort bounded observation to reach the extension.
+    pub fn notify_remote_ui_closed(&self, closed: ExtensionRemoteUiClosed) -> Result<(), ExtensionRuntimeError> {
+        closed.validate().map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        let owner = self.remote_ui_notification_owner(&connection, &closed.surface_id)?;
+        connection.remote_ui.close(&owner, &closed.surface_id);
+        Self::queue_remote_ui_notification(&connection, methods::UI_CLOSED, &closed)
+    }
+
+    fn remote_ui_notification_owner(
+        &self,
+        connection: &ProcessConnection,
+        surface_id: &str,
+    ) -> Result<ExtensionResourceOwner, ExtensionRuntimeError> {
+        if !connection_is_usable(connection) || connection.draining.load(Ordering::Acquire) {
+            return Err(ExtensionRuntimeError::Closed("remote UI generation is unavailable".into()));
+        }
+        let protocol = read_std_lock(&connection.protocol);
+        if protocol.version != EXTENSION_API_VERSION_0_4 || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
+            || !connection.remote_ui.is_bound()
+        {
+            return Err(ExtensionRuntimeError::Protocol("remote UI was not negotiated".into()));
+        }
+        let owner = connection.remote_ui.host_owner(surface_id)
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        if owner.process_generation != connection.generation
+            || owner.extension_instance_id != self.inner.instance_id
+            || !lock_std_mutex(&connection.issued_resource_owners).contains(&owner)
+        {
+            return Err(ExtensionRuntimeError::Closed("remote UI owner is stale".into()));
+        }
+        Ok(owner)
+    }
+
+    fn queue_remote_ui_notification<T: Serialize>(
+        connection: &ProcessConnection,
+        method: &str,
+        params: &T,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let params = serde_json::to_value(params)
+            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        if connection.queue_notification(method, params) { Ok(()) } else {
+            Err(ExtensionRuntimeError::Closed(format!("unable to queue `{method}` notification")))
+        }
     }
 
     /// Delivers one observer-only terminal resize event.
@@ -9562,6 +9755,7 @@ impl Tool for ProcessTool {
                     | Ok(ExtensionEvent::ShortcutRequested { .. })
                     | Ok(ExtensionEvent::ActiveToolsRequested { .. })
                     | Ok(ExtensionEvent::TerminalRequested { .. })
+                    | Ok(ExtensionEvent::RemoteUiRequested { .. })
                     | Ok(ExtensionEvent::ContextSnapshotRequested { .. })
                     | Ok(ExtensionEvent::ModelViewRequested { .. }) => {}
                     Err(broadcast::error::RecvError::Closed) => events_open = false,
@@ -9665,6 +9859,7 @@ struct ProcessConnection {
     child: Arc<Mutex<Child>>,
     pending: PendingRequests,
     issued_resource_owners: IssuedResourceOwners,
+    remote_ui: Arc<RemoteUiMailbox>,
     pending_changed: Arc<Notify>,
     child_requests: ChildRequests,
     next_id: AtomicU64,
@@ -9759,6 +9954,7 @@ struct ChildRequest {
     parent_request_id: u64,
     response_state: Arc<ChildResponseState>,
     policy_intent: Option<ExtensionActionIntent>,
+    remote_ui: Option<RemoteUiChildRequest>,
 }
 
 struct RegisteredChildRequest {
@@ -10142,6 +10338,7 @@ async fn run_protocol_writer(
     draining: Arc<AtomicBool>,
     pending: PendingRequests,
     pending_changed: Arc<Notify>,
+    remote_ui: Arc<RemoteUiMailbox>,
     health: Arc<StdRwLock<ConnectionHealth>>,
     events: broadcast::Sender<ExtensionEvent>,
     child: Arc<Mutex<Child>>,
@@ -10180,6 +10377,7 @@ async fn run_protocol_writer(
                 frame_limit.max_message_bytes()
             );
             closed.store(true, Ordering::Release);
+            remote_ui.clear();
             update_health(
                 &health,
                 ExtensionHealthState::Crashed,
@@ -10217,6 +10415,7 @@ async fn run_protocol_writer(
             }
             Err(message) => {
                 closed.store(true, Ordering::Release);
+                remote_ui.clear();
                 update_health(
                     &health,
                     ExtensionHealthState::Crashed,
@@ -10238,6 +10437,7 @@ async fn run_protocol_writer(
         }
     }
 
+    remote_ui.clear();
     if !closed.swap(true, Ordering::AcqRel) {
         let coordinated = draining.load(Ordering::Acquire);
         let state = if coordinated {
@@ -10754,6 +10954,13 @@ impl ProcessConnection {
             .send(Err(PendingError::Cancelled(reason.to_owned())));
         lock_std_mutex(&self.tombstones).insert(id, self.tombstone_ttl);
         self.cancel_children(id, reason);
+        self.remote_ui.settle_parent(id, true);
+        if read_std_lock(&self.protocol).supports(EXTENSION_FEATURE_REMOTE_UI) {
+            if let Some(owner) = &request.resource_owner {
+                lock_std_mutex(&self.issued_resource_owners).remove(owner);
+                self.remote_ui.discard_owner(owner);
+            }
+        }
 
         let frame_was_admitted = request
             .frame_state
@@ -10885,12 +11092,15 @@ impl ProcessConnection {
         }
         let line = ZeroizingBytes(line);
         loop {
-            let response_state = {
+            let (response_state, remote_ui_response) = {
                 let children = lock_std_mutex(&self.child_requests);
                 let Some(child) = children.get(&id) else {
                     return Ok(ChildResponseAdmission::AlreadySettled);
                 };
-                Arc::clone(&child.response_state)
+                let remote_ui_response = child.remote_ui.as_ref()
+                    .map(|request| request.prepare_response(response.get("result")))
+                    .transpose().map_err(ExtensionRuntimeError::Protocol)?.flatten();
+                (Arc::clone(&child.response_state), remote_ui_response)
             };
             match response_state.state.compare_exchange(
                 CHILD_ACTIVE,
@@ -10907,14 +11117,9 @@ impl ProcessConnection {
                         abort_cancel: Some((self.writer.clone(), Arc::clone(&self.frame_limit))),
                     };
                     let (completed, completion) = oneshot::channel();
-                    let admission = self.writer.send(WriterFrame {
-                        line: line.0.clone(),
-                        state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
-                        completion: Some(completed),
-                        bus_delivery: None,
-                    });
+                    let admission = self.writer.reserve();
                     tokio::pin!(admission);
-                    tokio::select! {
+                    let permit = tokio::select! {
                         biased;
                         _ = host_shutdown_requested() => return Err(
                             ExtensionRuntimeError::Closed("host is shutting down".into())
@@ -10928,10 +11133,22 @@ impl ProcessConnection {
                             "extension writer closed".into()
                         ))?,
                     };
+                    // Install remote UI geometry before making the acknowledgement
+                    // visible to the child. A reserved slot lets this commit and
+                    // terminal admission run together without an await or RPC.
+                    if let Some(response) = remote_ui_response {
+                        response.commit().map_err(ExtensionRuntimeError::Protocol)?;
+                    }
                     // Writer admission is the sole terminal outcome boundary:
                     // after this non-awaiting step cancellation cannot enqueue
                     // a competing $/cancelRequest for the same child request.
                     claim.mark_admitted();
+                    permit.send(WriterFrame {
+                        line: line.0.clone(),
+                        state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
+                        completion: Some(completed),
+                        bus_delivery: None,
+                    });
                     let completed = tokio::select! {
                         biased;
                         _ = host_shutdown_requested() => return Err(
@@ -10970,6 +11187,7 @@ impl ProcessConnection {
             return false;
         }
         read_std_lock(&self.slots).close();
+        self.remote_ui.clear();
         update_health(&self.health, ExtensionHealthState::Draining, None);
         true
     }
@@ -11114,6 +11332,8 @@ impl ProcessConnection {
 
     async fn terminate(&self) {
         self.draining.store(true, Ordering::Release);
+        self.remote_ui.clear();
+        lock_std_mutex(&self.child_requests).clear();
         self.cancel_all_provider_streams("terminated");
         self.remove_provider_owner();
         self.kill_process_group();
@@ -11139,6 +11359,8 @@ impl ProcessConnection {
 
 impl Drop for ProcessConnection {
     fn drop(&mut self) {
+        self.remote_ui.clear();
+        lock_std_mutex(&self.child_requests).clear();
         self.remove_provider_owner();
         lock_std_mutex(&self.provider_streams).clear();
         self.process_group.terminate_now();
@@ -11817,6 +12039,10 @@ async fn spawn_connection(
 
     let pending = Arc::new(StdMutex::new(HashMap::new()));
     let issued_resource_owners = Arc::new(StdMutex::new(HashSet::new()));
+    let remote_ui = Arc::new(RemoteUiMailbox::new(
+        (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4)
+            .then(|| config.remote_ui.clone()).flatten(),
+    ));
     let pending_changed = Arc::new(Notify::new());
     let child_requests = Arc::new(StdMutex::new(HashMap::new()));
     let child_work_slots = Arc::new(Semaphore::new(MAX_CHILD_WORKERS));
@@ -11871,6 +12097,7 @@ async fn spawn_connection(
         Arc::clone(&draining),
         Arc::clone(&pending),
         Arc::clone(&pending_changed),
+        Arc::clone(&remote_ui),
         Arc::clone(&health),
         events.clone(),
         Arc::clone(&child),
@@ -11887,6 +12114,7 @@ async fn spawn_connection(
         stdout,
         Arc::clone(&pending),
         Arc::clone(&issued_resource_owners),
+        Arc::clone(&remote_ui),
         Arc::clone(&pending_changed),
         Arc::clone(&closed),
         Arc::clone(&draining),
@@ -11945,6 +12173,7 @@ async fn spawn_connection(
         child,
         pending,
         issued_resource_owners,
+        remote_ui,
         pending_changed,
         child_requests,
         next_id: AtomicU64::new(1),
@@ -11985,6 +12214,7 @@ async fn spawn_connection(
     });
     artifact_guard.disarm();
     let offered_host_services = OfferedHostServices {
+        remote_ui: config.remote_ui.is_some(),
         agent_sessions: config.agent_sessions,
         session_lifecycle: session_lifecycle.is_some(),
         approvals: config.approvals,
@@ -12012,6 +12242,11 @@ async fn spawn_connection(
             .contains(&ExtensionHook::CompactionStrategy)
     {
         optional_features.push(EXTENSION_FEATURE_COMPACTION_STRATEGY.to_owned());
+    }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && offered_host_services.remote_ui
+    {
+        optional_features.push(EXTENSION_FEATURE_REMOTE_UI.to_owned());
     }
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
@@ -12624,6 +12859,9 @@ fn negotiate_contributions_with_host_services(
                     .contains(&ExtensionHook::CompactionStrategy)
             {
                 allowed.insert(EXTENSION_FEATURE_COMPACTION_STRATEGY);
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4 && offered_host_services.remote_ui {
+                allowed.insert(EXTENSION_FEATURE_REMOTE_UI);
             }
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
@@ -13773,6 +14011,7 @@ async fn dispatch_presentation_updates(
 struct ProtocolReadState {
     pending: PendingRequests,
     issued_resource_owners: IssuedResourceOwners,
+    remote_ui: Arc<RemoteUiMailbox>,
     pending_changed: Arc<Notify>,
     closed: Arc<AtomicBool>,
     draining: Arc<AtomicBool>,
@@ -14429,6 +14668,7 @@ async fn read_protocol_stdout<R>(
     mut stdout: R,
     pending: PendingRequests,
     issued_resource_owners: IssuedResourceOwners,
+    remote_ui: Arc<RemoteUiMailbox>,
     pending_changed: Arc<Notify>,
     closed: Arc<AtomicBool>,
     draining: Arc<AtomicBool>,
@@ -14468,6 +14708,7 @@ async fn read_protocol_stdout<R>(
     let state = ProtocolReadState {
         pending,
         issued_resource_owners,
+        remote_ui,
         pending_changed,
         closed,
         draining,
@@ -14571,6 +14812,9 @@ async fn read_protocol_stdout<R>(
     };
 
     state.closed.store(true, Ordering::Release);
+    state.remote_ui.clear();
+    lock_std_mutex(&state.issued_resource_owners).clear();
+    lock_std_mutex(&state.child_requests).clear();
     if let Some(bus) = &state.event_bus {
         bus.remove(&state.instance_id, state.generation);
     }
@@ -14818,6 +15062,20 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        if matches!(method, methods::UI_OPEN | methods::UI_CLOSE | methods::UI_FRAME)
+            && line.len() >= DEFAULT_EXTENSION_MESSAGE_BYTES
+        {
+            if object.contains_key("id") {
+                let id = parse_child_request_id(object, method)?;
+                reject_typed_child_request(state, id, ExtensionRequestFailure::BoundsExceeded,
+                    "remote UI envelope exceeds the 1 MiB transport bound")?;
+            } else {
+                let _ = state.events.send(ExtensionEvent::Diagnostic {
+                    message: "remote UI envelope exceeds the 1 MiB transport bound".into(),
+                });
+            }
+            return Ok(());
+        }
         match method {
             "bus/declare" | "bus/subscribe" | "bus/unsubscribe" | "bus/publish" if is_api_v03 => {
                 let id = parse_child_request_id(object, method)?;
@@ -14972,6 +15230,46 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                     generation: state.generation,
                     contribution,
                 });
+            }
+            methods::UI_OPEN => {
+                let Some((request, admitted)) = admit_remote_ui_request::<ExtensionRemoteUiOpenRequest>(
+                    state, object, method, params,
+                )? else { return Ok(()); };
+                dispatch_remote_ui_request(state, &admitted, ExtensionRemoteUiOperation::Open {
+                    surface_id: request.surface_id,
+                    title: request.title,
+                    placement: request.placement,
+                    mouse_capture: request.mouse_capture,
+                })?;
+            }
+            methods::UI_CLOSE => {
+                let Some((request, admitted)) = admit_remote_ui_request::<ExtensionRemoteUiCloseRequest>(
+                    state, object, method, params,
+                )? else { return Ok(()); };
+                dispatch_remote_ui_request(state, &admitted, ExtensionRemoteUiOperation::Close {
+                    surface_id: request.surface_id,
+                })?;
+            }
+            methods::UI_FRAME => {
+                if object.contains_key("id") {
+                    let id = parse_child_request_id(object, method)?;
+                    reject_typed_child_request(state, id, ExtensionRequestFailure::InvalidRequest,
+                        "ui/frame must be a notification")?;
+                    return Ok(());
+                }
+                let accepted = (|| {
+                    require_remote_ui(state)?;
+                    validate_remote_ui_envelope(object, false)?;
+                    let frame: ExtensionRemoteUiFrameNotification = serde_json::from_value(params)
+                        .map_err(|error| format!("invalid remote UI frame: {error}"))?;
+                    frame.validate().map_err(|(_, detail)| detail)?;
+                    validate_explicit_request_owner(state, &frame.resource_owner)
+                        .map_err(|(_, detail)| detail)?;
+                    state.remote_ui.accept(frame, state.generation).map_err(|(_, detail)| detail)
+                })();
+                if let Err(message) = accepted {
+                    let _ = state.events.send(ExtensionEvent::Diagnostic { message });
+                }
             }
             methods::UI_EDITOR => {
                 require_feature(state, EXTENSION_FEATURE_EDITOR_HANDOFF)?;
@@ -16402,6 +16700,15 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
     if let Some(request) = request {
         state.pending_changed.notify_waiters();
         cancel_children_from_reader(state, id, "parent settled");
+        state.remote_ui.settle_parent(id, reply.is_err());
+        if matches!(&reply, Err(PendingError::Remote { code: JSON_RPC_REQUEST_CANCELLED, .. }))
+            && read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_REMOTE_UI)
+        {
+            if let Some(owner) = &request.resource_owner {
+                lock_std_mutex(&state.issued_resource_owners).remove(owner);
+                state.remote_ui.discard_owner(owner);
+            }
+        }
         let _ = request.sender.send(reply);
     } else if lock_std_mutex(&state.tombstones).remove(id) {
         let _ = state.events.send(ExtensionEvent::Diagnostic {
@@ -16704,6 +17011,8 @@ impl_owner_scoped_host_request!(ToolsSetActiveRequest);
 impl_owner_scoped_host_request!(TerminalAcquireRequest);
 impl_owner_scoped_host_request!(TerminalReleaseRequest);
 impl_owner_scoped_host_request!(ContextSnapshotRequest);
+impl_owner_scoped_host_request!(ExtensionRemoteUiOpenRequest);
+impl_owner_scoped_host_request!(ExtensionRemoteUiCloseRequest);
 
 fn reject_typed_child_request(
     state: &ProtocolReadState,
@@ -16730,6 +17039,91 @@ fn reject_typed_child_request(
         settle_child_request(&state.child_requests, &request_id);
     }
     delivery.map(|_| ())
+}
+
+fn require_remote_ui(state: &ProtocolReadState) -> Result<(), String> {
+    let protocol = read_std_lock(&state.protocol);
+    if protocol.version != EXTENSION_API_VERSION_0_4
+        || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
+        || !state.remote_ui.is_bound()
+    {
+        return Err("remote UI requires explicitly negotiated API 0.4 and a bound frontend".into());
+    }
+    if state.closed.load(Ordering::Acquire) || state.draining.load(Ordering::Acquire) {
+        return Err("remote UI generation is closed or draining".into());
+    }
+    Ok(())
+}
+
+fn validate_remote_ui_envelope(
+    object: &serde_json::Map<String, serde_json::Value>,
+    request: bool,
+) -> Result<(), String> {
+    if object.keys().any(|key| !matches!(key.as_str(), "jsonrpc" | "method" | "params")
+        && !(request && key == "id"))
+    {
+        return Err("remote UI envelope contains unknown fields".into());
+    }
+    Ok(())
+}
+
+fn admit_remote_ui_request<T: OwnerScopedHostRequest>(
+    state: &ProtocolReadState,
+    object: &serde_json::Map<String, serde_json::Value>,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<Option<(T, AdmittedExtensionRequest)>, String> {
+    let id = parse_child_request_id(object, method)?;
+    if let Err(detail) = require_remote_ui(state) {
+        reject_typed_child_request(state, id, ExtensionRequestFailure::UnsupportedFeature, detail)?;
+        return Ok(None);
+    }
+    if let Err(detail) = validate_remote_ui_envelope(object, true) {
+        reject_typed_child_request(state, id, ExtensionRequestFailure::InvalidRequest, detail)?;
+        return Ok(None);
+    }
+    let Some((request, admitted)) = admit_host_request::<T>(
+        state, object, method, EXTENSION_FEATURE_REMOTE_UI, params,
+    )? else { return Ok(None); };
+    if lock_std_mutex(&state.tombstones).contains(request.parent_request_id()) {
+        refuse_admitted_request(state, &admitted, (ExtensionRequestFailure::NotForegroundOwner,
+            "remote UI parent was cancelled".into()))?;
+        return Ok(None);
+    }
+    if let Err(failure) = validate_explicit_request_owner(state, &admitted.owner) {
+        refuse_admitted_request(state, &admitted, failure)?;
+        return Ok(None);
+    }
+    Ok(Some((request, admitted)))
+}
+
+fn dispatch_remote_ui_request(
+    state: &ProtocolReadState,
+    admitted: &AdmittedExtensionRequest,
+    operation: ExtensionRemoteUiOperation,
+) -> Result<(), String> {
+    let mut children = lock_std_mutex(&state.child_requests);
+    let Some(child) = children.get_mut(&admitted.request_id) else { return Ok(()); };
+    let parent = (child.parent_request_id != 0).then_some(child.parent_request_id);
+    let reservation = state.remote_ui.reserve(
+        admitted.request_id.clone(), admitted.owner.clone(), operation.clone(), parent,
+    );
+    match reservation {
+        Ok(reservation) => child.remote_ui = Some(reservation),
+        Err(failure) => {
+            drop(children);
+            return refuse_admitted_request(state, admitted, failure);
+        }
+    }
+    drop(children);
+    dispatch_host_request_event(state, admitted, |admitted| ExtensionEvent::RemoteUiRequested {
+        request_id: admitted.request_id.clone(),
+        generation: admitted.generation,
+        owner: admitted.owner.clone(),
+        operation,
+    })?;
+    state.remote_ui.wake();
+    Ok(())
 }
 
 /// Admits one API `0.2` owner-scoped request: parse, feature gate, body parse,
@@ -17002,6 +17396,7 @@ fn insert_child_request(
                 parent_request_id: parent,
                 response_state: Arc::clone(&response_state),
                 policy_intent: None,
+                remote_ui: None,
             });
         }
         std::collections::hash_map::Entry::Occupied(_) => {
@@ -17756,6 +18151,7 @@ confirmations = true
             ProtocolReadState {
                 pending: Arc::new(StdMutex::new(HashMap::new())),
                 issued_resource_owners: Arc::new(StdMutex::new(HashSet::new())),
+                remote_ui: Arc::new(RemoteUiMailbox::new(None)),
                 pending_changed: Arc::new(Notify::new()),
                 closed: Arc::new(AtomicBool::new(false)),
                 draining: Arc::new(AtomicBool::new(false)),
@@ -17877,6 +18273,148 @@ confirmations = true
         for feature in features {
             protocol.features.insert((*feature).to_owned());
         }
+    }
+
+    fn remote_ui_test_state(events: broadcast::Sender<ExtensionEvent>) -> (ProtocolReadState, mpsc::Receiver<WriterFrame>) {
+        let (mut state, frames) = protocol_read_state_for_test(ManifestContributions::default(), events);
+        state.remote_ui = Arc::new(RemoteUiMailbox::new(Some(Arc::new(Notify::new()))));
+        let mut protocol = write_std_lock(&state.protocol);
+        protocol.version = EXTENSION_API_VERSION_0_4.into();
+        protocol.features.insert(EXTENSION_FEATURE_REMOTE_UI.into());
+        drop(protocol);
+        insert_test_parent(&state, 7, Some(test_resource_owner("session")));
+        (state, frames)
+    }
+
+    fn commit_remote_ui_test_response(state: &ProtocolReadState, id: u64, result: serde_json::Value) {
+        let id = ExtensionRequestId::Number(id);
+        let prepared = lock_std_mutex(&state.child_requests).get(&id).unwrap().remote_ui.as_ref().unwrap()
+            .prepare_response(Some(&result)).unwrap().unwrap();
+        prepared.commit().unwrap();
+        settle_child_request(&state.child_requests, &id);
+    }
+
+    fn remote_ui_frame_line(revision: u64) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","method":"ui/frame","params":{
+            "resource_owner":test_resource_owner("session"),"surface_id":"demo","revision":revision,
+            "columns":80,"rows":24,"lines":["\u{1b}[38;2;255;128;0m🦀\u{1b}[0m"]
+        }})).unwrap()
+    }
+
+    #[test]
+    fn remote_ui_requires_api_v04_frontend_and_explicit_negotiation() {
+        for (version, bound, selected) in [("0.1", true, true), ("0.2", true, true),
+            ("0.4", false, true), ("0.4", true, false)]
+        {
+            let (events, mut received) = broadcast::channel(8);
+            let (mut state, mut frames) = remote_ui_test_state(events);
+            write_std_lock(&state.protocol).version = version.into();
+            if !selected { write_std_lock(&state.protocol).features.clear(); }
+            if !bound { state.remote_ui = Arc::new(RemoteUiMailbox::new(None)); }
+            handle_protocol_line(&wave1_line(100, methods::UI_OPEN,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo"})), &state).unwrap();
+            assert_eq!(wave1_error(&frames.try_recv().unwrap()), (-32601, "unsupported_feature".into()));
+            assert!(received.try_recv().is_err());
+        }
+        let base = r#"name = "remote-ui-negotiation"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "unused"
+"#;
+        for (version, offered, accepted) in [("0.2", true, false), ("0.4", false, false), ("0.4", true, true)] {
+            let manifest = ExtensionManifest::parse(&base.replace("0.4", version)).unwrap();
+            let response = InitializeResponse {
+                api_version: version.into(), tools: vec![], commands: vec![], shortcuts: vec![], tool_renderers: vec![],
+                protocol: Some(ExtensionProtocolResponse {
+                    version: version.into(), features: API_0_2_REQUIRED_FEATURES.iter().copied()
+                        .chain([EXTENSION_FEATURE_REMOTE_UI]).map(str::to_owned).collect(),
+                    limits: ExtensionProtocolLimits { max_concurrent_requests: 1 }, lifecycle_events: vec![],
+                }),
+            };
+            assert_eq!(negotiate_contributions_with_host_services(&manifest, response, 1,
+                OfferedHostServices { remote_ui: offered, ..OfferedHostServices::default() }).is_ok(), accepted);
+        }
+    }
+
+    #[test]
+    fn remote_ui_requests_are_typed_owner_fenced_and_cancel_pending_opens() {
+        let (events, mut received) = broadcast::channel(32);
+        let (state, mut frames) = remote_ui_test_state(events);
+        for (id, params, expected) in [
+            (100, serde_json::json!({"surface_id":"demo","title":"Demo"}), "invalid_request"),
+            (101, serde_json::json!({"parent_request_id":"7","surface_id":"demo","title":"Demo"}), "invalid_request"),
+            (102, serde_json::json!({"parent_request_id":7,"surface_id":"bad id","title":"Demo"}), "invalid_request"),
+            (103, serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"\u{1b}[2J"}), "invalid_request"),
+            (104, serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"x".repeat(129)}), "bounds_exceeded"),
+            (105, serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo","placement":"overlay"}), "invalid_request"),
+            (106, serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo","placement":"footer","mouse_capture":true}), "invalid_request"),
+        ] {
+            handle_protocol_line(&wave1_line(id, methods::UI_OPEN, params), &state).unwrap();
+            assert_eq!(wave1_error(&frames.try_recv().unwrap()), (-32602, expected.into()));
+        }
+        handle_protocol_line(&wave1_line(110, methods::UI_OPEN, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("foreign"),"surface_id":"demo","title":"Demo"
+        })), &state).unwrap();
+        assert!(matches!(received.try_recv(), Ok(ExtensionEvent::RemoteUiRequested { owner, operation:
+            ExtensionRemoteUiOperation::Open { placement: crate::ExtensionRemoteUiPlacement::Fullscreen, .. }, .. })
+            if owner == test_resource_owner("session")));
+        handle_protocol_line(br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":110}}"#, &state).unwrap();
+        assert!(!state.remote_ui.contains(&test_resource_owner("session"), "demo"));
+        handle_protocol_line(br#"{"jsonrpc":"2.0","id":7,"result":{}}"#, &state).unwrap();
+        handle_protocol_line(&wave1_line(111, methods::UI_OPEN, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("session"),"surface_id":"demo","title":"Demo","placement":"footer"
+        })), &state).unwrap();
+        assert!(matches!(received.try_recv(), Ok(ExtensionEvent::RemoteUiRequested { .. })));
+        commit_remote_ui_test_response(&state, 111, serde_json::json!({"columns":80,"rows":24}));
+        handle_protocol_line(&wave1_line(112, methods::UI_CLOSE, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("foreign"),"surface_id":"demo"
+        })), &state).unwrap();
+        assert_eq!(wave1_error(&frames.try_recv().unwrap()), (-32002, "not_foreground_owner".into()));
+        handle_protocol_line(&wave1_line(113, methods::UI_CLOSE, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("session"),"surface_id":"demo"
+        })), &state).unwrap();
+        assert!(matches!(received.try_recv(), Ok(ExtensionEvent::RemoteUiRequested {
+            operation: ExtensionRemoteUiOperation::Close { .. }, .. })));
+        commit_remote_ui_test_response(&state, 113, serde_json::json!({}));
+        assert!(state.remote_ui.take_frames().is_empty());
+        assert!(!state.remote_ui.contains(&test_resource_owner("session"), "demo"));
+    }
+
+    #[tokio::test]
+    async fn remote_ui_frames_wake_latest_mailboxes_not_broadcast_and_enforce_full_boundary() {
+        let (events, mut received) = broadcast::channel(32);
+        let (mut state, _frames) = remote_ui_test_state(events);
+        let wake = Arc::new(Notify::new());
+        state.remote_ui = Arc::new(RemoteUiMailbox::new(Some(Arc::clone(&wake))));
+        handle_protocol_line(&wave1_line(100, methods::UI_OPEN,
+            serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo"})), &state).unwrap();
+        received.try_recv().unwrap();
+        commit_remote_ui_test_response(&state, 100, serde_json::json!({"columns":80,"rows":24}));
+        tokio::time::timeout(Duration::from_millis(100), wake.notified()).await.unwrap();
+        for revision in 0..1000 { handle_protocol_line(&remote_ui_frame_line(revision), &state).unwrap(); }
+        tokio::time::timeout(Duration::from_millis(100), wake.notified()).await.unwrap();
+        assert!(received.try_recv().is_err(), "accepted frames never enter the event broadcast");
+        let latest = state.remote_ui.take_frames();
+        assert_eq!(latest.len(), 1); assert_eq!(latest[0].revision, 999);
+        let mut exact = remote_ui_frame_line(1000);
+        exact.resize(DEFAULT_EXTENSION_MESSAGE_BYTES - 1, b' ');
+        handle_protocol_line(&exact, &state).unwrap();
+        assert_eq!(state.remote_ui.take_frames()[0].revision, 1000);
+        exact.push(b' ');
+        handle_protocol_line(&exact, &state).unwrap();
+        assert!(state.remote_ui.take_frames().is_empty());
+        assert!(matches!(received.try_recv(), Ok(ExtensionEvent::Diagnostic { .. })));
+        let mut stale: serde_json::Value = serde_json::from_slice(&remote_ui_frame_line(1001)).unwrap();
+        for (field, value) in [("columns", serde_json::json!(81)), ("revision", serde_json::json!(999))] {
+            stale["params"][field] = value;
+            handle_protocol_line(&serde_json::to_vec(&stale).unwrap(), &state).unwrap();
+            assert!(state.remote_ui.take_frames().is_empty());
+            received.try_recv().unwrap();
+        }
+        stale["params"]["resource_owner"]["process_generation"] = 0.into();
+        handle_protocol_line(&serde_json::to_vec(&stale).unwrap(), &state).unwrap();
+        assert!(state.remote_ui.take_frames().is_empty());
     }
 
     #[test]
@@ -18494,6 +19032,7 @@ system_prompt = {system_prompt}
         }
 
         let no_services = OfferedHostServices {
+            remote_ui: false,
             agent_sessions: false,
             session_lifecycle: false,
             approvals: false,
@@ -19955,6 +20494,7 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
                 cancel_on_response_abort: StdMutex::new(None),
             }),
             policy_intent: None,
+            remote_ui: None,
         }
     }
 
@@ -20687,6 +21227,315 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
             receiver.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[cfg(unix)]
+    const REMOTE_UI_PROCESS_SCRIPT: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+
+def receive():
+    return json.loads(sys.stdin.readline())
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+def notice(message):
+    send({"jsonrpc":"2.0","method":"notification","params":{"message":message}})
+def snapshot(revision, columns=80, rows=24):
+    send({"jsonrpc":"2.0","method":"ui/frame","params":{
+        "resource_owner":owner,"surface_id":surface,"revision":revision,
+        "columns":columns,"rows":rows,"lines":["\x1b[38;2;255;128;0mframe " + str(revision) + "\x1b[0m"]}})
+init = receive()
+protocol = init["params"]["protocol"]
+assert init["params"]["api_version"] == "0.4"
+assert "remote_ui" in protocol["optional_features"]
+send({"jsonrpc":"2.0","id":init["id"],"result":{
+    "api_version":"0.4","tools":[],"commands":[{"name":name,"description":name} for name in ["open","close","cancel","crash"]],
+    "protocol":{"version":"0.4","features":protocol["required_features"] + ["remote_ui"],"limits":{"max_concurrent_requests":4}}}})
+owner = None
+parent = None
+surface = "demo"
+serial = 0
+cancel_id = None
+while True:
+    message = receive()
+    method = message.get("method")
+    params = message.get("params", {})
+    if method == "command/execute":
+        name = params["name"]
+        if name == "crash":
+            os._exit(0)
+        if name in ("open", "cancel"):
+            owner = params["context"]["resource_owner"]
+            parent = message["id"]
+            surface = "cancelled" if name == "cancel" else "demo"
+            serial += 1
+            child_id = "open-" + str(serial)
+            send({"jsonrpc":"2.0","id":child_id,"method":"ui/open","params":{
+                "parent_request_id":parent,"surface_id":surface,"title":"Demo","mouse_capture":True}})
+            answer = receive()
+            assert answer["id"] == child_id and answer["result"] == {"columns":80,"rows":24}, answer
+            for revision in range(64):
+                snapshot(revision)
+            notice("cancel-ready" if name == "cancel" else "frames-ready")
+            if name == "cancel":
+                cancel_id = message["id"]
+            else:
+                send({"jsonrpc":"2.0","id":message["id"],"result":{"text":"opened"}})
+        elif name == "close":
+            serial += 1
+            child_id = "close-" + str(serial)
+            # Deliberately echo the original, normally-settled command parent.
+            send({"jsonrpc":"2.0","id":child_id,"method":"ui/close","params":{
+                "parent_request_id":parent,"resource_owner":owner,"surface_id":surface}})
+            answer = receive()
+            assert answer["id"] == child_id and answer["result"] == {}, answer
+            send({"jsonrpc":"2.0","id":message["id"],"result":{"text":"closed"}})
+    elif method == "ui/key":
+        assert params == {"surface_id":"demo","key":"Enter","kind":"press","modifiers":[]}, params
+        snapshot(64)
+        notice("key-ready")
+    elif method == "ui/mouse":
+        assert params["surface_id"] == "demo" and params["kind"] == "press" and params["button"] == "left"
+        assert params["x"] == 79 and params["y"] == 23 and params["wheel_delta"] == 0
+        snapshot(65)
+        notice("mouse-ready")
+    elif method == "ui/resize":
+        assert params == {"surface_id":"demo","columns":70,"rows":20}, params
+        snapshot(66)  # stale geometry must not become the current view
+        snapshot(67, 70, 20)
+        notice("resize-ready")
+    elif method == "context/updated":
+        assert params["resource_owner"] == owner and params["host"]["model"] == "updated-model", params
+        notice("context-ready")
+    elif method == "ui/closed":
+        assert params["surface_id"] == "demo" and params["reason"] in ["host dismissed", "foreground owner replaced"], params
+        snapshot(68, 70, 20)  # closed surface cannot be resurrected
+        notice("closed-ready")
+    elif method == "$/cancelRequest":
+        assert params["id"] == cancel_id, params
+        send({"jsonrpc":"2.0","id":cancel_id,"error":{"code":-32800,"message":"cancelled"}})
+        notice("cancel-ack")
+    elif method == "shutdown":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{}})
+        break
+    else:
+        raise AssertionError(message)
+"#;
+
+    #[cfg(unix)]
+    async fn start_remote_ui_test_process() -> (TempDir, ExtensionProcess, broadcast::Receiver<ExtensionEvent>, Arc<Notify>) {
+        let temp = TempDir::new().unwrap();
+        write_executable_script(&temp.path().join("extension.py"), REMOTE_UI_PROCESS_SCRIPT);
+        let manifest = ExtensionManifest::parse(r#"name = "remote-ui-process"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "extension.py"
+[contributes]
+commands = ["open", "close", "cancel", "crash"]
+notifications = true
+"#).unwrap();
+        let wake = Arc::new(Notify::new());
+        let mut config = ExtensionRuntimeConfig::new(temp.path());
+        config.remote_ui = Some(Arc::clone(&wake));
+        config.supervise = false;
+        let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), config).await.unwrap();
+        let events = process.subscribe();
+        (temp, process, events, wake)
+    }
+
+    #[cfg(unix)]
+    async fn remote_ui_next_operation(events: &mut broadcast::Receiver<ExtensionEvent>) -> (ExtensionRequestId, u64, ExtensionResourceOwner, ExtensionRemoteUiOperation) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let ExtensionEvent::RemoteUiRequested { request_id, generation, owner, operation } = events.recv().await.unwrap() {
+                    return (request_id, generation, owner, operation);
+                }
+            }
+        }).await.unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn remote_ui_wait_notice(events: &mut broadcast::Receiver<ExtensionEvent>, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let ExtensionEvent::Notification { notification } = events.recv().await.unwrap() {
+                    if notification.message == expected { return; }
+                }
+            }
+        }).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn remote_ui_open_test_surface(process: &ExtensionProcess, events: &mut broadcast::Receiver<ExtensionEvent>, command: &str) -> (ExtensionResourceOwner, tokio::task::JoinHandle<Result<CommandOutput, ExtensionRuntimeError>>) {
+        let context = process.current_context_for_resource_owner("session-owner");
+        let call = tokio::spawn({ let process = process.clone(); let command = command.to_owned();
+            async move { process.execute_command(command, vec![], context).await } });
+        let (request_id, generation, owner, operation) = remote_ui_next_operation(events).await;
+        assert!(matches!(operation, ExtensionRemoteUiOperation::Open { mouse_capture: true, .. }));
+        // A malformed frontend success must not silently admit invalid geometry.
+        assert!(process.respond_to_extension_request(request_id.clone(), generation,
+            ExtensionRequestOutcome::Ok(serde_json::json!({"columns":0,"rows":24}))).await.is_err());
+        process.respond_to_extension_request(request_id, generation,
+            ExtensionRequestOutcome::Ok(serde_json::json!({"columns":80,"rows":24}))).await.unwrap();
+        remote_ui_wait_notice(events, if command == "cancel" { "cancel-ready" } else { "frames-ready" }).await;
+        (owner, call)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_ui_real_process_caches_frames_and_delivers_notifications() {
+        let (_temp, process, mut events, wake) = start_remote_ui_test_process().await;
+        let (owner, call) = remote_ui_open_test_surface(&process, &mut events, "open").await;
+        assert_eq!(call.await.unwrap().unwrap().text, "opened");
+        let cached = process.take_remote_ui_frames();
+        assert_eq!(cached.len(), 1); assert_eq!(cached[0].revision, 63);
+        assert_eq!(cached[0].resource_owner, owner);
+        assert!(process.remote_ui_surface_is_current(&owner, "demo"));
+        tokio::time::timeout(Duration::from_millis(100), wake.notified()).await.unwrap();
+        let key = ExtensionRemoteUiKey { surface_id: "demo".into(), key: "Enter".into(),
+            kind: crate::ExtensionRemoteUiKeyKind::Press, modifiers: vec![] };
+        process.notify_remote_ui_key(key).unwrap();
+        remote_ui_wait_notice(&mut events, "key-ready").await;
+        assert_eq!(process.take_remote_ui_frames()[0].revision, 64);
+        let mut mouse = ExtensionRemoteUiMouse { surface_id: "demo".into(), kind: crate::ExtensionRemoteUiMouseKind::Press,
+            button: crate::ExtensionRemoteUiMouseButton::Left, x:80, y:23, modifiers:vec![], wheel_delta:0 };
+        assert!(process.notify_remote_ui_mouse(mouse.clone()).is_err());
+        mouse.x = 79;
+        process.notify_remote_ui_mouse(mouse).unwrap();
+        remote_ui_wait_notice(&mut events, "mouse-ready").await;
+        assert_eq!(process.take_remote_ui_frames()[0].revision, 65);
+        process.notify_remote_ui_resize(ExtensionRemoteUiResize { surface_id:"demo".into(), columns:70, rows:20 }).unwrap();
+        remote_ui_wait_notice(&mut events, "resize-ready").await;
+        let resized = process.take_remote_ui_frames();
+        assert_eq!(resized[0].revision, 67); assert_eq!((resized[0].columns, resized[0].rows), (70, 20));
+        let mut state = process.current_context().host;
+        state.model = Some("updated-model".into());
+        process.set_host_state(state);
+        remote_ui_wait_notice(&mut events, "context-ready").await;
+        process.notify_remote_ui_closed(ExtensionRemoteUiClosed { surface_id:"demo".into(), reason:"host dismissed".into() }).unwrap();
+        remote_ui_wait_notice(&mut events, "closed-ready").await;
+        assert!(process.take_remote_ui_frames().is_empty());
+        assert!(!process.remote_ui_surface_is_current(&owner, "demo"));
+        let (_, reopened) = remote_ui_open_test_surface(&process, &mut events, "open").await;
+        reopened.await.unwrap().unwrap();
+        let close = tokio::spawn({ let process = process.clone(); async move {
+            process.execute_command("close", vec![], process.current_context_for_resource_owner("session-owner")).await
+        }});
+        let (id, generation, _, operation) = remote_ui_next_operation(&mut events).await;
+        assert!(matches!(operation, ExtensionRemoteUiOperation::Close { .. }));
+        process.respond_to_extension_request(id, generation, ExtensionRequestOutcome::Ok(serde_json::json!({}))).await.unwrap();
+        close.await.unwrap().unwrap();
+        assert!(!process.remote_ui_surface_is_current(&owner, "demo"));
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_ui_real_process_cancellation_reload_and_crash_clear_state() {
+        let (_temp, process, mut events, _wake) = start_remote_ui_test_process().await;
+        let (old_owner, opened) = remote_ui_open_test_surface(&process, &mut events, "open").await;
+        opened.await.unwrap().unwrap();
+        let report = process.reload().await.unwrap();
+        assert_eq!(report.generation, 2);
+        assert!(!process.remote_ui_surface_is_current(&old_owner, "demo"));
+        assert!(process.take_remote_ui_frames().is_empty());
+        let (cancel_owner, pending) = remote_ui_open_test_surface(&process, &mut events, "cancel").await;
+        pending.abort(); let _ = pending.await;
+        remote_ui_wait_notice(&mut events, "cancel-ack").await;
+        assert!(!process.remote_ui_surface_is_current(&cancel_owner, "cancelled"));
+        assert!(process.take_remote_ui_frames().is_empty());
+        assert!(!lock_std_mutex(&read_std_lock(&process.inner.connection).issued_resource_owners).contains(&cancel_owner));
+        let (owner, opened) = remote_ui_open_test_surface(&process, &mut events, "open").await;
+        opened.await.unwrap().unwrap();
+        assert!(process.execute_command("crash", vec![], process.current_context_for_resource_owner("session-owner")).await.is_err());
+        assert!(!process.remote_ui_surface_is_current(&owner, "demo"));
+        assert!(process.take_remote_ui_frames().is_empty());
+        assert!(!process.is_running());
+        assert!(!process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_ui_real_process_owner_replacement_revokes_retained_context() {
+        let (_temp, process, mut events, _wake) = start_remote_ui_test_process().await;
+        let (owner, opened) = remote_ui_open_test_surface(&process, &mut events, "open").await;
+        opened.await.unwrap().unwrap();
+        let mut state = process.current_context().host;
+        state.session_id = Some("replacement-session".into());
+        process.set_host_state(state);
+        remote_ui_wait_notice(&mut events, "closed-ready").await;
+        assert!(!process.remote_ui_surface_is_current(&owner, "demo"));
+        assert!(process.take_remote_ui_frames().is_empty());
+        assert!(!lock_std_mutex(&read_std_lock(&process.inner.connection).issued_resource_owners).contains(&owner));
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_ui_api_v04_session_hooks_issue_owner_and_legacy_context() {
+        for hooks in [r#"["session_start"]"#, r#"["session_end"]"#, r#"["session_start", "session_end"]"#] {
+            let temp = TempDir::new().unwrap();
+            write_executable_script(&temp.path().join("extension.py"), r#"#!/usr/bin/env python3
+import json, sys
+def receive(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value, separators=(",", ":")), flush=True)
+init = receive()
+protocol = init["params"]["protocol"]
+send({"jsonrpc":"2.0","id":init["id"],"result":{"api_version":"0.4","tools":[],"commands":[],
+    "protocol":{"version":"0.4","features":protocol["required_features"]+["remote_ui"],"limits":{"max_concurrent_requests":1}}}})
+while True:
+    request = receive()
+    if request["method"] == "shutdown":
+        send({"jsonrpc":"2.0","id":request["id"],"result":{}})
+        break
+    params = request["params"]
+    assert request["method"] == "hook/run"
+    assert params["context"]["workspace"] == init["params"]["workspace"]
+    assert params["context"]["host"]["model"] == "initial-model"
+    assert params["context"]["resource_owner"] == params["payload"]["binding"]
+    if params["hook"] == "session_start":
+        send({"jsonrpc":"2.0","id":"footer","method":"ui/open","params":{
+            "parent_request_id":request["id"],"surface_id":"footer","title":"Footer","placement":"footer"}})
+        answer = receive()
+        assert answer["id"] == "footer" and answer["result"] == {"columns":80,"rows":1}, answer
+        send({"jsonrpc":"2.0","method":"ui/frame","params":{
+            "resource_owner":params["payload"]["binding"],"surface_id":"footer","revision":0,"columns":80,"rows":1,"lines":["footer"]}})
+    else:
+        assert params["hook"] == "session_end"
+    send({"jsonrpc":"2.0","id":request["id"],"result":{"disposition":{"action":"continue"}}})
+"#);
+            let manifest = ExtensionManifest::parse(&format!(r#"name = "remote-ui-hooks"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "extension.py"
+[contributes]
+hooks = {hooks}
+"#)).unwrap();
+            let mut config = ExtensionRuntimeConfig::new(temp.path());
+            config.remote_ui = Some(Arc::new(Notify::new())); config.supervise = false;
+            config.host_state.model = Some("initial-model".into());
+            let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), config).await.unwrap();
+            assert!(process.declares_session_hooks());
+            if !hooks.contains("session_start") {
+                process.start_session_hook_binding("session-owner").await.unwrap();
+                process.settle_session_hook_binding("session-owner", ExtensionLifecycleOutcome::Completed).await.unwrap();
+                assert!(process.shutdown().await);
+                continue;
+            }
+            let mut events = process.subscribe();
+            let start = tokio::spawn({ let process = process.clone(); async move { process.start_session_hook_binding("session-owner").await } });
+            let (id, generation, owner, operation) = remote_ui_next_operation(&mut events).await;
+            assert!(matches!(operation, ExtensionRemoteUiOperation::Open { placement: crate::ExtensionRemoteUiPlacement::Footer, .. }));
+            process.respond_to_extension_request(id, generation, ExtensionRequestOutcome::Ok(serde_json::json!({"columns":80,"rows":1}))).await.unwrap();
+            start.await.unwrap().unwrap();
+            assert_eq!(process.take_remote_ui_frames()[0].lines, vec!["footer"]);
+            assert!(process.remote_ui_surface_is_current(&owner, "footer"));
+            process.settle_session_hook_binding("session-owner", ExtensionLifecycleOutcome::Completed).await.unwrap();
+            assert!(!process.remote_ui_surface_is_current(&owner, "footer"));
+            assert!(!lock_std_mutex(&read_std_lock(&process.inner.connection).issued_resource_owners).contains(&owner));
+            assert!(process.shutdown().await);
+        }
     }
 
     #[test]

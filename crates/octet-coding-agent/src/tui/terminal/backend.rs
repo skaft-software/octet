@@ -166,6 +166,35 @@ pub struct OctetTerminal<W: Write = Stdout> {
 }
 
 impl OctetTerminal<Stdout> {
+    /// Request repeat/release kinds only while a remote component owns focus.
+    /// The ordinary text-preserving profile is restored when the lease ends.
+    pub(crate) fn set_remote_ui_keyboard_events(enabled: bool) -> Result<()> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if enabled {
+            execute!(out, event::PushKeyboardEnhancementFlags(
+                lifecycle::keyboard_enhancement_flags() | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            ))?;
+            lifecycle::mark_remote_keyboard_enhancement_active();
+        } else if lifecycle::take_remote_keyboard_enhancement_active() {
+            execute!(out, event::PopKeyboardEnhancementFlags)?;
+        }
+        Ok(())
+    }
+
+    /// Toggle reporting for a host-owned remote fullscreen mouse lease. The
+    /// locked stdout write cannot interleave with a renderer's physical write.
+    pub(crate) fn set_mouse_capture(enabled: bool) -> Result<()> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if enabled {
+            execute!(out, event::EnableMouseCapture)?;
+        } else {
+            execute!(out, event::DisableMouseCapture)?;
+        }
+        Ok(())
+    }
+
     /// Enter raw mode on the primary screen, returning the shared size cell.
     #[allow(dead_code)] // Used by the separately compiled Gate-0 spike target.
     pub fn enter() -> Result<(Self, TerminalSize)> {

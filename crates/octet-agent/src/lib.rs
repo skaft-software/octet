@@ -82,6 +82,7 @@ pub mod extension_policy;
 pub mod extension_presentation;
 pub mod extension_process;
 pub mod extension_provider;
+pub mod extension_remote_ui;
 pub mod extension_runtime;
 pub mod extension_secret;
 pub mod goal_driver;
@@ -205,6 +206,20 @@ pub use extension_provider::{
     ExtensionProviderAuthorizationPolicy, ExtensionProviderAuthorizationStatus,
     ExtensionProviderCatalogEntry, ExtensionProviderOwner, ExtensionProviderRegistry,
     ExtensionProviderRegistryError, ExtensionProviderRoute,
+};
+pub use extension_remote_ui::{
+    validate_remote_ui_line, ExtensionRemoteUiClosed, ExtensionRemoteUiCloseRequest,
+    ExtensionRemoteUiCloseResult, ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification,
+    ExtensionRemoteUiKey, ExtensionRemoteUiKeyKind, ExtensionRemoteUiKeyModifier,
+    ExtensionRemoteUiMouse, ExtensionRemoteUiMouseButton, ExtensionRemoteUiMouseKind,
+    ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOpenResult, ExtensionRemoteUiOperation,
+    ExtensionRemoteUiPlacement, ExtensionRemoteUiResize, EXTENSION_FEATURE_REMOTE_UI,
+    MAX_EXTENSION_REMOTE_UI_FRAME_BYTES,
+    MAX_EXTENSION_REMOTE_UI_KEY_BYTES, MAX_EXTENSION_REMOTE_UI_LINE_BYTES,
+    MAX_EXTENSION_REMOTE_UI_LINES, MAX_EXTENSION_REMOTE_UI_REASON_BYTES,
+    MAX_EXTENSION_REMOTE_UI_REVISION, MAX_EXTENSION_REMOTE_UI_SGR_BYTES,
+    MAX_EXTENSION_REMOTE_UI_SURFACES, MAX_EXTENSION_REMOTE_UI_SURFACE_ID_BYTES,
+    MAX_EXTENSION_REMOTE_UI_TITLE_BYTES,
 };
 pub use extension_secret::{
     ExtensionSecretBroker, ExtensionSecretError, ExtensionSecretRequest, ExtensionSecretValue,

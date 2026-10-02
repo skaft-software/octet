@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Add the optional, explicitly reviewed `octet-pi-compat` Node source package and
+  API `0.4` cached remote-component transport/frontend integration. Rust owns
+  agent/session execution, terminal composition, focus, and restoration; the
+  adapter uses selected Pi TUI utilities, never Pi's coding-agent runtime.
+  Synthetic-host tests cover unchanged Doom, drawing, powerline footer, and
+  rainbow editor behavior. Actual octet binary/PTY acceptance passed Doom,
+  drawing, the footer, and terminal restoration. Native custom-editor draft
+  restoration still fails qualification; startup comparison remains unrun.
+  This is not general Pi runtime parity or a published extension bundle.
+
 - Split startup tracing around the workspace marker and HTTP-client construction;
   skip an unchanged private workspace-marker rewrite while retaining no-follow
   validation and atomic repair. Use indexed model lookup during provider
