@@ -2,6 +2,9 @@ use super::*;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
+#[path = "cache_warming_tests.rs"]
+mod cache_warming;
+
 const VALID_MANIFEST: &str = r#"
 name = "git-tools"
 version = "0.1.0"

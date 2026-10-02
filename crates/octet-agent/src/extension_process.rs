@@ -52,16 +52,18 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::artifact::{ArtifactId, ArtifactPublication, ArtifactSource, ArtifactStore};
+use crate::cache_warmer::CacheWarmingAction;
 use crate::delegation::{
     ExtensionAgentSessionPolicy, ExtensionDelegationService, ExtensionDelegationSpawnRequest,
 };
 use crate::effect::{EffectPolicy, ToolEffect};
 use crate::events::AgentEvent;
 use crate::extension::{
-    AssistantPersistenceContext, CompactionStrategy, DynamicToolRegistration, EventObserver,
-    Extension, ExtensionHost, PersistenceMetadataHook, PersistenceMetadataProposal,
-    PostMutationContext, PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext,
-    ProviderRetryHook, ToolCallHook,
+    AssistantPersistenceContext, CacheWarmingDecisionContext, CacheWarmingDecisionHook,
+    CompactionStrategy, DynamicToolRegistration, EventObserver, Extension, ExtensionHost,
+    PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
+    PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
+    ToolCallHook,
 };
 use crate::extension_api_v03 as api_v03;
 use crate::extension_policy::{
@@ -255,6 +257,7 @@ pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
 pub use self::process_group::EXTENSION_FEATURE_APPROVALS;
 pub use self::process_group::EXTENSION_FEATURE_ARTIFACTS;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE;
+pub use self::process_group::EXTENSION_FEATURE_CACHE_WARMING_DECISION;
 pub use self::process_group::EXTENSION_FEATURE_COMPACTION_STRATEGY;
 pub use self::process_group::EXTENSION_FEATURE_COMPOSER;
 pub use self::process_group::EXTENSION_FEATURE_CONTENT_PARTS;

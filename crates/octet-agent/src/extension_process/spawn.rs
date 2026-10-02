@@ -362,6 +362,15 @@ pub(super) async fn spawn_connection(
     {
         optional_features.push(EXTENSION_FEATURE_COMPACTION_STRATEGY.to_owned());
     }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CacheWarmingDecision)
+    {
+        optional_features.push(EXTENSION_FEATURE_CACHE_WARMING_DECISION.to_owned());
+    }
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
         optional_features.push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.to_owned());

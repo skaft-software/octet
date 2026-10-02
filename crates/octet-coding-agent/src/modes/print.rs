@@ -101,6 +101,9 @@ async fn run_prompt(
 ) -> anyhow::Result<()> {
     if app.config.prompt_template.is_none() {
         crate::commands::reject_tui_changelog(&prompt)?;
+        if crate::commands::handle_cache_warming_input(app, &prompt)? {
+            return Ok(());
+        }
     }
     let prompt = match crate::prompts::render_configured(app, &prompt)? {
         Some(rendered) => {
@@ -156,6 +159,7 @@ async fn run_prompt(
     parts.extend(media.into_iter().map(InputPart::Media));
     let input = UserInput::from(parts);
     let mut events = json.then(|| JsonEventStream::new(app, &input));
+    let prior_cache_misses = crate::commands::cache_miss_count(app);
     let mut run = match app.agent.prompt(input.clone()).await {
         Ok(run) => run,
         Err(error) => anyhow::bail!(
@@ -243,6 +247,18 @@ async fn run_prompt(
                     )
                 );
             }
+            AgentEvent::CacheWarmed {
+                cost,
+                extension_override,
+                ..
+            } => {
+                if app.config.show_cache_miss_notices {
+                    crate::output::stderr_line(crate::commands::cache_warmed_notice(
+                        cost,
+                        extension_override,
+                    ));
+                }
+            }
             AgentEvent::ProviderUsageUncertain => {
                 crate::output::stderr!("warning: provider usage and cost are uncertain for this session; all subsequent numeric usage/cost values are known subtotals, not complete totals (including after resume).");
             }
@@ -327,6 +343,9 @@ async fn run_prompt(
         }
     };
     drop(run);
+    if let Some(notice) = crate::commands::cache_miss_notice(app, prior_cache_misses) {
+        crate::output::stderr_line(notice);
+    }
     if let Some(events) = events.as_mut() {
         events.finish(&outcome)?;
     }

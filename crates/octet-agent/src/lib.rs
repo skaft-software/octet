@@ -114,7 +114,10 @@ pub use cache::{
     analyze_session_cache, analyze_session_cache_stats, CacheMiss, CacheStats,
     CACHE_MISS_NOISE_TOKENS,
 };
-pub use cache_warmer::{CacheWarmMode, CacheWarmOutcome, CacheWarmPolicy};
+pub use cache_warmer::{
+    CacheWarmMode, CacheWarmingAction, CacheWarmingDecision, CacheWarmingPhase, CacheWarmingState,
+    CacheWarmingStatus,
+};
 pub use compaction::{
     build_branch_handoff_message, build_handoff_message, build_turn_prefix_handoff_message,
     choose_first_kept_by_tokens, finish_branch_handoff, finish_handoff, format_file_operations,

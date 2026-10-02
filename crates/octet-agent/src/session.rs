@@ -213,6 +213,12 @@ pub struct CacheWarmRecord {
     pub state: CacheWarmState,
     /// Wall-clock observation time.
     pub at_unix_ms: u64,
+    /// Durable request-prefix head. Absent on older experimental warm records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<EntryId>,
+    /// Whether an extension overrode the economic decision for this attempt.
+    #[serde(default)]
+    pub extension_override: bool,
 }
 
 /// Provider usage and cost recorded for one durable operation.

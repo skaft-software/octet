@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Add end-to-end billable prompt-cache warming with `off`, default `streaming`,
+  and `idle` policies, user-only config, `OCTET_CACHE_WARMING`,
+  `--cache-warming`, and persisted `/cache-warming`. Interactive/plain/RPC and
+  the retained native host drive cancellation-safe idle maintenance. Refreshes
+  replay the exact request with a one-token cap, keep private output out of
+  context, and record separate session usage/cost/uncertainty. `/session` exposes
+  economic decisions and refresh spend; cache-miss/refresh notices are opt-in via
+  `show_cache_miss_notices = true` (default false). Replaces the experimental
+  synthetic-suffix warm API. Live cache-hit or savings qualification is not claimed.
+
 ## [0.8.2] - 2026-09-30
 
 See [release notes](docs/releases/v0.8.2.md) for candidate scope, availability,

@@ -263,6 +263,17 @@ pub enum AgentEvent {
     /// are known subtotals, not complete totals. Never cleared by a retry.
     ProviderUsageUncertain,
 
+    /// One cache refresh's provider usage was durably charged to the session.
+    /// Its generated response is discarded and no local tool is executed.
+    CacheWarmed {
+        /// Provider-reported refresh usage, separate from assistant turns.
+        usage: Usage,
+        /// Exact known refresh cost; absent means unpriced, never free.
+        cost: Option<Cost>,
+        /// Whether an extension changed the cost-policy decision.
+        extension_override: bool,
+    },
+
     /// Operation-scoped auxiliary recovery; never discards main-answer output.
     ProviderOperationRetry {
         /// Actual provider operation being retried.

@@ -46,12 +46,47 @@ async fn run_stdio_loop() -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     let mut input = BufReader::new(stdin);
     let mut output = tokio::io::stdout();
+    let mut idle_app: Option<Box<crate::app::App>> = None;
+    let mut cache_warming_failed = false;
 
-    loop {
-        let frame = tokio::select! {
-            biased;
-            _ = crate::tui::terminal::wait_for_shutdown_signal() => break,
-            frame = framing::read_frame(&mut input) => frame?,
+    'requests: loop {
+        // Keep partially consumed NDJSON framing alive when maintenance wins
+        // the select. Recreating read_frame could discard a partial command.
+        let frame = {
+            let read = framing::read_frame(&mut input);
+            tokio::pin!(read);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = crate::tui::terminal::wait_for_shutdown_signal() => break 'requests,
+                    frame = &mut read => break frame?,
+                    warm = async {
+                        match idle_app.as_mut() {
+                            Some(app) => app.agent.drive_cache_warming().await,
+                            None => std::future::pending().await,
+                        }
+                    }, if !cache_warming_failed => {
+                        match warm {
+                            Ok(octet_agent::AgentEvent::CacheWarmed { cost, extension_override, .. }) => {
+                                // The prior request already emitted final_result:
+                                // idle maintenance is durable accounting + stderr,
+                                // never an extra protocol event for that request.
+                                if idle_app.as_ref().is_some_and(|app| app.config.show_cache_miss_notices) {
+                                    crate::output::stderr_line(crate::commands::cache_warmed_notice(cost, extension_override));
+                                }
+                            }
+                            Ok(octet_agent::AgentEvent::ProviderUsageUncertain) => {
+                                crate::output::stderr!("warning: cache warming usage is uncertain; session costs are a known subtotal.");
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                cache_warming_failed = true;
+                                crate::output::stderr!("warning: cache warming stopped; session usage may be uncertain.");
+                            }
+                        }
+                    }
+                }
+            }
         };
         let Some(frame) = frame else {
             break;
@@ -142,8 +177,14 @@ async fn run_stdio_loop() -> anyhow::Result<()> {
                 }
                 let mut emitter =
                     emitter.scoped(run_request.run_id.clone(), run_request.session_id.clone());
+                // Settle/cancel the previous cache generation before opening
+                // any session writer (including a resume of the same file).
+                drop(idle_app.take());
                 match run::run_request(&mut emitter, *run_request).await {
-                    Ok(RunRequestOutcome::Completed) => {}
+                    Ok(RunRequestOutcome::Completed(app)) => {
+                        idle_app = Some(app);
+                        cache_warming_failed = false;
+                    }
                     Ok(RunRequestOutcome::Signaled) => break,
                     Err(_) if crate::tui::terminal::received_shutdown_signal().is_some() => break,
                     Err(error) => {

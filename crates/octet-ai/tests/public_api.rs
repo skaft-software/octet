@@ -17,14 +17,14 @@ use octet_ai::{
     ImageMedia, ImageModality, ImageModel, ImageModelCatalog, ImageModelSpec, ImageOutput,
     ImagePricing, ImageSource, ImageStopReason, JsonSchemaFormat, Media, Message, Mime, Modality,
     ModalitySet, Model, ModelCatalog, ModelConfig, ModelId, ModelLimits, ModelSpec, OutputFormat,
-    OutputModalities, PayloadHook, Pricing, PricingError, PricingTier, Protocol, ProviderError,
-    ProviderMediaRef, ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
-    ReasoningEffortBudgets, ReasoningPart, ReasoningState, ReasoningStateKind, Request,
-    RequestBodyEncoding, RequestOverrides, RequestRuntime, ResolvedCredential, Response,
-    ResponseHook, ResponseStream, ResponsesRuntimeProfile, Secret, StopReason, StreamEvent,
-    StreamProtocolError, TokenRate, ToolCall, ToolCallId, ToolChoice, ToolDef, ToolResult,
-    ToolResultPart, TransportError, TransportPhase, UnsupportedError, Usage, UserMessage, UserPart,
-    ValidationError, VertexCredential,
+    OutputModalities, PayloadHook, Pricing, PricingError, PricingTier, PromptCacheLifetimes,
+    Protocol, ProviderError, ProviderMediaRef, ReasoningCapability, ReasoningConfig,
+    ReasoningControl, ReasoningEffort, ReasoningEffortBudgets, ReasoningPart, ReasoningState,
+    ReasoningStateKind, Request, RequestBodyEncoding, RequestOverrides, RequestRuntime,
+    ResolvedCredential, Response, ResponseHook, ResponseStream, ResponsesRuntimeProfile, Secret,
+    StopReason, StreamEvent, StreamProtocolError, TokenRate, ToolCall, ToolCallId, ToolChoice,
+    ToolDef, ToolResult, ToolResultPart, TransportError, TransportPhase, UnsupportedError, Usage,
+    UserMessage, UserPart, ValidationError, VertexCredential,
 };
 
 // A compile-time proof that every public re-export above is nameable. Referencing
@@ -33,6 +33,7 @@ use octet_ai::{
 const _: fn() = || {
     fn assert_exported<T>() {}
     assert_exported::<ReasoningStateKind>();
+    assert_exported::<PromptCacheLifetimes>();
     assert_exported::<ReasoningState>();
     assert_exported::<DeferredHandle>();
     assert_exported::<DeferredPollPermit>();

@@ -29,6 +29,7 @@ fn base() -> Cli {
         reasoning: None,
         reasoning_mode: None,
         cache_retention: None,
+        cache_warming: None,
         workspace: None,
         theme: None,
         theme_dirs: vec![],
@@ -668,6 +669,88 @@ fn effect_policy_layers_respect_project_tightening_and_cli_override() {
             .effect_policy
             .source,
         PolicyValueSource::Cli
+    );
+}
+
+#[test]
+fn cache_warming_defaults_to_streaming_and_is_global_only() {
+    let directory = cwd();
+    let global = directory.path().join("global.toml");
+    std::fs::write(
+        &global,
+        "cache_warming = 'off'\nshow_cache_miss_notices = true\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(directory.path().join(".octet")).unwrap();
+    std::fs::write(
+        directory.path().join(".octet/config.toml"),
+        "cache_warming = 'invalid-project-policy'\nshow_cache_miss_notices = false\n",
+    )
+    .unwrap();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.workspace_trusted = true;
+    let config = build_config_with_global_path(cli, directory.path(), Some(&global)).unwrap();
+    assert_eq!(config.cache_warming, octet_agent::CacheWarmMode::Off);
+    assert!(config.show_cache_miss_notices);
+    let config = config_with_empty_global(base(), directory.path()).unwrap();
+    assert_eq!(config.cache_warming, octet_agent::CacheWarmMode::Streaming);
+    assert!(!config.show_cache_miss_notices);
+}
+
+#[test]
+fn cache_warming_cli_and_layer_precedence_are_explicit() {
+    let directory = cwd();
+    let global = directory.path().join("global.toml");
+    std::fs::write(&global, "cache_warming = 'off'\n").unwrap();
+    let mut cli = base();
+    cli.cache_warming = Some("idle".into());
+    let config = build_config_with_global_path(cli, directory.path(), Some(&global)).unwrap();
+    assert_eq!(config.cache_warming, octet_agent::CacheWarmMode::Idle);
+    let mut layer = ConfigLayer {
+        cache_warming: Some("off".into()),
+        ..Default::default()
+    };
+    layer.merge(ConfigLayer {
+        cache_warming: Some("streaming".into()),
+        ..Default::default()
+    });
+    assert_eq!(layer.cache_warming.as_deref(), Some("streaming"));
+    for value in ["off", "streaming", "idle"] {
+        assert!(Cli::try_parse_from(["octet", "--cache-warming", value]).is_ok());
+    }
+    assert!(Cli::try_parse_from(["octet", "--cache-warming", "always"]).is_err());
+    std::fs::write(&global, "cache_warming = 'always'\n").unwrap();
+    assert!(
+        build_config_with_global_path(base(), directory.path(), Some(&global))
+            .unwrap_err()
+            .to_string()
+            .contains("cache warming")
+    );
+}
+
+#[test]
+fn cache_warming_keys_are_known_and_persistence_preserves_other_user_settings() {
+    let directory = cwd();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "# user choices\nmodel = 'keep-model'\nshow_cache_miss_notices = true\n[compaction]\nmode = 'local'\n").unwrap();
+    persist_key_to_path("cache_warming", "idle", &path).unwrap();
+    let loaded = read_layer(&path, ConfigSourceKind::Global).unwrap();
+    assert!(loaded.diagnostics.is_empty());
+    assert_eq!(loaded.values.cache_warming.as_deref(), Some("idle"));
+    assert_eq!(loaded.values.show_cache_miss_notices, Some(true));
+    assert_eq!(loaded.values.model.as_deref(), Some("keep-model"));
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("# user choices"));
+    persist_key_to_path("cache_warming", "off", &path).unwrap();
+    assert_eq!(
+        read_layer(&path, ConfigSourceKind::Global)
+            .unwrap()
+            .values
+            .cache_warming
+            .as_deref(),
+        Some("off")
     );
 }
 

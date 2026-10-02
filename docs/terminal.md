@@ -27,6 +27,15 @@ The first three share one agent loop, providers, sessions, safety policy and
 cancellation. Print mode still has tools, so add [tool limits](tools.md) if you
 want none. Plain and print send readiness diagnostics to stderr.
 
+[Cache warming](cache-warming.md) defaults to `streaming`; `idle` also runs while
+the retained host waits for input, without delaying input, reload or shutdown.
+Refresh usage is billed to the session, never the current assistant turn or its
+cache-hit/throughput/context metrics. `show_cache_miss_notices = true` in user
+config opts into brief ordinary cache-miss/refresh notices (default `false`).
+`/session`, `/cache` and `/cache-warming` show scheduler state, expected savings,
+miss penalty and refresh costs even with notices off. Plain/print notices stay
+on stderr, and print stdout stays response-only.
+
 The startup card says `permissions: full access` in bold red by default. With
 `--safe-mode` it says `safe mode` (blue in the default theme) and octet asks
 before running bash or changing files. Neither is a sandbox.

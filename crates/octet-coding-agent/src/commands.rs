@@ -51,6 +51,8 @@ pub enum Command {
     Session,
     Cost,
     Cache,
+    /// Inspect or persist the user-owned billable prompt-cache warming policy.
+    CacheWarming(Option<octet_agent::CacheWarmMode>),
     Update,
     /// Read the current version's bundled release notes without inference.
     Changelog,
@@ -342,6 +344,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!("cost", "/cost", "show turn and session cost", false),
     slash!("cache", "/cache", "show prompt-cache diagnostics", false),
+    slash!(
+        "cache-warming",
+        "/cache-warming [off|streaming|idle]",
+        "inspect or set billable cache refreshes (user setting)",
+        true
+    ),
     slash!(
         "changelog",
         "/changelog",
@@ -982,6 +990,12 @@ pub fn parse(input: &str) -> Command {
         "context" if argument.is_none() => Command::Context,
         "cost" if argument.is_none() => Command::Cost,
         "cache" if argument.is_none() => Command::Cache,
+        "cache-warming" => match argument {
+            None => Command::CacheWarming(None),
+            Some(value) => crate::config::parse_cache_warming(&value)
+                .map(|mode| Command::CacheWarming(Some(mode)))
+                .unwrap_or_else(|_| Command::Unknown(input.to_owned())),
+        },
         "hotkeys" if argument.is_none() => Command::Hotkeys,
         "copy" if argument.is_none() => Command::Copy,
         "session" if matches!(argument.as_deref(), None | Some("info")) => Command::Session,
@@ -1061,6 +1075,176 @@ fn token_count(value: u64) -> String {
 /// requests visible in a report.
 pub fn format_microdollars(value: u64) -> String {
     format!("${}.{:06}", value / 1_000_000, value % 1_000_000)
+}
+
+/// One brief, UI-only notice for a durably accounted cache refresh.
+pub(crate) fn cache_warmed_notice(cost: Option<Cost>, extension_override: bool) -> String {
+    let amount = cost
+        .map(|cost| {
+            if cost.total_picodollars_remainder == 0 {
+                format_microdollars(cost.total)
+            } else {
+                format!(
+                    "${}.{:06}{:06}",
+                    cost.total / 1_000_000,
+                    cost.total % 1_000_000,
+                    cost.total_picodollars_remainder
+                )
+                .trim_end_matches('0')
+                .to_owned()
+            }
+        })
+        .unwrap_or_else(|| "cost unknown".to_owned());
+    format!(
+        "Cache warmed{}: {amount}",
+        if extension_override {
+            " (extension override)"
+        } else {
+            ""
+        }
+    )
+}
+
+/// Snapshot the opt-in miss baseline before a run; default UI does no extra analysis.
+pub(crate) fn cache_miss_count(app: &App) -> Option<u64> {
+    app.config
+        .show_cache_miss_notices
+        .then(|| analyze_session_cache_stats(app.agent.session()).miss_count)
+}
+
+/// One brief notice for newly observed, material durable cache misses.
+pub(crate) fn cache_miss_notice(app: &App, before: Option<u64>) -> Option<String> {
+    let before = before?;
+    let (stats, misses) = analyze_session_cache(app.agent.session());
+    if stats.miss_count <= before {
+        return None;
+    }
+    let miss = misses.last()?;
+    let cost = miss
+        .missed_cost_microdollars
+        .map(|cost| format!(" · estimated penalty {}", format_microdollars(cost)))
+        .unwrap_or_default();
+    Some(format!(
+        "Cache miss: {} reusable tokens billed again{cost}. See /session.",
+        token_count(miss.missed_reusable_tokens)
+    ))
+}
+
+/// Resumed sessions expose prior auxiliary usage without replaying private output.
+pub(crate) fn resumed_cache_warming_notice(app: &App) -> Option<String> {
+    if !app.config.show_cache_miss_notices {
+        return None;
+    }
+    let count = app
+        .agent
+        .session()
+        .usage_records()
+        .iter()
+        .filter(|record| matches!(record.kind, UsageRecordKind::CacheWarm))
+        .count();
+    if count == 0 {
+        return None;
+    }
+    let overridden = app
+        .agent
+        .session()
+        .cache_warm_records()
+        .iter()
+        .any(|record| record.extension_override);
+    Some(format!("Resumed session includes {count} billable cache refresh{}{}. See /session for usage and costs.",
+        if count == 1 { "" } else { "es" },
+        if overridden { " (extension override recorded)" } else { "" }))
+}
+
+/// Current timer/decision economics plus the session-wide refresh subtotal.
+pub(crate) fn cache_warming_text(
+    mode: octet_agent::CacheWarmMode,
+    status: &octet_agent::CacheWarmingStatus,
+    session: &Session,
+) -> String {
+    let records = session
+        .usage_records()
+        .iter()
+        .filter(|record| matches!(record.kind, UsageRecordKind::CacheWarm))
+        .collect::<Vec<_>>();
+    let picodollars = records
+        .iter()
+        .filter_map(|record| record.cost)
+        .fold(0u128, |sum, cost| {
+            sum.saturating_add(
+                u128::from(cost.total) * 1_000_000 + u128::from(cost.total_picodollars_remainder),
+            )
+        });
+    let known_cost = format!(
+        "${}.{:012}",
+        picodollars / 1_000_000_000_000,
+        picodollars % 1_000_000_000_000
+    );
+    let uncertain =
+        session.has_uncertain_usage() || records.iter().any(|record| record.cost.is_none());
+    let economics = status
+        .decision
+        .as_ref()
+        .filter(|decision| decision.economics_available)
+        .map(|decision| {
+            format!(
+                "Refresh estimate: {} · avoided miss: {}\n",
+                format_microdollars(decision.warm_cost_microdollars),
+                format_microdollars(decision.miss_cost_microdollars)
+            )
+        })
+        .unwrap_or_default();
+    let overrides = session
+        .cache_warm_records()
+        .iter()
+        .filter(|record| {
+            record.extension_override && record.state == octet_agent::CacheWarmState::Completed
+        })
+        .count();
+    format!(
+        "Cache warming\nMode: {} (user setting; each refresh is billable)\nStatus: {}\n{}Refreshes: {} · cost: {}{}\nExtension-overridden refreshes: {}",
+        crate::config::cache_warming_label(mode),
+        octet_agent::cache_warmer::format_cache_warming_status(status),
+        economics,
+        records.len(), known_cost.trim_end_matches('0').trim_end_matches('.'),
+        if uncertain { " (known subtotal; usage or pricing uncertain)" } else { "" },
+        overrides,
+    )
+}
+
+pub(crate) fn app_cache_warming_text(app: &App) -> String {
+    cache_warming_text(
+        app.agent.cache_warming_mode(),
+        &app.agent.cache_warming_status(),
+        app.agent.session(),
+    )
+}
+
+/// Persist first, then reconcile the live agent without changing model context.
+pub(crate) fn set_cache_warming(
+    app: &mut App,
+    mode: octet_agent::CacheWarmMode,
+) -> anyhow::Result<()> {
+    crate::cli::persist_cache_warming(mode)?;
+    app.config.cache_warming = mode;
+    app.agent.set_cache_warming_mode(mode)?;
+    Ok(())
+}
+
+/// Headless slash control: local-only, with diagnostics on stderr rather than
+/// response stdout. Explicit template arguments remain ordinary prompt data.
+pub(crate) fn handle_cache_warming_input(app: &mut App, input: &str) -> anyhow::Result<bool> {
+    if input.split_whitespace().next() != Some("/cache-warming") {
+        return Ok(false);
+    }
+    let Command::CacheWarming(mode) = parse(input) else {
+        anyhow::bail!("usage: /cache-warming [off|streaming|idle]");
+    };
+    if let Some(mode) = mode {
+        set_cache_warming(app, mode)?;
+    }
+    crate::output::stderr_multiline(app_cache_warming_text(app));
+    Ok(true)
 }
 
 /// Render a spend limit in ordinary dollars, rounded to cents.
@@ -1289,6 +1473,7 @@ pub struct SettingsSurface {
     pub transport: &'static str,
     pub endpoint: String,
     pub show_images: bool,
+    pub cache_warming: octet_agent::CacheWarmMode,
 }
 
 impl SettingsSurface {
@@ -1301,6 +1486,7 @@ impl SettingsSurface {
             transport: transport_label(&app.model),
             endpoint: app.model.endpoint.id.0.clone(),
             show_images: app.config.show_images,
+            cache_warming: app.agent.cache_warming_mode(),
         }
     }
 }
@@ -1322,6 +1508,7 @@ pub fn settings_text(surface: &SettingsSurface) -> String {
          Theme              {}\n\
          Transport          {} (declared by the {} route; not a user preference)\n\
          Inline images      {}\n\
+         Cache warming      {} (user-only billable policy; /cache-warming)\n\
          Editor padding     compiled theme layout (no persisted override)\n\n\
          Project trust is deliberately not persisted here: workspace trust comes from --workspace-trusted or the interactive startup prompt.\n\n\
          Change: /settings theme <auto|light|dark> · /settings images <on|off> · /settings default model <id> · /settings default reasoning <level>",
@@ -1330,6 +1517,7 @@ pub fn settings_text(surface: &SettingsSurface) -> String {
         surface.transport,
         surface.endpoint,
         if surface.show_images { "on" } else { "off" },
+        crate::config::cache_warming_label(surface.cache_warming),
     )
 }
 
@@ -1811,7 +1999,7 @@ pub(crate) fn status_text_with_metrics(
         .unwrap_or_else(|| "disabled".to_owned());
     format!(
         "Provider       {}\nModel          {}\nDisplay model  {}\nAPI model      {}\nEndpoint       {}\nProtocol       {:?}\nTransport      {:?}\nReasoning      {}\n{}\nPricing        {}\nContext        ~{} / {} (estimated)\n\
-         Workspace      {}\nSession        {} — {}\nSession cost   {} ({})\nCost guardrails limit {} · turn warning {}\nCache hit rate  {}\nModel turns    {}\nTool calls     {}\nSkills         {} active / {} discovered\n\n\
+         Workspace      {}\nSession        {} — {}\nSession cost   {} ({})\nCost guardrails limit {} · turn warning {}\nCache hit rate  {}\n{}\nModel turns    {}\nTool calls     {}\nSkills         {} active / {} discovered\n\n\
          Extensions     {}\n\n\
          Security model: local agent with workspace trust gates\nEffect policy: {}\nBuilt-in file paths: {}\nFile edits: {}\nFile write: {}\n\
          Remote media reads: {}\nProcess execution: {}\nShell execution: {}\nOS isolation: none\n\
@@ -1843,6 +2031,7 @@ pub(crate) fn status_text_with_metrics(
         cost_limit,
         cost_warning,
         cache_rate,
+        app_cache_warming_text(app),
         model_turns,
         tool_calls,
         active_skills,

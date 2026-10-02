@@ -110,6 +110,7 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         Some(tools) => ToolPolicy::only(tools.clone())?,
         None => ToolPolicy::default(),
     };
+    let (cache_warming, show_cache_miss_notices) = crate::cli::user_cache_warming_policy()?;
     Ok(Config {
         workspace,
         invocation_cwd,
@@ -124,6 +125,8 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: true,
         cache_retention: CacheRetention::Short,
+        cache_warming,
+        show_cache_miss_notices,
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox,
         theme: None,

@@ -1232,6 +1232,7 @@ pub(crate) struct ShellState {
     pub(crate) theme: OctetTheme,
     /// Whether this session uses explicit approval gates instead of full host access.
     pub(crate) safe_mode: bool,
+    pub(crate) show_cache_miss_notices: bool,
     /// Opt-in terminal-image mode and conservative terminal capability state.
     image_rendering: ToolImageRendering,
     /// Monotonic image IDs and the private backend payload map stay separate
@@ -3814,7 +3815,33 @@ impl InteractiveShell {
         self.on_run_event(id, event);
     }
 
+    /// Session-scoped cache maintenance must never create an assistant run or
+    /// change its timing, context size, token counters, or cache effectiveness.
+    /// The owner separately refreshes exact cumulative accounting from Session.
+    pub fn on_cache_warming_event(&mut self, event: &AgentEvent) {
+        let mut state = self.state.borrow_mut();
+        match event {
+            AgentEvent::CacheWarmed {
+                cost,
+                extension_override,
+                ..
+            } => {
+                state.usage_uncertain |= cost.is_none();
+                if state.show_cache_miss_notices {
+                    state.push_block(TranscriptBlock::Notice(
+                        crate::commands::cache_warmed_notice(*cost, *extension_override),
+                    ));
+                }
+            }
+            AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
+            _ => {}
+        }
+    }
+
     pub fn on_run_event(&mut self, id: RunId, event: &AgentEvent) {
+        if matches!(event, AgentEvent::CacheWarmed { .. }) {
+            self.on_cache_warming_event(event);
+        }
         // A renderer may retain the immutable pending queue. Preparing the
         // delivered transcript text must not clone a large paste under the
         // semantic lock; queue removal and transcript insertion remain atomic.
@@ -3871,6 +3898,7 @@ impl InteractiveShell {
             }
         }
         match event {
+            AgentEvent::CacheWarmed { .. } => {}
             AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
             AgentEvent::RecoveredOutput { channel, text } => {
                 state.push_block(TranscriptBlock::Notice(format!(
@@ -4375,19 +4403,8 @@ impl InteractiveShell {
         }
     }
 
-    /// Refresh durable session instruments outside the render loop. These
-    /// values change only at run boundaries, keeping the footer stable.
-    pub fn set_session_telemetry(
-        &mut self,
-        session: &Session,
-        cache_hit_rate_basis_points: Option<u16>,
-    ) {
-        let telemetry_model = session
-            .latest_active_checkpoint()
-            .and_then(|checkpoint| session.entry(&checkpoint.prompt))
-            .and_then(|entry| entry.metadata.as_ref())
-            .and_then(|metadata| metadata.prompt_model.as_ref())
-            .map(|model| model.0.clone());
+    /// Refresh cumulative accounting without changing assistant-turn metrics.
+    pub fn set_session_accounting(&mut self, session: &Session) {
         let session_cost_microdollars = session
             .usage_records()
             .iter()
@@ -4397,6 +4414,23 @@ impl InteractiveShell {
         state.session_cost_microdollars = session_cost_microdollars;
         state.refresh_subagent_committed_costs(session);
         state.usage_uncertain |= session.has_uncertain_usage() || session.has_unpriced_usage();
+    }
+
+    /// Refresh durable session instruments outside the render loop. These
+    /// values change only at run boundaries, keeping the footer stable.
+    pub fn set_session_telemetry(
+        &mut self,
+        session: &Session,
+        cache_hit_rate_basis_points: Option<u16>,
+    ) {
+        self.set_session_accounting(session);
+        let telemetry_model = session
+            .latest_active_checkpoint()
+            .and_then(|checkpoint| session.entry(&checkpoint.prompt))
+            .and_then(|entry| entry.metadata.as_ref())
+            .and_then(|metadata| metadata.prompt_model.as_ref())
+            .map(|model| model.0.clone());
+        let mut state = self.state.borrow_mut();
         state.telemetry_model = telemetry_model;
         state.cache_hit_rate_basis_points = state
             .selected_model_owns_telemetry()
@@ -5229,6 +5263,7 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         state.safe_mode = config.effect_policy != octet_agent::EffectPolicy::UnsafeHost;
         state.max_session_cost_microdollars = config.max_cost_microdollars;
+        state.show_cache_miss_notices = config.show_cache_miss_notices;
         drop(state);
         self.set_show_images(show_images);
     }

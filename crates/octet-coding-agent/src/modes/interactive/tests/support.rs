@@ -23,6 +23,8 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,
+        cache_warming: octet_agent::CacheWarmMode::default(),
+        show_cache_miss_notices: false,
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox: SandboxPolicy::default(),
         theme: None,
@@ -92,6 +94,7 @@ pub(super) async fn idle_shell_after(events: Vec<Event>) -> (InteractiveShell, I
         &mut reload_tick,
         &reload_watcher,
         &mut reload,
+        None,
     )
     .await
     .unwrap();
@@ -282,6 +285,15 @@ pub(super) fn test_run_inspection() -> &'static ActiveRunInspection {
                 transport: "http",
                 endpoint: "test-endpoint".into(),
                 show_images: false,
+                cache_warming: octet_agent::CacheWarmMode::Streaming,
+            },
+            cache_warming_control: None,
+            cache_warming_status: octet_agent::CacheWarmingStatus {
+                state: octet_agent::CacheWarmingState::Inactive,
+                reason: Some("waiting for first request".into()),
+                next_warm_at_unix_ms: None,
+                decision: None,
+                extension_override: false,
             },
             model_scope: None,
             catalog_is_narrowed: false,
@@ -326,6 +338,15 @@ pub(super) fn test_run_inspection_with_session(dir: &Path) -> ActiveRunInspectio
             transport: "http",
             endpoint: "test-endpoint".into(),
             show_images: false,
+            cache_warming: octet_agent::CacheWarmMode::Streaming,
+        },
+        cache_warming_control: None,
+        cache_warming_status: octet_agent::CacheWarmingStatus {
+            state: octet_agent::CacheWarmingState::Inactive,
+            reason: Some("waiting for first request".into()),
+            next_warm_at_unix_ms: None,
+            decision: None,
+            extension_override: false,
         },
         model_scope: None,
         catalog_is_narrowed: false,

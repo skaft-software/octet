@@ -92,6 +92,30 @@ pub(super) struct EventTranslator {
     pub(super) retry_attempt: Option<usize>,
     pub(super) pending_retry_end: Option<Value>,
     pub(super) usage_uncertain: bool,
+    pub(super) cache_warming_control: Option<octet_agent::RunControl>,
+}
+
+/// Maintenance events are session accounting, never assistant messages/turns.
+pub(super) fn emit_cache_warming_event(
+    event: &AgentEvent,
+    output: &mut RpcOutput,
+) -> anyhow::Result<()> {
+    match event {
+        AgentEvent::CacheWarmed {
+            usage,
+            cost,
+            extension_override,
+        } => output.send(json!({
+            "type": "cache_warmed",
+            "usage": usage_value(usage, *cost),
+            "cost": cost,
+            "extensionOverride": extension_override,
+        })),
+        AgentEvent::ProviderUsageUncertain => {
+            output.send(json!({"type": "provider_usage_uncertain"}))
+        }
+        _ => Ok(()),
+    }
 }
 
 impl EventTranslator {
@@ -117,6 +141,7 @@ impl EventTranslator {
             last_assistant_text: String::new(),
             retry_attempt: None,
             pending_retry_end: None,
+            cache_warming_control: None,
             usage_uncertain: (app.agent.session().has_uncertain_usage()
                 || app.agent.session().has_unpriced_usage()),
         }
@@ -408,6 +433,10 @@ impl EventTranslator {
                     "errorMessage": error
                 }))?;
             }
+            AgentEvent::CacheWarmed { cost, .. } => {
+                self.usage_uncertain |= cost.is_none();
+                emit_cache_warming_event(&event, output)?;
+            }
             AgentEvent::ProviderUsageUncertain => {
                 self.usage_uncertain = true;
                 output.send(json!({"type": "provider_usage_uncertain"}))?;
@@ -688,6 +717,16 @@ pub(super) fn active_state_value(
         object.insert("usageUncertain".into(), json!(translator.usage_uncertain));
         object.insert("messageCount".into(), json!(translator.messages.len()));
         object.insert("pendingMessageCount".into(), json!(queue.len()));
+        if let Some(control) = &translator.cache_warming_control {
+            object.insert(
+                "cacheWarmingMode".into(),
+                json!(control.cache_warming_mode()),
+            );
+            object.insert(
+                "cacheWarmingStatus".into(),
+                json!(control.cache_warming_status()),
+            );
+        }
     }
     state
 }

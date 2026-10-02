@@ -89,6 +89,22 @@ pub(crate) async fn translate(
                 )
                 .await?;
         }
+        AgentEvent::CacheWarmed {
+            usage,
+            cost,
+            extension_override,
+        } => {
+            emitter
+                .emit(
+                    "cache_warmed",
+                    serde_json::json!({
+                        "usage": usage,
+                        "cost": cost,
+                        "extension_override": extension_override,
+                    }),
+                )
+                .await?;
+        }
         AgentEvent::ProviderUsageUncertain => {
             emitter
                 .emit("provider_usage_uncertain", serde_json::json!({}))

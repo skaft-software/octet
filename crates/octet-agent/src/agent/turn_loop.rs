@@ -1,6 +1,7 @@
 //! The agent's turn loop: model calls, tool dispatch and settlement until the run ends.
 
 use super::*;
+use crate::cache_warmer::{CacheWarmHost, CacheWarmLimits, CacheWarmStep};
 
 impl Agent {
     /// Reconciles unresolved calls from the latest persisted assistant turn.
@@ -203,6 +204,8 @@ impl Agent {
         let abort = Arc::new(AbortFlag::default());
         let control_admission = Arc::new(std::sync::Mutex::new(true));
         let control = RunControl {
+            cache_warming_mode: self.cache_warmer.mode_control(),
+            cache_warming_status: self.cache_warmer.diagnostics(),
             reasoning_model: self
                 .model
                 .responses_features()
@@ -287,6 +290,7 @@ impl Agent {
             .and_then(DelegationBinding::telemetry_receiver);
         let stream_lifecycle = lifecycle.clone();
         let telemetry = self.telemetry.clone();
+        let cache_warmer = &mut self.cache_warmer;
         let session = &mut self.session;
 
         let stream = async_stream::stream! {
@@ -294,11 +298,13 @@ impl Agent {
             // the generated stream. If the caller drops the stream at any
             // suspension point, its Drop implementation durably pairs pending
             // tool calls before `Run::drop` returns.
-            let mut session_guard = RunSessionGuard {
+            let session_guard = RunSessionGuard {
                 session,
+                cache_warmer,
                 lifecycle: stream_lifecycle.clone(),
             };
-            let session = &mut *session_guard;
+            let session = &mut *session_guard.session;
+            let cache_warmer = &mut *session_guard.cache_warmer;
             let mut context_capacity = initial_capacity;
             // Parity 1e.2 durability half: republish the partial assistant
             // turn a killed stream left behind. The frame journal is consumed
@@ -839,6 +845,19 @@ impl Agent {
                 let input_tokens = prepared.input_tokens;
                 let mut request = prepared.request;
 
+                // Settle an older warm's exposure before the new main request
+                // reserves its budget. Its new timer starts at opening below,
+                // not during preparation or a TurnStarted yield suspension.
+                let warm_usage_uncertainty_count = session.usage_uncertainty_records().len();
+                if let Err(error) = cache_warmer.cancel(session, "new provider request") {
+                    break 'run FinishReason::Failed(error.into());
+                }
+                if session.usage_uncertainty_records().len() > warm_usage_uncertainty_count {
+                    let event = AgentEvent::ProviderUsageUncertain;
+                    notify_observers(&observers, &event);
+                    yield event;
+                }
+
                 let reserved_output_tokens = match reservation_output_tokens(
                     session, &model, request_max_output_tokens, max_session_tokens, max_session_cost_microdollars,
                 ) {
@@ -907,27 +926,19 @@ impl Agent {
                     None
                 };
                 let native_delta_has_results = native_delta.as_ref().is_some_and(|delta| delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))));
+                if abort.is_set() { break 'run FinishReason::Aborted; }
+                // Snapshot the actual request at REQUEST OPEN. The warmer alone
+                // decides eligibility before cloning it or allocating a timer.
+                if let Err(error) = cache_warmer.start(
+                    &model, &request, session.head(), input_tokens, tool_revision, session,
+                ) {
+                    break 'run FinishReason::Failed(error.into());
+                }
                 let opening_client = client.track_request_dispatch();
-                let opened = tokio::select! {
-                    biased;
-                    _ = abort.wait() => Ok(None),
-                    _ = wait_network_deadline(network_deadline) => {
-                        if opening_client.request_may_have_been_sent() {
-                            let first = !session.has_uncertain_usage();
-                            let recorded = session.record_usage_uncertainty_with_bound(model.endpoint.id.clone(), model.spec.id.clone(), "assistant_turn", attempt_bound);
-                            if first {
-                                let event = AgentEvent::ProviderUsageUncertain;
-                                notify_observers(&observers, &event);
-                                yield event;
-                            }
-                            if let Err(error) = recorded {
-                                break 'run FinishReason::Failed(error.into());
-                            }
-                            failed_usage_unknown = true;
-                        }
-                        break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown });
-                    },
-                    result = async {
+                let opened = {
+                    // Pin once: a warm/control wake must never drop an opening
+                    // future and replay an already accepted main POST.
+                    let opening = async {
                         if let Some(connection) = native.connection.take() {
                             Ok(Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
                         } else if native_enabled {
@@ -935,7 +946,75 @@ impl Agent {
                         } else {
                             open_provider_stream(&opening_client, &model, request, &abort).await.map(|stream| stream.map(native_steering::ProviderStream::Ordinary))
                         }
-                    } => result,
+                    };
+                    tokio::pin!(opening);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = abort.wait() => break Ok(None),
+                            _ = wait_network_deadline(network_deadline) => {
+                                if opening_client.request_may_have_been_sent() {
+                                    let first = !session.has_uncertain_usage();
+                                    let recorded = session.record_usage_uncertainty_with_bound(model.endpoint.id.clone(), model.spec.id.clone(), "assistant_turn", attempt_bound);
+                                    if first {
+                                        let event = AgentEvent::ProviderUsageUncertain;
+                                        notify_observers(&observers, &event);
+                                        yield event;
+                                    }
+                                    if let Err(error) = recorded {
+                                        break 'run FinishReason::Failed(error.into());
+                                    }
+                                    failed_usage_unknown = true;
+                                }
+                                break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown });
+                            },
+                            // Native steering must stay queued until the socket
+                            // control exists; ordinary requests use turn-boundary
+                            // queues. Abort remains independently level-triggered.
+                            control = control_rx.recv(), if control_open && !native_enabled => match control {
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
+                                Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::FinishNow(input)) => {
+                                    input.push_pending(&mut pending_steer);
+                                    answer_only = true;
+                                    finish_pending = true;
+                                    context_capacity.invalidate();
+                                }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
+                                Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                Some(Control::Abort) => { abort.set(); break Ok(None); }
+                                None => control_open = false,
+                            },
+                            result = &mut opening => {
+                                break if abort.is_set() { Ok(None) } else { result };
+                            },
+                            step = cache_warmer.next_step() => {
+                                // Opening can set abort while returning Pending
+                                // in this same select poll.
+                                if abort.is_set() { break Ok(None); }
+                                match cache_warmer.advance(step, CacheWarmHost {
+                                    session,
+                                    client: &client,
+                                    hooks: &extension_host.cache_warming_decision_hooks,
+                                    resource_owner: &resource_owner,
+                                    tool_generation: extension_host.tool_snapshot().0,
+                                    limits: CacheWarmLimits {
+                                        max_session_tokens,
+                                        max_session_cost_microdollars,
+                                        pending_request: attempt_bound,
+                                    },
+                                }) {
+                                    Ok(Some(event)) => {
+                                        notify_observers(&observers, &event);
+                                        yield event;
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => break 'run FinishReason::Failed(error.into()),
+                                }
+                            },
+                        }
+                    }
                 };
                 let mut response_stream = match opened {
                     Err(error) if native_enabled => {
@@ -1068,6 +1147,7 @@ impl Agent {
                     Ctl(Option<Control>),
                     Delegation(Option<DelegationTelemetrySnapshot>),
                     Steering(octet_ai::SteeringUpdate),
+                    Warm(CacheWarmStep),
                     Abort,
                 }
                 let mut attempt_saw_generation = false;
@@ -1089,7 +1169,11 @@ impl Agent {
                             }
                         }, if delegation_telemetry.is_some() => Next::Delegation(snapshot),
                         ev = response_stream.next() => Next::Event(ev),
+                        step = cache_warmer.next_step() => Next::Warm(step),
                     };
+                    // A provider/body poll can set abort after the biased abort
+                    // branch was checked. No warm or semantic event outranks it.
+                    let next = if abort.is_set() { Next::Abort } else { next };
                     // Apply the selected update before subsequently queued ones;
                     // both paths must drive required-input continuations.
                     let next = match next {
@@ -1154,6 +1238,27 @@ impl Agent {
                             yield event;
                         }
                         Next::Delegation(None) => delegation_telemetry = None,
+                        Next::Warm(step) => {
+                            match cache_warmer.advance(step, CacheWarmHost {
+                                session,
+                                client: &client,
+                                hooks: &extension_host.cache_warming_decision_hooks,
+                                resource_owner: &resource_owner,
+                                tool_generation: extension_host.tool_snapshot().0,
+                                limits: CacheWarmLimits {
+                                    max_session_tokens,
+                                    max_session_cost_microdollars,
+                                    pending_request: attempt_bound,
+                                },
+                            }) {
+                                Ok(Some(event)) => {
+                                    notify_observers(&observers, &event);
+                                    yield event;
+                                }
+                                Ok(None) => {}
+                                Err(error) => break 'run FinishReason::Failed(error.into()),
+                            }
+                        }
                         Next::Event(None) | Next::Event(Some(Err(_))) => {
                             let error = match next {
                                 Next::Event(Some(Err(error))) => error,
@@ -2139,7 +2244,6 @@ impl Agent {
                             let completed = loop {
                                 tokio::select! {
                                     biased;
-                                    results = &mut operation => break results,
                                     _ = abort.wait(), if !abort_observed => {
                                         abort_observed = true;
                                     }
@@ -2160,6 +2264,32 @@ impl Agent {
                                             abort_observed = true;
                                         }
                                         None => control_open = false,
+                                    },
+                                    results = &mut operation => break results,
+                                    step = cache_warmer.next_step(), if !abort_observed => {
+                                        if abort.is_set() {
+                                            abort_observed = true;
+                                            continue;
+                                        }
+                                        match cache_warmer.advance(step, CacheWarmHost {
+                                            session,
+                                            client: &client,
+                                            hooks: &extension_host.cache_warming_decision_hooks,
+                                            resource_owner: &resource_owner,
+                                            tool_generation: extension_host.tool_snapshot().0,
+                                            limits: CacheWarmLimits {
+                                                max_session_tokens,
+                                                max_session_cost_microdollars,
+                                                pending_request: None,
+                                            },
+                                        }) {
+                                            Ok(Some(event)) => {
+                                                notify_observers(&observers, &event);
+                                                yield event;
+                                            }
+                                            Ok(None) => {}
+                                            Err(error) => break 'run FinishReason::Failed(error.into()),
+                                        }
                                     },
                                 }
                             };
@@ -2442,7 +2572,6 @@ impl Agent {
                                     tokio::select! {
                                         biased;
                                         _ = abort.wait() => break None,
-                                        r = &mut operation => break Some(r),
                                         c = control_rx.recv(), if control_open => match c {
                                             Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                             Some(Control::FollowUp(input)) => followups.push_back(input),
@@ -2460,6 +2589,31 @@ impl Agent {
                                                 break None;
                                             }
                                             None => control_open = false,
+                                        },
+                                        r = &mut operation => break Some(r),
+                                        step = cache_warmer.next_step() => {
+                                            // Tool polling may synchronously
+                                            // cancel while returning Pending.
+                                            if abort.is_set() { break None; }
+                                            match cache_warmer.advance(step, CacheWarmHost {
+                                                session,
+                                                client: &client,
+                                                hooks: &extension_host.cache_warming_decision_hooks,
+                                                resource_owner: &resource_owner,
+                                                tool_generation: extension_host.tool_snapshot().0,
+                                                limits: CacheWarmLimits {
+                                                    max_session_tokens,
+                                                    max_session_cost_microdollars,
+                                                    pending_request: None,
+                                                },
+                                            }) {
+                                                Ok(Some(event)) => {
+                                                    notify_observers(&observers, &event);
+                                                    yield event;
+                                                }
+                                                Ok(None) => {}
+                                                Err(error) => break 'run FinishReason::Failed(error.into()),
+                                            }
                                         },
                                         progress = progress_rx.recv() => {
                                             if let Some(p) = progress {
@@ -2965,6 +3119,18 @@ impl Agent {
                     }
                 }
                 delegation.detach_telemetry();
+            }
+            // Settlement never awaits a warm provider/hook. Idle mode keeps
+            // the request-opening age; streaming mode stops at this boundary.
+            // A dropped, undriven Run is instead cancelled by RunSessionGuard.
+            let warm_usage_uncertainty_count = session.usage_uncertainty_records().len();
+            if let Err(error) = cache_warmer.on_agent_settled(session) {
+                reason = FinishReason::Failed(error.into());
+            }
+            if session.usage_uncertainty_records().len() > warm_usage_uncertainty_count {
+                let event = AgentEvent::ProviderUsageUncertain;
+                notify_observers(&observers, &event);
+                yield event;
             }
             // Capacity checks use the incremental total-only cache. Refresh the
             // detailed snapshot once at the settled boundary so observers retain

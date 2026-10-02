@@ -152,6 +152,7 @@ async fn scoped_model_cycle_reaches_idle_owner_without_draining_draft() {
             &mut reload_tick,
             &reload_watcher,
             &mut reload,
+            None,
         )
         .await
         .unwrap();

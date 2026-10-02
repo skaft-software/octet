@@ -247,6 +247,9 @@ pub struct Cli {
     /// Prompt-cache retention: none, short, or long.
     #[arg(long, value_name = "POLICY")]
     pub cache_retention: Option<String>,
+    /// Billable prompt-cache refreshes: off, streaming (default), or idle.
+    #[arg(long, value_name = "MODE", value_parser = ["off", "streaming", "idle"])]
+    pub cache_warming: Option<String>,
     /// Workspace root override.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
@@ -414,6 +417,9 @@ struct ConfigLayer {
     effect_policy: Option<String>,
     reasoning_mode: Option<String>,
     cache_retention: Option<String>,
+    /// Global only: a trusted project must not select extra billable requests.
+    cache_warming: Option<String>,
+    show_cache_miss_notices: Option<bool>,
     theme: Option<String>,
     color: Option<String>,
     mouse: Option<String>,
@@ -473,6 +479,8 @@ impl ConfigLayer {
         override_some!(effect_policy);
         override_some!(reasoning_mode);
         override_some!(cache_retention);
+        override_some!(cache_warming);
+        override_some!(show_cache_miss_notices);
         override_some!(theme);
         override_some!(color);
         override_some!(mouse);
@@ -622,6 +630,8 @@ impl ConfigLayer {
         project.trusted_extensions = None;
         let scoped_models = self.models.clone();
         project.models = None;
+        project.cache_warming = None;
+        project.show_cache_miss_notices = None;
         tighten_effect_policy(&mut self.effect_policy, project.effect_policy.take());
         self.merge(project);
         self.trusted_extensions = trusted_extensions;
@@ -646,6 +656,38 @@ pub fn debug_log_path() -> Option<PathBuf> {
     dirs::home_dir()
         .filter(|home| home.is_absolute())
         .map(|home| home.join(".octet").join("octet-debug.log"))
+}
+
+/// Persist the billable cache-warming mode to user configuration only.
+pub fn persist_cache_warming(mode: octet_agent::CacheWarmMode) -> anyhow::Result<()> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist cache warming: user home directory is unavailable")
+    })?;
+    persist_key_to_path("cache_warming", config::cache_warming_label(mode), &path)
+}
+
+/// Resolve the native host's billable cache policy from user config and environment,
+/// never from a run's workspace or session. Protocol 1 adds no authority field.
+pub(crate) fn user_cache_warming_policy() -> anyhow::Result<(octet_agent::CacheWarmMode, bool)> {
+    #[cfg(test)]
+    {
+        // Test hosts must not inherit the developer's real user preferences.
+        Ok((octet_agent::CacheWarmMode::default(), false))
+    }
+    #[cfg(not(test))]
+    {
+        let global = match global_config_path() {
+            Some(path) => read_layer(&path, ConfigSourceKind::Global)?.values,
+            None => ConfigLayer::default(),
+        };
+        let mode = env_value("OCTET_CACHE_WARMING")
+            .or(global.cache_warming)
+            .as_deref()
+            .map(config::parse_cache_warming)
+            .transpose()?
+            .unwrap_or_default();
+        Ok((mode, global.show_cache_miss_notices.unwrap_or(false)))
+    }
 }
 
 pub fn persist_model(model: &str) -> anyhow::Result<()> {
@@ -1244,6 +1286,8 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         reasoning_mode: env_value("OCTET_REASONING_MODE"),
         cache_retention: env_value("OCTET_CACHE_RETENTION")
             .or_else(|| env_value("PI_CACHE_RETENTION")),
+        cache_warming: env_value("OCTET_CACHE_WARMING"),
+        show_cache_miss_notices: None,
         theme: env_value("OCTET_THEME"),
         color: env_value("OCTET_COLOR"),
         mouse: env_value("OCTET_MOUSE"),
@@ -1403,6 +1447,13 @@ fn build_config_with_global_path_and_diagnostics(
         Some(value) => config::parse_cache_retention(value)?,
         None => octet_ai::CacheRetention::Short,
     };
+    let cache_warming = cli
+        .cache_warming
+        .as_deref()
+        .or(values.cache_warming.as_deref())
+        .map(config::parse_cache_warming)
+        .transpose()?
+        .unwrap_or_default();
     let color = match cli.color.as_deref().or(values.color.as_deref()) {
         Some(value) => ColorMode::parse(value)?,
         None => ColorMode::Auto,
@@ -1690,6 +1741,8 @@ fn build_config_with_global_path_and_diagnostics(
         reasoning_mode,
         reasoning_mode_explicit,
         cache_retention,
+        cache_warming,
+        show_cache_miss_notices: values.show_cache_miss_notices.unwrap_or(false),
         effect_policy,
         sandbox,
         theme: cli.theme.or(values.theme),

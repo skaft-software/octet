@@ -222,6 +222,14 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 allowed.insert(EXTENSION_FEATURE_COMPACTION_STRATEGY);
             }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::CacheWarmingDecision)
+            {
+                allowed.insert(EXTENSION_FEATURE_CACHE_WARMING_DECISION);
+            }
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
                 allowed.insert(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1);
@@ -262,6 +270,17 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 return Err(ExtensionRuntimeError::Protocol(
                     "compaction_strategy hook requires negotiated compaction_strategy feature"
+                        .into(),
+                ));
+            }
+            if manifest
+                .contributes
+                .hooks
+                .contains(&ExtensionHook::CacheWarmingDecision)
+                && !features.contains(EXTENSION_FEATURE_CACHE_WARMING_DECISION)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "cache_warming_decision hook requires negotiated cache_warming_decision feature"
                         .into(),
                 ));
             }

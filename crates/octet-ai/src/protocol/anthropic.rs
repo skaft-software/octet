@@ -9,9 +9,9 @@ use crate::protocol::{
 };
 use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{
-    AssistantPart, CacheRetention, ImageSource, Media, Message, Protocol, ReasoningConfig,
-    ReasoningState, ReasoningStateKind, Request, StopReason, ToolCallId, ToolChoice,
-    ToolResultPart, Usage, UserPart,
+    AssistantPart, ImageSource, Media, Message, Protocol, ReasoningConfig, ReasoningState,
+    ReasoningStateKind, Request, StopReason, ToolCallId, ToolChoice, ToolResultPart, Usage,
+    UserPart,
 };
 use crate::validate::{normalize_request_reasoning, validate_request};
 
@@ -724,16 +724,10 @@ pub(crate) fn build_request(
         );
     }
 
-    // A normal request marks its final user block. A one-off cache warm has a
-    // synthetic final user turn: mark the preceding canonical message instead,
-    // so a subsequent real prompt can reuse the warmed conversation prefix.
+    // Ordinary requests and exact cache-warming replays use the same final
+    // real user breakpoint; a replay changes only the output-token cap.
     if let Some(marker) = cache_marker {
-        let target = if req.cache_retention == CacheRetention::WarmShort {
-            messages.iter_mut().rev().nth(1)
-        } else {
-            messages.last_mut()
-        };
-        let content = match target {
+        let content = match messages.last_mut() {
             Some(AnthropicMessage::User { content } | AnthropicMessage::Assistant { content }) => {
                 Some(content)
             }

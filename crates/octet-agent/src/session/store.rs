@@ -509,6 +509,8 @@ impl Session {
                                     && last.state == CacheWarmState::Started
                                     && last.endpoint == record.endpoint
                                     && last.model == record.model
+                                    && last.anchor == record.anchor
+                                    && last.extension_override == record.extension_override
                             }),
                         };
                     if !valid {

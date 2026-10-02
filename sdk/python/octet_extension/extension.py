@@ -17,6 +17,12 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from .cache_warming import (
+    CacheWarmingDecisionHandler,
+    CacheWarmingDecisionPayload,
+    CacheWarmingDecisionResult,
+    cache_warming_decision,
+)
 from .protocol import (
     DEFAULT_API_VERSION,
     DEFAULT_MAX_MESSAGE_BYTES,
@@ -62,6 +68,7 @@ API_V02_FEATURES = (
     "approvals",
     "secrets",
     "compaction_strategy",
+    "cache_warming_decision",
 )
 LIFECYCLE_METHODS = (
     "session/started",
@@ -636,8 +643,8 @@ class Extension:
 
     def hook(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("hook", name)
-        if name == "compaction_strategy" and self.api_version != "0.4":
-            raise ValueError("compaction_strategy requires API 0.4")
+        if name in ("compaction_strategy", "cache_warming_decision") and self.api_version != "0.4":
+            raise ValueError(f"{name} requires API 0.4")
         if name in _TYPED_MUTATION_HOOKS and self.api_version not in ("0.2", "0.4"):
             raise ValueError(f"{name} requires extension API 0.2")
 
@@ -648,6 +655,24 @@ class Extension:
             return handler
 
         return decorate
+
+    def cache_warming_decision(
+        self, handler: CacheWarmingDecisionHandler
+    ) -> CacheWarmingDecisionHandler:
+        """Register API 0.4 advice returning warm, stop, or None.
+
+        Handlers receive the typed payload and optionally the ordinary owner-
+        fenced execution context. The host orders extensions, uses the last
+        returned action, and retains all refresh budgets and deadlines.
+        """
+
+        def advise(
+            payload: CacheWarmingDecisionPayload, context: dict[str, Any]
+        ) -> CacheWarmingDecisionResult:
+            return cache_warming_decision(self._invoke(handler, payload, context))
+
+        self.hook("cache_warming_decision")(advise)
+        return handler
 
     def context(self, handler: Optional[Handler] = None) -> Any:
         def decorate(callback: Handler) -> Handler:
@@ -1976,6 +2001,8 @@ class Extension:
                 )
             features = list(dict.fromkeys(required + optional))
             features = [feature for feature in features if feature in self._supported_features]
+            if self.api_version != "0.4":
+                features = [feature for feature in features if feature != "cache_warming_decision"]
             if not self._lifecycle_handlers:
                 features = [feature for feature in features if feature != "lifecycle_events"]
             limits = protocol.get("limits", {})
@@ -2026,6 +2053,11 @@ class Extension:
         return result
 
     def _validate_declarations(self) -> None:
+        if (
+            "cache_warming_decision" in self._declared.get("hooks", [])
+            and self.api_version != "0.4"
+        ):
+            raise RpcError(-32602, "cache_warming_decision requires API 0.4")
         self._require_exact_names("tools", self._declared_names("tools"), self._tools)
         self._require_exact_names("commands", self._declared_names("commands"), self._commands)
         # A host that declares contributions must declare the menu it serves.
@@ -2134,6 +2166,10 @@ class Extension:
         if not isinstance(name, str) or not name:
             raise RpcError(-32602, "hook must be a string")
         self._require_declared_name("hooks", name)
+        if name == "cache_warming_decision" and (
+            self.api_version != "0.4" or name not in self._features
+        ):
+            raise RpcError(-32601, "cache_warming_decision was not negotiated")
         handler = self._hooks.get(name)
         if handler is None:
             return {"disposition": {"action": "continue"}, "context": [], "notifications": []}
@@ -2142,7 +2178,10 @@ class Extension:
         except (CancelledError, RpcError):
             raise
         except Exception as error:
-            self.logger.error("hook handler failed", hook=name, error=str(error))
+            if name == "cache_warming_decision":
+                self.logger.error("cache warming decision handler failed")
+            else:
+                self.logger.error("hook handler failed", hook=name, error=str(error))
             raise RpcError(-32603, "internal error") from error
         return self._hook_result(name, value)
 
@@ -2378,6 +2417,14 @@ class Extension:
             result["post_mutation"] = self._validate_post_mutation_disposition(
                 value["post_mutation"]
             )
+        elif hook == "cache_warming_decision":
+            if self.api_version != "0.4" or hook not in self._features:
+                raise RpcError(-32603, "cache_warming_decision was not negotiated")
+            action = value.get("cache_warming_decision")
+            if action is not None and action not in ("warm", "stop"):
+                raise RpcError(-32603, "invalid cache_warming_decision action")
+            if "cache_warming_decision" in value:
+                result["cache_warming_decision"] = action
         elif hook == "compaction_strategy":
             if "compaction_strategy" not in self._features:
                 raise RpcError(-32603, "compaction_strategy was not negotiated")
