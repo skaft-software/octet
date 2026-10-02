@@ -147,7 +147,11 @@ modal content rather than migration `rows` nodes. Internally styled documents
 and approval labels may use native `ansi` content; this never runs or repaints
 an ANSI TUI. A user prompt is a native `card` (tone `user`, Markdown body)
 that Tern lays out against its own column, filled with the projected
-`userMessageBg`. An ANSI wash padded to octet's PTY width came out ragged
+`userMessageBg`. A follow-up assistant message is the same shape with the model
+name as its `head`, so replies draw over the projected `customMessageBg` /
+`customMessageText` / `customMessageLabel` palette rather than as bare Markdown
+in Tern's default prose look; streaming still lives on the single `md` leaf, so
+a growing reply patches one node. An ANSI wash padded to octet's PTY width came out ragged
 wherever Tern's column was narrower. Markdown reports (`/changelog`,
 `/hotkeys`) carry their source, so Tern typesets their headings, tables and
 code rather than showing flattened text. `/hotkeys` groups bound actions by
