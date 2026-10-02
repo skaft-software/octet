@@ -5,6 +5,7 @@
 //! not own input or terminal capability policy.
 #![allow(missing_docs)]
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Stdout, Write};
@@ -136,16 +137,32 @@ fn open_tui_write_log(configured: Option<std::ffi::OsString>) -> Option<File> {
 const SYNC_OUTPUT_BEGIN: &str = "\x1b[?2026h";
 const SYNC_OUTPUT_END: &str = "\x1b[?2026l";
 
-fn normalize_line_endings(data: &str, last_was_cr: &mut bool) -> String {
-    let mut normalized = String::with_capacity(data.len().saturating_add(8));
-    for character in data.chars() {
-        if character == '\n' && !*last_was_cr {
-            normalized.push('\r');
-        }
-        normalized.push(character);
-        *last_was_cr = character == '\r';
+fn normalize_line_endings<'a>(data: &'a str, last_was_cr: &mut bool) -> Cow<'a, str> {
+    let preceding_cr = *last_was_cr;
+    if let Some(last) = data.as_bytes().last() {
+        *last_was_cr = *last == b'\r';
     }
-    normalized
+    let mut bare_lfs = data.match_indices('\n').filter(|(index, _)| {
+        if *index == 0 {
+            !preceding_cr
+        } else {
+            data.as_bytes()[index - 1] != b'\r'
+        }
+    });
+    let Some(first) = bare_lfs.next() else {
+        // Complete renderer frames already use CRLF. Do not decode and copy
+        // their entire native-history payload just to return identical bytes.
+        return Cow::Borrowed(data);
+    };
+    let mut normalized = String::with_capacity(data.len().saturating_add(8));
+    let mut cursor = 0;
+    for (index, _) in std::iter::once(first).chain(bare_lfs) {
+        normalized.push_str(&data[cursor..index]);
+        normalized.push_str("\r\n");
+        cursor = index + 1;
+    }
+    normalized.push_str(&data[cursor..]);
+    Cow::Owned(normalized)
 }
 
 /// Destination for complete terminal frames.
@@ -335,7 +352,9 @@ impl<W: FrameSink> OctetTerminal<W> {
 
     fn append_backend_bytes(&mut self, bytes: &[u8]) {
         self.pending.extend_from_slice(bytes);
-        self.pending_log.extend_from_slice(bytes);
+        if self.write_log.is_some() {
+            self.pending_log.extend_from_slice(bytes);
+        }
     }
 
     fn append_text(&mut self, text: &str) {
@@ -361,12 +380,15 @@ impl<W: FrameSink> OctetTerminal<W> {
         // the bytes once this exact placement has been written.
         if let Some(encoded) = self.image_store.encoded(&key) {
             if self.pending.try_reserve(encoded.len()).is_err()
-                || self.pending_log.try_reserve(LOG_MARKER.len()).is_err()
+                || (self.write_log.is_some()
+                    && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
             {
                 return;
             }
             self.pending.extend_from_slice(&encoded);
-            self.pending_log.extend_from_slice(LOG_MARKER);
+            if self.write_log.is_some() {
+                self.pending_log.extend_from_slice(LOG_MARKER);
+            }
             return;
         }
         let Ok(command) = ImageProtocolEncoder::new(anchor.protocol(), ImageLimits::default())
@@ -379,14 +401,16 @@ impl<W: FrameSink> OctetTerminal<W> {
         // a partial graphics sequence in a synchronized frame or an image
         // write without its payload-free log replacement.
         if self.pending.try_reserve(command.encoded_len()).is_err()
-            || self.pending_log.try_reserve(LOG_MARKER.len()).is_err()
+            || (self.write_log.is_some() && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
         {
             return;
         }
         let mut encoded = Vec::with_capacity(command.encoded_len());
         if command.write_to(&mut encoded).is_ok() {
             self.pending.extend_from_slice(&encoded);
-            self.pending_log.extend_from_slice(LOG_MARKER);
+            if self.write_log.is_some() {
+                self.pending_log.extend_from_slice(LOG_MARKER);
+            }
             self.image_store.remember_encoded(key, encoded.into());
         }
     }

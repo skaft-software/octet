@@ -322,6 +322,38 @@ HTTP-client construction; it does not show a first-frame speedup or characterize
 an extension-enabled/credentialed launch. The script prints the per-trial
 samples and uses an intentionally credential-free environment.
 
+## Complete startup and resume work
+
+Many-model custom override merging indexes the first exact `api_name` and
+tracks emitted names without repeated catalog scans. Discovery ordering,
+duplicates, configured metadata precedence and authoritative discovered limits
+remain unchanged. Model-scope membership is indexed without changing ordered
+patterns or the first reasoning suffix. Globs still match and sort candidates.
+
+Finished history uses one canonical Markdown parse per materialized block rather
+than provisional streaming stabilization and another final parse. Copy and
+colored-surface rendering reuse that committed document. Hydration still visits
+every accepted item; it skips replacement tracking for rows that have never been
+cached, tracks the moving active subagent summary within a batch, and bulk-builds
+initial/reset persistent publication trees. Ordinary publication retains shared
+unchanged branches. Native startup still paints the full branch, not a tail-only
+shortcut; session decoding, validation, recovery and saved prompt colors are
+unchanged.
+
+Already-normalized terminal frames borrow their bytes, and disabled write logging
+retains no duplicate diagnostics payload. Auto-background detection begins without
+waiting before cold startup work and consumes an arrived reply before ready layout;
+explicit appearances remain authoritative and absent replies cannot hold readiness.
+The ordinary bounded post-ready probe handling remains.
+
+Deterministic regressions cover canonical render/copy parity, chunked CRLF,
+4K-model index work and 1K/10K/100K-block bookkeeping/publication budgets. The
+[offline PTY comparison](../benchmarks/startup-resume-2026-10-02/README.md) separately
+records complete history-ready frames. `history.hydrate` → `frame.ready` excludes
+renderer materialization, layout and terminal writes; do not present its reduction
+as an equivalent end-to-end resume speedup. Full native replay still has
+history-sized layout and output cost.
+
 ## Agent-turn request copy audit
 
 Ordinary provider turns no longer construct an unused native-steering

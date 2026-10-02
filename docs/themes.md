@@ -120,8 +120,12 @@ contrast profile.
 <details>
 <summary>How the OSC 11 background query behaves</summary>
 
-Auto can issue one OSC 11 background query and use a neutral fallback after its
-short detection deadline. The shared input owner keeps recognizing a late reply
+Auto can issue one OSC 11 background query without waiting before model/session
+initialization. An already-arrived reply is applied before the first branded
+frame; readiness never waits for the probe. If no reply has arrived, that frame
+uses the neutral fallback and the existing short post-ready detection wait can
+update it. Explicit Light/Dark choices and no-color output skip the probe.
+The shared input owner keeps recognizing a late reply
 after that deadline, including slowly fragmented bodies once the OSC 11 header
 is recognized. Genuine typing and bracketed paste are kept. Escape and Alt+]
 stay genuine keys: an incomplete opening header has a 250 ms ambiguity timeout,

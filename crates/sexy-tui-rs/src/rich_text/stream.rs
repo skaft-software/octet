@@ -268,6 +268,28 @@ impl StreamingMarkdown {
         stream
     }
 
+    /// Construct an already complete document with one canonical parse.
+    ///
+    /// Unlike [`Self::from_text`] followed by [`Self::finish`], this skips
+    /// provisional fence scanning, suffix copies and preview parsing. Exact
+    /// UTF-8 source and final semantics are identical; further pushes are ignored.
+    pub fn from_finalized_text(text: &str) -> Self {
+        Self {
+            raw: text.as_bytes().to_vec(),
+            decoded: text.to_owned(),
+            committed: markdown::parse(text),
+            finished: true,
+            committed_revision: 1,
+            tail_revision: 1,
+            stats: StreamingStats {
+                parse_passes: 1,
+                reparsed_bytes: text.len() as u64,
+                ..StreamingStats::default()
+            },
+            ..Self::default()
+        }
+    }
+
     pub fn push_str(&mut self, chunk: &str) {
         self.push_bytes(chunk.as_bytes());
     }

@@ -8138,6 +8138,24 @@ async fn apply_detected_terminal_background<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    apply_detected_terminal_background_with_timeout(
+        shell,
+        input,
+        config,
+        Duration::from_millis(120),
+    )
+    .await
+}
+
+async fn apply_detected_terminal_background_with_timeout<S>(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream<S>,
+    config: &crate::config::Config,
+    timeout: Duration,
+) -> bool
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     if explicit_terminal_background_override()
         || TerminalThemeChoice::from_config(config)
             .and_then(TerminalThemeChoice::explicit_background)
@@ -8152,8 +8170,7 @@ where
         return false;
     }
     let Some((red, green, blue)) =
-        crate::tui::terminal::query_terminal_background_color(input, Duration::from_millis(120))
-            .await
+        crate::tui::terminal::query_terminal_background_color(input, timeout).await
     else {
         return false;
     };
@@ -9260,6 +9277,16 @@ async fn run_interactive_once(
             return Ok(InteractiveExit::Finished);
         }
     }
+    // Start Auto detection without waiting. The existing input owner filters
+    // and retains the reply while catalogs, extensions and sessions initialize.
+    // Explicit appearances and no-color terminals never issue the query.
+    apply_detected_terminal_background_with_timeout(
+        &mut shell,
+        &mut input,
+        &config,
+        Duration::ZERO,
+    )
+    .await;
     // Cold/expired model inventories can require network discovery. Give the
     // terminal an input owner before that work, just as for session/extension
     // startup below. Editing is live; submission still waits for full startup.
@@ -9347,6 +9374,16 @@ async fn run_interactive_once(
         }
         startup_prompt = Some(rendered.text);
     }
+    // Consume an already-arrived Auto reply before layout. Never put a probe
+    // deadline on readiness; absent replies keep the neutral fallback and the
+    // ordinary bounded post-ready detection below.
+    apply_detected_terminal_background_with_timeout(
+        &mut shell,
+        &mut input,
+        &app.config,
+        Duration::ZERO,
+    )
+    .await;
     // One atomic ready frame. History, identity, status, extension UI and the
     // startup prompt are all installed before `finish_startup` opens the
     // branded surface, so the terminal never sees an incremental
