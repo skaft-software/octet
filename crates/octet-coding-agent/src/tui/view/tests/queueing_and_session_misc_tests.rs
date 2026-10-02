@@ -418,7 +418,7 @@ fn failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcom
         "{frame:?}"
     );
     assert!(
-        frame.contains("Subagents · 1 running · /extensions"),
+        frame.contains("Subagents · 1 running · /subagents"),
         "{frame:?}"
     );
 

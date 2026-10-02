@@ -759,7 +759,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        compact.contains("Subagents · 5 running · 3 completed · /extensions"),
+        compact.contains("Subagents · 5 running · 3 completed · /subagents"),
         "{compact}"
     );
     assert!(
@@ -808,7 +808,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        settled.contains("Subagents · 3 completed · /extensions"),
+        settled.contains("Subagents · 3 completed · /subagents"),
         "{settled}"
     );
     assert_eq!(

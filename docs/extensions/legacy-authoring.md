@@ -425,8 +425,9 @@ when project/environment/CLI activation makes user config non-authoritative.
 transcript; `/extensions action <extension> <action-id>` performs validated
 interactive routing.
 
-octet-subagents' **Workers** entry (and `/extensions` during a run) opens a live
-arrow-key worker list.
+`/subagents`, `/subagents list` and `/subagents status` open the live arrow-key
+worker list, including during a run; `/extensions` stays an enablement and
+configuration surface, not a runtime worker inspector.
 Owner-bound refresh reconciles authoritative `agent_sessions` state and retains
 focus by stable node ID. Enter revalidates and opens the selected bounded read-only
 transcript; Escape/Left returns to the list.

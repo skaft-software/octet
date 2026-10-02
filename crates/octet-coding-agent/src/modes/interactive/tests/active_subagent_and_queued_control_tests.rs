@@ -6,22 +6,30 @@ use super::*;
 
 use super::support::*;
 
-/// While the root provider is held, `/extensions` opens the live worker
+/// While the root provider is held, `/subagents` opens the live worker
 /// list and Ctrl+X stops the selected worker through the owner-bound
 /// first-party stop path; input and cancellation stay responsive while the
 /// stop response is pending.
 #[cfg(unix)]
 #[tokio::test]
 async fn active_subagent_stops_are_owned_and_survive_root_completion() {
-    for (worker, owner_mode) in [
-        ("running", "owned"),
-        ("running", "slow"),
-        ("running", "cancel"),
-        ("running", "after-completion-abort"),
-        ("running", "missing"),
-        ("running", "wrong"),
-        ("running", "impostor"),
-        ("settled", "owned"),
+    for (worker, owner_mode, command) in [
+        ("running", "owned", "/subagents"),
+        ("running", "slow", "/subagents"),
+        ("running", "cancel", "/subagents"),
+        ("running", "after-completion-abort", "/subagents"),
+        ("running", "missing", "/subagents"),
+        ("running", "wrong", "/subagents"),
+        ("running", "impostor", "/subagents"),
+        ("settled", "owned", "/subagents"),
+        ("running", "owned", "/subagents list"),
+        ("running", "owned", "/subagents status"),
+        ("running", "owned", "/subagents stop worker-one"),
+        ("running", "owned", "/subagents stop all"),
+        ("running", "missing", "/subagents stop worker-one"),
+        ("running", "wrong", "/subagents stop all"),
+        ("running", "impostor", "/subagents stop all"),
+        ("running", "configuration", "/extensions"),
     ] {
         let (server, started, release) = HeldApi::start(text_turn()).await;
         let (_agent_dir, mut agent) =
@@ -63,14 +71,18 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         let key = |code, modifiers| -> std::io::Result<Event> {
             Ok(Event::Key(crossterm::event::KeyEvent::new(code, modifiers)))
         };
-        // Another extension's roster never becomes the worker list, so the
-        // menu waits for idle behind a report that the next key dismisses.
-        let opening = vec![
-            Ok(Event::Paste("/extensions".into())),
+        assert_eq!(extensions.tui_command_suggestions().is_empty(), impostor);
+        let picker = !command.contains(" stop ");
+        let mut opening = vec![
+            Ok(Event::Paste(command.into())),
             key(KeyCode::Enter, KeyModifiers::NONE),
-            key(KeyCode::Char('x'), KeyModifiers::CONTROL),
         ];
-        let closing = if impostor {
+        if picker {
+            opening.push(key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        }
+        // An impostor cannot open the roster; /extensions remains management
+        // and queues behind its diagnostic report, never behind a worker list.
+        let closing = if impostor || !picker || owner_mode == "configuration" {
             vec![key(KeyCode::Char('x'), KeyModifiers::NONE)]
         } else {
             vec![
@@ -176,7 +188,7 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         .await
         .expect("active run and stop should settle");
         drop(run);
-        let case = format!("{worker} {owner_mode}");
+        let case = format!("{worker} {owner_mode} {command}");
         assert_eq!(
             ended.unwrap(),
             if owner_mode == "cancel" {
@@ -199,8 +211,8 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         assert!(!quit);
         assert_eq!(
             pending.len(),
-            usize::from(impostor),
-            "{case}: only an unanswered /extensions waits for idle"
+            usize::from(owner_mode == "configuration"),
+            "{case}: only extension management waits for idle"
         );
         // The open list polls read-only `status`; only stops matter here.
         let wire = std::fs::read_to_string(&log).unwrap_or_default();
@@ -220,7 +232,14 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
             );
             assert_eq!(
                 commands[0]["params"]["arguments"],
-                serde_json::json!(["stop", "worker-one"])
+                serde_json::json!([
+                    "stop",
+                    if command.ends_with(" all") {
+                        "all"
+                    } else {
+                        "worker-one"
+                    }
+                ])
             );
             assert_eq!(
                 commands[0]["params"]["context"]["resource_owner"]["session_id"],
@@ -233,6 +252,134 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         }
         assert!(process.shutdown().await);
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn idle_subagents_opens_the_live_roster_and_routes_worker_commands() {
+    let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
+    let owner = app.agent.session().resource_owner_key();
+    let fixture = tempfile::tempdir().unwrap();
+    let (extensions, process, log) =
+        crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
+            fixture.path(),
+            Some(&owner),
+            "octet-subagents",
+            0,
+        )
+        .await;
+    app.executable_extensions = extensions;
+    app.executable_extensions.test_publish_worker_roster(
+        &process,
+        &[("worker:one", "worker-one", Some("worker-one"))],
+    );
+    let mut shell = InteractiveShell::test_shell();
+    let panel_open = shell.test_subagent_panel_probe();
+    let before = std::fs::read(app.agent.session().path()).unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+    let Command::Unknown(text) = commands::parse("/subagents") else {
+        panic!("extension command")
+    };
+    let arguments = subagents_command_arguments(&text, &app.executable_extensions).unwrap();
+    let driver = run_subagents_command(&mut app, &mut shell, &mut input, arguments);
+    let close = async {
+        while !panel_open() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sender
+            .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(driver, close)
+    })
+    .await
+    .expect("idle /subagents must open its live list without a model turn");
+    result.unwrap();
+    assert_eq!(shell.debug_error(), None);
+    for text in [
+        "/subagents inspect worker-one",
+        "/subagents wait worker-one",
+        "/subagents reattach worker-one",
+        "/subagents stop all",
+    ] {
+        let arguments = subagents_command_arguments(text, &app.executable_extensions).unwrap();
+        run_subagents_command(&mut app, &mut shell, &mut input, arguments)
+            .await
+            .unwrap();
+    }
+    assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
+    let commands = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    for command in &commands {
+        assert_eq!(
+            command["params"]["context"]["resource_owner"]["session_id"],
+            owner
+        );
+    }
+    assert_eq!(commands[0]["params"]["arguments"], serde_json::json!([]));
+    for action in ["inspect", "wait", "reattach", "stop"] {
+        assert!(commands
+            .iter()
+            .any(|command| command["params"]["arguments"][0] == action));
+    }
+    assert!(process.shutdown().await);
+    assert!(app
+        .executable_extensions
+        .tui_command_suggestions()
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn active_subagent_wait_queues_without_running_an_extension_command() {
+    let fixture = tempfile::tempdir().unwrap();
+    let (mut extensions, process, log) =
+        crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
+            fixture.path(),
+            Some("owner"),
+            "octet-subagents",
+            0,
+        )
+        .await;
+    let mut shell = InteractiveShell::test_shell();
+    let mut input = futures_util::stream::pending();
+    let mut queue = VecDeque::new();
+    let mut deadline = None;
+    let mut quit = false;
+    handle_active_command(
+        &mut shell,
+        commands::parse("/subagents wait worker-one"),
+        test_run_inspection(),
+        &mut extensions,
+        &octet_agent::ContextSnapshot::default(),
+        &mut deadline,
+        |_, _| Ok(None),
+        &mut input,
+        &mut queue,
+        &mut quit,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        queue,
+        VecDeque::from([PendingIdleAction::Subagents(vec![
+            "wait".into(),
+            "worker-one".into()
+        ])])
+    );
+    assert!(!log.exists());
+    assert!(!quit);
+    assert_eq!(shell.debug_error(), None);
+    assert!(process.shutdown().await);
 }
 
 /// Input is acknowledged while the first response is held by a gate. The

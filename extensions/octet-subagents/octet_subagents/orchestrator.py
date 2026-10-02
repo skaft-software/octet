@@ -719,7 +719,7 @@ class Orchestrator:
                 raise SubagentError(
                     "worker %s is still owned by this session but is currently "
                     "detached from any host run; reattach it with subagent_wait (or "
-                    "Wait for workers in /extensions) once the host republishes its "
+                    "/subagents wait) once the host republishes its "
                     "live session"
                     % display,
                     code="detached",
@@ -818,8 +818,8 @@ class Orchestrator:
                         "%d worker(s) are still owned by this parent session but "
                         "detached from any host run (%d reattachable). The cached "
                         "fallback cannot observe the live host service, so no wait "
-                        "or reattachment was performed. Choose Wait for workers under "
-                        "/extensions in an interactive session or call subagent_wait."
+                        "or reattachment was performed. Run /subagents wait "
+                        "in an interactive session or call subagent_wait."
                         % (len(detached), reattachable)
                     ),
                     "notifications": [
@@ -836,7 +836,7 @@ class Orchestrator:
             return {
                 "text": (
                     "No detached workers. An explicit live wait needs the owner-bound "
-                    "command context: choose Wait for workers under /extensions in an "
+                    "command context: run /subagents wait in an "
                     "interactive session or call subagent_wait."
                 ),
                 "notifications": [],
@@ -962,79 +962,14 @@ class Orchestrator:
             "skipped": skipped,
         }
 
-    def menu(self, context: Mapping[str, Any]) -> Dict[str, Any]:
-        """The /extensions options menu, from cached owner state only."""
+    def menu(self, _context: Mapping[str, Any]) -> Dict[str, Any]:
+        """Extension management only; worker operations belong to /subagents."""
 
-        state = self._owner_for_command(context)
-        with self._lock:
-            workers = list(state.workers.values()) if state is not None else []
-        running = sum(worker.active for worker in workers)
-        detached = sum(worker.detached for worker in workers)
-        failed = sum(
-            worker.state in {"failed", "timed_out", "limit_reached"} for worker in workers
-        )
-        if not workers:
-            status = {"state": "empty", "label": "No workers in this session"}
-        elif running:
-            status = {"state": "running", "label": "%d running · %d total" % (running, len(workers))}
-        elif failed:
-            status = {"state": "degraded", "label": "%d settled · %d failed" % (len(workers), failed)}
-        else:
-            status = {"state": "active", "label": "%d settled" % len(workers)}
-
-        def action(item_id: str, label: str, description: str, *arguments: str,
-                   **flags: bool) -> Dict[str, Any]:
-            item: Dict[str, Any] = {
-                "id": item_id,
-                "label": label,
-                "description": description,
-                "command": "subagents",
-                "arguments": list(arguments),
-            }
-            item.update({name: True for name, value in flags.items() if value})
-            return item
-
-        items = [
-            action(
-                "workers",
-                "Workers",
-                "Live list: Enter opens a worker's transcript, Ctrl+X stops it",
-                recommended=bool(workers),
-            )
-        ]
-        if running or detached:
-            items.append(action(
-                "wait", "Wait for workers",
-                "Wait up to 30 seconds for this session's workers and report them",
-                "wait",
-            ))
-        if detached:
-            items.append(action(
-                "reattach", "Reattach detached workers",
-                "Pick detached workers back up in this session", "reattach",
-            ))
-        if running:
-            items.append(action(
-                "stop-all", "Stop all workers",
-                "Interrupt every running worker this session owns", "stop", "all",
-                destructive=True,
-            ))
-        items.append({
-            "id": "panes",
-            "label": "Open workers in panes (preview)",
-            "description": "Plans a pane per worker; opening them is blocked for now",
-            "detail": (
-                "Reports which workers could get a pane. Octet opens none until the "
-                "host can hand a worker's session over safely."
-            ),
-            "items": [
-                action("tmux", "Plan tmux panes", "Needs tmux; nothing is opened",
-                       "open-all", "tmux"),
-                action("herdr", "Plan herdr panes", "Needs herdr; nothing is opened",
-                       "open-all", "herdr"),
-            ],
-        })
-        return {"title": "Subagents", "status": status, "items": items}
+        return {
+            "title": "Subagents",
+            "detail": "Browse and control this session's workers with /subagents.",
+            "items": [],
+        }
 
     def status_contribution(self, context: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         state = self._owner_for_command(context)

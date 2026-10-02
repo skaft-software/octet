@@ -4,13 +4,13 @@
 
 ### Added
 
-- An options menu under `/extensions` replaces the `/subagents` slash command in
-  the terminal UI: **Workers** opens the live worker list (Enter shows a
-  transcript, Ctrl+X stops the selected worker), **Wait for workers**,
-  **Reattach detached workers**, **Stop all workers** (confirmed first), and
-  **Open workers in panes (preview)**. The menu shows the session's worker
-  counts and offers only what applies. While a turn runs, `/extensions` opens
-  the worker list directly. The web UI keeps the `/subagents` command for now.
+- Keep `/subagents` as the runtime worker surface in the terminal UI. Bare,
+  `list` and `status` open the live roster (Enter shows a transcript, Ctrl+X
+  stops the selected worker), including during a turn. `/subagents stop
+  <name-or-id|all>` uses the bounded owner-bound stop queue during a turn;
+  inspect, wait, reattach and open-all queue until idle. Slash completion
+  follows the first-party extension's live registration. `/extensions` only
+  enables, disables and configures the extension, with no worker operations.
 
 - `/subagents open-all tmux|herdr` remains **Partial**: bounded opaque-handle
   plans and fresh owner-bound host status are retained, but every worker and the

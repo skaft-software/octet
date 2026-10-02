@@ -102,11 +102,14 @@ generation and negotiated features. The packaged skill is opt-in too:
 
 ## Inspect the work
 
-Open `/extensions`, then octet-subagents, then **Workers**, to see the
-host-owned worker list. While a turn runs, `/extensions` opens it directly. Up
-and Down select, Enter opens a scrollable, read-only transcript, Ctrl+X stops
-the selected worker, and Escape or Left goes back. The same menu waits for
-workers, reattaches detached ones and stops them all.
+Open `/subagents` (also `/subagents list` or `/subagents status`) to see the
+host-owned live roster, including while a turn runs. Up and Down select, Enter
+opens a scrollable, read-only transcript, Ctrl+X stops the selected worker, and
+Escape or Left goes back. `/subagents stop <name-or-id|all>` requests interruption
+without waiting for the parent turn to end. `/subagents inspect <name-or-id>`,
+`/subagents wait [name-or-id]` and `/subagents reattach [name-or-id]` run at idle,
+or queue until idle during a turn. `/extensions` only enables, disables and
+configures the extension; runtime worker controls are not in its options menu.
 
 A bounded, tool-like **Subagents** transcript block updates in place while
 workers are active, including between root turns. Its heading counts worker
@@ -128,14 +131,14 @@ tool and run failures and approval prompts stay visible.
 </details>
 
 Serve inspection is also owner-bound and read-only, and can't send a prompt. In
-the web UI, `/subagents inspect <name-or-id>` gives cached detail, and
+both frontends, `/subagents inspect <name-or-id>` gives cached detail, and
 `/extensions inspect agent-session:<digest>` is the fallback for an explicit
 reference.
 
 ## Open the fleet in panes
 
-**Partial: pane execution is blocked.** **Open workers in panes (preview)** in
-the options menu (the web UI's `/subagents open-all tmux` or `herdr`) refreshes
+**Partial: pane execution is blocked.** `/subagents open-all tmux` or
+`/subagents open-all herdr` refreshes
 the owner-bound `agent/list` and reports bounded plans using opaque
 `agent-session:<sha256>` handles. No pane is created and no command is
 submitted, including on repeated calls. See

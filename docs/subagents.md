@@ -63,20 +63,25 @@ the inspector, survive restoration, and are preserved by continuation. Host
 
 ## Drive the fleet
 
-Everything is in `/extensions` → octet-subagents:
+Use `/extensions` to enable, disable or configure the extension. Runtime worker
+inspection and control belong to `/subagents`, which appears in slash completion
+when the first-party extension is ready:
 
-| Entry | Use |
+| Command | Use |
 | --- | --- |
-| **Workers** | Host-owned worker list; Up/Down selects, Enter opens a read-only transcript, Ctrl+X stops the selected worker. While a run is active, `/extensions` opens this list directly. |
-| **Wait for workers** | Explicit parent wait; also the owner-bound reattach pass. |
-| **Reattach detached workers** | The reattachment pass, offered while a worker is detached. |
-| **Stop all workers** | Owner-bound interruption of every running worker, after a confirmation. |
-| **Open workers in panes (preview)** | Plan one tmux or herdr pane per worker; opening them is blocked for now. |
+| `/subagents`, `/subagents list`, `/subagents status` | Host-owned live roster, including during a run; Up/Down selects, Enter opens a read-only transcript, Ctrl+X stops the selected worker. |
+| `/subagents inspect <name-or-id>` | Cached read-only worker detail. |
+| `/subagents wait [name-or-id]` | Explicit parent wait; also the owner-bound reattach pass. |
+| `/subagents reattach [name-or-id]` | Force the owner-bound reattachment pass. |
+| `/subagents stop <name-or-id\|all>` | Request owner-bound interruption of one worker or every running worker. |
+| `/subagents open-all <tmux\|herdr>` | Plan one pane per worker; opening them is blocked for now. |
 
-To stop every worker owned by this session, choose **Stop all workers**; to
-stop one, select it in the worker list and press Ctrl+X, including while the
-parent is running. The live roster points at `/extensions`. Acceptance requests interruption, not immediate settlement: a worker may
-briefly remain `stopping`. Cancelling a wait does not stop its worker.
+To stop every worker owned by this session, enter `/subagents stop all`; to stop
+one, enter `/subagents stop <name-or-id>` or select it in the roster and press
+Ctrl+X. Roster and stop controls stay available while the parent is running;
+other commands queue until idle. The live roster points at `/subagents`.
+Acceptance requests interruption, not immediate settlement: a worker may briefly
+remain `stopping`. Cancelling a wait does not stop its worker.
 
 Live roster token counts use rounded `K`, `M`, `B`, and `T` suffixes (for example,
 `284K`, `1.2M`, and `1.5B`). A `~` still marks an output estimate; compact labels
@@ -87,8 +92,7 @@ The model-facing equivalents are `subagent_models`, `subagent_spawn`, `subagent_
 
 ## Open the fleet in panes
 
-**Open workers in panes (preview)** (in the web UI, `/subagents open-all tmux`
-or `herdr`) is the escape hatch: it plans to pluck the parent session and every
+`/subagents open-all tmux` or `/subagents open-all herdr` is the escape hatch: it plans to pluck the parent session and every
 **running** worker out of the read-only parent-controlled panel and reopen each
 as its own interactive octet session, one pane or window per session. Pane
 execution is **Partial**: every pane stays blocked until the host can hand a
@@ -231,7 +235,7 @@ The extension models the gap as **detached, not dead**:
 - When the owning session republishes the live record, the extension **reattaches**
   automatically: `detached` clears, `reattach_count` increments,
   `last_reattached_at_ms` is recorded, and the bounded detachment note is cleared
-  (a real host error is preserved). **Wait for workers** forces that pass.
+  (a real host error is preserved). `/subagents wait` forces that pass.
 - A targeted wait result carries
   `reattachment: {state: "detached"|"reattached"}` so the caller always knows
   which one happened. The cached/narrow fallback states plainly that it performed
@@ -245,7 +249,7 @@ The extension models the gap as **detached, not dead**:
   handle, so a pane never targets a stale session and `octet --resume` refuses the
   same rows the host does. A detached or parked worker is excluded **and named** in
   the report with its reattach/approve step, and a worker reattached by
-  **Wait for workers** is planned again on the next run.
+  `/subagents wait` is planned again on the next run.
 
 ## Where the rest lives
 

@@ -323,7 +323,7 @@ impl SubagentTranscript {
             } else {
                 "activity recorded · orchestration failed"
             };
-            return format!("Subagents · {outcome} · /extensions");
+            return format!("Subagents · {outcome} · /subagents");
         }
         let mut parts = Vec::new();
         for (count, name) in [
@@ -337,7 +337,7 @@ impl SubagentTranscript {
                 parts.push(format!("{count} {name}"));
             }
         }
-        format!("Subagents · {} · /extensions", parts.join(" · "))
+        format!("Subagents · {} · /subagents", parts.join(" · "))
     }
 
     fn settled_role(&self) -> &'static str {
@@ -1355,6 +1355,7 @@ pub(crate) struct ShellState {
     /// both; Escape dismisses it until the command token changes again.
     prompt_templates: Arc<[crate::prompts::PromptTemplateDescriptor]>,
     skill_commands: Arc<[(String, String)]>,
+    extension_commands: Arc<[(String, String)]>,
     /// Session-scoped live roster, rendered only in composer-adjacent chrome.
     pub(crate) subagent_activity: Option<SubagentActivityView>,
     /// Cumulative child spend already handed off to the root's durable ledger.
@@ -3410,6 +3411,20 @@ impl InteractiveShell {
         move || state.borrow().run.is_active()
     }
 
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_subagent_panel_probe(&self) -> impl Fn() -> bool {
+        let state = self.state.clone();
+        move || {
+            matches!(
+                &state.borrow().panel,
+                Some(Panel::SelectList {
+                    action: PanelAction::SelectSubagent(_),
+                    ..
+                })
+            )
+        }
+    }
+
     /// Real renderer thread with a deterministic layout gate. The caller must
     /// always release the gate before dropping the shell, including on failure.
     #[cfg(test)]
@@ -4915,6 +4930,19 @@ impl InteractiveShell {
         state.skill_commands = commands;
         state.slash_selection = 0;
         state.slash_scroll = 0;
+    }
+
+    /// Replace live runtime-command discovery without resetting unchanged
+    /// popup selection on each background tick.
+    pub fn set_extension_commands(&mut self, commands: Arc<[(String, String)]>) -> bool {
+        let mut state = self.state.borrow_mut();
+        if state.extension_commands.as_ref() == commands.as_ref() {
+            return false;
+        }
+        state.extension_commands = commands;
+        state.slash_selection = 0;
+        state.slash_scroll = 0;
+        true
     }
 
     #[allow(dead_code)]

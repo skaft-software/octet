@@ -423,7 +423,7 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        activity.contains("Subagents · 1 running · /extensions"),
+        activity.contains("Subagents · 1 running · /subagents"),
         "{activity}"
     );
     assert!(
@@ -610,12 +610,15 @@ fn subagent_stop_hint_is_visible_only_while_workers_are_active() {
         shell.state.borrow_mut().set_subagent_activity(view.clone());
         let live =
             strip_terminal_sequences(&shell.state.borrow().rendered_transcript(width).join("\n"));
-        assert!(live.contains("/extensions to stop"), "{width}: {live}");
+        assert!(live.contains("/subagents stop all"), "{width}: {live}");
         view.telemetry[0].state = "completed".into();
         shell.state.borrow_mut().set_subagent_activity(view);
         let settled =
             strip_terminal_sequences(&shell.state.borrow().rendered_transcript(width).join("\n"));
-        assert!(!settled.contains("to stop"), "{width}: {settled}");
+        assert!(
+            !settled.contains("/subagents stop all"),
+            "{width}: {settled}"
+        );
     }
 }
 
@@ -642,9 +645,7 @@ fn subagent_transcript_row_is_height_bounded_and_points_to_the_inspector() {
                 .subagents
                 .is_empty());
             assert_eq!(
-                rows.iter()
-                    .filter(|row| row.contains("/extensions"))
-                    .count(),
+                rows.iter().filter(|row| row.contains("/subagents")).count(),
                 1
             );
             assert!(rows
@@ -725,7 +726,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        block.contains("Subagents · 1 running · 1 failed · /extensions"),
+        block.contains("Subagents · 1 running · 1 failed · /subagents"),
         "{block}"
     );
     assert!(
