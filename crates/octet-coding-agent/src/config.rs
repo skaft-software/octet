@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use octet_agent::{
-    EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
+    CacheWarmMode, EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
     DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_MAX_OUTPUT_BYTES,
 };
 
@@ -434,6 +434,10 @@ pub struct Config {
     /// True when the reasoning mode came from an explicit command-line override.
     pub reasoning_mode_explicit: bool,
     pub cache_retention: CacheRetention,
+    /// Billable prompt-cache refresh policy. Project configuration cannot override it.
+    pub cache_warming: CacheWarmMode,
+    /// Opt-in presentation of cache misses and successful warming; accounting is unconditional.
+    pub show_cache_miss_notices: bool,
     /// Host-owned admission policy for model-requested tool effects.
     pub effect_policy: EffectPolicy,
     pub sandbox: SandboxPolicy,
@@ -566,6 +570,25 @@ pub fn parse_cache_retention(value: &str) -> anyhow::Result<CacheRetention> {
     }
 }
 
+/// Parse the user-owned billable cache-warming policy.
+pub fn parse_cache_warming(value: &str) -> anyhow::Result<CacheWarmMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(CacheWarmMode::Off),
+        "streaming" => Ok(CacheWarmMode::Streaming),
+        "idle" => Ok(CacheWarmMode::Idle),
+        _ => anyhow::bail!("invalid cache warming {value:?}; use off, streaming, or idle"),
+    }
+}
+
+/// Stable configuration and diagnostics spelling for a cache-warming mode.
+pub fn cache_warming_label(mode: CacheWarmMode) -> &'static str {
+    match mode {
+        CacheWarmMode::Off => "off",
+        CacheWarmMode::Streaming => "streaming",
+        CacheWarmMode::Idle => "idle",
+    }
+}
+
 /// Default location for persistent sessions.
 pub fn default_session_dir() -> PathBuf {
     dirs::home_dir()
@@ -609,6 +632,24 @@ mod tests {
         );
         assert_eq!(parse_cache_retention("long").unwrap(), CacheRetention::Long);
         assert!(parse_cache_retention("sometimes").is_err());
+    }
+
+    #[test]
+    fn cache_warming_accepts_only_the_three_modes() {
+        assert_eq!(CacheWarmMode::default(), CacheWarmMode::Streaming);
+        for mode in [
+            CacheWarmMode::Off,
+            CacheWarmMode::Streaming,
+            CacheWarmMode::Idle,
+        ] {
+            assert_eq!(
+                parse_cache_warming(cache_warming_label(mode)).unwrap(),
+                mode
+            );
+        }
+        for invalid in ["", "on", "none", "sometimes"] {
+            assert!(parse_cache_warming(invalid).is_err());
+        }
     }
 
     #[test]

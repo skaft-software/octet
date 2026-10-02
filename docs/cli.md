@@ -30,6 +30,7 @@ defaults that aren't listed here aren't guessed.
 | `--model ID` | Choose the model. Overrides a resumed session's model. |
 | `--reasoning LEVEL`, `--reasoning budget=N` | Reasoning effort, or a token budget where supported. [Levels](providers.md#reasoning). |
 | `--cache-retention VALUE` | Provider cache retention, such as `short`. |
+| `--cache-warming off\|streaming\|idle` | Billable prompt-cache refresh policy; default `streaming`. Overrides `OCTET_CACHE_WARMING` and user configuration. [Details](cache-warming.md). |
 | `--max-turns N` | Limit model turns. |
 | `--workspace PATH` | Workspace root for relative tool paths and the default bash directory. |
 | `--workspace-trusted`, `--trust-workspace` | Load project config, instructions and resources. Can't relax global safety limits or grant extension trust. |
@@ -46,6 +47,14 @@ is unknown, and a known zero is different. Known total-dollar projections
 include the sub-microdollar remainder, and the exact integer cost stays in the
 session ledger. Aggregate scalar costs are known subtotals whenever usage is
 uncertain or an operation is unpriced.
+
+`/cache-warming` reports mode, scheduler/economic decisions and known refresh
+spend; `/cache-warming MODE` persists the user setting. The local command never
+becomes model input. In print/plain it reports on stderr. RPC `get_state` and
+`get_session_stats` expose `cacheWarmingMode` and `cacheWarmingStatus`;
+`get_state` also exposes `showCacheMissNotices`. RPC maintenance emits
+`cache_warmed` with `usage`, exact integer `cost`, and `extensionOverride`,
+without assistant-message or turn events. Its usage is session-only.
 
 ## Tools and limits
 

@@ -89,6 +89,22 @@ pub(crate) async fn translate(
                 )
                 .await?;
         }
+        AgentEvent::CacheWarmed {
+            usage,
+            cost,
+            extension_override,
+        } => {
+            emitter
+                .emit(
+                    "cache_warmed",
+                    serde_json::json!({
+                        "usage": usage,
+                        "cost": cost,
+                        "extension_override": extension_override,
+                    }),
+                )
+                .await?;
+        }
         AgentEvent::ProviderUsageUncertain => {
             emitter
                 .emit("provider_usage_uncertain", serde_json::json!({}))
@@ -453,6 +469,29 @@ fn append_bounded(target: &mut String, text: &str, max_bytes: usize) {
         end -= 1;
     }
     target.push_str(&text[..end]);
+}
+
+/// The prior request already emitted final_result: idle maintenance is durable
+/// accounting plus optional stderr notices, never an extra protocol event.
+pub(crate) fn report_idle_cache_warming(event: AgentEvent, show_notices: bool) {
+    match event {
+        AgentEvent::CacheWarmed {
+            cost,
+            extension_override,
+            ..
+        } if show_notices => {
+            crate::output::stderr_line(crate::commands::cache_warmed_notice(
+                cost,
+                extension_override,
+            ));
+        }
+        AgentEvent::ProviderUsageUncertain => {
+            crate::output::stderr!(
+                "warning: cache warming usage is uncertain; session costs are a known subtotal."
+            );
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

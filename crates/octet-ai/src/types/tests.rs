@@ -92,6 +92,33 @@ fn inline_media_json_overhead_is_base64_sized() {
 }
 
 #[test]
+fn prompt_cache_lifetimes_are_explicit_and_default_to_unknown() {
+    let defaults = CacheCompatibility::default();
+    assert_eq!(defaults.prompt_cache, PromptCacheLifetimes::default());
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    legacy.as_object_mut().unwrap().remove("prompt_cache");
+    let parsed: CacheCompatibility = serde_json::from_value(legacy).unwrap();
+    assert_eq!(parsed.prompt_cache.short, None);
+    assert_eq!(parsed.prompt_cache.long, None);
+
+    for lifetimes in [
+        serde_json::json!({}),
+        serde_json::json!({"short": 300}),
+        serde_json::json!({"long": 3600}),
+        serde_json::json!({"short": 300, "long": 3600}),
+    ] {
+        let cache: CacheCompatibility =
+            serde_json::from_value(serde_json::json!({"prompt_cache": lifetimes})).unwrap();
+        assert_eq!(cache.prompt_cache.short, lifetimes["short"].as_u64());
+        assert_eq!(cache.prompt_cache.long, lifetimes["long"].as_u64());
+        let round_trip: CacheCompatibility =
+            serde_json::from_slice(&serde_json::to_vec(&cache).unwrap()).unwrap();
+        assert_eq!(cache, round_trip);
+    }
+    assert!(serde_json::from_str::<CacheRetention>("\"warm_short\"").is_err());
+}
+
+#[test]
 fn explicit_prompt_cache_mode_is_opt_in_and_backwards_compatible() {
     let mut serialized = serde_json::to_value(CacheCompatibility::default()).unwrap();
     assert!(!serialized["supports_explicit_prompt_cache_mode"]

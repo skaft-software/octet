@@ -21,6 +21,8 @@ pub(super) fn serve_test_config(directory: &Path) -> Config {
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,
+        cache_warming: octet_agent::CacheWarmMode::default(),
+        show_cache_miss_notices: false,
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox: crate::config::SandboxPolicy::default(),
         theme: None,

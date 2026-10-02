@@ -61,6 +61,8 @@ const CONFIG_KEYS: &[&str] = &[
     "effect_policy",
     "reasoning_mode",
     "cache_retention",
+    "cache_warming",
+    "show_cache_miss_notices",
     "theme",
     "color",
     "mouse",

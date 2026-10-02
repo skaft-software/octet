@@ -320,66 +320,182 @@ fn cache_retention_controls_anthropic_wire_markers() {
 }
 
 #[test]
-fn warm_breakpoint_covers_reusable_canonical_prefix_not_synthetic_suffix() {
-    let model = make_test_model(false);
-    let mut req = Request {
-        system: Some("stable system".into()),
-        messages: vec![
-            Message::User(UserMessage {
-                content: vec![UserPart::Text("prior user".into())],
-            }),
-            Message::Assistant(crate::types::AssistantMessage {
-                content: vec![AssistantPart::Text("prior answer".into())],
-                model: model.spec.id.clone(),
-                protocol: Protocol::AnthropicMessages,
-            }),
-        ],
-        tools: vec![ToolDef {
-            async_execution: false,
-            constrained_sampling: None,
-            name: "lookup".into(),
-            description: "lookup".into(),
-            parameters: serde_json::json!({"type": "object"}),
-        }],
-        max_output_tokens: Some(1),
-        cache_retention: CacheRetention::WarmShort,
-        session_id: Some("same-session".into()),
-        ..base_request()
+fn cache_warming_replay_changes_only_max_tokens_for_short_and_long_retention() {
+    use crate::types::{
+        AssistantMessage, CacheRetention, ReasoningEffort, ReasoningState, ReasoningStateKind,
+        ToolCall, ToolCallId, ToolResult, ToolResultPart,
     };
-    req.messages.push(Message::User(UserMessage {
-        content: vec![UserPart::Text("Reply with a single period.".into())],
-    }));
-    let warm = build_request(&model, &req).unwrap();
-    let warm_body: serde_json::Value = serde_json::from_slice(&warm.body).unwrap();
-    req.cache_retention = CacheRetention::Short;
-    req.max_output_tokens = Some(100);
-    req.messages.pop();
-    req.messages.push(Message::User(UserMessage {
-        content: vec![UserPart::Text("real follow-up".into())],
-    }));
-    let follow_up = build_request(&model, &req).unwrap();
-    let follow_up_body: serde_json::Value = serde_json::from_slice(&follow_up.body).unwrap();
 
-    assert_eq!(warm_body["system"], follow_up_body["system"]);
-    assert_eq!(warm_body["tools"], follow_up_body["tools"]);
-    let mut warm_prefix = warm_body["messages"].as_array().unwrap()[..2].to_vec();
-    let follow_up_prefix = &follow_up_body["messages"].as_array().unwrap()[..2];
-    assert_eq!(
-        warm_prefix[1]["content"][0]["cache_control"]["type"],
-        "ephemeral"
-    );
-    warm_prefix[1]["content"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("cache_control");
-    assert_eq!(&warm_prefix, follow_up_prefix);
-    assert!(warm_body["messages"][2]["content"][0]
-        .get("cache_control")
-        .is_none());
-    assert_eq!(
-        follow_up_body["messages"][2]["content"][0]["cache_control"]["type"],
-        "ephemeral"
-    );
+    let mut model = make_test_model(true);
+    {
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.capabilities.reasoning = Some(crate::test_fixtures::reasoning_capability());
+        spec.cache.send_session_affinity_headers = true;
+        spec.preset.anthropic_compat = Some(crate::declarations::AnthropicCompatPreset {
+            force_adaptive_thinking: Some(true),
+            supports_mid_convo_effort: Some(true),
+            ..Default::default()
+        });
+    }
+    for cache_retention in [CacheRetention::Short, CacheRetention::Long] {
+        for reasoning in [
+            ReasoningConfig::Off,
+            ReasoningConfig::Effort(ReasoningEffort::Low),
+            ReasoningConfig::Effort(ReasoningEffort::High),
+        ] {
+            let ordinary = Request {
+                system: Some("stable system".into()),
+                messages: vec![
+                    Message::User(UserMessage {
+                        content: vec![UserPart::Text("prior user".into())],
+                    }),
+                    Message::Assistant(AssistantMessage {
+                        content: vec![
+                            AssistantPart::Reasoning(ReasoningPart {
+                                text: Some("prior thinking".into()),
+                                state: Some(ReasoningState {
+                                    protocol: Protocol::AnthropicMessages,
+                                    model: model.spec.id.clone(),
+                                    kind: ReasoningStateKind::AnthropicSignature {
+                                        signature: "unchanged-signature".into(),
+                                    },
+                                }),
+                            }),
+                            AssistantPart::Text("prior answer".into()),
+                            AssistantPart::ToolCall(ToolCall {
+                                async_execution: false,
+                                id: ToolCallId("call-1".into()),
+                                name: "lookup".into(),
+                                arguments_json: "{}".into(),
+                                argument_error: None,
+                            }),
+                        ],
+                        model: model.spec.id.clone(),
+                        protocol: Protocol::AnthropicMessages,
+                    }),
+                    Message::User(UserMessage {
+                        content: vec![
+                            UserPart::ToolResult(ToolResult {
+                                tool_call_id: ToolCallId("call-1".into()),
+                                content: vec![ToolResultPart::Text("lookup result".into())],
+                                is_error: false,
+                                added_tool_names: None,
+                            }),
+                            UserPart::Text("real follow-up".into()),
+                        ],
+                    }),
+                ],
+                tools: vec![ToolDef {
+                    async_execution: false,
+                    constrained_sampling: None,
+                    name: "lookup".into(),
+                    description: "lookup".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }],
+                output_format: OutputFormat::JsonSchema(crate::types::JsonSchemaFormat {
+                    name: "answer".into(),
+                    description: None,
+                    schema: serde_json::json!({"type": "object"}),
+                    strict: false,
+                }),
+                max_output_tokens: Some(100),
+                cache_retention,
+                reasoning: reasoning.clone(),
+                session_id: Some("same-session".into()),
+                ..base_request()
+            };
+            let mut replay = ordinary.clone();
+            replay.max_output_tokens = Some(1);
+            let normal = build_request(&model, &ordinary).unwrap();
+            let warm = build_request(&model, &replay).unwrap();
+            assert_eq!(normal.url, warm.url);
+            assert_eq!(normal.headers, warm.headers);
+            assert_eq!(warm.headers["x-session-affinity"], "same-session");
+            assert_eq!(normal.streaming, warm.streaming);
+            assert!(normal.diagnostics.is_empty() && warm.diagnostics.is_empty());
+
+            let mut normal_body: serde_json::Value = serde_json::from_slice(&normal.body).unwrap();
+            let warm_body: serde_json::Value = serde_json::from_slice(&warm.body).unwrap();
+            assert_eq!(normal_body["max_tokens"], 100);
+            assert_eq!(warm_body["max_tokens"], 1);
+            let expected_wire = std::str::from_utf8(&normal.body).unwrap().replacen(
+                "\"max_tokens\":100",
+                "\"max_tokens\":1",
+                1,
+            );
+            assert_eq!(expected_wire.as_bytes(), warm.body.as_ref());
+            normal_body["max_tokens"] = serde_json::json!(1);
+            assert_eq!(
+                normal_body, warm_body,
+                "{cache_retention:?} / {reasoning:?}"
+            );
+
+            let marker = match cache_retention {
+                CacheRetention::Short => serde_json::json!({"type": "ephemeral"}),
+                CacheRetention::Long => serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+                CacheRetention::None => unreachable!(),
+            };
+            assert_eq!(warm_body["system"][0]["cache_control"], marker);
+            assert_eq!(warm_body["tools"][0]["cache_control"], marker);
+            assert_eq!(
+                warm_body["messages"][2]["content"][1]["cache_control"],
+                marker
+            );
+            assert_eq!(
+                warm_body["messages"][2]["content"][1]["text"],
+                "real follow-up"
+            );
+            assert!(warm_body["messages"][1]["content"][1]
+                .get("cache_control")
+                .is_none());
+            assert_eq!(
+                warm_body["messages"][1]["content"][0]["signature"],
+                "unchanged-signature"
+            );
+            match reasoning {
+                ReasoningConfig::Off => assert_eq!(warm_body["thinking"]["type"], "disabled"),
+                ReasoningConfig::Effort(effort) => {
+                    assert_eq!(warm_body["thinking"]["type"], "adaptive");
+                    assert!(warm_body["thinking"].get("budget_tokens").is_none());
+                    assert_eq!(
+                        warm_body["output_config"]["effort"],
+                        anthropic_effort(effort)
+                    );
+                    assert_eq!(
+                        warm_body["messages"][3]["output_config"]["effort"],
+                        anthropic_effort(effort)
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn one_token_replay_rejects_budget_thinking_without_changing_the_budget() {
+    let model = make_test_model(true);
+    for compatibility in [
+        crate::CompatibilityMode::Strict,
+        crate::CompatibilityMode::Lossy,
+    ] {
+        for reasoning in [
+            ReasoningConfig::Budget(2048),
+            ReasoningConfig::Effort(crate::types::ReasoningEffort::Low),
+        ] {
+            let mut request = beta_test_request(reasoning);
+            request.compatibility = compatibility;
+            request.max_output_tokens = Some(8192);
+            assert!(build_request(&model, &request).is_ok());
+            request.max_output_tokens = Some(1);
+            assert!(matches!(
+                build_request(&model, &request),
+                Err(AiError::Validation(
+                    crate::error::ValidationError::ReasoningBudgetOutOfRange
+                ))
+            ));
+        }
+    }
 }
 
 #[test]

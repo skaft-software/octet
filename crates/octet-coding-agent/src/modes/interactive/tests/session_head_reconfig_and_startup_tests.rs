@@ -181,6 +181,7 @@ async fn idle_slash_enter_returns_the_highlighted_command_to_dispatch() {
         &mut reload_tick,
         &reload_watcher,
         &mut reload,
+        None,
     )
     .await
     .unwrap();

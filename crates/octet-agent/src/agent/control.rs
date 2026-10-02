@@ -210,6 +210,8 @@ pub(super) fn control_input_bytes(input: &UserInput) -> usize {
 /// bypasses this queue entirely.
 #[derive(Clone)]
 pub struct RunControl {
+    pub(super) cache_warming_mode: tokio::sync::watch::Sender<crate::cache_warmer::CacheWarmPolicy>,
+    pub(super) cache_warming_status: tokio::sync::watch::Receiver<crate::CacheWarmingStatus>,
     pub(super) reasoning_model: Option<Model>,
     pub(super) ultra_observed: bool,
     pub(super) admission: Arc<std::sync::Mutex<bool>>,
@@ -220,6 +222,36 @@ pub struct RunControl {
 }
 
 impl RunControl {
+    /// Reconcile the user-owned warming mode while a run is active. This
+    /// coalesces without queueing prompt data; the session owner applies it on
+    /// its next poll. Persistence errors are reported by the run's event stream.
+    pub fn set_cache_warming_mode(&self, mode: crate::CacheWarmMode) -> Result<(), AgentError> {
+        let admitted = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admitted || self.tx.is_closed() {
+            return Err(AgentError::RunEnded);
+        }
+        self.cache_warming_mode
+            .send_modify(|policy| policy.set_mode(mode));
+        Ok(())
+    }
+
+    /// Latest host-selected warming mode, including a pending active change.
+    pub fn cache_warming_mode(&self) -> crate::CacheWarmMode {
+        self.cache_warming_mode.borrow().mode
+    }
+
+    /// Live, payload-free diagnostics published by this run's session owner.
+    pub fn cache_warming_status(&self) -> crate::CacheWarmingStatus {
+        if self.cache_warming_mode() == crate::CacheWarmMode::Off {
+            crate::CacheWarmingStatus::inactive("cache warming disabled")
+        } else {
+            self.cache_warming_status.borrow().clone()
+        }
+    }
+
     /// Queues a host-authoritative effort change without interrupting generation.
     /// The latest pending selection applies at the next response boundary;
     /// acceptance is not a provider acknowledgement.

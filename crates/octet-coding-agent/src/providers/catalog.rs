@@ -15,7 +15,7 @@ use octet_ai::{
 };
 
 use super::auth::{environment_auth, EnvironmentCredential};
-use super::compatibility::cache_compatibility;
+use super::compatibility::cache_compatibility_for_route;
 use super::contract::{valid_public_header, ProviderDeclaration, ProviderRoute};
 use super::models::{static_models, StaticModelPreset};
 use super::pricing::pricing_for;
@@ -217,7 +217,7 @@ fn register_static_model(
             max_output_tokens: model.max_output_tokens,
         },
         pricing: pricing_for(declaration, model.id),
-        cache: cache_compatibility(declaration.compatibility, model.id, route.protocol),
+        cache: cache_compatibility_for_route(catalog, declaration, model.id, route),
     })?;
     Ok(())
 }
@@ -291,7 +291,7 @@ pub(crate) fn register_discovered_model_at_route(
         capabilities,
         limits,
         pricing: pricing.or_else(|| pricing_for(declaration, api_name)),
-        cache: cache_compatibility(declaration.compatibility, api_name, route.protocol),
+        cache: cache_compatibility_for_route(catalog, declaration, api_name, route),
     })?;
     Ok(())
 }
@@ -457,6 +457,88 @@ mod tests {
         CLOUDFLARE_AI_GATEWAY, CLOUDFLARE_WORKERS_AI, META, MINIMAX, MISTRAL, OPENAI, OPENCODE,
         OPENCODE_GO,
     };
+
+    #[test]
+    fn discovered_anthropic_cache_lifetimes_are_direct_only_and_preserve_configured_models() {
+        use crate::providers::contract::ANTHROPIC;
+        for (base_url, expected) in [
+            (
+                ANTHROPIC.base_url,
+                octet_ai::PromptCacheLifetimes {
+                    short: Some(300),
+                    long: Some(3600),
+                },
+            ),
+            (
+                "https://gateway.example.test/v1/",
+                octet_ai::PromptCacheLifetimes::default(),
+            ),
+        ] {
+            let mut catalog = ModelCatalog::default();
+            let credential = EnvironmentCredential::for_test("ANTHROPIC_API_KEY", "fixture-key");
+            register_environment_endpoints_at_base_url(
+                &mut catalog,
+                &ANTHROPIC,
+                &credential,
+                &url::Url::parse(base_url).unwrap(),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            let capabilities = Capabilities {
+                input_modalities: ModalitySet::none(),
+                output_modalities: ModalitySet::none(),
+                tools: false,
+                parallel_tool_calls: false,
+                reasoning: None,
+                responses_lite: false,
+                agent_delegation: None,
+                structured_output: false,
+                deferred_tool_loading: false,
+                responses_features: Default::default(),
+            };
+            let limits = ModelLimits {
+                context_window: 128_000,
+                max_output_tokens: 16_000,
+            };
+            register_discovered_model(
+                &mut catalog,
+                &ANTHROPIC,
+                "claude-new-model",
+                None,
+                capabilities.clone(),
+                limits,
+                None,
+            )
+            .unwrap();
+            let id = ModelId("anthropic/claude-new-model".into());
+            let discovered = catalog.resolve(&id).unwrap();
+            assert_eq!(discovered.spec.cache.prompt_cache, expected);
+
+            // A configured model with this exact discovery id remains
+            // authoritative, including its explicitly validated lifetime hints.
+            let mut configured = (*discovered.spec).clone();
+            configured.cache.prompt_cache = octet_ai::PromptCacheLifetimes {
+                short: Some(600),
+                long: Some(7200),
+            };
+            assert!(catalog.remove_model_if_endpoint(&id, &configured.endpoint));
+            catalog.register_model(configured.clone()).unwrap();
+            register_discovered_model(
+                &mut catalog,
+                &ANTHROPIC,
+                "claude-new-model",
+                None,
+                capabilities,
+                limits,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                catalog.resolve(&id).unwrap().spec.cache.prompt_cache,
+                configured.cache.prompt_cache
+            );
+        }
+    }
 
     #[test]
     fn discovered_gpt6_cache_mode_is_qualified_by_exact_public_route() {

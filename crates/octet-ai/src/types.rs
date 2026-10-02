@@ -29,16 +29,32 @@ pub enum CacheRetention {
     /// Provider default short-lived cache retention.
     #[default]
     Short,
-    /// Short retention for a one-off Anthropic cache warm: place the message
-    /// breakpoint before the synthetic final user turn, not on that turn.
-    WarmShort,
     /// Request the provider's long-lived retention where supported.
     Long,
+}
+
+/// Best-effort prompt-cache lifetimes for a declared model route.
+///
+/// Unset tiers mean the lifetime is unknown, not that caching is disabled.
+/// These hints do not enable cache controls or guarantee cache hits. Catalog
+/// configuration accepts positive lifetimes of at most one day, in seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheLifetimes {
+    /// Anticipated lifetime for requests using short retention, in seconds.
+    #[serde(default)]
+    pub short: Option<u64>,
+    /// Anticipated lifetime for requests using long retention, in seconds.
+    #[serde(default)]
+    pub long: Option<u64>,
 }
 
 /// Cache compatibility knobs for provider/model variants.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheCompatibility {
+    /// Explicit, best-effort prompt-cache lifetime hints for this route.
+    /// Protocol or model identity alone never supplies these values.
+    #[serde(default)]
+    pub prompt_cache: PromptCacheLifetimes,
     /// Whether long retention is supported by this model/endpoint.
     #[serde(default = "default_true")]
     pub supports_long_retention: bool,
@@ -74,6 +90,7 @@ const fn default_true() -> bool {
 impl Default for CacheCompatibility {
     fn default() -> Self {
         Self {
+            prompt_cache: PromptCacheLifetimes::default(),
             supports_long_retention: true,
             send_session_id_header: true,
             send_session_affinity_headers: false,

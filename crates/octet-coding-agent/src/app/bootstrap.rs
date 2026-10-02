@@ -8018,6 +8018,7 @@ pub(crate) fn build_app_with_runtime_manager(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
+    agent.set_cache_warming_mode(config.cache_warming)?;
     #[cfg(any(unix, windows))]
     agent.enable_session_partial_output_checkpoints(
         "bash",
@@ -8400,6 +8401,7 @@ pub fn rebuild_app(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
+    agent.set_cache_warming_mode(config.cache_warming)?;
     agent.set_service_tier(service_tier)?;
     #[cfg(any(unix, windows))]
     agent.enable_session_partial_output_checkpoints(

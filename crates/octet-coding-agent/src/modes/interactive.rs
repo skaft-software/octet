@@ -238,6 +238,9 @@ pub enum PendingIdleAction {
     Logout(Option<String>),
     ChangeModel(ModelId),
     Fast(bool),
+    CacheWarming(octet_agent::CacheWarmMode),
+    /// Preference is already saved and sent to the active session owner.
+    SyncCacheWarming(octet_agent::CacheWarmMode),
     ChangeThinking(ReasoningConfig),
     ChangeThinkingLevel(ThinkingLevel),
     /// Save the active-run selection as the startup preference at the idle
@@ -292,6 +295,10 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
                 PendingIdleAction::ChangeThinking(_) | PendingIdleAction::ChangeThinkingLevel(_)
             )
             | (
+                Some(PendingIdleAction::SyncCacheWarming(_)),
+                PendingIdleAction::SyncCacheWarming(_)
+            )
+            | (
                 Some(PendingIdleAction::PersistThinkingPreference(_)),
                 PendingIdleAction::PersistThinkingPreference(_)
             )
@@ -326,11 +333,13 @@ async fn wait_for_prompt<S>(
     reload_tick: &mut Interval,
     reload_watcher: &crate::reload::ReloadWatcher,
     reload: &mut crate::reload::ReloadSupervisor,
+    mut agent: Option<&mut octet_agent::Agent>,
 ) -> anyhow::Result<Idle>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let mut scroll_dirty = false;
+    let mut cache_warming_failed = false;
     loop {
         if shell.close_requested() {
             return Ok(Idle::Quit);
@@ -586,6 +595,26 @@ where
                 if reload.is_due(now) {
                     return Ok(Idle::ReloadDue);
                 }
+            }
+            warm = async {
+                match agent.as_deref_mut() {
+                    Some(agent) => agent.drive_cache_warming().await,
+                    None => std::future::pending().await,
+                }
+            }, if !cache_warming_failed => {
+                match warm {
+                    Ok(event) => shell.on_cache_warming_event(&event),
+                    Err(_) => {
+                        // Background maintenance cannot end the prompt loop,
+                        // and a persistence failure must not spin or retry.
+                        cache_warming_failed = true;
+                        shell.notice("Cache warming stopped; usage may be uncertain. See /cache-warming.");
+                    }
+                }
+                if let Some(agent) = agent.as_deref() {
+                    shell.set_session_accounting(agent.session());
+                }
+                shell.render();
             }
         }
     }
@@ -861,6 +890,7 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
             level => PendingIdleAction::ChangeThinkingLevel(level),
         },
         Command::Thinking(None) => PendingIdleAction::PickThinking,
+        Command::CacheWarming(Some(mode)) => PendingIdleAction::CacheWarming(mode),
         Command::New => PendingIdleAction::NewSession,
         Command::Resume(id) => PendingIdleAction::ResumeSession(id),
         Command::Fork => PendingIdleAction::Fork,
@@ -1652,6 +1682,8 @@ pub struct ActiveRunInspection {
     goal: Result<GoalAccess, ActiveGoalError>,
     /// Effective `/settings` facts (defaults, theme, transport, images).
     settings: commands::SettingsSurface,
+    cache_warming_status: octet_agent::CacheWarmingStatus,
+    cache_warming_control: Option<RunControl>,
     /// The launch ordered cycling scope, rendered by `/scoped-models` mid-run.
     model_scope: Option<Vec<crate::cli::parity::ScopedModel>>,
     /// Whether the catalog holds only the routes this launch proved it needs.
@@ -1685,8 +1717,23 @@ impl ActiveRunInspection {
             service_tier: app.agent.service_tier(),
             goal: GoalAccess::from_app(app),
             settings: commands::SettingsSurface::capture(app),
+            cache_warming_status: app.agent.cache_warming_status(),
+            cache_warming_control: None,
             model_scope: app.model_scope.clone(),
         }
+    }
+
+    fn cache_warming_text(&self, session: &Session) -> String {
+        let (mode, status) = self.cache_warming_control.as_ref().map_or_else(
+            || {
+                (
+                    self.settings.cache_warming,
+                    self.cache_warming_status.clone(),
+                )
+            },
+            |control| (control.cache_warming_mode(), control.cache_warming_status()),
+        );
+        commands::cache_warming_text(mode, &status, session)
     }
 
     fn session_id(&self) -> Option<&str> {
@@ -1860,7 +1907,11 @@ where
             Ok(session) => shell.show_report_text(
                 "Session",
                 "Durable session facts",
-                commands::session_text(&session),
+                format!(
+                    "{}\n\n{}",
+                    commands::session_text(&session),
+                    inspection.cache_warming_text(&session)
+                ),
             ),
             Err(error) => shell.error(format!("session report unavailable: {error}")),
         },
@@ -1881,10 +1932,38 @@ where
             Ok(session) => shell.show_report_text(
                 "Cache",
                 "Review session cache accounting",
-                commands::cache_text(&session),
+                format!(
+                    "{}\n\n{}",
+                    commands::cache_text(&session),
+                    inspection.cache_warming_text(&session)
+                ),
             ),
             Err(error) => shell.error(format!("cache report unavailable: {error}")),
         },
+        Command::CacheWarming(None) => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Cache warming",
+                "Billable refresh policy",
+                inspection.cache_warming_text(&session),
+            ),
+            Err(error) => shell.error(format!("cache warming report unavailable: {error}")),
+        },
+        Command::CacheWarming(Some(mode)) => {
+            if let Err(error) = crate::cli::persist_cache_warming(mode) {
+                shell.error(format!("failed to save cache warming: {error}"));
+            } else {
+                if let Some(control) = &inspection.cache_warming_control {
+                    if let Err(error) = control.set_cache_warming_mode(mode) {
+                        shell.error(error.to_string());
+                    }
+                }
+                push_pending_action(queue, PendingIdleAction::SyncCacheWarming(mode));
+                shell.notice(format!(
+                    "Cache warming: {} (saved to user config)",
+                    crate::config::cache_warming_label(mode)
+                ));
+            }
+        }
         Command::Context => shell.show_report_text(
             "Context",
             "Review the estimated request context before the next turn",
@@ -2069,11 +2148,17 @@ where
         Command::Thinking(None) => open_active_thinking(shell, inspection),
         Command::Settings(sub) => {
             match sub {
-                commands::SettingsCommand::Show => shell.show_report_text(
-                    "Settings",
-                    "Effective display and default preferences",
-                    commands::settings_text(&inspection.settings),
-                ),
+                commands::SettingsCommand::Show => {
+                    let mut settings = inspection.settings.clone();
+                    if let Some(control) = &inspection.cache_warming_control {
+                        settings.cache_warming = control.cache_warming_mode();
+                    }
+                    shell.show_report_text(
+                        "Settings",
+                        "Effective display and default preferences",
+                        commands::settings_text(&settings),
+                    );
+                }
                 commands::SettingsCommand::Transport => shell.notice(format!(
                     "transport {} (declared by the {} route; not a user preference)",
                     inspection.settings.transport, inspection.settings.endpoint,
@@ -3573,6 +3658,13 @@ where
                                 intents.clear();
                                 in_flight = None;
                             }
+                        }
+                    }
+                    if matches!(&event, AgentEvent::CacheWarmed { .. }) {
+                        // Read exact cumulative accounting without attributing
+                        // refresh traffic to assistant timing or cache metrics.
+                        if let Ok(session) = inspection.read_only_session() {
+                            shell.set_session_accounting(&session);
                         }
                     }
                     let run_finished = matches!(&event, AgentEvent::RunFinished { .. });
@@ -6065,6 +6157,24 @@ async fn apply_pending_actions(
             PendingIdleAction::Fast(enabled) => {
                 apply_fast_command(&mut app, shell, Some(enabled));
             }
+            PendingIdleAction::CacheWarming(mode) => {
+                if let Err(error) = commands::set_cache_warming(&mut app, mode) {
+                    shell.error(format!("failed to save cache warming: {error}"));
+                } else {
+                    shell.notice(format!(
+                        "Cache warming: {} (saved to user config)",
+                        crate::config::cache_warming_label(mode)
+                    ));
+                }
+            }
+            PendingIdleAction::SyncCacheWarming(mode) => {
+                app.config.cache_warming = mode;
+                if app.agent.cache_warming_mode() != mode {
+                    if let Err(error) = app.agent.set_cache_warming_mode(mode) {
+                        shell.error(error.to_string());
+                    }
+                }
+            }
             PendingIdleAction::ChangeModel(id) => {
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
             }
@@ -7356,7 +7466,28 @@ async fn run_idle_shell_escape(
     Ok(IdleCommandOutcome::Continue(Box::new(app)))
 }
 
-async fn run_idle_command(
+fn run_idle_command<'a>(
+    app: App,
+    shell: &'a mut InteractiveShell,
+    input: &'a mut EventStream,
+    command: Command,
+    goal_deadline: &'a mut Option<Instant>,
+    reexec: Option<&'a mut crate::reexec::ReexecController>,
+    reload: &'a mut crate::reload::ReloadSupervisor,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<IdleCommandOutcome>> + 'a>> {
+    // The complete dispatcher is too large to embed in every caller's future.
+    Box::pin(run_idle_command_inner(
+        app,
+        shell,
+        input,
+        command,
+        goal_deadline,
+        reexec,
+        reload,
+    ))
+}
+
+async fn run_idle_command_inner(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
@@ -7372,7 +7503,11 @@ async fn run_idle_command(
         Command::Session => shell.show_report_text(
             "Session",
             "Durable session facts",
-            commands::session_text(app.agent.session()),
+            format!(
+                "{}\n\n{}",
+                commands::session_text(app.agent.session()),
+                commands::app_cache_warming_text(&app)
+            ),
         ),
         Command::Help(topic) => {
             shell.show_report_text(
@@ -7395,8 +7530,30 @@ async fn run_idle_command(
         Command::Cache => shell.show_report_text(
             "Cache",
             "Review session cache accounting",
-            commands::cache_text(app.agent.session()),
+            format!(
+                "{}\n\n{}",
+                commands::cache_text(app.agent.session()),
+                commands::app_cache_warming_text(&app)
+            ),
         ),
+        Command::CacheWarming(mode) => {
+            if let Some(mode) = mode {
+                if let Err(error) = commands::set_cache_warming(&mut app, mode) {
+                    shell.error(format!("failed to save cache warming: {error}"));
+                } else {
+                    shell.notice(format!(
+                        "Cache warming: {} (saved to user config)",
+                        crate::config::cache_warming_label(mode)
+                    ));
+                }
+            } else {
+                shell.show_report_text(
+                    "Cache warming",
+                    "Billable refresh policy",
+                    commands::app_cache_warming_text(&app),
+                );
+            }
+        }
         Command::Update => {
             match await_lifecycle(shell, input, "checking for updates…", async {
                 crate::update::check().await
@@ -8509,6 +8666,7 @@ async fn run_interactive_without_model(
             &mut reload_tick,
             &reload_watcher,
             &mut reload,
+            None,
         )
         .await?
         {
@@ -8696,6 +8854,7 @@ fn schedule_idle_responses_prewarm(app: &App, command: &Command) {
         command,
         Command::Changelog
             | Command::Fast(_)
+            | Command::CacheWarming(_)
             | Command::Hotkeys
             | Command::Copy
             | Command::Session
@@ -9354,6 +9513,9 @@ async fn run_interactive_once(
     // off-screen through `OCTET_STARTUP_TRACE=1`.
     crate::app::bootstrap::startup_phase("history.hydrate");
     shell.hydrate(app.agent.session())?;
+    if let Some(notice) = commands::resumed_cache_warming_notice(&app) {
+        shell.notice(notice);
+    }
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);
@@ -9419,6 +9581,7 @@ async fn run_interactive_once(
                     &mut reload_tick,
                     &reload_watcher,
                     &mut reload,
+                    Some(&mut app.agent),
                 )
                 .await?
             }
@@ -9730,7 +9893,8 @@ async fn run_interactive_once(
                 let pane_session_id = herdr_session_id(&app);
                 // Snapshot the read-only application facts the run cannot lend
                 // out (it owns `&mut Agent`), so inspection commands still work.
-                let inspection = ActiveRunInspection::capture(&app);
+                let prior_cache_misses = commands::cache_miss_count(&app);
+                let mut inspection = ActiveRunInspection::capture(&app);
                 let mut run = {
                     let user_input = composed.into_user_input();
                     let run_result = if answer_only {
@@ -9769,6 +9933,7 @@ async fn run_interactive_once(
                 shell.set_awaiting_provider(run_id);
                 shell.render();
                 let control = run.control();
+                inspection.cache_warming_control = Some(control.clone());
                 let mut quit_requested = false;
                 let mut made_tool_call = false;
                 let ended = drive_active_run(
@@ -9788,6 +9953,9 @@ async fn run_interactive_once(
                 )
                 .await?;
                 drop(run);
+                if let Some(notice) = commands::cache_miss_notice(&app, prior_cache_misses) {
+                    shell.notice(notice);
+                }
                 if app.model.responses_features().reasoning_effort_updates {
                     app.reasoning = app.agent.reasoning().clone();
                     update_status(&mut shell, &app);

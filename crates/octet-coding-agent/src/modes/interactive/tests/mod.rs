@@ -17,6 +17,7 @@ pub(super) use support::terminal_theme_test_config;
 mod active_reports_and_status_tests;
 mod active_run_commands_and_steering_tests;
 mod active_subagent_and_queued_control_tests;
+mod cache_warming_tests;
 mod codex_context_window_tests;
 mod delegated_session_presentation_tests;
 mod dialog_and_message_lifecycle_tests;

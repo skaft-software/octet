@@ -25,6 +25,105 @@ fn test_builtin_catalog_loads_and_resolves() {
 }
 
 #[test]
+fn builtin_cache_lifetimes_belong_only_to_explicit_direct_anthropic_models() {
+    let catalog = ModelCatalog::builtin().unwrap();
+    let mut annotated = 0;
+    for spec in catalog.models() {
+        if spec.endpoint.0 == "anthropic" {
+            annotated += 1;
+            assert_eq!(spec.protocol, Protocol::AnthropicMessages);
+            assert_eq!(
+                catalog.endpoint(&spec.endpoint).unwrap().base_url.as_str(),
+                "https://api.anthropic.com/v1/"
+            );
+            assert_eq!(spec.cache.prompt_cache.short, Some(300));
+            assert_eq!(spec.cache.prompt_cache.long, Some(3600));
+        } else {
+            assert_eq!(
+                spec.cache.prompt_cache,
+                crate::PromptCacheLifetimes::default()
+            );
+        }
+    }
+    assert_eq!(annotated, 5);
+}
+
+#[test]
+fn catalog_preserves_explicit_custom_cache_lifetimes_without_inference() {
+    for prompt_cache in [
+        crate::PromptCacheLifetimes::default(),
+        crate::PromptCacheLifetimes {
+            short: Some(600),
+            long: Some(7200),
+        },
+    ] {
+        let mut config: CatalogConfig =
+            serde_json::from_str(include_str!("../../models/catalog.json")).unwrap();
+        config
+            .models
+            .retain(|model| model.id.0 == "claude-sonnet-4-6");
+        config
+            .endpoints
+            .retain(|endpoint| endpoint.id.0 == "anthropic");
+        config.endpoints[0].base_url = url::Url::parse("https://gateway.example.test/v1/").unwrap();
+        config.models[0].id = ModelId("custom/claude-sonnet-4-6".into());
+        config.models[0].cache = crate::CacheCompatibility::default();
+        config.models[0].cache.prompt_cache = prompt_cache;
+        config.models[0].cache.supports_long_retention = false;
+        let config = serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+        let catalog = ModelCatalog::from_config(config).unwrap();
+        let model = catalog
+            .resolve(&ModelId("custom/claude-sonnet-4-6".into()))
+            .unwrap();
+        assert_eq!(model.spec.cache.prompt_cache, prompt_cache);
+        assert!(
+            !model.spec.cache.supports_long_retention,
+            "lifetime hints do not enable cache controls"
+        );
+    }
+}
+
+#[test]
+fn catalog_validates_positive_bounded_cache_lifetimes_at_ingress() {
+    for tier in ["short", "long"] {
+        for seconds in [0, 86_401, u64::MAX] {
+            let mut config: serde_json::Value =
+                serde_json::from_str(include_str!("../../models/catalog.json")).unwrap();
+            config["models"][0]["cache"]["prompt_cache"] = serde_json::json!({(tier): seconds});
+            let config: CatalogConfig = serde_json::from_value(config).unwrap();
+            assert!(
+                matches!(
+                    ModelCatalog::from_config(config),
+                    Err(ConfigError::InvalidModel(_))
+                ),
+                "{tier}: {seconds}"
+            );
+        }
+        for seconds in [1, 300, 3600, 86_400] {
+            let mut catalog = ModelCatalog::builtin().unwrap();
+            let mut spec = (*catalog
+                .resolve(&ModelId("gpt-4o-mini".into()))
+                .unwrap()
+                .spec)
+                .clone();
+            spec.id = ModelId("explicit-lifetime".into());
+            spec.cache.prompt_cache = if tier == "short" {
+                crate::PromptCacheLifetimes {
+                    short: Some(seconds),
+                    long: None,
+                }
+            } else {
+                crate::PromptCacheLifetimes {
+                    short: None,
+                    long: Some(seconds),
+                }
+            };
+            catalog.register_model(spec).unwrap();
+        }
+    }
+}
+
+#[test]
 fn builtin_gpt_6_astra_matches_the_public_openai_contract() {
     let catalog = ModelCatalog::builtin().unwrap();
     let model = catalog.resolve(&ModelId("gpt-6-astra".to_owned())).unwrap();

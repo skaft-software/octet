@@ -936,7 +936,8 @@ impl EventObserver for TelemetryObserver {
                     fields,
                 );
             }
-            AgentEvent::RecoveredOutput { .. }
+            AgentEvent::CacheWarmed { .. }
+            | AgentEvent::RecoveredOutput { .. }
             | AgentEvent::ToolProgress { .. }
             | AgentEvent::OutputMedia { .. }
             | AgentEvent::ProviderLifecycle { .. } => {}
@@ -1041,6 +1042,7 @@ fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::ProviderWaitingForNetwork { .. } => "provider_waiting_for_network",
         AgentEvent::ProviderOperationRetry { .. } => "provider_operation_retry",
         AgentEvent::ProviderUsageUncertain => "provider_usage_uncertain",
+        AgentEvent::CacheWarmed { .. } => "cache_warmed",
         AgentEvent::ToolStarted { .. } => "tool_started",
         AgentEvent::ToolPolicyDecision { .. } => "tool_policy_decision",
         AgentEvent::ToolFinished { .. } => "tool_finished",

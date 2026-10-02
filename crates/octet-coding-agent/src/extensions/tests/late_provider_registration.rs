@@ -420,6 +420,7 @@ async fn a_conflicting_late_model_never_replaces_a_resident_catalog_route() {
             pricing: None,
             preset: Default::default(),
             cache: CacheCompatibility {
+                prompt_cache: Default::default(),
                 supports_long_retention: false,
                 supports_explicit_prompt_cache_mode: false,
                 send_session_id_header: false,

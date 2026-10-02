@@ -42,6 +42,20 @@ pub(super) async fn project_agent_event(
             crate::output::stderr!("warning: provider usage and cost are uncertain; displayed numeric usage is a known subtotal, not a complete total.");
             persisted?;
         }
+        AgentEvent::CacheWarmed {
+            cost,
+            extension_override,
+            ..
+        } => {
+            // The durable ledger is mirrored by sync_session_usage on settle.
+            // This auxiliary operation creates no assistant/turn/context item.
+            if plan.config.show_cache_miss_notices {
+                crate::output::stderr_line(crate::commands::cache_warmed_notice(
+                    cost,
+                    extension_override,
+                ));
+            }
+        }
         AgentEvent::TurnStarted => {}
         AgentEvent::ProviderLifecycle { .. }
         | AgentEvent::ProviderWaitingForNetwork { .. }

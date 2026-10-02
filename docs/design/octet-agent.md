@@ -307,6 +307,34 @@ Before every provider turn, the agent estimates the complete request and retains
 
 Writes use an advisory exclusive lock, compare the observed file length under that lock, append complete record buffers, and call `sync_data` before updating in-memory state. Read-only inspection uses a shared lock and never repairs or truncates. Writable open performs explicit torn-tail recovery while exclusively locked. Files are `0600` on Unix and parsing is bounded by bytes and record count.
 
+## Prompt-cache warming
+
+The same session owner polls `CacheWarmer` alongside provider opening, body
+consumption and tool waits; retained hosts and delegated workers also poll its
+idle driver. Timer, advisory-hook and refresh futures live in the Agent, not a
+temporary `select!` branch, so competing input does not drop or repeat an
+accepted provider request. Real provider opens remain pinned across warming
+wakeups. Explicit cancellation drops the refresh and durably records its
+bounded uncertainty if dispatch was possible.
+
+Each real inference captures its exact request before dispatch. A refresh
+changes only the output cap to one; generated content and calls are discarded.
+Declared retention-specific TTLs and an enforceable wire cap gate eligibility.
+The scheduler follows pi's default streaming and opt-in idle profiles,
+pre-expiry delay, fixed age horizons and expected-savings decision. Ordered,
+bounded extension advice can change the economic action, never replay safety
+or hard ceilings. Admission accounts for the concurrent real request's
+reservation; freshness is checked again before a deferred first provider poll.
+
+Successful refresh usage and exact cost are session-only ledger records plus a
+`CacheWarmed` event, never an assistant turn, context mutation or throughput
+sample. Payload-free lifecycle records retain the route, prefix anchor and
+extension-override flag. An unfinished refresh after a crash stays uncertain
+and disables auxiliary warming rather than failing an uncapped real run.
+Resume does not reconstruct a live cache/timer from history. See
+[cache warming](../cache-warming.md) for product configuration, cancellation,
+accounting and qualification limits.
+
 ## V2 task delegation
 
 For explicit orchestration boundaries (hosted delegation vs local delegated children, sandbox/approval/env/cwd inheritance, extension trust propagation, and explicit non-goals), see [`docs/design/extension-capability-and-orchestration-boundaries.md`](extension-capability-and-orchestration-boundaries.md).

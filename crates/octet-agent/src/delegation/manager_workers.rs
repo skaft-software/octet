@@ -958,6 +958,20 @@ impl DelegationManager {
                     continue;
                 },
                 command = commands.recv() => command,
+                _ = async {
+                    match agent.as_mut() {
+                        Some(child) => child.drive_cache_warming().await,
+                        None => std::future::pending().await,
+                    }
+                }, if !timeout_settled => {
+                    let child = agent.as_ref().expect("idle warmer owns initialized child");
+                    self.update_agent_session_accounting(
+                        &identity.id,
+                        child.session(),
+                        child.model().spec.pricing.is_some(),
+                    );
+                    continue;
+                }
             };
             let Some(command) = command else {
                 self.set_status(&identity.id, DelegatedAgentStatus::Shutdown, false);
@@ -1189,6 +1203,7 @@ impl DelegationManager {
             agent.set_max_session_tokens(runtime.max_session_tokens);
             agent.set_max_session_cost_microdollars(runtime.max_session_cost_microdollars);
         }
+        agent.inherit_cache_warming_mode_control(runtime.cache_warming_mode);
         agent.set_provider_retries_enabled(runtime.provider_retries_enabled);
         agent.set_max_network_wait(runtime.max_network_wait);
         if extension_policy.is_none() {
