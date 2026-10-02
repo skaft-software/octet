@@ -666,9 +666,7 @@ impl PrimaryTrace {
 }
 
 fn resize_frame_end(output: &[u8]) -> Option<usize> {
-    // Old explicit baselines clear/replay; Octet now repairs absolute rows.
-    synchronized_frame_end_containing(output, b"\x1b[1;1H\x1b[2K")
-        .or_else(|| synchronized_frame_end_containing(output, b"\x1b[2J"))
+    synchronized_frame_end_containing(output, b"\x1b[2J")
 }
 
 fn run_primary(binary: &Path, mode: MouseMode) -> PrimaryTrace {
@@ -2129,8 +2127,8 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
     consumed = octet.pty.output.len();
     assert!(parser.screen().contents().contains("draft remains local"));
     let repair_bytes = &octet.pty.output[resize_start..];
-    assert_eq!(count_bytes(repair_bytes, b"\x1b[2J"), 0);
-    assert_eq!(count_bytes(repair_bytes, b"\x1b[3J"), 0);
+    assert_eq!(count_bytes(repair_bytes, b"\x1b[2J"), 1);
+    assert_eq!(count_bytes(repair_bytes, b"\x1b[3J"), 1);
     assert!(parser.screen().contents().contains(label));
     assert_eq!(
         parser
@@ -2141,8 +2139,8 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
         1,
         "resize must retain one composer and the held activity"
     );
-    // The welcome can already be above the live viewport. Repair must not
-    // retransmit it merely to prove that canonical history is retained.
+    // Canonical replay retains the complete transcript, including rows above
+    // the old viewport, rather than silently dropping them during repair.
     octet.pty.write_input(b"\x1b");
     await_screen(
         &mut octet,
@@ -2646,7 +2644,7 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                     });
                     // Old-width frames may already be queued when the PTY
                     // resizes. Replay them, but apply the new geometry contract
-                    // from the first complete absolute-grid repair, not to those
+                    // from the first complete canonical replay, not to those
                     // in-flight frames. Every subsequent frame is still checked.
                     let resize_end =
                         resize_start + resize_frame_end(&octet.pty.output[resize_start..]).unwrap();

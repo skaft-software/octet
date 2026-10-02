@@ -3678,6 +3678,7 @@ impl InteractiveShell {
             let _ = render_tx.try_send(RenderCommand::Render);
         } else if let Some(tui) = self.tui.as_mut() {
             tui.request_render();
+            self.state.frame_written_at(tui.rendered_viewport_top());
         }
     }
 
