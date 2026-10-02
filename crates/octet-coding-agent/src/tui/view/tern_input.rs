@@ -108,7 +108,7 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             let binding = match completion.source {
                 super::tern_completion::Source::Slash => {
                     shell.slash_selection = index;
-                    "tui.input.submit"
+                    "tui.select.confirm"
                 }
                 super::tern_completion::Source::Path => {
                     shell.path_selection = index;
@@ -264,15 +264,18 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             let raw_cursor = utf16_boundary(&edited, *cursor)?;
             let cursor = sexy_tui_rs::TextEditor::normalize_paste(&edited[..raw_cursor]).len();
             let text = sexy_tui_rs::TextEditor::normalize_paste(text);
+            let text_revision = shell.editor.text_revision();
             if !shell.editor.replace_range(from..to, &text) {
                 return None;
             }
             shell.editor.set_cursor(cursor);
             shell.prompt_history_navigation = None;
             shell.composer_preferred_column = None;
-            shell.slash_selection = 0;
-            shell.slash_scroll = 0;
-            shell.slash_popup_dismissed = false;
+            if shell.editor.text_revision() != text_revision {
+                shell.slash_selection = 0;
+                shell.slash_scroll = 0;
+                shell.slash_popup_dismissed = false;
+            }
             invalidate_editor_autocomplete(&mut shell);
             if shell.editor.cursor() == shell.editor.text().len() {
                 request_file_index_scan(&mut shell);
@@ -374,7 +377,189 @@ fn key_event(key: &str) -> Option<KeyEvent> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{tern_completion::Completion, SlashMenuAction};
     use super::*;
+    use crate::tui::keymap::InputAction;
+
+    fn native_slash_shell() -> InteractiveShell {
+        let shell = InteractiveShell::test_shell();
+        shell.state.borrow_mut().startup_pending = false;
+        shell.state.native().lock().unwrap().accepting_input = true;
+        shell.state.borrow_mut().editor.set_text("/");
+        shell
+    }
+
+    #[test]
+    fn native_slash_activation_uses_confirm_instead_of_submit() {
+        for name in ["/help", "/exit", "/late-extension"] {
+            let mut shell = native_slash_shell();
+            shell
+                .set_extension_commands(vec![("late-extension".into(), "Extension".into())].into());
+            shell.input_dispatch.bindings = KeybindingsManager::with_platform(
+                "macos",
+                false,
+                std::collections::BTreeMap::from([
+                    ("tui.input.submit".into(), vec!["ctrl+enter".into()]),
+                    ("tui.select.confirm".into(), vec!["ctrl+y".into()]),
+                ]),
+            );
+            let completion = Completion::capture(&shell.state.borrow()).unwrap();
+            let index = completion
+                .entries
+                .iter()
+                .position(|entry| entry.0 == name)
+                .unwrap();
+            let handler = shell.tern_input_handler();
+            let event = handler(Incoming::Event(Event::Activate {
+                sf: super::super::tern::SURFACE.into(),
+                id: completion.id.clone(),
+                item: completion.item_id(index),
+            }));
+            assert_eq!(
+                event,
+                Some(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Char('y'),
+                    KeyModifiers::CONTROL
+                )))
+            );
+            assert_eq!(shell.pending(), "/");
+            assert_eq!(shell.state.borrow().slash_selection, index);
+            assert_eq!(
+                shell.translate_input(event, false),
+                InputAction::SlashMenu(SlashMenuAction::Select)
+            );
+            assert!(shell.slash_menu(SlashMenuAction::Select));
+            assert_eq!(shell.pending().trim_end(), name);
+            assert!(!shell.slash_popup_open());
+        }
+    }
+
+    #[test]
+    fn native_slash_activation_respects_disabled_confirm() {
+        let mut shell = native_slash_shell();
+        shell.input_dispatch.bindings = KeybindingsManager::with_platform(
+            "macos",
+            false,
+            std::collections::BTreeMap::from([("tui.select.confirm".into(), Vec::new())]),
+        );
+        let completion = Completion::capture(&shell.state.borrow()).unwrap();
+        let index = completion.entries.len() - 1;
+        let handler = shell.tern_input_handler();
+        assert!(handler(Incoming::Event(Event::Activate {
+            sf: super::super::tern::SURFACE.into(),
+            id: completion.id.clone(),
+            item: completion.item_id(index),
+        }))
+        .is_none());
+        assert_eq!(shell.pending(), "/");
+        assert_eq!(shell.state.borrow().slash_selection, index);
+        assert!(shell.slash_popup_open());
+    }
+
+    #[test]
+    fn native_cursor_only_edits_preserve_slash_selection_and_dismissal() {
+        for dismissed in [false, true] {
+            let shell = native_slash_shell();
+            let (text_revision, revision) = {
+                let mut state = shell.state.borrow_mut();
+                state.slash_selection = 10;
+                state.slash_scroll = 3;
+                state.slash_popup_dismissed = dismissed;
+                (state.editor.text_revision(), state.editor.revision())
+            };
+            let handler = shell.tern_input_handler();
+            // An empty splice moves the caret; replacing text with itself is
+            // also not a text mutation and must not reopen a dismissed popup.
+            for (to, text, cursor) in [(0, "", 0), (1, "/", 1)] {
+                handler(Incoming::Event(Event::Edit {
+                    sf: super::super::tern::SURFACE.into(),
+                    id: "composer.editor".into(),
+                    from: 0,
+                    to,
+                    text: text.into(),
+                    cursor,
+                    len: 1,
+                }));
+                let state = shell.state.borrow();
+                assert_eq!(state.editor.text(), "/");
+                assert_eq!(state.editor.cursor(), cursor);
+                assert_eq!(state.editor.text_revision(), text_revision);
+                assert!(state.editor.revision() > revision);
+                assert_eq!(state.slash_selection, 10);
+                assert_eq!(state.slash_scroll, 3);
+                assert_eq!(state.slash_popup_dismissed, dismissed);
+                if !dismissed {
+                    assert_eq!(Completion::capture(&state).unwrap().selected, 10);
+                } else {
+                    assert!(Completion::capture(&state).is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_text_edits_reset_slash_selection_and_reopen_the_popup() {
+        let shell = native_slash_shell();
+        let text_revision = {
+            let mut state = shell.state.borrow_mut();
+            state.slash_selection = 10;
+            state.slash_scroll = 3;
+            state.slash_popup_dismissed = true;
+            state.editor.text_revision()
+        };
+        let handler = shell.tern_input_handler();
+        handler(Incoming::Event(Event::Edit {
+            sf: super::super::tern::SURFACE.into(),
+            id: "composer.editor".into(),
+            from: 1,
+            to: 1,
+            text: "s".into(),
+            cursor: 2,
+            len: 1,
+        }));
+        let state = shell.state.borrow();
+        assert_eq!(state.editor.text(), "/s");
+        assert!(state.editor.text_revision() > text_revision);
+        assert_eq!(state.slash_selection, 0);
+        assert_eq!(state.slash_scroll, 0);
+        assert!(!state.slash_popup_dismissed);
+        assert_eq!(Completion::capture(&state).unwrap().selected, 0);
+    }
+
+    #[test]
+    fn native_slash_paging_uses_its_viewport_only_while_it_owns_input() {
+        for (columns, rows) in [(120, 40), (46, 8)] {
+            let mut shell = native_slash_shell();
+            shell.set_size(columns, rows);
+            let ansi_page = super::super::shell_chrome(
+                &shell.state.borrow(),
+                columns,
+                std::time::Instant::now(),
+            )
+            .suggestions
+            .len()
+            .saturating_sub(1)
+            .max(1);
+            assert_ne!(ansi_page, super::super::tern_completion::MAX_LINES);
+            for native in [false, true, false] {
+                shell.state.native().lock().unwrap().accepting_input = native;
+                let page = if native {
+                    super::super::tern_completion::MAX_LINES
+                } else {
+                    ansi_page
+                };
+                shell.slash_menu(SlashMenuAction::First);
+                shell.slash_menu(SlashMenuAction::PageDown);
+                assert_eq!(shell.state.borrow().slash_selection, page);
+                shell.slash_menu(SlashMenuAction::PageDown);
+                assert_eq!(shell.state.borrow().slash_selection, 2 * page);
+                shell.slash_menu(SlashMenuAction::PageUp);
+                assert_eq!(shell.state.borrow().slash_selection, page);
+                shell.slash_menu(SlashMenuAction::PageUp);
+                assert_eq!(shell.state.borrow().slash_selection, 0);
+            }
+        }
+    }
 
     #[test]
     fn native_edits_are_normalized_and_rejected_after_ownership_handback() {

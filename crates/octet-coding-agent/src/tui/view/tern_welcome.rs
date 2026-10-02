@@ -56,7 +56,7 @@ impl Brand {
                     .set("blob", address)
                     .set("alt", "octet byte mark: 01101111")
                     .set("w", 128)
-                    .set("h", 32),
+                    .set("h", 64),
             )
         } else {
             Node::new(

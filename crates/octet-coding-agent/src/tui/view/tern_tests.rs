@@ -595,7 +595,7 @@ fn hidden_pane_keeps_its_place_and_reasserts_focus_on_return() {
 }
 
 #[test]
-fn finished_bash_collapses_to_summary_without_an_expanded_frame() {
+fn bash_is_summary_only_from_first_progress_through_completion() {
     use super::super::{summarize_tool, ToolPanel};
     use octet_ai::ToolCallId;
     let (shell, mut surface, output) = setup(2);
@@ -616,13 +616,24 @@ fn finished_bash_collapses_to_summary_without_an_expanded_frame() {
         ))));
     surface.flush(&shell.state).unwrap();
     let identity = shell.state.borrow().transcript_commit_ids[index];
-    // While running, the live output is expanded.
-    assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
+    // Running and finished command output use the same disclosure policy.
+    assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
+    assert_eq!(
+        find_node(&surface.sent.main, &id(identity, "tool"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["collapsed"],
+        true
+    );
+    assert!(!output.last_frame().to_string().contains("line1"));
     ack(&shell, 1);
     {
         let mut state = shell.state.borrow_mut();
         if let TranscriptBlock::Tool(panel) = &mut state.transcript[index] {
             panel.finished = true;
+            panel.duration = Some(Duration::from_millis(1200));
             panel.output = "exit=0 duration=1.2s\n--- stdout ---\nline1\nline2\nline3\n".into();
         }
         state.touch_block(index);
@@ -637,10 +648,10 @@ fn finished_bash_collapses_to_summary_without_an_expanded_frame() {
     let ops = output.last_frame()["ops"].clone();
     let ops = ops.as_array().unwrap();
     assert!(
-        ops.iter()
-            .any(|op| op[0] == "del" && op[1] == id(identity, "out")),
-        "completion must delete the live output child: {ops:?}"
+        !ops.iter().any(|op| op[1] == id(identity, "out")),
+        "collapsed output must never have been mounted: {ops:?}"
     );
+    assert_eq!(tool.p.as_ref().unwrap().as_map()["meta"], json!(["1.2s"]));
     assert!(
         !ops.iter()
             .any(|op| op[0] == "set" && op[1] == id(identity, "out")),
@@ -649,7 +660,115 @@ fn finished_bash_collapses_to_summary_without_an_expanded_frame() {
 }
 
 #[test]
-fn finished_shell_block_collapses_to_its_command_summary() {
+fn verbose_commands_patch_one_cursorless_text_leaf_and_retain_disclosure() {
+    use super::super::{summarize_tool, ToolPanel};
+    use octet_ai::ToolCallId;
+    for name in ["bash", "exec"] {
+        let (shell, mut surface, output) = setup(16);
+        shell.state.borrow_mut().verbose_tools = true;
+        let args = json!({"command":"git diff"});
+        let index = shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+                ToolCallId("streaming-command".into()),
+                name.into(),
+                args.to_string(),
+                summarize_tool(name, &args),
+                String::new(),
+                false,
+                false,
+                None,
+                None,
+            ))));
+        let identity = shell.state.borrow().transcript_commit_ids[index];
+        let chunks = [
+            "diff --git a/a b/a",
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new",
+        ];
+        for (step, text) in chunks.iter().enumerate() {
+            {
+                let mut state = shell.state.borrow_mut();
+                if let TranscriptBlock::Tool(panel) = &mut state.transcript[index] {
+                    panel.output = (*text).into();
+                }
+                state.touch_block(index);
+            }
+            surface.flush(&shell.state).unwrap();
+            let leaf = find_node(&surface.sent.main, &id(identity, "out")).unwrap();
+            assert_eq!(leaf.k, Kind::Text);
+            let props = leaf.p.as_ref().unwrap().as_map();
+            assert_eq!(props["spans"][0]["t"], *text);
+            assert!(props.get("stream").is_none());
+            assert!(props.get("cursor").is_none());
+            if step > 0 {
+                let frame = output.last_frame();
+                let ops = frame["ops"].as_array().unwrap();
+                assert!(ops
+                    .iter()
+                    .any(|op| op[0] == "set" && op[1] == id(identity, "out")));
+                assert!(!ops
+                    .iter()
+                    .any(|op| matches!(op[0].as_str(), Some("add" | "del" | "move"))));
+            }
+        }
+        // Collapsing mid-run removes the projection, never the captured source.
+        shell.state.borrow_mut().verbose_tools = false;
+        surface.flush(&shell.state).unwrap();
+        assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
+        surface
+            .observe(&Incoming::Event(Event::Toggle {
+                sf: SURFACE.into(),
+                id: id(identity, "tool"),
+                collapsed: false,
+                key: None,
+            }))
+            .unwrap();
+        surface.flush(&shell.state).unwrap();
+        assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
+        {
+            let mut state = shell.state.borrow_mut();
+            if let TranscriptBlock::Tool(panel) = &mut state.transcript[index] {
+                panel.finished = true;
+                panel.is_error = true;
+                panel.failure_reason = Some("command failed".into());
+                panel.output = "final captured failure".into();
+            }
+            state.touch_block(index);
+        }
+        surface.flush(&shell.state).unwrap();
+        let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
+        assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], false);
+        assert_eq!(
+            tool.p.as_ref().unwrap().as_map()["meta"],
+            json!(["command failed"])
+        );
+        let leaf = find_node(&surface.sent.main, &id(identity, "out")).unwrap();
+        assert_eq!(leaf.k, Kind::Text);
+        assert_eq!(
+            leaf.p.as_ref().unwrap().as_map()["spans"][0]["t"],
+            "final captured failure"
+        );
+        surface
+            .observe(&Incoming::Event(Event::Toggle {
+                sf: SURFACE.into(),
+                id: id(identity, "tool"),
+                collapsed: true,
+                key: None,
+            }))
+            .unwrap();
+        surface.flush(&shell.state).unwrap();
+        assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
+        let state = shell.state.borrow();
+        let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
+            panic!("tool fixture")
+        };
+        assert_eq!(panel.output, "final captured failure");
+    }
+}
+
+#[test]
+fn local_shell_is_summary_only_during_execution_and_after_success_or_failure() {
     use super::super::ShellOutput;
     let (shell, mut surface, _) = setup(2);
     let running = shell
@@ -669,13 +788,13 @@ fn finished_shell_block_collapses_to_its_command_summary() {
             id: "s-done".into(),
             command: "cargo test".into(),
             output: "test result: ok".into(),
-            exit_code: 0,
+            exit_code: 1,
             running: false,
         })));
     surface.flush(&shell.state).unwrap();
     let ids = shell.state.borrow().transcript_commit_ids.clone();
-    // Running shell output stays expanded.
-    assert!(find_node(&surface.sent.main, &id(ids[running], "out")).is_some());
+    // Neither running nor failed local shell output is mounted while collapsed.
+    assert!(find_node(&surface.sent.main, &id(ids[running], "out")).is_none());
     assert_eq!(
         find_node(&surface.sent.main, &id(ids[running], "shell"))
             .unwrap()
@@ -683,9 +802,9 @@ fn finished_shell_block_collapses_to_its_command_summary() {
             .as_ref()
             .unwrap()
             .as_map()["collapsed"],
-        false
+        true
     );
-    // Finished shell output collapses to the command summary.
+    // The failure's exit code stays visible in its summary.
     assert_eq!(
         find_node(&surface.sent.main, &id(ids[done], "shell"))
             .unwrap()
@@ -696,6 +815,17 @@ fn finished_shell_block_collapses_to_its_command_summary() {
         true
     );
     assert!(find_node(&surface.sent.main, &id(ids[done], "out")).is_none());
+    let failed = find_node(&surface.sent.main, &id(ids[done], "shell")).unwrap();
+    assert_eq!(
+        failed.p.as_ref().unwrap().as_map()["meta"],
+        json!(["exit 1"])
+    );
+    shell.state.borrow_mut().verbose_tools = true;
+    ack(&shell, 1);
+    surface.flush(&shell.state).unwrap();
+    for index in [running, done] {
+        assert!(find_node(&surface.sent.main, &id(ids[index], "out")).is_some());
+    }
 }
 
 #[test]
@@ -962,7 +1092,14 @@ fn welcome_uploads_identical_hashed_bytes_once_and_replays_after_eviction() {
         format!("{:x}", Sha256::digest(&bytes))
     );
     let svg = String::from_utf8(bytes).unwrap();
-    assert!(svg.contains("<svg"));
+    assert!(svg.contains(r#"viewBox="0 0 96 48""#));
+    assert_eq!(svg.matches("<rect ").count(), 8);
+    assert_eq!(svg.matches(r#"y="24" width="12" height="24""#).count(), 2);
+    assert_eq!(svg.matches(r#"y="0" width="12" height="48""#).count(), 6);
+    let mark = find_node(&surface.sent.main, "welcome.byte").unwrap();
+    let props = mark.p.as_ref().unwrap().as_map();
+    assert_eq!(props["w"], 128);
+    assert_eq!(props["h"], 64);
     surface.flush(&shell.state).unwrap();
     assert_eq!(output.blobs().len(), 1);
     surface
@@ -977,6 +1114,27 @@ fn welcome_uploads_identical_hashed_bytes_once_and_replays_after_eviction() {
         output.blobs()[0].params["id"],
         output.blobs()[1].params["id"]
     );
+}
+
+#[test]
+fn native_transcript_and_composer_share_a_wider_responsive_measure() {
+    let (shell, mut surface, _) = setup(8);
+    {
+        let mut state = shell.state.borrow_mut();
+        state.startup_card_started_at = Some(Instant::now());
+        state.push_block(TranscriptBlock::Notice("Layout fixture".into()));
+    }
+    for cols in [46, 120, 240] {
+        shell.state.borrow_mut().size = (cols, 40);
+        surface.flush(&shell.state).unwrap();
+        for node in &surface.sent.main {
+            assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], "144ch");
+            assert!(node.p.as_ref().unwrap().as_map().get("min").is_none());
+        }
+        let dock = find_node(&surface.sent.dock, "dock.content").unwrap();
+        let composer = find_node(dock.c.as_deref().unwrap(), "composer").unwrap();
+        assert_eq!(composer.p.as_ref().unwrap().as_map()["max"]["w"], "144ch");
+    }
 }
 
 #[test]
@@ -1152,6 +1310,11 @@ fn native_agent_uses_authoritative_telemetry_and_terminal_clocks() {
         ..Default::default()
     });
     surface.flush(&shell.state).unwrap();
+    let dock = find_node(&surface.sent.dock, "dock.content").unwrap();
+    assert!(dock.p.as_ref().unwrap().as_map().get("role").is_none());
+    for node in dock.c.as_ref().unwrap() {
+        assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], "144ch");
+    }
     let node = find_node(&surface.sent.dock, "subagent.child").unwrap();
     assert_eq!(node.k, Kind::Agent);
     let props = node.p.as_ref().unwrap().as_map();

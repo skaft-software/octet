@@ -138,10 +138,23 @@ The welcome uploads octet's byte mark as immutable, content-addressed SVG;
 unsupported images retain the textual byte mark. Assistant prose and thinking
 use the observed `omp.assistant` / `omp.thinking` layout hooks. These `omp.*`
 roles are Tern implementation details, not portable TSP guarantees or omp
-branding. Tern still owns typography, geometry and its focus ring.
+branding. The SVG uses the brand's 2:1 pixel proportions, accounting for the
+taller cells in the ANSI mark. Transcript, welcome, composer and subagent
+chrome share a responsive `144ch` maximum width; the neutral native dock column
+keeps the roster aligned rather than spanning the pane. The character-relative
+bound scales with Tern's font and shrinks in narrow panes.
 
-Slash, path and extension completions are bounded native lists anchored above
-the composer. Their gestures are fenced by the draft revision. Model, theme,
+Tern still owns typography and its focus ring. Increase **Font size** in Tern's
+settings (or use Cmd+= / Cmd+- on macOS) for a larger interface. TSP v1 has no
+per-application font-scale setting; octet does not multiply logical sizes by
+the display's pixel density.
+
+Slash, path and extension completions are native lists anchored above the
+composer. All matching candidates are sent; the eight-row native viewport,
+not the candidate catalogue, is bounded. Paging uses that viewport during
+native ownership. Slash activation follows the resolved selection-confirm
+binding, and cursor-only edits preserve navigation and popup dismissal. Their
+gestures are fenced by the draft revision. Model, theme,
 thinking, session, fork and subagent pickers reuse the host's catalogues and
 filtering, with panel-epoch-fenced gestures. The model picker has real provider
 scopes, context/price columns, a current-model indicator, and a public-facts
@@ -181,6 +194,14 @@ Identified protocol fragments, malformed messages and oversized assemblies
 are consumed rather than replayed into a draft. Only an ambiguous opening
 Escape prefix has a short input-latency timeout. Genuine bracketed paste and
 Enter/Escape keys remain frontend input.
+
+Bash/exec tools and local `!` commands are summary-only from their first frame
+unless Ctrl+O or an explicit card disclosure requests output. Collapsed command
+bodies are not mounted or sent to Tern, including on failure; status, duration,
+and failure reason/exit code remain in the summary. Captured output is retained
+unchanged for disclosure. Verbose Bash/exec output patches one stable native
+text leaf as chunks arrive, including partial lines, without a streaming cursor
+or switching to a diff widget when command output resembles a diff.
 
 Tool images respect the existing opt-in image preference. Validated bounded
 payloads are hashed and uploaded once per content address; retained frames

@@ -4838,6 +4838,12 @@ impl InteractiveShell {
     /// a heavyweight modal panel. A selected command returns `true` for the
     /// ordinary dispatcher; navigation and dismissal return `false`.
     pub fn slash_menu(&mut self, action: SlashMenuAction) -> bool {
+        let native_input = self
+            .state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .accepting_input;
         let mut state = self.state.borrow_mut();
         let suggestions = input_slash_suggestions(&state);
         if suggestions.is_empty() {
@@ -4845,14 +4851,19 @@ impl InteractiveShell {
         }
         let last = suggestions.len().saturating_sub(1);
         state.slash_selection = state.slash_selection.min(last);
-        // Use the actual rendered popup viewport (excluding its one footer
-        // row), so Page Up/Down remain correct after resize, wrapped errors, or
-        // composer growth rather than relying on a stale terminal-height guess.
-        let page = shell_chrome(&state, state.size.0, Instant::now())
-            .suggestions
-            .len()
-            .saturating_sub(1)
-            .max(1);
+        // Page through the active renderer's viewport, not the configured
+        // backend policy: native ownership can hand back to ANSI after failure.
+        let page = if native_input {
+            tern_completion::MAX_LINES
+        } else {
+            // Exclude the ANSI popup's footer and account for resize, wrapped
+            // errors, and composer growth.
+            shell_chrome(&state, state.size.0, Instant::now())
+                .suggestions
+                .len()
+                .saturating_sub(1)
+                .max(1)
+        };
         match action {
             SlashMenuAction::Previous => {
                 state.slash_selection = state.slash_selection.saturating_sub(1)

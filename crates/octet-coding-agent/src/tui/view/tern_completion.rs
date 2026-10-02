@@ -5,6 +5,8 @@ use serde_json::json;
 
 use super::{normal_editor_focused, sanitize_ordinary_surface_cell, ShellState};
 
+pub(super) const MAX_LINES: usize = 8;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Source {
     Slash,
@@ -129,15 +131,12 @@ impl Completion {
     }
 
     pub(super) fn node(&self, shell: &ShellState) -> Node {
-        // A bounded native list, anchored above the draft rather than consuming
-        // dock height with pane-wide, pre-rendered ANSI migration rows.
-        let start = self.selected.saturating_sub(7);
+        // Send every candidate and let Tern bound the viewport above the draft,
+        // keeping late entries reachable without pre-rendered ANSI rows.
         let items = self
             .entries
             .iter()
             .enumerate()
-            .skip(start)
-            .take(8)
             .map(|(index, (label, detail))| {
                 Node::new(
                     self.item_id(index),
@@ -170,9 +169,98 @@ impl Completion {
                 Kind::List,
                 Props::new()
                     .set("selected", self.item_id(self.selected))
-                    .set("max", json!({"lines":8})),
+                    .set("max", json!({"lines":MAX_LINES})),
                 items,
             )],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prompts::{PromptTemplateDescriptor, PromptTrust};
+
+    fn assert_complete_list(shell: &ShellState, completion: &Completion) {
+        let overlay = completion.node(shell);
+        let list = &overlay.c.as_ref().unwrap()[0];
+        assert_eq!(list.k, Kind::List);
+        let props = list.p.as_ref().unwrap().as_map();
+        assert_eq!(props["max"], json!({"lines": MAX_LINES}));
+        assert_eq!(props["selected"], completion.item_id(completion.selected));
+        let items = list.c.as_ref().unwrap();
+        assert_eq!(items.len(), completion.entries.len());
+        for (index, (item, (label, detail))) in items.iter().zip(&completion.entries).enumerate() {
+            assert_eq!(item.id, completion.item_id(index));
+            assert_eq!(completion.index(&item.id), Some(index));
+            let props = item.p.as_ref().unwrap().as_map();
+            assert_eq!(props["label"][0]["t"], *label);
+            assert_eq!(props["detail"], *detail);
+        }
+    }
+
+    #[test]
+    fn native_slash_list_keeps_every_builtin_and_dynamic_candidate() {
+        let mut shell = ShellState::default();
+        shell.editor.set_text("/");
+        shell.prompt_templates = vec![PromptTemplateDescriptor {
+            name: "late-prompt".into(),
+            description: "Prompt template".into(),
+            argument_hint: Some("[topic]".into()),
+            path: "late-prompt.md".into(),
+            trust: PromptTrust::UserInstalled,
+            content_hash: "fixture".into(),
+        }]
+        .into();
+        shell.skill_commands = vec![("skill:late".into(), "Skill".into())].into();
+        shell.extension_commands = vec![("late-extension".into(), "Extension".into())].into();
+        let suggestions = super::super::input_overlays::input_slash_suggestions(&shell);
+        let builtin_count = crate::commands::slash_suggestions("/").len();
+        assert!(builtin_count > MAX_LINES);
+        assert_eq!(suggestions.len(), builtin_count + 3);
+        for selected in [0, builtin_count - 1, suggestions.len() - 1] {
+            shell.slash_selection = selected;
+            let completion = Completion::capture(&shell).unwrap();
+            assert!(matches!(completion.source, Source::Slash));
+            assert_eq!(completion.selected, selected);
+            assert_eq!(completion.entries.len(), suggestions.len());
+            for (entry, suggestion) in completion.entries.iter().zip(&suggestions) {
+                assert!(entry.0.starts_with(&format!("/{}", suggestion.name)));
+                assert_eq!(entry.1, suggestion.description);
+            }
+            assert_eq!(completion.entries[builtin_count].0, "/late-prompt [topic]");
+            assert_eq!(completion.entries[builtin_count + 1].0, "/skill:late");
+            assert_eq!(completion.entries[builtin_count + 2].0, "/late-extension");
+            assert_complete_list(&shell, &completion);
+        }
+    }
+
+    #[test]
+    fn native_filtered_slash_list_keeps_matches_beyond_its_viewport() {
+        let mut shell = ShellState::default();
+        shell.editor.set_text("/native-");
+        shell.extension_commands = (0..12)
+            .map(|index| (format!("native-{index}"), format!("Command {index}")))
+            .collect::<Vec<_>>()
+            .into();
+        shell.slash_selection = 10;
+        let completion = Completion::capture(&shell).unwrap();
+        assert_eq!(completion.entries.len(), 12);
+        assert_eq!(completion.entries[10].0, "/native-10");
+        assert_complete_list(&shell, &completion);
+
+        shell.editor.set_text("/native-1");
+        let filtered = Completion::capture(&shell).unwrap();
+        assert_ne!(filtered.id, completion.id);
+        assert_eq!(filtered.selected, 2);
+        assert_eq!(
+            filtered
+                .entries
+                .iter()
+                .map(|entry| entry.0.as_str())
+                .collect::<Vec<_>>(),
+            ["/native-1", "/native-10", "/native-11"]
+        );
+        assert_complete_list(&shell, &filtered);
     }
 }

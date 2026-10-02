@@ -628,6 +628,24 @@ fn project(
             out.dock.push(ansi_rows(id, rows));
         }
     }
+    // TSP's character-relative bound grows with Tern's font/zoom and still
+    // shrinks in small panes. Use one measure for history and live chrome.
+    for node in out.main.iter_mut().chain(&mut out.dock) {
+        node.p = Some(
+            node.p
+                .take()
+                .unwrap_or_default()
+                .set("max", json!({"w":"144ch"})),
+        );
+    }
+    // The neutral dock column is Tern's native shared-column layout hook.
+    // Without it, the agent roster spans the pane while the editor is centered.
+    out.dock = vec![Node::with_children(
+        "dock.content",
+        Kind::Col,
+        Props::new().set("gap", "sm"),
+        std::mem::take(&mut out.dock),
+    )];
     out.panel_receipt = super::renderer_geometry::PanelRenderReceipt::capture(shell, &chrome.panel);
     if let Some(picker) = super::tern_picker::node(shell) {
         out.focus = Some(super::tern_picker::id(shell));
@@ -1274,19 +1292,26 @@ fn tool_node(
         }
     }
 
-    // A user Toggle gesture for this card wins over the default; otherwise a
-    // finished non-verbose card is collapsed to its summary.
+    // Command output is summary-only from its first frame, not expanded
+    // during execution and then collapsed on completion. Explicit disclosure
+    // still wins; captured output remains in the semantic model.
+    let command_output = matches!(panel.name.as_str(), "bash" | "exec");
     let collapsed = collapsed_overrides
         .get(&id(index, "tool"))
         .copied()
-        .unwrap_or(!verbose && panel.finished);
+        .unwrap_or(!verbose && (panel.finished || command_output));
     let mut body = Vec::new();
     let compact_read = panel.name == "read"
         && panel.finished
         && !panel.is_error
         && !verbose
         && target_kind == "path";
-    if let Some(diff) = super::tool_render::tool_diff(panel) {
+    // Bash stays a single text leaf even when its output resembles a diff.
+    // Changing kinds mid-stream would replace the displayed body.
+    let diff = (!command_output)
+        .then(|| super::tool_render::tool_diff(panel))
+        .flatten();
+    if let Some(diff) = diff {
         // Diffs stay mounted while collapsed: Tern hides them, and the user
         // can disclose without waiting for a re-projected child.
         body.push(octet_tern::scene::diff_block(
@@ -1294,11 +1319,14 @@ fn tool_node(
             &target,
             &diff,
         ));
-    } else if !compact_read && !panel.output.trim().is_empty() && (!collapsed || panel.is_error) {
+    } else if !compact_read
+        && !panel.output.trim().is_empty()
+        && (!collapsed || (panel.is_error && !command_output))
+    {
         // Collapsed successful tools project summary-only (header/target):
         // mounting the full output in the same frame that flips `collapsed`
-        // paints one expanded frame before the terminal hides it. Errors keep
-        // their output visible so the failure is seen without disclosing.
+        // paints one expanded frame before the terminal hides it. Bash failures
+        // retain their reason in metadata; full output requires disclosure.
         let shown = sanitize_for_terminal(&panel.output);
         body.push(Node::new(
             id(index, "out"),
@@ -1309,7 +1337,12 @@ fn tool_node(
         ));
     }
 
-    for (image_index, image) in panel.images.iter().enumerate() {
+    for (image_index, image) in panel
+        .images
+        .iter()
+        .enumerate()
+        .filter(|_| !command_output || !collapsed)
+    {
         let image_id = format!("t{index}.image{image_index}");
         body.push(images.node(&image_id).unwrap_or_else(|| {
             Node::new(
@@ -1392,14 +1425,13 @@ fn shell_node(
     if !shell.running && shell.exit_code != 0 {
         meta.push(Text::Plain(format!("exit {}", shell.exit_code)));
     }
-    // `!` shell blocks collapse to their command summary like tool cards:
-    // keeping the full scrollback mounted while collapsed paints one
-    // expanded frame on completion. Failures keep output visible.
+    // Local `!` commands follow the same disclosure policy from first paint.
+    // Failures retain their exit status above; scrollback requires disclosure.
     let collapsed = collapsed_overrides
         .get(&id(index, "shell"))
         .copied()
-        .unwrap_or(!verbose && !shell.running);
-    let body = if shell.output.trim().is_empty() || (collapsed && shell.exit_code == 0) {
+        .unwrap_or(!verbose);
+    let body = if shell.output.trim().is_empty() || collapsed {
         Vec::new()
     } else {
         vec![octet_tern::scene::ansi_block(

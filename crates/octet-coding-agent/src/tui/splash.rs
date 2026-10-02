@@ -91,24 +91,26 @@ pub(crate) fn render_logo(
         .collect()
 }
 
-/// Retained native mark, using the same byte geometry and settled gradient.
+/// Retained native mark, using the settled gradient and the brand's 2:1
+/// proportions. Terminal cells are twice as tall as they are wide: the 8×2
+/// cell silhouette is an 8×4 pixel silhouette, not a vertically squashed 4:1 SVG.
 pub(crate) fn native_svg(
     model_accent: Option<(u8, u8, u8)>,
     solid: Option<(u8, u8, u8)>,
 ) -> String {
     let mut svg = String::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 24" width="96" height="24" shape-rendering="crispEdges">"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 48" width="96" height="48" shape-rendering="crispEdges">"#,
     );
     for (column, bit) in BYTE.iter().enumerate() {
         let (r, g, b) = solid.map_or_else(
             || model_accent.map_or(COLORS[column], |accent| mix(COLORS[column], accent, 0.58)),
             |solid| gradient_stop(solid, column),
         );
-        let y = if *bit == b'0' { 12 } else { 0 };
+        let y = if *bit == b'0' { 24 } else { 0 };
         svg.push_str(&format!(
             r##"<rect x="{}" y="{y}" width="12" height="{}" fill="#{r:02x}{g:02x}{b:02x}"/>"##,
             column * 12,
-            24 - y
+            48 - y
         ));
     }
     svg.push_str("</svg>");
