@@ -116,6 +116,7 @@ fn insert_test_parent(
             resource_owner,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
 }
@@ -779,6 +780,7 @@ system_prompt = {system_prompt}
 
     let no_services = OfferedHostServices {
         agent_sessions: false,
+        tool_composition: false,
         session_lifecycle: false,
         approvals: false,
         secrets: false,
@@ -2230,6 +2232,7 @@ fn child_request(parent_request_id: u64, state: u8) -> ChildRequest {
             state: AtomicU8::new(state),
             changed: Notify::new(),
             cancel_on_response_abort: StdMutex::new(None),
+            composition_cancellation: StdMutex::new(None),
         }),
         policy_intent: None,
     }
@@ -2654,6 +2657,7 @@ fn child_arriving_after_parent_cancellation_is_terminal_not_fatal() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
     lock_std_mutex(&state.pending).remove(&7);
@@ -2699,6 +2703,7 @@ fn parent_settlement_cannot_overtake_child_registration() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
     let state = Arc::new(state);
@@ -2778,6 +2783,7 @@ fn non_tool_input_is_delivered_to_an_event_consumer() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
     handle_protocol_line(
@@ -2827,6 +2833,7 @@ fn non_tool_input_fails_closed_without_an_event_consumer() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
     handle_protocol_line(
@@ -2850,6 +2857,8 @@ fn prospective_tool_catalog_has_one_input_and_output_schema_byte_budget() {
         output_schema: Some(
             serde_json::json!({"type": "object", "description": "y".repeat(bytes)}),
         ),
+        composition: None,
+        constrained_sampling: None,
     };
     let mut catalog = Vec::new();
     for index in 0..6 {
@@ -3783,6 +3792,8 @@ fn handshake_must_exactly_match_manifest_contribution_names() {
             description: "Undeclared".into(),
             parameters: serde_json::json!({"type": "object"}),
             output_schema: None,
+            composition: None,
+            constrained_sampling: None,
         }],
         commands: vec![CommandDefinition {
             name: "checkpoint".into(),
@@ -3865,6 +3876,8 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
             description: "Echo".into(),
             parameters: serde_json::json!({"type": "object"}),
             output_schema: Some(serde_json::json!({"type": "object"})),
+            composition: None,
+            constrained_sampling: None,
         }],
         commands: vec![CommandDefinition {
             name: "checkpoint".into(),
@@ -7171,22 +7184,22 @@ commands = ["tool"]
 #[test]
 fn menus_need_api_0_2_and_a_declared_command() {
     for (source, expected) in [
-            (
-                "name = \"legacy\"\nversion = \"0.1.0\"\napi_version = \"0.1\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\ncommands = [\"tool\"]\nmenu = true\n",
-                "require extension API 0.2",
-            ),
-            (
-                "name = \"bare\"\nversion = \"0.2.0\"\napi_version = \"0.2\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\nmenu = true\n",
-                "at least one declared command",
-            ),
-        ] {
-            match ExtensionManifest::parse(source) {
-                Err(ExtensionRuntimeError::InvalidManifest(message)) => {
-                    assert!(message.contains(expected), "{message}");
-                }
-                other => panic!("expected {expected:?}, got {other:?}"),
+        (
+            "name = \"legacy\"\nversion = \"0.1.0\"\napi_version = \"0.1\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\ncommands = [\"tool\"]\nmenu = true\n",
+            "require extension API 0.2",
+        ),
+        (
+            "name = \"bare\"\nversion = \"0.2.0\"\napi_version = \"0.2\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\nmenu = true\n",
+            "at least one declared command",
+        ),
+    ] {
+        match ExtensionManifest::parse(source) {
+            Err(ExtensionRuntimeError::InvalidManifest(message)) => {
+                assert!(message.contains(expected), "{message}");
             }
+            other => panic!("expected {expected:?}, got {other:?}"),
         }
+    }
 }
 
 #[cfg(unix)]
@@ -7503,9 +7516,9 @@ command = "dynamic.py"
             diagnostics.push(format!("{event:?}"));
         }
         panic!(
-                "initial live catalog did not publish while the host was idle; health={:?}; events={diagnostics:?}",
-                process.health_snapshot()
-            );
+            "initial live catalog did not publish while the host was idle; health={:?}; events={diagnostics:?}",
+            process.health_snapshot()
+        );
     }
     assert_eq!(
         process

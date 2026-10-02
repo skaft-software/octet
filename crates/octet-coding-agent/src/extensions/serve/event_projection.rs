@@ -39,7 +39,9 @@ pub(super) async fn project_agent_event(
                 .send(event(EventPayload::ContextUpdated { context }))
                 .await
                 .map_err(|_| ServiceError::Unavailable)?;
-            crate::output::stderr!("warning: provider usage and cost are uncertain; displayed numeric usage is a known subtotal, not a complete total.");
+            crate::output::stderr!(
+                "warning: provider usage and cost are uncertain; displayed numeric usage is a known subtotal, not a complete total."
+            );
             persisted?;
         }
         AgentEvent::TurnStarted => {}
@@ -429,7 +431,7 @@ pub(super) async fn project_tool_progress(
                 .await
                 .map_err(|_| ServiceError::Unavailable)?;
         }
-        ToolProgress::SessionEvent(_, _) => {}
+        ToolProgress::SessionEvent(_, _) | ToolProgress::SessionMetadataEvent(_, _) => {}
     }
     Ok(())
 }

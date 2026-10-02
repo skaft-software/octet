@@ -97,6 +97,7 @@ mod shell_safety;
 pub mod skills;
 pub mod telemetry;
 pub mod tool;
+pub mod tool_composition;
 pub mod tools;
 
 pub use agent::{

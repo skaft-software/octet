@@ -254,7 +254,7 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The five executable bundles and the separate Serve app are pinned exactly to the
+The six executable bundles and the separate Serve app are pinned exactly to the
 running host. This checkout's source manifests require `=0.8.2`, and the
 published 0.8.0 bundles require `=0.8.0`. The [0.8.2
 candidate notes](releases/v0.8.2.md) record planned distribution and remaining
@@ -268,7 +268,7 @@ octet extension update NAME
 octet extension remove NAME
 ```
 
-The executable catalog is `octet-browse`, `octet-computer-use`, `octet-mcp`,
+The executable catalog is `octet-browse`, `octet-codemode`, `octet-computer-use`, `octet-mcp`,
 `octet-subagents` and `octet-web-search`. Checksummed bundles install atomically
 under `~/.octet/extensions/<id>`, and a local update must match the managed
 package ID. Nothing runs at install: no hook, dependency setup, activation,

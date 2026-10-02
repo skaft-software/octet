@@ -1,0 +1,123 @@
+{
+  "schema": "octet.codemode.vendor.v1",
+  "packages": [
+    {
+      "name": "@earendil-works/pi-codemode",
+      "version": "1.0.0",
+      "directory": "pi-codemode",
+      "archive": "pi-codemode-1.0.0.tgz",
+      "url": "https://registry.npmjs.org/@earendil-works/pi-codemode/-/pi-codemode-1.0.0.tgz",
+      "integrity": "sha512-LPpFI4+T9NzDnhBDs15izWAolaoM8xnwqdziRd6Zx8BQeoEPvzefD2vMMzSyF0rOtq34TfQqkZ0ki16f6cGdMg==",
+      "sha256": "05ea491bc1f7adf9fac438c6de9fd313d7a258beb0801724485cf8915b7f8186",
+      "repository": "https://github.com/earendil-works/pi",
+      "git_head": "a13d35a742c6ef8462812a28fbe1d8c8b7431c32"
+    },
+    {
+      "name": "quickjs-wasi",
+      "version": "3.6.2",
+      "directory": "quickjs-wasi",
+      "archive": "quickjs-wasi-3.6.2.tgz",
+      "url": "https://registry.npmjs.org/quickjs-wasi/-/quickjs-wasi-3.6.2.tgz",
+      "integrity": "sha512-FCqGtGOrMgzUiIrMNMA2YnsOxCNwo31dzqXvclXUC6xeT35NJLKXQJsvbeCTjvoFAwZgEAPg8U6+KAPDGXn8Mg==",
+      "sha256": "f1f4349f19a2d849e33ea0ae9bec2e7062b8839f4eceb17c9051ddbaa2720982",
+      "repository": "https://github.com/vercel-labs/quickjs-wasi",
+      "source_tag": "quickjs-wasi@3.6.2",
+      "git_head": "5a7a0eeda87c99542f8cf3095b6d61ecfa755977"
+    }
+  ],
+  "pi_license": {
+    "url": "https://raw.githubusercontent.com/earendil-works/pi/a13d35a742c6ef8462812a28fbe1d8c8b7431c32/LICENSE",
+    "sha256": "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48",
+    "note": "Pi's npm tarball omits LICENSE; supplied from its exact published gitHead."
+  },
+  "supplemental_licenses": [
+    {
+      "component": "QuickJS-NG",
+      "source": "sources/quickjs-ng-LICENSE",
+      "destination": "quickjs-wasi/licenses/quickjs-ng-LICENSE",
+      "url": "https://raw.githubusercontent.com/quickjs-ng/quickjs/6d46d07d04041b40f4f49eaa7fdebe44c314c699/LICENSE",
+      "sha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171"
+    },
+    {
+      "component": "wasi-libc",
+      "source": "sources/wasi-libc-LICENSE",
+      "destination": "quickjs-wasi/licenses/wasi-libc-LICENSE",
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/LICENSE",
+      "sha256": "2711a8b5a5cdfef0e639f96c1aca12ae23d7d64a02d0507f1bdf14d2b27bbc3a"
+    },
+    {
+      "component": "wasi-libc",
+      "source": "sources/wasi-libc-LICENSE-APACHE-LLVM",
+      "destination": "quickjs-wasi/licenses/wasi-libc-LICENSE-APACHE-LLVM",
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/LICENSE-APACHE-LLVM",
+      "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+    },
+    {
+      "component": "wasi-libc",
+      "source": "sources/wasi-libc-LICENSE-APACHE",
+      "destination": "quickjs-wasi/licenses/wasi-libc-LICENSE-APACHE",
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+      "component": "wasi-libc",
+      "source": "sources/wasi-libc-LICENSE-MIT",
+      "destination": "quickjs-wasi/licenses/wasi-libc-LICENSE-MIT",
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    {
+      "component": "wasi-libc",
+      "source": "sources/wasi-libc-libc-bottom-half-cloudlibc-LICENSE",
+      "destination": "quickjs-wasi/licenses/wasi-libc-libc-bottom-half-cloudlibc-LICENSE",
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/libc-bottom-half/cloudlibc/LICENSE",
+      "sha256": "c8b789cf5a746611e6300a0cc7750dbf92b61912a709d04e639245f7290656d0"
+    },
+    {
+      "component": "wasi-libc",
+      "source": "sources/wasi-libc-libc-top-half-musl-COPYRIGHT",
+      "destination": "quickjs-wasi/licenses/wasi-libc-libc-top-half-musl-COPYRIGHT",
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/libc-top-half/musl/COPYRIGHT",
+      "sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af"
+    },
+    {
+      "component": "wasi-libc",
+      "source": "sources/wasi-libc-fts-musl-fts-COPYING",
+      "destination": "quickjs-wasi/licenses/wasi-libc-fts-musl-fts-COPYING",
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/fts/musl-fts/COPYING",
+      "sha256": "55af87e4017668f54467a3380e7ebbac5e672d8c763bfe95e6fc882a6fdc4046"
+    },
+    {
+      "component": "LLVM runtime",
+      "source": "sources/llvm-LICENSE.TXT",
+      "destination": "quickjs-wasi/licenses/llvm-LICENSE.TXT",
+      "url": "https://raw.githubusercontent.com/llvm/llvm-project/4434dabb69916856b824f68a64b029c67175e532/llvm/LICENSE.TXT",
+      "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee"
+    },
+    {
+      "component": "Ada URL (archive only; MIT alternative)",
+      "source": "sources/ada-LICENSE-MIT",
+      "destination": "quickjs-wasi/licenses/ada-LICENSE-MIT",
+      "url": "https://raw.githubusercontent.com/ada-url/ada/v3.4.3/LICENSE-MIT",
+      "sha256": "af0d7d2cef91fc243cf4ad98570b03d1f26f5e0227cad0f5f4a7376e2feb3160"
+    },
+    {
+      "component": "Mbed TLS (archive only; Apache-2.0 alternative)",
+      "source": "sources/mbedtls-LICENSE",
+      "destination": "quickjs-wasi/licenses/mbedtls-LICENSE",
+      "url": "https://raw.githubusercontent.com/vercel-labs/quickjs-wasi/5a7a0eeda87c99542f8cf3095b6d61ecfa755977/extensions/crypto/mbedtls/LICENSE",
+      "sha256": "9b405ef4c89342f5eae1dd828882f931747f71001cfba7d114801039b52ad09b"
+    }
+  ],
+  "patches": [
+    {
+      "path": "pi-codemode/dist/runtime/worker.js",
+      "old": "from \"quickjs-wasi\";",
+      "new": "from \"../../../quickjs-wasi/dist/index.js\";",
+      "reason": "Offline relative import relocation only; engine/prelude otherwise unchanged."
+    }
+  ],
+  "omitted": [
+    "quickjs-wasi optional native WASM .so extensions (not used by Pi codemode)"
+  ]
+}

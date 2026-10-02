@@ -335,6 +335,8 @@ pub(super) async fn spawn_connection(
     artifact_guard.disarm();
     let offered_host_services = OfferedHostServices {
         agent_sessions: config.agent_sessions,
+        tool_composition: config.tool_composition
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         session_lifecycle: session_lifecycle.is_some(),
         approvals: config.approvals,
         secrets: config.secret_broker.is_some()
@@ -361,6 +363,9 @@ pub(super) async fn spawn_connection(
             .contains(&ExtensionHook::CompactionStrategy)
     {
         optional_features.push(EXTENSION_FEATURE_COMPACTION_STRATEGY.to_owned());
+    }
+    if offered_host_services.tool_composition {
+        optional_features.push(EXTENSION_FEATURE_TOOL_COMPOSITION.to_owned());
     }
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());

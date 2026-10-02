@@ -288,6 +288,10 @@ impl ExecutableExtensions {
                         .activate_eager(startable_names, |entry| {
                             let mut runtime = ExtensionRuntimeConfig::new(workspace.clone());
                             runtime.host_state = state.clone();
+                            // Generic request-scoped composition is offered to
+                            // API 0.4 extensions. Authority is attached later,
+                            // only to live model-tool contexts, never commands.
+                            runtime.tool_composition = true;
                             runtime.flag_values = extension_flag_values
                                 .get(&entry.descriptor.manifest.name)
                                 .cloned()

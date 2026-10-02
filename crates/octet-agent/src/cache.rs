@@ -193,6 +193,7 @@ fn analyze_session_cache_impl(
                 .copied()
                 .map(|index| (index, assistant, record)),
             UsageRecordKind::DelegatedAgent { .. }
+            | UsageRecordKind::ToolComposition { .. }
             | UsageRecordKind::Compaction
             | UsageRecordKind::CacheWarm
             | UsageRecordKind::RejectedResponsesTurn

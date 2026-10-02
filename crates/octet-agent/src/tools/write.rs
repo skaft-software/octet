@@ -31,6 +31,10 @@ pub struct WriteTool;
 
 #[async_trait::async_trait]
 impl Tool for WriteTool {
+    fn composition_is_unmetered(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             async_execution: false,

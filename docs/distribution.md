@@ -34,15 +34,15 @@ channel evidence.
 | Product library | `octet_sdk` |
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
-| Executable bundles | `octet-browse`, `octet-computer-use`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
+| Executable bundles | `octet-browse`, `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
 | Separate application package | `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK, Serve and five executable-bundle distribution versions | `0.8.2`; installed compatibility `requires_octet = "=0.8.2"` |
+| Product, SDK, Serve and six executable-bundle distribution versions | `0.8.2`; installed compatibility `requires_octet = "=0.8.2"` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
-Current extension authoring and the five executable-bundle manifests target API
+Current extension authoring and the six executable-bundle manifests target API
 `0.4`, the feature-negotiated wire the Python `Extension` runtime supports
 alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
@@ -60,7 +60,7 @@ The release workflows don't publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets. Verify public installation after upload. |
-| Five executable bundles | `release-serve.yml` | Separate exact-version `octet-browse`, `octet-computer-use`, `octet-mcp`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
+| Six executable bundles | `release-serve.yml` | Separate exact-version `octet-browse`, `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
 | npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all four. Disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication needed. The public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Don't advertise registry installation. Publishing the CLI and dependency graph and verifying registry ownership is separate work. |

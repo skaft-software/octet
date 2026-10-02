@@ -388,7 +388,8 @@ impl UsageTotals {
                 UsageRecordKind::DelegatedAgent { .. } => {
                     totals.delegated_records = totals.delegated_records.saturating_add(1);
                 }
-                UsageRecordKind::CacheWarm
+                UsageRecordKind::ToolComposition { .. }
+                | UsageRecordKind::CacheWarm
                 | UsageRecordKind::RejectedResponsesTurn
                 | UsageRecordKind::TerminalGate { .. } => {
                     totals.own_context_total_tokens =

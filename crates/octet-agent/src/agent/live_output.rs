@@ -352,7 +352,9 @@ pub(super) fn settle_tool_progress(
         // remain durable, but a queued semantic event must
         // not take effect after the tool was reported as
         // cancelled (notably, it must not activate a skill).
-        if let ToolProgress::SessionEvent(_, reply_tx_mutex) = p {
+        if let ToolProgress::SessionEvent(_, reply_tx_mutex)
+        | ToolProgress::SessionMetadataEvent(_, reply_tx_mutex) = p
+        {
             if let Ok(mut opt) = reply_tx_mutex.lock() {
                 if let Some(reply_tx) = opt.take() {
                     let _ = reply_tx.send(Err(
@@ -363,17 +365,27 @@ pub(super) fn settle_tool_progress(
         }
         return ProgressSettlement::Cancelled;
     }
-    if let ToolProgress::SessionEvent(event, reply_tx_mutex) = p {
-        let res = session.append(*event);
-        if let Ok(mut opt) = reply_tx_mutex.lock() {
-            if let Some(reply_tx) = opt.take() {
-                let _ = reply_tx.send(res.map_err(|e| e.to_string()));
-            }
+    let (res, reply_tx_mutex) = match p {
+        ToolProgress::SessionEvent(event, reply) => (session.append(*event), reply),
+        ToolProgress::SessionMetadataEvent(metadata, reply) => (
+            session.append_with_metadata(
+                EntryValue::Config {
+                    model: None,
+                    reasoning: None,
+                    reasoning_mode: None,
+                },
+                Some(*metadata),
+            ),
+            reply,
+        ),
+        progress => return ProgressSettlement::Emit(progress),
+    };
+    if let Ok(mut opt) = reply_tx_mutex.lock() {
+        if let Some(reply_tx) = opt.take() {
+            let _ = reply_tx.send(res.map_err(|e| e.to_string()));
         }
-        ProgressSettlement::Settled
-    } else {
-        ProgressSettlement::Emit(p)
     }
+    ProgressSettlement::Settled
 }
 
 impl Agent {

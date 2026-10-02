@@ -4152,7 +4152,8 @@ impl InteractiveShell {
                                 );
                             }
                         }
-                        ToolProgress::SessionEvent(..) => {}
+                        ToolProgress::SessionEvent(..) | ToolProgress::SessionMetadataEvent(..) => {
+                        }
                     }
                 }
                 if state.verbose_tools || refreshes_compact_tail {

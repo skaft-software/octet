@@ -76,11 +76,13 @@ use crate::tool::{
     CancellationToken, OutputStream, ReplaySafety, Tool, ToolContext, ToolError, ToolOutput,
     ToolOutputContentPart, ToolProgressDecoration, ToolProgressSink,
 };
+use crate::tool_composition::ToolCompositionConfig;
 
 mod event_bus;
 pub use event_bus::ExtensionEventBus;
 
 mod admission;
+mod composition;
 mod connection;
 mod contributions;
 mod host_requests;
@@ -103,6 +105,7 @@ mod validation;
 
 pub use self::admission::validate_extension_flag_value;
 use self::admission::*;
+use self::composition::*;
 use self::connection::*;
 pub use self::contributions::CommandOutput;
 pub use self::contributions::ContextContribution;
@@ -279,6 +282,7 @@ pub use self::process_group::EXTENSION_FEATURE_SHORTCUTS;
 pub use self::process_group::EXTENSION_FEATURE_SYSTEM_PROMPT_READ;
 pub use self::process_group::EXTENSION_FEATURE_TERMINAL_HANDOFF;
 pub use self::process_group::EXTENSION_FEATURE_TERMINAL_INPUT;
+pub use self::process_group::EXTENSION_FEATURE_TOOL_COMPOSITION;
 pub use self::process_group::EXTENSION_MANIFEST_FILENAME;
 pub use self::process_group::MAX_EXTENSION_AUTOCOMPLETE_ITEMS;
 pub use self::process_group::MAX_EXTENSION_AUTOCOMPLETE_TEXT_BYTES;
@@ -442,6 +446,12 @@ pub mod methods {
     pub const TOOLS_REGISTER: &str = "tools/register";
     /// Extension-to-host live tool removal request.
     pub const TOOLS_UNREGISTER: &str = "tools/unregister";
+    /// Extension request for a model-tool parent's composition context.
+    pub const COMPOSITION_CONTEXT: &str = "composition/context";
+    /// Extension request to dispatch a nested call through the host tool boundary.
+    pub const COMPOSITION_CALL: &str = "composition/call";
+    /// Extension request to update the parent-scoped composition store.
+    pub const COMPOSITION_STORE: &str = "composition/store";
     /// Extension-to-host completion of an initial provider catalog batch.
     pub const PROVIDERS_COMPLETE: &str = "providers/complete";
     /// Extension-to-host atomic provider catalog registration.

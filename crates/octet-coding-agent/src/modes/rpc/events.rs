@@ -507,7 +507,8 @@ impl EventTranslator {
                         }
                         ToolProgress::Confirmation(_)
                         | ToolProgress::Input(_)
-                        | ToolProgress::SessionEvent(_, _) => {}
+                        | ToolProgress::SessionEvent(_, _)
+                        | ToolProgress::SessionMetadataEvent(_, _) => {}
                     }
                     output.send(json!({
                         "type": "tool_execution_update",

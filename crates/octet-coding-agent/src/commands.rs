@@ -412,7 +412,9 @@ pub(crate) const CURRENT_CHANGELOG: &str = include_str!(concat!(
 /// frontends that have no report surface. Their ordinary error channel owns it.
 pub(crate) fn reject_tui_changelog(input: &str) -> anyhow::Result<()> {
     if matches!(parse(input), Command::Changelog) {
-        anyhow::bail!("/changelog is available in the interactive TUI; launch octet without --plain, --print, or --mode rpc and enter /changelog");
+        anyhow::bail!(
+            "/changelog is available in the interactive TUI; launch octet without --plain, --print, or --mode rpc and enter /changelog"
+        );
     }
     Ok(())
 }
@@ -1514,12 +1516,23 @@ pub fn session_text(session: &Session) -> String {
         .unwrap_or_else(|| "(empty)".into());
     format!(
         "Session: {id}\nFile: {}\nTitle: {}\nHead: {head}\nEntries: {}\nActive-branch messages: {messages}\nCheckpoints: {}\nUsage records: {}\nTokens: {} input · {} cache-read · {} cache-write · {} output\nCost: {}{}",
-        session.path().display(), active_branch_title(session), session.entries().len(),
-        session.checkpoints().len(), session.usage_records().len(),
-        usage.input_tokens, usage.cache_read_tokens,
-        usage.cache_write_tokens.saturating_add(usage.cache_write_1h_tokens), usage.output_tokens,
+        session.path().display(),
+        active_branch_title(session),
+        session.entries().len(),
+        session.checkpoints().len(),
+        session.usage_records().len(),
+        usage.input_tokens,
+        usage.cache_read_tokens,
+        usage
+            .cache_write_tokens
+            .saturating_add(usage.cache_write_1h_tokens),
+        usage.output_tokens,
         format_microdollars(session.total_cost_microdollars()),
-        if session.has_uncertain_usage() || session.has_unpriced_usage() { " (known subtotal only; usage or pricing uncertain)" } else { "" },
+        if session.has_uncertain_usage() || session.has_unpriced_usage() {
+            " (known subtotal only; usage or pricing uncertain)"
+        } else {
+            ""
+        },
     )
 }
 
@@ -1574,6 +1587,7 @@ pub fn cost_text(session: &Session, model: &Model) -> String {
             UsageRecordKind::DelegatedAgent { ref agent_id, .. } => {
                 format!("sub:{}", agent_id.trim_start_matches("agent-"))
             }
+            UsageRecordKind::ToolComposition { .. } => "tools".to_owned(),
             UsageRecordKind::Compaction => "cmp".to_owned(),
             UsageRecordKind::CacheWarm => "warm".to_owned(),
             UsageRecordKind::RejectedResponsesTurn => "rejected".to_owned(),

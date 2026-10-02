@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use octet_ai::ToolDef;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
 use crate::effect::{ToolEffect, ToolPolicyDenialCode};
@@ -69,6 +69,10 @@ pub struct SearchTool;
 
 #[async_trait::async_trait]
 impl Tool for SearchTool {
+    fn composition_is_unmetered(&self) -> bool {
+        true
+    }
+
     fn prompt_snippet(&self) -> Option<&str> {
         Some("Search file contents with ripgrep (rg)")
     }
@@ -118,6 +122,34 @@ impl Tool for SearchTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "matches": {
+                    "type": "array",
+                    "description": "Returned match and context lines, in ripgrep order, with the same line clipping as a direct search.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "line": {"type": "integer", "minimum": 1},
+                            "text": {"type": "string"},
+                            "is_context": {"type": "boolean"},
+                            "text_truncated": {"type": "boolean"}
+                        },
+                        "required": ["path", "line", "text", "is_context", "text_truncated"],
+                        "additionalProperties": false
+                    }
+                },
+                "total": {"type": "integer", "minimum": 0, "description": "Returned match count, excluding context; a lower bound when truncated."},
+                "truncated": {"type": "boolean"}
+            },
+            "required": ["matches", "total", "truncated"],
+            "additionalProperties": false
+        }))
     }
 
     fn effect(
@@ -417,9 +449,6 @@ async fn execute_search(
         ));
     }
 
-    if results.is_empty() {
-        return Ok(ToolOutput::new("no matches"));
-    }
     let count_line = if truncated {
         format!("{match_count}+ matches")
     } else if match_count == 1 {
@@ -427,17 +456,34 @@ async fn execute_search(
     } else {
         format!("{match_count} matches")
     };
-    Ok(ToolOutput::new(format!(
-        "{count_line}\n{}\ntruncated={truncated}",
-        results.join("\n")
-    )))
+    let output = if results.is_empty() {
+        ToolOutput::new("no matches")
+    } else {
+        ToolOutput::new(format!(
+            "{count_line}\n{}\ntruncated={truncated}",
+            results
+                .iter()
+                .map(SearchLine::render)
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    };
+    if ctx.progress.is_programmatic() {
+        output
+            .try_with_programmatic_content(serde_json::json!({
+                "matches": results, "total": match_count, "truncated": truncated
+            }))
+            .map_err(|error| ToolError::new(error.to_string()))
+    } else {
+        Ok(output)
+    }
 }
 
 async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
     mut stdout: R,
     max_results: usize,
     byte_budget: usize,
-) -> Result<(Vec<String>, bool, usize), ToolError> {
+) -> Result<(Vec<SearchLine>, bool, usize), ToolError> {
     let mut results = Vec::new();
     let mut match_count = 0usize;
     let mut body_bytes = 0usize;
@@ -551,7 +597,7 @@ impl RgEventBuffer {
 
 fn record_rg_event(
     event: &[u8],
-    results: &mut Vec<String>,
+    results: &mut Vec<SearchLine>,
     body_bytes: &mut usize,
     match_count: &mut usize,
     max_results: usize,
@@ -560,9 +606,10 @@ fn record_rg_event(
     let Ok(event) = std::str::from_utf8(event) else {
         return false;
     };
-    let Some((rendered, is_match)) = render_match(event) else {
+    let Some((result, is_match)) = render_match(event) else {
         return false;
     };
+    let rendered = result.render();
     if (is_match && *match_count == max_results)
         || body_bytes.saturating_add(rendered.len() + usize::from(!results.is_empty()))
             > byte_budget
@@ -573,13 +620,29 @@ fn record_rg_event(
     if is_match {
         *match_count += 1;
     }
-    results.push(rendered);
+    results.push(result);
     false
 }
 
-/// Converts one `rg --json` event line into a `path:line  text` result, or
-/// `None` for non-match events (begin/end/summary).
-fn render_match(json_line: &str) -> Option<(String, bool)> {
+#[derive(Debug, Serialize)]
+struct SearchLine {
+    path: String,
+    line: u64,
+    text: String,
+    is_context: bool,
+    text_truncated: bool,
+}
+
+impl SearchLine {
+    fn render(&self) -> String {
+        let separator = if self.is_context { "-" } else { ":" };
+        format!("{}{separator}{}  {}", self.path, self.line, self.text)
+    }
+}
+
+/// Decodes fields before rendering; never parses the human-facing output to
+/// recover paths or text (which themselves may contain separators/newlines).
+fn render_match(json_line: &str) -> Option<(SearchLine, bool)> {
     let event: serde_json::Value = serde_json::from_str(json_line).ok()?;
     let kind = event.get("type")?.as_str()?;
     if kind != "match" && kind != "context" {
@@ -594,12 +657,15 @@ fn render_match(json_line: &str) -> Option<(String, bool)> {
         .and_then(|t| t.as_str())
         .unwrap_or("")
         .trim_end();
-    let separator = if kind == "match" { ":" } else { "-" };
+    let clipped = clip_line(text, MAX_LINE_CHARS);
     Some((
-        format!(
-            "{path}{separator}{line_number}  {}",
-            clip_line(text, MAX_LINE_CHARS)
-        ),
+        SearchLine {
+            path: path.to_owned(),
+            line: line_number,
+            text_truncated: clipped != text,
+            text: clipped,
+            is_context: kind == "context",
+        },
         kind == "match",
     ))
 }

@@ -2,8 +2,8 @@
 
 [Documentation](README.md) · [Extensions](extensions.md) · [Serve](experimental/octet-serve/README.md)
 
-octet installs five executable bundles—Browse, computer use, MCP, subagents,
-and web search—and the separate Serve application through `octet extension`. See
+octet installs six executable bundles—Browse, codemode, computer use, MCP,
+subagents and web search—and the separate Serve application through `octet extension`. See
 [executable bundle setup](installation.md#optional-packages) for the tool
 integrations. The application-package format on this page is specifically for
 `octet-serve`; Serve is not an executable-extension activation target.
@@ -75,7 +75,7 @@ Validation rules (`validate_manifest` in `crates/octet-coding-agent/src/extensio
 ## Source extensions vs. executable bundles
 
 Independent source extensions are a manifest plus a script or module, discovered
-through normal resource roots and enabled/trusted explicitly. Unlike the five
+through normal resource roots and enabled/trusted explicitly. Unlike the six
 official executable bundles (including `octet-computer-use`), they are not
 installed by `octet extension` or distributed as release archives.
 [Extension authoring](extensions.md) owns the manifest and API contract; the

@@ -125,6 +125,30 @@ impl Session {
         ))
     }
 
+    /// Charge completed nested-tool usage even when the owning script fails or
+    /// is cancelled. Record before accepting another composition request, so
+    /// its frozen budget includes all previously completed nested work.
+    pub(crate) fn record_tool_composition_usage(
+        &mut self,
+        parent: String,
+        usage: Usage,
+    ) -> Result<(), SessionError> {
+        // ToolOutput reports counters, not an authoritative billing route or
+        // cost. Never invent a price by using the owning chat model's rates.
+        self.record_usage(UsageRecord {
+            kind: UsageRecordKind::ToolComposition { parent },
+            usage,
+            stop_reason: None,
+            endpoint: None,
+            model: None,
+            completed_at_unix_ms: Some(now_unix_millis()),
+            cost: None,
+            cost_microdollars: None,
+            session_cost_microdollars: None,
+            session_cost_picodollars_remainder: None,
+        })
+    }
+
     /// Persist root-ledger usage for one bounded delegated child session.
     ///
     /// `cost` is the exact aggregate of the child's durable provider records,

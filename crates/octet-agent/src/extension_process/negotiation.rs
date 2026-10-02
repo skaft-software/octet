@@ -129,6 +129,8 @@ pub(super) fn negotiate_api_v03_contributions(
             description: tool.description,
             parameters: tool.parameters,
             output_schema: tool.output_schema,
+            composition: None,
+            constrained_sampling: None,
         })
         .collect::<Vec<_>>();
     let protocol = ExtensionNegotiatedProtocol {
@@ -221,6 +223,11 @@ pub(super) fn negotiate_contributions_with_host_services(
                     .contains(&ExtensionHook::CompactionStrategy)
             {
                 allowed.insert(EXTENSION_FEATURE_COMPACTION_STRATEGY);
+            }
+            if offered_host_services.tool_composition
+                && manifest.api_version == EXTENSION_API_VERSION_0_4
+            {
+                allowed.insert(EXTENSION_FEATURE_TOOL_COMPOSITION);
             }
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
@@ -347,7 +354,7 @@ pub(super) fn negotiate_contributions_with_host_services(
     if !protocol.supports(EXTENSION_FEATURE_DYNAMIC_TOOLS) {
         ensure_same_contributions("tools", &manifest.contributes.tools, &tool_names)?;
     }
-    validate_tool_definitions(&response.tools, &manifest.api_version)?;
+    validate_tool_definitions_for_protocol(&response.tools, &protocol)?;
 
     if response.shortcuts != manifest.contributes.shortcuts {
         return Err(ExtensionRuntimeError::Protocol(

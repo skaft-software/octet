@@ -45,7 +45,7 @@ fn normalize(mut args: serde_json::Value) -> Result<EditArgs, ToolError> {
         _ => {
             return Err(ToolError::new(
                 "invalid arguments: edits must be an array or a single replacement",
-            ))
+            ));
         }
     };
     for (old, new) in [("old", "new"), ("oldText", "newText")] {
@@ -97,6 +97,10 @@ pub struct EditTool;
 
 #[async_trait::async_trait]
 impl Tool for EditTool {
+    fn composition_is_unmetered(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             async_execution: false,
@@ -136,7 +140,9 @@ impl Tool for EditTool {
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
-        Some("Make precise file edits with exact text replacement, including multiple disjoint edits in one call")
+        Some(
+            "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+        )
     }
 
     fn prompt_guidelines(&self) -> &[&str] {
@@ -252,20 +258,27 @@ fn replace(
                 .len_utf8();
         if text[next..].contains(&edit.old) {
             let count = 1 + text[next..].matches(&edit.old).count();
-            return Err(ToolError::new(format!("error ambiguous\n{display_path}\n\"{}\" matches {count} locations. Include more surrounding context to make it unique.", clip_line(&edit.old,80))));
+            return Err(ToolError::new(format!(
+                "error ambiguous\n{display_path}\n\"{}\" matches {count} locations. Include more surrounding context to make it unique.",
+                clip_line(&edit.old, 80)
+            )));
         }
         regions.push((start, start + edit.old.len(), edit));
     }
     regions.sort_unstable_by_key(|(start, _, _)| *start);
     if regions.windows(2).any(|pair| pair[0].1 > pair[1].0) {
-        return Err(ToolError::new("error overlapping_edits\nReplacements overlap in the original file; merge them into one edit."));
+        return Err(ToolError::new(
+            "error overlapping_edits\nReplacements overlap in the original file; merge them into one edit.",
+        ));
     }
     let mut size = text.len();
     for (_, _, edit) in &regions {
         size = size - edit.old.len() + edit.new.len();
     }
     if size > MAX_FILE_BYTES {
-        return Err(ToolError::new(format!("error too_large\n{display_path}: edited content is {size} bytes (limit {MAX_FILE_BYTES})")));
+        return Err(ToolError::new(format!(
+            "error too_large\n{display_path}: edited content is {size} bytes (limit {MAX_FILE_BYTES})"
+        )));
     }
     let mut updated = String::with_capacity(size);
     let mut cursor = 0;
