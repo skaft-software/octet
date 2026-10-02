@@ -301,6 +301,15 @@ pub struct CompletionAttributes {
     /// Explicit reason the server rate is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_timing_unavailable: Option<octet_ai::inference::ServerTimingUnavailable>,
+    /// Client-derived decode estimate, not native server accounting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_estimated_tokens_per_second: Option<f64>,
+    /// Pair-slope dispersion; not a probability of GPU accuracy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_relative_dispersion: Option<f64>,
+    /// Explicit failure of client evidence, with no E2E fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_estimate_unavailable: Option<octet_ai::DecodeEstimateUnavailable>,
 }
 
 impl CompletionAttributes {
@@ -349,6 +358,11 @@ impl CompletionAttributes {
                 self.server_timing_source = Some(server.source);
             }
             self.server_timing_unavailable = metrics.server_unavailable;
+            if let Some(estimate) = &metrics.decode_estimate {
+                self.decode_estimated_tokens_per_second = Some(estimate.tokens_per_second);
+                self.decode_relative_dispersion = Some(estimate.relative_dispersion);
+            }
+            self.decode_estimate_unavailable = metrics.decode_unavailable;
         }
         self
     }
@@ -642,6 +656,25 @@ pub fn agent_telemetry_schema() -> TelemetrySchema {
             "Explicit reason the server rate is unavailable.",
         ),
     );
+    for (name, kind, description) in [
+        (
+            "decode_estimated_tokens_per_second",
+            AttributeType::Number,
+            "Robust client-stream decode estimate, not E2E or native server timing.",
+        ),
+        (
+            "decode_relative_dispersion",
+            AttributeType::Number,
+            "Pair-slope dispersion, not GPU accuracy confidence.",
+        ),
+        (
+            "decode_estimate_unavailable",
+            AttributeType::String,
+            "Why client evidence could not resolve decode cadence.",
+        ),
+    ] {
+        end_attributes.insert(name.into(), attribute(kind, false, description));
+    }
     let mut spans = BTreeMap::new();
     for name in [
         RunSpan::NAME,
@@ -828,6 +861,7 @@ mod inference_tests {
                 total_ns: None,
             }),
             server_unavailable: None,
+            ..Default::default()
         };
         let usage = octet_ai::Usage {
             output_tokens: 150,

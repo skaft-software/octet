@@ -2,8 +2,10 @@
 
 [Providers](providers.md) · [Telemetry](telemetry.md) · [Performance contract](design/performance.md)
 
-This checkout separates **client observations** from **server-reported generation
-throughput**. It does not expose a universal GPU decode-speed measurement.
+This checkout estimates **decode cadence**, rather than labeling round-trip
+throughput as decode speed. It prefers **server-reported generation** when a
+matching native pair exists; otherwise it uses a separately labeled robust
+client-stream estimate. Neither authenticates pure GPU-active execution.
 Deterministic fixtures establish parsing, units, scope and propagation—not live
 provider accuracy, loaded-serving performance, or a released feature.
 
@@ -34,9 +36,19 @@ summaries are not a timeline of hidden reasoning. One buffered chunk gives a
 zero first-to-last interval, not an infinite decode rate. Completed audio/media
 is an observation of completed media, not a timestamp for its individual tokens.
 
-Polling is consumer-driven. Client observations include preparation/opening,
-network/proxy buffering, local decode and scheduling, and caller backpressure.
-They are not server execution time or terminal paint. They cannot separate
+After the first poll, a cancellation-owned receive task drains ahead of the
+consumer into a 256-event / 16-MiB admission queue. Larger guarded terminal/media
+events own the whole byte budget alone; the canonical content caps still apply.
+Dropping the stream aborts the reader. Queue saturation marks local backpressure
+and suppresses the decode estimate, without dropping/reordering events or changing
+native timing. Native steering also has a bounded outer receive task so successor
+segments are not timed by terminal painting.
+
+Client observations include preparation/opening, waiting before the first poll,
+network/proxy buffering, local decode and scheduling, and caller backpressure
+when the queue saturates. Already-ready terminal responses and EOF remain ready
+in the same poll, preserving accepted-result settlement under cancellation.
+These observations are not server execution time or terminal paint. They cannot separate
 queueing from prefill, hidden reasoning, speculative acceptance/rejection,
 preemption, batching or network latency.
 
@@ -54,6 +66,47 @@ sample, and a retry or successor gets independent state. A direct codec result
 can have server metrics without any client clock; that absence is not zero
 latency. Retained WebSocket retrieval remains part of the same observed request,
 not a replayed generation or a fresh decode window.
+
+## Decode estimation without native timing
+
+`InferenceMetrics.decode_estimate` is an estimate of visible-output decode cadence,
+not E2E and not an asserted server measurement. The same implementation is used
+by every conversation codec/transport; there is no provider-name speed heuristic.
+
+- Capture cumulative answer-text and tool-argument UTF-8 byte progress on the
+  receive side, excluding empty deltas, assembled calls and reasoning summaries.
+  No response text, tokenizer files or provider payloads are retained.
+- Coalesce arrivals within a fixed 2-ms burst window. Retain at most 256 samples
+  with deterministic decimation, plus first/final boundaries. Events are never
+  counted as tokens; the first chunk can contain many tokens.
+- Calibrate progress using terminal `output_tokens - reasoning_tokens` across
+  the whole observed visible output. This avoids a guessed characters/token
+  constant, but **assumes approximately representative bytes/token over the
+  fitted window**. Tool framing, unreported hidden output, rejected predictions
+  and changing text/token density can bias that assumption.
+- Fit the median of long-baseline pair slopes (at least one-quarter of observed
+  progress and 62.5 ms apart). The intercept absorbs prefill/round-trip/first-chunk
+  delay. Differencing byte progress removes the first chunk's proportional token
+  mass instead of incorrectly dividing all tokens by first-to-last time. Final
+  usage, agent persistence and completion-tail delays are not fitting samples.
+- Require at least 32 visible-usage tokens, eight arrival bursts and a 250-ms
+  observed window. Reject pair-slope 10th-to-90th percentile dispersion above
+  50%, local reader backpressure, media, deferred retrieval, and reasoning whose
+  usage cannot be separated. Short/unstreamed/fully buffered output is unavailable.
+
+`relative_dispersion` describes fit stability, **not an accuracy probability or
+confidence interval**. A stable stream can still have hidden server buffering or
+a wrong token basis. Chunk jitter can be reduced statistically; arbitrary proxy
+buffering, hidden reasoning timing, GPU scheduling and speculative execution
+cannot be uniquely recovered from arrivals. This is the best available estimate
+under its documented assumptions, not a guarantee of matching every provider's
+server report. Native timing always wins the completion display; both independent
+observations remain available for comparison in `/status` and telemetry.
+
+`decode_unavailable` names missing visible usage, an unknown reasoning split,
+insufficient output/samples, buffered output, unstable cadence, deferred operations,
+media or local backpressure. It never falls back to the E2E average. Native
+`server_unavailable` remains independent and is not overwritten by an estimate.
 
 ## Server-reported generation throughput
 
@@ -93,8 +146,8 @@ object; unknown provider strings/trees are not copied into metrics.
 
 `server_unavailable` explicitly distinguishes `not_reported`, `invalid`,
 `provisional` and `conflicting`. It is absent when a valid server pair exists.
-There is no visible-text retokenization, character-to-token estimate, timestamp
-subtraction or client-derived fallback for a missing server rate.
+There is no client-derived fallback masquerading as a server rate. The separate
+usage-calibrated estimate has its own provenance and unavailable reasons.
 
 ## Coverage by route and transport
 
@@ -128,9 +181,12 @@ are measured normally.
 
 ## Presentation and observability
 
-- Completion retains `tok/s E2E (last turn)` and adds a separate
-  `tok/s server-reported generation (last turn)` line only for a valid native pair.
-- `/status` shows client output offsets/event count/gap/tail and server source,
+- Completion shows `tok/s generation (server-reported, last turn)` when native
+  timing exists; otherwise `~tok/s decode (estimated, last turn)` or explicit
+  `decode unavailable`. E2E is no longer on the completion line or copied outcome.
+  `/status` retains E2E as a separately labeled request-throughput diagnostic.
+- `/status` shows client output offsets/event count/gap/tail, estimate sample
+  count/window/visible-token basis/dispersion/reasoning exclusion, and server source,
   native count, normalized duration, original unit, or explicit unavailability.
 - `AgentEvent::ProviderInference` is transient and carries the frozen metrics.
   It is not assistant content, durable session usage or a terminal-gate verdict.
@@ -159,8 +215,13 @@ response identity, byte-fragmented SSE and completed audio. Deterministic client
 clock tests separate reasoning, answer, arguments, output gaps and completion
 tail. Existing loopback transport regressions assert measurement propagation
 through every codec, WebSocket transport selections, steering and deferred scopes.
-Presentation/telemetry tests pin distinct labels, accounting independence and
-frozen timing despite delayed persistence.
+Presentation/telemetry tests pin distinct labels, native preference, no E2E
+completion fallback, accounting independence and frozen timing despite delayed
+persistence. Deterministic known-cadence fits test multi-token first batches,
+prefill offsets, packet jitter, chunk bursts, hidden reasoning exclusion and
+bounded long streams. Reader tests establish independent progress during a stalled
+consumer, queue/byte admission, ordering, saturation feedback and drop cancellation.
+They do not qualify a real provider's GPU execution.
 
 Live-provider timing availability and numerical accuracy remain **unqualified**.
 A production-serving campaign should reuse [AIPerf](https://github.com/ai-dynamo/aiperf)

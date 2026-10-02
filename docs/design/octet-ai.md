@@ -218,7 +218,10 @@ Observed indices use a hash set and are sorted only during final assembly, keepi
 `Response.inference` keeps advisory performance observations outside `Usage`.
 The shared guarded-client wrapper freezes monotonic canonical-output offsets,
 byte/event counters, gaps and completion time before downstream settlement for
-all ordinary conversation transports. Native steering successors and deferred
+all ordinary conversation transports. A cancellation-owned bounded receive task
+isolates clocks from ordinary downstream polling; queue saturation suppresses the
+usage-calibrated robust decode estimate, not accounting or native timing.
+Native steering successors and deferred
 submit/poll operations retain distinct origins rather than fabricated E2E rates.
 Codecs retain recognized native terminal count/duration pairs with source/unit
 provenance; unsupported, invalid, provisional and conflicting server timing is

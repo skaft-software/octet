@@ -22,27 +22,38 @@ pub(super) const SUBAGENTS_RUNNING_DETAIL: &str =
 pub(super) fn completion_text(
     elapsed: Duration,
     separator: &str,
-    tokens_per_second: Option<f64>,
+    inference: Option<&octet_ai::InferenceMetrics>,
 ) -> String {
-    completion_status_text("completed", elapsed, separator, tokens_per_second)
+    completion_status_text("completed", elapsed, separator, inference)
 }
 
 fn completion_status_text(
     status: &str,
     elapsed: Duration,
     separator: &str,
-    tokens_per_second: Option<f64>,
+    inference: Option<&octet_ai::InferenceMetrics>,
 ) -> String {
     let mut text = format!("{status}{separator}{}", format_duration(elapsed));
-    if let Some(rate) = tokens_per_second.filter(|rate| rate.is_finite() && *rate > 0.0) {
-        text.push_str(&format!("{separator}{rate:.0} tok/s E2E (last turn)"));
+    if let Some(metrics) = inference {
+        if let Some(rate) = metrics.server.as_ref().and_then(|m| m.tokens_per_second()) {
+            text.push_str(&format!(
+                "{separator}{rate:.1} tok/s generation (server-reported, last turn)"
+            ));
+        } else if let Some(estimate) = &metrics.decode_estimate {
+            text.push_str(&format!(
+                "{separator}~{:.1} tok/s decode (estimated, last turn)",
+                estimate.tokens_per_second
+            ));
+        } else {
+            text.push_str(&format!("{separator}decode unavailable (last turn)"));
+        }
     }
     text
 }
 
 fn outcome_line(
     outcome: &RunOutcome,
-    tokens_per_second: Option<f64>,
+    inference: Option<&octet_ai::InferenceMetrics>,
     theme: &OctetTheme,
 ) -> String {
     let separator = semantic_separator(theme);
@@ -55,10 +66,7 @@ fn outcome_line(
         // never transcript wording, so the two variants cannot drift apart.
         RunOutcome::Completed { elapsed, .. }
         | RunOutcome::CompletedWithWarnings { elapsed, .. } => {
-            let text = subdued_text(
-                theme,
-                &completion_text(*elapsed, separator, tokens_per_second),
-            );
+            let text = subdued_text(theme, &completion_text(*elapsed, separator, inference));
             format!("{} {text}", theme.fg("success", theme.glyph("success")))
         }
         RunOutcome::Failed { elapsed, .. } => format!(
@@ -107,27 +115,9 @@ pub(super) fn render_outcome(
     subagents_running: bool,
 ) -> Vec<String> {
     let mut lines = vec![fit_line(
-        &outcome_line(&outcome.outcome, outcome.tokens_per_second, theme),
+        &outcome_line(&outcome.outcome, outcome.inference.as_deref(), theme),
         width,
     )];
-    if matches!(
-        outcome.outcome,
-        RunOutcome::Completed { .. } | RunOutcome::CompletedWithWarnings { .. }
-    ) {
-        if let Some(rate) = outcome
-            .server_generation
-            .as_ref()
-            .and_then(|m| m.tokens_per_second())
-        {
-            lines.push(fit_line(
-                &subdued_text(
-                    theme,
-                    &format!("{rate:.1} tok/s server-reported generation (last turn)"),
-                ),
-                width,
-            ));
-        }
-    }
     let detail = match &outcome.outcome {
         // Inference diagnostics are credential-redacted at the request boundary.
         // Bound and terminal-sanitize them again at this presentation boundary.
@@ -202,20 +192,20 @@ mod tests {
             },
         };
 
-        for rate in [None, Some(216.0)] {
+        for rate in [None, Some(&octet_ai::InferenceMetrics::default())] {
             assert_eq!(
                 outcome_line(&completed, rate, &theme),
                 outcome_line(&with_warnings, rate, &theme),
                 "the two completed variants must render byte-identically"
             );
         }
-        let line = strip_terminal_sequences(&outcome_line(&with_warnings, Some(216.0), &theme));
-        assert_eq!(line, "✓ completed · 1m23s · 216 tok/s E2E (last turn)");
+        let line = strip_terminal_sequences(&outcome_line(&with_warnings, None, &theme));
+        assert_eq!(line, "✓ completed · 1m23s");
         assert!(!line.to_ascii_lowercase().contains("warning"), "{line}");
 
         // The success glyph and role are the ones the completed line uses; the
         // warning glyph and role never reach it.
-        let styled = outcome_line(&with_warnings, Some(216.0), &theme);
+        let styled = outcome_line(&with_warnings, None, &theme);
         assert!(
             styled.contains(&theme.fg("success", theme.glyph("success"))),
             "{styled:?}"
@@ -226,7 +216,7 @@ mod tests {
         );
 
         // The whole block is identical too, and no line carries warning wording.
-        let block = |outcome: RunOutcome| OutcomeBlock::new(outcome, Some(216.0));
+        let block = |outcome: RunOutcome| OutcomeBlock::new(outcome, None);
         let rendered = |outcome: RunOutcome| {
             render_outcome(&block(outcome), &theme, 80, false)
                 .into_iter()
@@ -236,10 +226,7 @@ mod tests {
         };
         let plain = rendered(with_warnings);
         assert_eq!(plain, rendered(completed), "{plain:?}");
-        assert_eq!(
-            plain, "✓ completed · 1m23s · 216 tok/s E2E (last turn)",
-            "{plain:?}"
-        );
+        assert_eq!(plain, "✓ completed · 1m23s", "{plain:?}");
         assert!(!plain.to_ascii_lowercase().contains("warning"), "{plain:?}");
     }
 
@@ -369,7 +356,7 @@ mod tests {
 mod inference_tests {
     use super::*;
     #[test]
-    fn completion_labels_server_generation_separately_from_e2e() {
+    fn completion_prefers_native_generation_and_never_displays_e2e() {
         let theme = crate::tui::theme::test_theme();
         let mut block = OutcomeBlock::new(
             RunOutcome::Completed {
@@ -380,9 +367,17 @@ mod inference_tests {
                     warnings: 0,
                 },
             },
-            Some(50.0),
+            Some(octet_ai::InferenceMetrics::default()),
         );
-        block.server_generation = Some(octet_ai::ServerGenerationMetrics {
+        block.inference.as_mut().unwrap().decode_estimate = Some(octet_ai::DecodeEstimate {
+            tokens_per_second: 100.0,
+            reported_visible_tokens: 100,
+            observed_ns: 1_000_000_000,
+            samples: 20,
+            relative_dispersion: 0.01,
+            reasoning_tokens_excluded: 0,
+        });
+        block.inference.as_mut().unwrap().server = Some(octet_ai::ServerGenerationMetrics {
             source: octet_ai::ServerTimingSource::TimingsPredicted,
             tokens: 100,
             generation_ns: 500_000_000,
@@ -396,11 +391,53 @@ mod inference_tests {
             .map(|line| sexy_tui_rs::strip_terminal_sequences(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("50 tok/s E2E (last turn)"), "{text}");
+        assert!(!text.contains("E2E"), "{text}");
         assert!(
-            text.contains("200.0 tok/s server-reported generation (last turn)"),
+            text.contains("200.0 tok/s generation (server-reported, last turn)"),
             "{text}"
         );
         assert!(!text.contains("decode"), "{text}");
+        assert!(!text.contains("100.0"), "native source must win: {text}");
+    }
+}
+
+#[cfg(test)]
+mod decode_estimate_tests {
+    use super::*;
+    #[test]
+    fn estimated_decode_and_unavailable_replace_e2e_in_completion_and_copy() {
+        let mut metrics = octet_ai::InferenceMetrics::default();
+        let missing = completion_text(Duration::from_secs(60), " · ", Some(&metrics));
+        assert!(missing.contains("decode unavailable"));
+        assert!(!missing.contains("E2E"));
+        metrics.decode_estimate = Some(octet_ai::DecodeEstimate {
+            tokens_per_second: 100.0,
+            reported_visible_tokens: 205,
+            observed_ns: 2_000_000_000,
+            samples: 41,
+            relative_dispersion: 0.01,
+            reasoning_tokens_excluded: 10000,
+        });
+        let text = completion_text(Duration::from_secs(60), " · ", Some(&metrics));
+        assert!(
+            text.contains("~100.0 tok/s decode (estimated, last turn)"),
+            "{text}"
+        );
+        assert!(!text.contains("E2E"));
+        let block = OutcomeBlock::new(
+            RunOutcome::Completed {
+                elapsed: Duration::from_secs(60),
+                summary: crate::presentation::RunSummary {
+                    files_changed: 0,
+                    tool_calls: 0,
+                    warnings: 0,
+                },
+            },
+            Some(metrics),
+        );
+        assert_eq!(
+            super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(block)),
+            text
+        );
     }
 }

@@ -322,8 +322,10 @@ and is advisory telemetry, not model output or durable content.
 `provider_inference.data.metrics` carries independent `client`, `server` and
 `server_unavailable` observations. Offsets/durations are integer nanoseconds;
 client scopes distinguish request, steering successor, deferred submit and poll.
-The nullable server pair retains native source/unit provenance. Missing timing
-is unavailable, never a client-derived server decode rate. This additive event
+The nullable server pair retains native source/unit provenance. The separately
+optional `decode_estimate` is a robust client-stream fit with visible-token basis,
+window, sample count and dispersion; `decode_unavailable` explains insufficient
+evidence. Missing native timing remains unavailable, never filled by an estimate. This additive event
 changes neither protocol `1`, assistant messages nor durable usage authority.
 CLI JSON/RPC uses `{"type":"provider_inference","metrics":{...}}` outside
 message updates. See [inference measurements](inference-metrics.md) for exact

@@ -666,6 +666,12 @@ Server timing is reported only when a recognized matching terminal count/duratio
 pair exists; client E2E throughput is never labeled server decode speed. No
 live-provider timing accuracy or released availability is implied.
 
+All live conversation routes also use the same usage-calibrated streaming decode
+estimator when native timing is absent. Native reporting wins; estimates are
+marked `~` and exclude E2E, prefill and completion-tail time. Short/buffered output,
+unseparated reasoning and deferred retrieval may remain unavailable. See the
+measurement contract for assumptions and qualification limits.
+
 ## Reasoning
 
 ```sh

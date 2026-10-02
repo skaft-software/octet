@@ -177,17 +177,15 @@ struct CompactionBlock {
 #[derive(Clone, Debug)]
 struct OutcomeBlock {
     outcome: RunOutcome,
-    /// Client end-to-end rate; never a reconstructed server decode rate.
-    tokens_per_second: Option<f64>,
-    server_generation: Option<octet_ai::inference::ServerGenerationMetrics>,
+    /// Frozen native timing or robust estimate, never the E2E average.
+    inference: Option<Box<octet_ai::InferenceMetrics>>,
 }
 
 impl OutcomeBlock {
-    fn new(outcome: RunOutcome, tokens_per_second: Option<f64>) -> Self {
+    fn new(outcome: RunOutcome, inference: Option<octet_ai::InferenceMetrics>) -> Self {
         Self {
             outcome,
-            tokens_per_second,
-            server_generation: None,
+            inference: inference.map(Box::new),
         }
     }
 }
@@ -3758,14 +3756,7 @@ impl InteractiveShell {
                 .saturating_add(run.elapsed_at(Instant::now()));
         }
         state.close_streaming_blocks();
-        let tokens_per_second = state
-            .last_turn_tokens_per_second
-            .filter(|rate| rate.is_finite() && *rate > 0.0);
-        let mut block = OutcomeBlock::new(outcome, tokens_per_second);
-        block.server_generation = state
-            .last_turn_inference
-            .as_ref()
-            .and_then(|m| m.server.clone());
+        let block = OutcomeBlock::new(outcome, state.last_turn_inference.clone());
         state.push_block(TranscriptBlock::Outcome(block));
         if !state.selected_model_owns_telemetry() {
             state.clear_turn_telemetry();

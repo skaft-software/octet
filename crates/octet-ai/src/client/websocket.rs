@@ -161,7 +161,7 @@ impl ResponsesResume {
 #[allow(clippy::too_many_arguments)]
 // A separate guard and builder are created for every response.created. A tiny
 // in-memory channel feeds already-decoded canonical events to the existing
-// guard one at a time; no extra inference loop or background decoder is needed.
+// guard one at a time. The outer bounded reader isolates observation from paint.
 pub(super) fn steering_event_stream(
     pool: ResponsesWsPool,
     key: Option<String>,
@@ -243,7 +243,7 @@ pub(super) fn steering_event_stream(
             item.map_err(|e| sanitize_ai_error(&redactor, e))
         }
     });
-    Box::pin(stream)
+    crate::inference::buffered_steering_stream(Box::pin(stream))
 }
 
 /// Decode a cached Responses WebSocket using the same protocol builder as the

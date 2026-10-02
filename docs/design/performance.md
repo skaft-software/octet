@@ -239,29 +239,25 @@ terminal paint. See [benchmark methods](../benchmarks/README.md).
 
 ### TUI output throughput
 
-The completion line's `tok/s E2E (last turn)` and `/status` throughput divide
-provider-reported output tokens (including reasoning) by the latest ordinary
-AI-client request-to-canonical-completion interval. The sample freezes before
-agent persistence, settlement and terminal gates; polling still includes
-network buffering, local decode, scheduling and consumer backpressure. Legacy
-external event producers without client metrics retain the explicitly
-agent-observed `TurnStarted`-to-`TurnFinished` fallback, including settlement.
-Neither is **server-side generation speed** or a whole-task average. Retries
-start fresh samples; successor steering segments and deferred submit/poll scopes
-do not manufacture a request E2E rate. Missing timing or zero output leaves the
-rate unavailable.
+The completion line prefers a matching native server generation count/duration.
+Without that, it shows a separately labeled robust decode estimate or explicit
+unavailability, never the E2E average. `/status` keeps request-to-completion E2E
+throughput separate from the decode estimate and native server observation.
 
-Recognized terminal native count/duration pairs appear separately as
-`server-reported generation`, with source/original units or explicit
-unavailability in `/status`. Their native definition is not automatically
-post-first-token decode or GPU-active time. See the unreleased
-[inference measurement contract](../inference-metrics.md) for codec/transport
-coverage, error/provisional handling and qualification limits.
+The receive-side reader runs ahead of terminal/agent polling with bounded event
+and byte admission; cancellation aborts it, and saturation suppresses estimates.
+A usage-calibrated median long-baseline fit of visible output progress excludes
+request/prefill and completion-tail time and corrects the first chunk's token
+mass. Hidden reasoning usage is excluded, and an unknown reasoning split cannot
+be assigned to answer-text time. Burst coalescing and slope dispersion reject
+unresolvable timing rather than claiming infinite decode speed.
 
-Do not divide all reported output tokens by first-visible-delta-to-completion
-time: hidden reasoning can consume most of the output budget before any text
-arrives, inflating that rate by orders of magnitude. Server-side generation
-throughput requires provider-supplied timing with matching token semantics.
+These are estimates under a token-density/arrival-cadence assumption. A stable
+fit cannot identify arbitrary proxy buffering, hidden GPU stages, preemption or
+speculative execution. Native generation is not automatically GPU-active time
+or post-first-token TPOT. See the unreleased
+[inference measurement contract](../inference-metrics.md) for the algorithm,
+thresholds, coverage and qualification limits.
 
 ## Startup attribution (opt-in)
 

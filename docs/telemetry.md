@@ -48,7 +48,10 @@ outlive its caller, and pending records are not claimed delivered.
 server metrics before agent settlement. The JSONL observer emits a bounded
 `provider_inference` record with attempt/logical-turn identity and no provider
 payload. Provider-request spans add `inference_scope`, `client_*` and `server_*`
-completion attributes, preserving usage buckets and uncertainty separately.
+completion attributes, plus `decode_estimated_tokens_per_second`,
+`decode_relative_dispersion` and `decode_estimate_unavailable`, preserving usage
+buckets and uncertainty separately. Estimates never fill native server fields;
+fit dispersion is not an accuracy probability.
 [Inference measurements](inference-metrics.md) defines native sources, units,
 missing/invalid/provisional/conflicting states, transport scopes and forwarding.
 

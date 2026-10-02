@@ -108,6 +108,13 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
                 metrics.server_unavailable.unwrap_or_default()
             ));
         }
+        if let Some(estimate) = &metrics.decode_estimate {
+            lines.push(format!("Decode estimate ~{:.1} tok/s; {} visible-usage tokens; {:.3}s output window; {} arrival bursts; {:.1}% slope dispersion (not accuracy confidence); {} reasoning tokens excluded", estimate.tokens_per_second, estimate.reported_visible_tokens, estimate.observed_ns as f64 / 1e9, estimate.samples, estimate.relative_dispersion * 100.0, estimate.reasoning_tokens_excluded));
+        } else if let Some(reason) = metrics.decode_unavailable {
+            lines.push(format!(
+                "Decode estimate unavailable ({reason:?}); no E2E substitute"
+            ));
+        }
         if let Some(client) = &metrics.client {
             let offset = |value: Option<u64>| {
                 value.map_or_else(

@@ -327,6 +327,7 @@ impl ServerTiming {
             client: None,
             server_unavailable: server.is_none().then_some(self.unavailable),
             server,
+            ..Default::default()
         }
     }
 }
