@@ -21,6 +21,12 @@ pub(super) struct Mailbox {
     pub(super) messages: VecDeque<Incoming>,
     pub(super) bindings: Option<KeybindingsManager>,
     pub(super) editor_resync: u64,
+    /// OS-level keyboard-focus returns (`FocusGained`) observed by the
+    /// frontend. The native renderer treats a change like `set_visible(true)`:
+    /// it forces a frame and re-asserts `composer.editor` focus, because Tern
+    /// does not always deliver a TSP `Visible(true)` when returning from
+    /// another app or overlay (screen recording, space switch).
+    pub(super) focus_resync: u64,
     pub(super) accepting_input: bool,
 }
 

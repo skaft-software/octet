@@ -1600,6 +1600,11 @@ fn active_fast_status(
 fn apply_focus_transition(shell: &mut InteractiveShell, gained: bool) {
     if !gained {
         shell.begin_transcript_selection(u16::MAX, u16::MAX, false);
+    } else {
+        // A returning window may have lost native keyboard focus while Tern
+        // kept the pane visible (no TSP `Visible` event): ask the native
+        // surface to force a frame and re-assert `composer.editor` focus.
+        shell.request_tern_focus_resync();
     }
     shell.render();
 }

@@ -18,7 +18,7 @@ use super::renderer_model::{RenderModel, RenderOwner};
 use super::renderer_runtime::SharedState;
 use super::terminal_text::sanitize_for_terminal;
 use super::tern_theme::NativeTheme;
-use super::{NoticeTone, ShellState, TranscriptBlock};
+use super::{AssistantBlock, NoticeTone, ShellState, TranscriptBlock};
 use crate::tui::theme::ModelLab;
 
 pub(super) const SURFACE: &str = "octet.session";
@@ -82,6 +82,10 @@ pub(super) struct TernSurface {
     verbose: bool,
     last_resync: u64,
     last_editor_revision: u64,
+    /// Last OS-focus return consumed from the native mailbox. A change forces
+    /// a frame and re-asserts native keyboard focus even when Tern sent no
+    /// TSP visibility event while another app was in front.
+    last_focus_resync: u64,
     /// The pane was hidden and came back: re-assert native keyboard focus even
     /// if the focused control did not change.
     force_focus: bool,
@@ -118,6 +122,7 @@ impl TernSurface {
             verbose: false,
             last_resync: 0,
             last_editor_revision: 0,
+            last_focus_resync: 0,
             force_focus: false,
             credit_blocked: None,
             receipts: Default::default(),
@@ -301,15 +306,32 @@ impl TernSurface {
                 .lock()
                 .expect("native mailbox poisoned")
                 .editor_resync;
+            let focus_resync = state
+                .native()
+                .lock()
+                .expect("native mailbox poisoned")
+                .focus_resync;
             if self.last_key == Some(key)
                 && resync == self.last_resync
+                && focus_resync == self.last_focus_resync
                 && !crate::output::has_tui_diagnostics()
             {
                 return Ok(());
             }
             let editor_revision = shell.editor.revision();
             let editor_changed = self.last_editor_revision != editor_revision;
+            let focus_changed = focus_resync != self.last_focus_resync;
+            if focus_changed {
+                // OS focus returned without a TSP `Visible` event (screen
+                // recording, space switch): same recovery as becoming visible
+                // again — force a frame, re-assert native keyboard focus, and
+                // forgive credit starvation while the tab was in front of
+                // another app.
+                self.force_focus = true;
+                self.credit_blocked = None;
+            }
             if !editor_changed
+                && !focus_changed
                 && self
                     .last_sent
                     .is_some_and(|sent| now.duration_since(sent) < FRAME_INTERVAL)
@@ -373,6 +395,7 @@ impl TernSurface {
             &self.images,
             main_changed,
             editor_revision,
+            &self.collapsed,
         );
         for nodes in [&mut next.main, &mut next.dock, &mut next.layer] {
             apply_disclosure(nodes, &self.collapsed);
@@ -396,7 +419,15 @@ impl TernSurface {
             .lock()
             .expect("native mailbox poisoned")
             .editor_resync;
-        if resync != self.last_resync {
+        let focus_resync_now = state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .focus_resync;
+        // A focus return also refreshes the composer draft: the terminal may
+        // hold a stale revision after input was impossible, and stale drafts
+        // reject gestures on length mismatch.
+        if resync != self.last_resync || focus_resync_now != self.last_focus_resync {
             if let Some(editor) = find_node(&next.dock, "composer.editor") {
                 ops.push(Op::Set {
                     id: editor.id.clone(),
@@ -435,6 +466,7 @@ impl TernSurface {
                 .map_or(0, |run| run.elapsed_at(now).as_secs()),
         ));
         self.last_resync = resync;
+        self.last_focus_resync = focus_resync_now;
         self.last_editor_revision = editor_revision;
         Ok(())
     }
@@ -495,6 +527,7 @@ fn project(
     images: &super::tern_images::NativeImages,
     main_changed: bool,
     editor_revision: u64,
+    collapsed: &HashMap<String, bool>,
 ) -> Projection {
     let mut out = Projection::default();
     if main_changed && !shell.startup_pending {
@@ -504,7 +537,7 @@ fn project(
         for (index, block) in shell.transcript.iter().enumerate() {
             // Commit IDs survive prepends, deletion, resume and streaming.
             let identity = shell.transcript_commit_ids[index];
-            if let Some(node) = block_node(identity, block, shell, images) {
+            if let Some(node) = block_node(identity, block, shell, images, collapsed) {
                 out.main.push(node);
             }
         }
@@ -588,7 +621,7 @@ fn welcome(shell: &ShellState) -> Node {
         Kind::Row,
         Props::new()
             .role("octet.welcome")
-            .set("gap", "lg")
+            .set("gap", "sm")
             .set("align", "center")
             .set("wrap", true),
         vec![
@@ -648,11 +681,95 @@ fn id(identity: u64, suffix: &str) -> String {
     format!("t{identity}.{suffix}")
 }
 
+/// A follow-up assistant message.
+///
+/// A bare `md` node is Tern's default prose: no label, no fill, so a turn's
+/// replies read as one wall of text. `omp` draws each reply as a labelled
+/// custom message — a card carrying the model label over the `customMessage*`
+/// palette tokens, which `tern_theme` already projects but nothing consumed.
+/// Projecting that same shape gives each message its own identity instead of
+/// the default look, and keeps streaming on the single `md` leaf so a growing
+/// reply still patches one node.
+fn assistant_node(identity: u64, block: &AssistantBlock, shell: &ShellState) -> Node {
+    let label = if shell.model_display.is_empty() {
+        &shell.model
+    } else {
+        &shell.model_display
+    };
+    Node::with_children(
+        id(identity, "assistant"),
+        Kind::Card,
+        Props::new()
+            .role("octet.assistant")
+            .text(
+                "head",
+                Text::Spans(vec![Span::styled(sanitize_for_terminal(label), "accent")]),
+            )
+            .set("frame", "card")
+            .set("gap", "sm"),
+        vec![Node::new(
+            id(identity, "assistant.md"),
+            Kind::Md,
+            Props::new()
+                .set("text", tighten_markdown(&block.text))
+                .set("stream", !block.finished),
+        )],
+    )
+}
+
+/// Collapse excess vertical whitespace in native Markdown projections.
+///
+/// Tern typesets Markdown with its own paragraph rhythm, so stacked blank
+/// lines from streamed joins render as large air gaps. Capping runs at a
+/// single blank line and trimming edges keeps the content identical while
+/// removing the doubled spacing. Code-fence contents are preserved verbatim:
+/// only blank-line runs outside fences are collapsed.
+fn tighten_markdown(text: &str) -> String {
+    let sanitized = sanitize_for_terminal(text);
+    let mut out = String::with_capacity(sanitized.len());
+    let mut blanks: usize = 0;
+    let mut in_fence = false;
+    for line in sanitized.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            blanks = 0;
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+            continue;
+        }
+        if in_fence {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+            continue;
+        }
+        if trimmed.is_empty() {
+            blanks += 1;
+            if blanks > 1 {
+                continue;
+            }
+            out.push('\n');
+            continue;
+        }
+        blanks = 0;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out.trim_matches('\n').to_owned()
+}
+
 fn block_node(
     identity: u64,
     block: &TranscriptBlock,
     shell: &ShellState,
     images: &super::tern_images::NativeImages,
+    collapsed: &HashMap<String, bool>,
 ) -> Option<Node> {
     match block {
         TranscriptBlock::User { text, .. } => {
@@ -668,18 +785,11 @@ fn block_node(
                 vec![Node::new(
                     id(identity, "user.body"),
                     Kind::Md,
-                    Props::new().set("text", sanitize_for_terminal(text)),
+                    Props::new().set("text", tighten_markdown(text)),
                 )],
             ))
         }
-        TranscriptBlock::Assistant(block) => Some(Node::new(
-            id(identity, "assistant"),
-            Kind::Md,
-            Props::new()
-                .role("octet.assistant")
-                .set("text", sanitize_for_terminal(&block.text))
-                .set("stream", !block.finished),
-        )),
+        TranscriptBlock::Assistant(block) => Some(assistant_node(identity, block, shell)),
         TranscriptBlock::Reasoning(block) => Some(Node::with_children(
             id(identity, "reasoning"),
             Kind::Section,
@@ -698,14 +808,20 @@ fn block_node(
                 id(identity, "reasoning.md"),
                 Kind::Md,
                 Props::new()
-                    .set("text", sanitize_for_terminal(&block.text))
+                    .set("text", tighten_markdown(&block.text))
                     .set("stream", !block.finished),
             )],
         )),
-        TranscriptBlock::Tool(panel) => {
-            Some(tool_node(identity, panel, shell.verbose_tools, images))
+        TranscriptBlock::Tool(panel) => Some(tool_node(
+            identity,
+            panel,
+            shell.verbose_tools,
+            images,
+            collapsed,
+        )),
+        TranscriptBlock::Shell(output) => {
+            Some(shell_node(identity, output, shell.verbose_tools, collapsed))
         }
-        TranscriptBlock::Shell(output) => Some(shell_node(identity, output)),
         TranscriptBlock::Notice(text) => Some(text_node(identity, text, "muted")),
         TranscriptBlock::NoticeStatus { text, tone, .. } => Some(text_node(
             identity,
@@ -730,7 +846,7 @@ fn block_node(
             vec![Node::new(
                 id(identity, "compaction.md"),
                 Kind::Md,
-                Props::new().set("text", sanitize_for_terminal(&compaction.summary)),
+                Props::new().set("text", tighten_markdown(&compaction.summary)),
             )],
         )),
         TranscriptBlock::Subagents(subagents) => {
@@ -927,7 +1043,7 @@ fn composer(shell: &ShellState) -> Node {
                 Kind::Row,
                 Props::new()
                     .role("octet.composer.bar")
-                    .set("gap", "md")
+                    .set("gap", "sm")
                     .set("align", "center")
                     .set("wrap", true),
                 controls,
@@ -970,7 +1086,7 @@ fn report(shell: &ShellState) -> Option<Node> {
                 super::ReportBody::Markdown(_, source) => Node::new(
                     "report.body",
                     Kind::Md,
-                    Props::new().set("text", sanitize_for_terminal(source)),
+                    Props::new().set("text", tighten_markdown(source)),
                 ),
                 super::ReportBody::Context(_) => ansi_rows(
                     "report.body",
@@ -1037,6 +1153,7 @@ fn tool_node(
     panel: &super::ToolPanel,
     verbose: bool,
     images: &super::tern_images::NativeImages,
+    collapsed_overrides: &HashMap<String, bool>,
 ) -> Node {
     let (target, target_kind) = tool_target(panel);
     let status = if !panel.finished {
@@ -1056,14 +1173,26 @@ fn tool_node(
         }
     }
 
+    // A user Toggle gesture for this card wins over the default; otherwise a
+    // finished non-verbose card is collapsed to its summary.
+    let collapsed = collapsed_overrides
+        .get(&id(index, "tool"))
+        .copied()
+        .unwrap_or(!verbose && panel.finished);
     let mut body = Vec::new();
     if let Some(diff) = super::tool_render::tool_diff(panel) {
+        // Diffs stay mounted while collapsed: Tern hides them, and the user
+        // can disclose without waiting for a re-projected child.
         body.push(octet_tern::scene::diff_block(
             id(index, "diff"),
             &target,
             &diff,
         ));
-    } else if !panel.output.trim().is_empty() {
+    } else if !panel.output.trim().is_empty() && (!collapsed || panel.is_error) {
+        // Collapsed successful tools project summary-only (header/target):
+        // mounting the full output in the same frame that flips `collapsed`
+        // paints one expanded frame before the terminal hides it. Errors keep
+        // their output visible so the failure is seen without disclosing.
         let shown = sanitize_for_terminal(&panel.output);
         body.push(Node::new(
             id(index, "out"),
@@ -1104,12 +1233,17 @@ fn tool_node(
         node.p
             .unwrap_or_default()
             .role("octet.tool")
-            .set("collapsed", !verbose && panel.finished),
+            .set("collapsed", collapsed),
     );
     node
 }
 
-fn shell_node(index: u64, shell: &super::ShellOutput) -> Node {
+fn shell_node(
+    index: u64,
+    shell: &super::ShellOutput,
+    verbose: bool,
+    collapsed_overrides: &HashMap<String, bool>,
+) -> Node {
     let status = if shell.running {
         "running"
     } else if shell.exit_code == 0 {
@@ -1121,7 +1255,14 @@ fn shell_node(index: u64, shell: &super::ShellOutput) -> Node {
     if !shell.running && shell.exit_code != 0 {
         meta.push(Text::Plain(format!("exit {}", shell.exit_code)));
     }
-    let body = if shell.output.trim().is_empty() {
+    // `!` shell blocks collapse to their command summary like tool cards:
+    // keeping the full scrollback mounted while collapsed paints one
+    // expanded frame on completion. Failures keep output visible.
+    let collapsed = collapsed_overrides
+        .get(&id(index, "shell"))
+        .copied()
+        .unwrap_or(!verbose && !shell.running);
+    let body = if shell.output.trim().is_empty() || (collapsed && shell.exit_code == 0) {
         Vec::new()
     } else {
         vec![octet_tern::scene::ansi_block(
@@ -1129,7 +1270,7 @@ fn shell_node(index: u64, shell: &super::ShellOutput) -> Node {
             &sanitize_for_terminal(&shell.output),
         )]
     };
-    octet_tern::scene::tool_card(
+    let mut node = octet_tern::scene::tool_card(
         id(index, "shell"),
         "bash",
         "Bash",
@@ -1138,7 +1279,14 @@ fn shell_node(index: u64, shell: &super::ShellOutput) -> Node {
         status,
         meta,
         body,
-    )
+    );
+    node.p = Some(
+        node.p
+            .unwrap_or_default()
+            .role("octet.tool")
+            .set("collapsed", collapsed),
+    );
+    node
 }
 
 fn tool_title(name: &str) -> String {

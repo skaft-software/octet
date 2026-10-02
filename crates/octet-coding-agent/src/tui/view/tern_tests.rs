@@ -125,7 +125,7 @@ fn streaming_materializes_source_and_only_patches_the_retained_leaf() {
     surface.flush(&shell.state).unwrap();
     let identity = shell.state.borrow().transcript_commit_ids[0];
     assert_eq!(
-        find_node(&surface.sent.main, &id(identity, "assistant"))
+        find_node(&surface.sent.main, &id(identity, "assistant.md"))
             .unwrap()
             .p
             .as_ref()
@@ -148,13 +148,40 @@ fn streaming_materializes_source_and_only_patches_the_retained_leaf() {
         .unwrap()
         .iter()
         .any(|op| op[0] == "set"
-            && op[1] == id(identity, "assistant")
+            && op[1] == id(identity, "assistant.md")
             && op[2]["text"] == "hello 🦀 world"));
     assert!(!frame["ops"]
         .as_array()
         .unwrap()
         .iter()
         .any(|op| op[0] == "add" || op[0] == "del"));
+}
+
+#[test]
+fn assistant_replies_are_labelled_cards_not_default_prose() {
+    let (shell, mut surface, _) = setup(2);
+    shell.state.borrow_mut().model_display = "Sonnet 4.5".into();
+    shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Assistant(Box::new(
+            AssistantBlock::streaming("the fix is a checked subtraction"),
+        )));
+    surface.flush(&shell.state).unwrap();
+    let identity = shell.state.borrow().transcript_commit_ids[0];
+    let card = find_node(&surface.sent.main, &id(identity, "assistant")).unwrap();
+    // A labelled custom-message card, like omp's replies, instead of a bare
+    // `md` node that Tern renders with its default prose look.
+    assert_eq!(card.k, Kind::Card);
+    let props = card.p.as_ref().unwrap().as_map();
+    assert_eq!(props["role"], "octet.assistant");
+    assert_eq!(props["frame"], "card");
+    assert_eq!(props["head"][0]["t"], "Sonnet 4.5");
+    // Streaming still lives on the single Markdown leaf, so a growing reply
+    // patches one node instead of re-sending the card.
+    let body = find_node(&surface.sent.main, &id(identity, "assistant.md")).unwrap();
+    assert_eq!(body.k, Kind::Md);
+    assert_eq!(body.p.as_ref().unwrap().as_map()["stream"], true);
 }
 
 #[test]
@@ -532,6 +559,149 @@ fn hidden_pane_keeps_its_place_and_reasserts_focus_on_return() {
         .unwrap()
         .iter()
         .any(|op| op[0] == "focus" && op[1] == "composer.editor"));
+}
+
+#[test]
+fn finished_bash_collapses_to_summary_without_an_expanded_frame() {
+    use super::super::{summarize_tool, ToolPanel};
+    use octet_ai::ToolCallId;
+    let (shell, mut surface, output) = setup(2);
+    let args = json!({"command":"cargo test"});
+    let index = shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            ToolCallId("bash1".into()),
+            "bash".into(),
+            args.to_string(),
+            summarize_tool("bash", &args),
+            "line1\nline2\nline3".into(),
+            false,
+            false,
+            None,
+            None,
+        ))));
+    surface.flush(&shell.state).unwrap();
+    let identity = shell.state.borrow().transcript_commit_ids[index];
+    // While running, the live output is expanded.
+    assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
+    ack(&shell, 1);
+    {
+        let mut state = shell.state.borrow_mut();
+        if let TranscriptBlock::Tool(panel) = &mut state.transcript[index] {
+            panel.finished = true;
+            panel.output = "exit=0 duration=1.2s\n--- stdout ---\nline1\nline2\nline3\n".into();
+        }
+        state.touch_block(index);
+    }
+    surface.flush(&shell.state).unwrap();
+    // Finished and non-verbose: collapsed to the command summary, with no
+    // output child mounted — the completion must not paint one expanded
+    // frame before the terminal hides it.
+    let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
+    assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], true);
+    assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
+    let ops = output.last_frame()["ops"].clone();
+    let ops = ops.as_array().unwrap();
+    assert!(
+        ops.iter()
+            .any(|op| op[0] == "del" && op[1] == id(identity, "out")),
+        "completion must delete the live output child: {ops:?}"
+    );
+    assert!(
+        !ops.iter()
+            .any(|op| op[0] == "set" && op[1] == id(identity, "out")),
+        "completion must not set full output text while collapsing: {ops:?}"
+    );
+}
+
+#[test]
+fn finished_shell_block_collapses_to_its_command_summary() {
+    use super::super::ShellOutput;
+    let (shell, mut surface, _) = setup(2);
+    let running = shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Shell(Box::new(ShellOutput {
+            id: "s-running".into(),
+            command: "cargo test".into(),
+            output: "line1".into(),
+            exit_code: 0,
+            running: true,
+        })));
+    let done = shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Shell(Box::new(ShellOutput {
+            id: "s-done".into(),
+            command: "cargo test".into(),
+            output: "test result: ok".into(),
+            exit_code: 0,
+            running: false,
+        })));
+    surface.flush(&shell.state).unwrap();
+    let ids = shell.state.borrow().transcript_commit_ids.clone();
+    // Running shell output stays expanded.
+    assert!(find_node(&surface.sent.main, &id(ids[running], "out")).is_some());
+    assert_eq!(
+        find_node(&surface.sent.main, &id(ids[running], "shell"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["collapsed"],
+        false
+    );
+    // Finished shell output collapses to the command summary.
+    assert_eq!(
+        find_node(&surface.sent.main, &id(ids[done], "shell"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["collapsed"],
+        true
+    );
+    assert!(find_node(&surface.sent.main, &id(ids[done], "out")).is_none());
+}
+
+#[test]
+fn os_focus_return_reasserts_native_focus_without_a_visible_event() {
+    let (shell, mut surface, output) = setup(2);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 1);
+    // No model change and no TSP `Visible`: nothing is sent.
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 1);
+    // OS focus return (back from screen recording / another app): force a
+    // frame and re-assert `composer.editor` focus even though Tern sent no
+    // visibility event.
+    shell.request_tern_focus_resync();
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 2);
+    let frame = output.last_frame();
+    assert!(
+        frame["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|op| op[0] == "focus" && op[1] == "composer.editor"),
+        "focus return must re-assert native keyboard focus: {frame:?}"
+    );
+}
+
+#[test]
+fn markdown_projection_collapses_stacked_blank_lines_but_preserves_fences() {
+    assert_eq!(super::tighten_markdown("a\n\n\n\nb"), "a\n\nb");
+    assert_eq!(
+        super::tighten_markdown("\n\n# Title\n\nbody\n\n"),
+        "# Title\n\nbody"
+    );
+    let fenced = "text\n\n```rust\nline1\n\n\nline2\n```\nafter";
+    assert_eq!(
+        super::tighten_markdown(fenced),
+        "text\n\n```rust\nline1\n\n\nline2\n```\nafter"
+    );
 }
 
 #[test]
