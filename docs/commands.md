@@ -53,7 +53,8 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | `/prompt [name] [arguments]` | List or expand prompt templates. `/<name> ...` also works, as in Pi. |
 | `/skills ...` | List, search, inspect, load, unload or reload [skills](instructions.md#skills). |
 | `/skill:NAME [arguments]` | Expand a skill as a user prompt when sent, not as a local slash command. During a run, Enter or Ctrl+S queues it, so it expands at the next idle prompt. |
-| `/extensions [status\|reload]` | Open the extension menu (below), or show or reload state. During a run, with workers present, it opens the live subagent worker list. |
+| `/extensions [status\|reload]` | Enable, disable and configure extensions (below), or show or reload extension state. Menu changes wait for idle during a run. |
+| `/subagents [list\|status\|inspect\|wait\|reattach\|stop\|open-all]` | Browse and control this session's workers when octet-subagents is ready. Bare `/subagents`, `list` and `status` open the live roster, including during a run; `/subagents stop <name-or-id\|all>` requests owner-bound interruption immediately. Other operations wait for idle. |
 | `/settings [theme\|images on/off\|default model/reasoning\|transport\|padding]` | Show or change user-level display and default preferences. Defaults, theme and images persist through the shared config writer. Transport and editor padding are reported facts, and project trust is deliberately not a persisted setting. |
 | `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model-cycling scope. Changes apply to Ctrl+P at once and persist as an exact ordered pattern list (`models` in the user config). `move <id> <up\|down\|top\|bottom>` reorders it. |
 | `/help [command]` | Help for a command. |
@@ -128,8 +129,9 @@ extension's state and offers only what applies:
   and Reset the browser profile.
 - **octet-web-search:** Use Brave Search (recommended), Use SearXNG, Change the
   SearXNG endpoint and Log out of Brave Search.
-- **octet-subagents:** Workers, Wait for workers, Reattach detached workers,
-  Stop all workers and Open workers in panes (preview).
+- **octet-subagents:** Enable or disable orchestration. Use `/subagents` for
+  the live worker roster, inspection, wait, reattach and stop controls; these
+  runtime operations are not extension configuration.
 - **octet-mcp:** Add a server, then per server Show details, Refresh tools,
   Restart or Start, Stop, Enable or Disable, Edit and Remove.
 
@@ -139,9 +141,11 @@ input) appear in place. Actions an extension marks destructive ask first. A
 third-party extension without its own menu gets one entry per command it
 declares, which asks for that command's arguments.
 
-Extension commands are no longer typed after the slash in the terminal UI:
+Other extension commands are no longer typed after the slash in the terminal UI:
 typing one, such as `/computer-use setup`, names the extension to open instead.
-The web UI keeps extension commands for now. The menu never writes a trust
+`/subagents` remains a runtime slash command and appears in completion while its
+first-party extension is ready. The web UI keeps extension commands for now.
+The menu never writes a trust
 grant. Full access implicitly trusts enabled extensions, while safe mode keeps
 executable extensions stopped.
 

@@ -17,7 +17,7 @@ const MAX_OUTCOME_DETAIL_BYTES: usize = 4 * 1024;
 /// is a render-time fact: the same settled outcome block stops showing the line
 /// the moment the roster settles.
 pub(super) const SUBAGENTS_RUNNING_DETAIL: &str =
-    "subagents are running; inspect or stop them from /extensions.";
+    "subagents are running; inspect or stop them from /subagents.";
 
 pub(super) fn completion_text(
     elapsed: Duration,
@@ -266,7 +266,7 @@ mod tests {
                 live,
                 vec![
                     "✓ completed · 1.0s",
-                    "  subagents are running; inspect or stop them from /extensions.",
+                    "  subagents are running; inspect or stop them from /subagents.",
                 ],
                 "{live:?}"
             );

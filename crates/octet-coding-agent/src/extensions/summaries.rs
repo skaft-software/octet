@@ -143,6 +143,12 @@ pub(super) fn generated_options(process: &ExtensionProcess) -> ExtensionOptions 
         .contributions()
         .commands
         .iter()
+        // A missing or failed menu must not move worker runtime controls back
+        // into extension management. Preserve all unrelated configuration commands.
+        .filter(|command| {
+            process.descriptor().manifest.name != SUBAGENTS_EXTENSION_NAME
+                || command.name != "subagents"
+        })
         .map(|command| octet_agent::ExtensionMenuItem {
             id: format!("command:{}", command.name),
             label: command.name.clone(),

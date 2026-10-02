@@ -425,3 +425,90 @@ async fn installed_extension_is_disabled_by_default_and_full_access_trust_is_not
         started.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn subagents_runtime_controls_never_appear_in_generated_extension_options() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for name in [SUBAGENTS_EXTENSION_NAME, "other-extension"] {
+        for supports_menu in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let script = temp.path().join("options-fixture.sh");
+            std::fs::write(
+                &script,
+                r#"#!/bin/sh
+request_id() { sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
+IFS= read -r initialize
+id=$(printf '%s' "$initialize" | request_id)
+printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.4","tools":[],"commands":[{"name":"subagents","description":"Worker controls"},{"name":"configure","description":"Configuration"}],"protocol":{"version":"0.4","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}\n' "$id"
+while IFS= read -r request; do
+  id=$(printf '%s' "$request" | request_id)
+  case "$request" in
+    *'"method":"menu/collect"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"options unavailable"}}\n' "$id"
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let manifest = ExtensionManifest::parse(&format!(
+                r#"name = {name:?}
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "options-fixture.sh"
+[contributes]
+commands = ["subagents", "configure"]
+menu = {supports_menu}
+"#,
+            ))
+            .unwrap();
+            let process = ExtensionProcess::start(
+                DiscoveredExtension {
+                    manifest,
+                    manifest_path: temp.path().join("extension.toml"),
+                    source: ExtensionSource::Explicit,
+                    activation: octet_agent::extension_process::ExtensionActivation {
+                        enabled: true,
+                        trust: ExtensionTrust::Trusted,
+                    },
+                },
+                ExtensionRuntimeConfig::new(temp.path()),
+            )
+            .await
+            .unwrap();
+            let mut extensions = ExecutableExtensions::default();
+            extensions.processes.push(process.clone());
+            let options = extensions.options_menu(name).await;
+            let options = if supports_menu {
+                assert!(options.is_err(), "fixture must exercise menu failure");
+                extensions.generated_options_menu(name).unwrap()
+            } else {
+                options.unwrap().unwrap()
+            };
+            assert!(options.generated);
+            let commands = options
+                .menu
+                .items
+                .iter()
+                .map(|item| item.command.as_deref().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                commands,
+                if name == SUBAGENTS_EXTENSION_NAME {
+                    vec!["configure"]
+                } else {
+                    vec!["subagents", "configure"]
+                },
+                "{name}, menu={supports_menu}"
+            );
+            assert!(process.shutdown().await);
+        }
+    }
+}

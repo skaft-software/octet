@@ -214,9 +214,9 @@ Escape or Left returns to the composer.
 Generic presentation snapshots do not create persistent chrome. First-party
 subagent activity occupies one mutable tool-like **Subagents** transcript block,
 including between root turns. Its bold heading counts worker states and points
-to `/extensions`; up to four active child lines show task and `↑input ↓output`
+to `/subagents`; up to four active child lines show task and `↑input ↓output`
 tokens, compacted with `K`/`M`/`B`/`T` suffixes. An inline
-`/extensions to stop` heading hint is shown only for live activity. Input includes
+`/subagents stop all` heading hint is shown only for live activity. Input includes
 uncached, cache-read, and cache-write usage; streamed
 output estimates carry `~` until provider usage settles. Later parent output
 is placed above this tail, and settlement fixes the summary in place without
@@ -244,10 +244,12 @@ agent-side claim would refuse.
 
 `/extensions` opens an interactive installed-bundle panel instead: Enter opens
 the selected extension's options menu (its `menu/collect` answer, or one entry
-per declared command), where every setup and configuration action lives; typed
-extension commands are not accepted. Actions run with live progress and
-in-place confirmation and input dialogs. octet-subagents' **Workers** entry (and
-`/extensions` during a run) opens a frontend-owned worker list; Up/Down moves
+per declared command), where setup and configuration actions live. Other typed
+extension commands are not accepted; `/subagents` remains a separate runtime
+surface and completion follows its first-party owner's live registration.
+Actions run with live progress and in-place confirmation and input dialogs.
+Bare `/subagents`, `list` and `status`, including during a run, open a
+frontend-owned worker list; Up/Down moves
 focus, Enter opens the selected bounded read-only transcript, Ctrl+X stops the
 selected worker, and Escape or Left returns from the transcript to the list. While open, the same owner-bound status command reconciles the host's
 authoritative worker state and publishes complete presentation revisions; the
@@ -531,9 +533,10 @@ bounded actionable reason.
   pickers, tool prompts, lifecycle waits, and local shell commands. Active work
   is aborted and settled before the process exits.
 - Safe presentation commands execute immediately. During an active run,
-  `/extensions` opens the live worker list, and Ctrl+X there stops the selected
-  worker through the registered, owner-bound first-party stop; arbitrary
-  extension commands do not gain active-run admission. Input and run events remain responsive, and
+  `/subagents`, `list` and `status` open the live worker list; Ctrl+X there and
+  `/subagents stop <name-or-id|all>` use the registered, owner-bound first-party
+  stop queue. Other worker operations and extension management queue until idle;
+  arbitrary extension commands do not gain active-run admission. Input and run events remain responsive, and
   a stop acknowledgement does not claim terminal worker settlement.
 - Model, reasoning, session, compaction, and reload work is queued in
   order and applied after the active `Run` releases its Agent borrow.

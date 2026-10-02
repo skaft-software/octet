@@ -1,5 +1,5 @@
-//! `/extensions` options menus: every extension is configured and operated
-//! from here. Selecting an extension shows its menu (its own `menu/collect`
+//! `/extensions` options menus: extension activation and configuration live
+//! here; subagent runtime controls stay on `/subagents`. Selecting an extension shows its menu (its own `menu/collect`
 //! answer, or entries generated from its declared commands); running an item
 //! shows live progress and the extension's confirm and input dialogs.
 
@@ -490,12 +490,7 @@ async fn run_extension_menu_action(
         result
     };
     request_extension_ui(shell, app);
-    // The octet-subagents worker list is the host's live browser (refreshing,
-    // with worker transcripts), not a static result document.
-    let worker_browser =
-        extension == "octet-subagents" && command == "subagents" && item.arguments.is_empty();
     match result {
-        Ok(output) if worker_browser => super::subagents_view(app, shell, input, output).await?,
         Ok(output) if output.trim().is_empty() => {
             shell.notice(format!("{} finished", item.label));
         }
