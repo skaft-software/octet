@@ -213,6 +213,22 @@ supply these timings. Missing timings remain missing. These clocks include work
 before the observer sees a delta and do not expose exact provider headers or
 terminal paint. See [benchmark methods](../benchmarks/README.md).
 
+### TUI output throughput
+
+The completion line's `tok/s E2E (last turn)` and `/status` throughput divide
+provider-reported output tokens (including reasoning) by the locally observed
+interval from `TurnStarted` to accepted `TurnFinished` for the latest attempt.
+The interval includes initial waiting, hidden thinking, network buffering, and
+local event processing/settlement. It is **not server-side generation speed**
+or a whole-task average. A retry starts a fresh interval; earlier attempts,
+retry backoff, and tool execution between turns are not aggregated into it.
+Missing request timing or zero reported output leaves the rate unavailable.
+
+Do not divide all reported output tokens by first-visible-delta-to-completion
+time: hidden reasoning can consume most of the output budget before any text
+arrives, inflating that rate by orders of magnitude. Server-side generation
+throughput requires provider-supplied timing with matching token semantics.
+
 ## Startup attribution (opt-in)
 
 `OCTET_STARTUP_TRACE=1` emits monotonic phase boundaries to stderr without

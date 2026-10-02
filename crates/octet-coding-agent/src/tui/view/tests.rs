@@ -10683,6 +10683,112 @@ fn default_footer_ascii_has_no_terminal_controls_or_unicode_separators() {
     assert!(footer.ends_with("/project"), "{footer:?}");
 }
 
+fn throughput_finished_event(output_tokens: u64) -> AgentEvent {
+    let usage = Usage {
+        output_tokens,
+        reasoning_tokens: output_tokens.saturating_sub(23),
+        total_tokens: output_tokens,
+        ..Usage::default()
+    };
+    AgentEvent::TurnFinished {
+        turn_cost: None,
+        message: octet_ai::AssistantMessage {
+            content: vec![octet_ai::AssistantPart::Text("answer".into())],
+            model: octet_ai::ModelId("test".into()),
+            protocol: octet_ai::Protocol::AnthropicMessages,
+        },
+        stop_reason: octet_ai::StopReason::EndTurn,
+        turn_usage: usage,
+        usage,
+        session_cost_microdollars: None,
+        run_cost_microdollars: 0,
+    }
+}
+
+#[test]
+fn throughput_includes_hidden_thinking_and_works_without_visible_deltas() {
+    for channel in [
+        None,
+        Some(OutputChannel::Text),
+        Some(OutputChannel::Reasoning),
+    ] {
+        let mut shell = InteractiveShell::test_shell();
+        let id = shell.begin_run("test");
+        shell.on_run_event(id, &AgentEvent::TurnStarted);
+        let requested = Instant::now() - Duration::from_secs(4);
+        shell.state.borrow_mut().turn_requested_at = Some(requested);
+        if let Some(channel) = channel {
+            shell.on_run_event(
+                id,
+                &AgentEvent::OutputDelta {
+                    channel,
+                    text: "buffered output".into(),
+                },
+            );
+            shell.state.borrow_mut().turn_generation_started_at =
+                Some(requested + Duration::from_millis(3900));
+        }
+        shell.on_run_event(id, &throughput_finished_event(128));
+        let state = shell.state.borrow();
+        let elapsed = state.last_turn_provider_elapsed.unwrap();
+        assert!(elapsed >= Duration::from_secs(4));
+        let rate = state.last_turn_tokens_per_second.unwrap();
+        assert_eq!(rate, 128.0 / elapsed.as_secs_f64());
+        assert!(rate <= 32.0, "hidden thinking must not yield 1280 tok/s");
+        assert_eq!(state.last_turn_generated_tokens, Some(128));
+        assert_eq!(
+            state.last_turn_first_token,
+            channel.map(|_| Duration::from_millis(3900))
+        );
+        assert!(state.turn_requested_at.is_none());
+        let status = status_telemetry(&state, Instant::now());
+        assert!(status.contains("tok/s end-to-end, last attempt"));
+        assert!(status.contains("request-to-completion; not server speed"));
+    }
+}
+
+#[test]
+fn throughput_resets_per_attempt_and_never_reuses_missing_measurements() {
+    let mut shell = InteractiveShell::test_shell();
+    let id = shell.begin_run("test");
+    shell.on_run_event(id, &AgentEvent::TurnStarted);
+    shell.state.borrow_mut().turn_requested_at = Some(Instant::now() - Duration::from_secs(60));
+    shell.on_run_event(
+        id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "discarded attempt".into(),
+        },
+    );
+    shell.on_run_event(id, &retry_event(1));
+    let before_retry = Instant::now();
+    shell.on_run_event(id, &AgentEvent::TurnStarted);
+    {
+        let state = shell.state.borrow();
+        assert!(state.turn_requested_at.unwrap() >= before_retry);
+        assert!(state.turn_generation_started_at.is_none());
+        assert!(state.last_turn_tokens_per_second.is_none());
+    }
+    shell.on_run_event(
+        id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: String::new(),
+        },
+    );
+    assert!(shell.state.borrow().turn_generation_started_at.is_none());
+    shell.on_run_event(id, &throughput_finished_event(128));
+    assert!(shell.state.borrow().last_turn_tokens_per_second.is_some());
+
+    // Missing request timing cannot inherit the preceding turn's rate.
+    shell.on_run_event(id, &throughput_finished_event(128));
+    assert!(shell.state.borrow().last_turn_tokens_per_second.is_none());
+    assert!(shell.state.borrow().last_turn_provider_elapsed.is_none());
+    shell.on_run_event(id, &AgentEvent::TurnStarted);
+    shell.on_run_event(id, &throughput_finished_event(0));
+    assert!(shell.state.borrow().last_turn_tokens_per_second.is_none());
+}
+
 #[test]
 fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
     let mut shell = InteractiveShell::test_shell();
@@ -10706,6 +10812,7 @@ fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
             started,
         );
         state.turn_generation_started_at = Some(started);
+        state.turn_requested_at = Some(started);
         state.turn_streamed_output_bytes = 2_520;
         state.context_estimate = Some((21_000, 256_000));
         state.price_display = PriceDisplay::Unknown;
@@ -10768,7 +10875,7 @@ fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
         state.turn_generation_started_at = None;
         state.turn_streamed_output_bytes = 0;
         state.last_turn_tokens_per_second = Some(72.4);
-        state.last_turn_generation_elapsed = Some(Duration::from_secs(2));
+        state.last_turn_provider_elapsed = Some(Duration::from_secs(2));
         state.last_turn_generated_tokens = Some(145);
         let id = state.run.current_id().unwrap();
         state.run.set_phase_at(
@@ -10790,7 +10897,7 @@ fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
     );
     assert!(!active_sample.contains("tool"));
     let final_diagnostics = status_telemetry(&shell.state.borrow(), now);
-    assert!(final_diagnostics.contains("72.4 tok/s final"));
+    assert!(final_diagnostics.contains("72.4 tok/s end-to-end, last attempt"));
 
     {
         let mut state = shell.state.borrow_mut();
