@@ -222,9 +222,11 @@ class ReleaseDocumentationTests(unittest.TestCase):
         version = re.search(r'^version = "([^"]+)"$',
                             (SCRIPTS.parent / "Cargo.toml").read_text(), re.MULTILINE).group(1)
         self.assertIn(f"/releases/tag/v{PUBLISHED_NATIVE_VERSION}", text)
-        self.assertIn(f"distribution is **{version}**", text)
+        self.assertIn(f"distribution target is **{version}**", text)
+        self.assertIn("source candidate, not a published release", text)
         self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
-        self.assertIn("npm is published at `@skaft/octet@0.8.2` (launcher plus three signed platform packages, with npm provenance); Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
+        self.assertIn(f"planned npm channel is `@skaft/octet@{version}` (launcher plus three signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
+        self.assertIn(f"**{version} is not published to npm.**", text)
 
 
 if __name__ == "__main__":

@@ -2067,6 +2067,8 @@ where
                 action: PanelAction::SelectGroupedModel {
                     models: presentation.ids,
                     providers: presentation.providers,
+                    details: presentation.details,
+                    scope: None,
                 },
             });
         }

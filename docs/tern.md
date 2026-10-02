@@ -132,17 +132,29 @@ move the preceding history.
 - `dock` owns working status and the composer.
 - `layer` owns native autocomplete, picker sheets and report overlays.
 
-The composer uses flat `octet.composer.*` primitives: a rule, native editor,
-model-colored text controls, effort and context facts, and Send/Stop. It does
-not opt into `omp.editor` liquid-glass CSS or inject omp branding. Tern still
-owns typography and the base appearance of its native controls; the accent
-chrome octet *can* control is the node `tone`, so the composer carries the
-active model accent while Tern's own focus ring stays the terminal's.
+The composer uses Tern's observed `omp.editor` layout with octet's native
+editor, model and effort controls, context meter, session cost, and Send/Stop.
+The welcome uploads octet's byte mark as immutable, content-addressed SVG;
+unsupported images retain the textual byte mark. Assistant prose and thinking
+use the observed `omp.assistant` / `omp.thinking` layout hooks. These `omp.*`
+roles are Tern implementation details, not portable TSP guarantees or omp
+branding. Tern still owns typography, geometry and its focus ring.
 
 Slash, path and extension completions are bounded native lists anchored above
 the composer. Their gestures are fenced by the draft revision. Model, theme,
 thinking, session, fork and subagent pickers reuse the host's catalogues and
-filtering, with panel-epoch-fenced gestures. Settings/help reports are native
+filtering, with panel-epoch-fenced gestures. The model picker has real provider
+scopes, context/price columns, a current-model indicator, and a public-facts
+preview (limits, input modalities, cache pricing and supported capabilities).
+Provider marks use seeded initials, the protocol's supported text mark rather
+than fabricated logos. Thinking is a compact native disclosure-sized sheet
+with descriptions and a current check, not a large empty browser. Session
+selection exposes workspace, sorting, named/path filters, explicit transcript
+search, rename and delete actions; the selected session previews its saved
+metadata. Scope and filter chips wrap separately from the primary actions.
+Narrow layouts request a below-list preview; Tern may hide that preview at its
+smallest widths, but Resume remains visible. Rename and delete confirmation
+still use the existing host-owned modal flow. Settings/help reports are native
 modal content rather than migration `rows` nodes. Internally styled documents
 and approval labels may use native `ansi` content; this never runs or repaints
 an ANSI TUI. A user prompt is a native `card` (tone `user`, Markdown body)
@@ -174,6 +186,13 @@ Tool images respect the existing opt-in image preference. Validated bounded
 payloads are hashed and uploaded once per content address; retained frames
 contain only blob references, dimensions and safe descriptions. Unsupported
 image kinds and rejected/disabled payloads retain text placeholders.
+
+`/context` uses its captured semantic quantities for a stacked meter and a
+token/percentage table, falling back to native key/value rows if tables are
+unsupported. Subagent telemetry uses native `agent` nodes with authoritative
+tools, tokens, priced cost, current tool, and terminal-clocked age; unsupported
+agent kinds keep the existing compact activity text. No retry, context, or
+request statistics are invented when the host does not supply them.
 
 A hidden pane suspends presentation without failing the renderer: credit
 starvation and rejected background frames while hidden are not timeouts, and
@@ -230,3 +249,9 @@ palette's user tint; the stored per-turn prompt colour still paints prompts in
 the ANSI renderer. This is distinct from
 running an ANSI TUI. Extension-defined styled rows also remain native ANSI
 content until those extension contracts provide semantic nodes.
+
+The native renderer does not claim omp's whole product surface: octet's current
+settings command is a read-only report, not editable `prefs`; extension-owned
+text is not reverse-parsed into fabricated checklists or charts. Transcript
+subtrees are memoized and incrementally reconciled, but finalized history is
+not yet evicted with `settle`.

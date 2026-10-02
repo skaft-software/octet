@@ -61,11 +61,14 @@ receipt.
   credential would receive the beta headers a subscription token requires.
   `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN` are unchanged.
 
-- Preserve saved terminal history through resize, PageUp, and historical live-row
-  repairs instead of clearing and replaying the full transcript. Settle resize
-  bursts, reuse height-only wrapping, and promote threaded reading anchors before
-  width reflow. Canonical session/copy history remains authoritative; already
-  emitted native scrollback rows remain snapshots.
+- Restore complete canonical native history after dimension changes and
+  canonical mutations above the old viewport, using synchronized clear/replay
+  instead of saved snapshots that could omit accepted rows. Settle resize bursts,
+  reuse height-only wrapping, and promote threaded reading anchors before width
+  reflow. Resize epochs cover away-and-back changes and final/suspend flushes.
+  Ordinary appends and visible-row diffs are unchanged. Structural replay scales
+  with history and can reset the native reading position; PageUp/`--mouse app`
+  remain a separate bounded semantic viewport.
 
 - Keep the startup welcome static, budget it for the actual pane height, and
   reserve fresh-start composer geometry before model admission. Draft edits and
@@ -89,7 +92,9 @@ receipt.
 - Protect live cache-read, cache-write and effective reasoning prices against
   zeroing or greater-than-tenfold drops, just like input and output prices.
 - Re-anchor active status rows after history reflow so `Working` shimmer and its
-  elapsed clock continue after a narrow-to-wide resize.
+  elapsed clock continue after a narrow-to-wide resize. Use revision-fenced
+  painted viewport/active-heading geometry so visible clocks keep self-waking
+  after tall tool progress contracts, without requiring resize or more output.
 - Complete default macOS computer-use setup with a checksum- and Developer
   ID-verified signed host in octet-owned state when needed. Target cursor moves
   with the current driver's exact-window contract, and reopen setup with a fresh

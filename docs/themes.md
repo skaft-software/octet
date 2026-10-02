@@ -89,10 +89,14 @@ terminal could be light, dark or custom.
 Inside Tern, octet sends resolved dark and light semantic palettes and reapplies
 the active model accent on selection. Native projection uses the validated
 loaded theme snapshot, so switching models does not re-read or reinterpret
-custom theme files. The composer is flat, octet-branded native structure rather
-than omp's liquid-glass editor. Historical prompt colors remain scoped to each
-turn. TSP owns fonts and widget geometry, so custom layouts and ANSI-only style
-flags are not exact cell-for-cell native contracts. See [octet in Tern](tern.md)
+custom theme files. The composer uses Tern's native editor layout with octet's
+controls and identity. The compiled default supplies a contrast-balanced
+model tint; `prompt_wash = false` preserves the custom user-surface fill, and
+loaded themes retain their selection fill. Stored historical prompt colors
+remain intact, but native prompt cards share the active Tern palette's tint;
+per-turn full-cell fills remain an ANSI-renderer feature. TSP owns fonts and
+widget geometry, so custom layouts and ANSI-only style flags are not exact
+cell-for-cell native contracts. See [octet in Tern](tern.md)
 for compatibility limits and protocol verification.
 
 ## Activity status contrast

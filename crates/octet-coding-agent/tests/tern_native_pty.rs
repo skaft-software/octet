@@ -194,6 +194,11 @@ impl NativePty {
             let sequence = String::from_utf8(self.pending[start..end].to_vec()).unwrap();
             self.pending.drain(..end);
             let raw = frame::split(&sequence).unwrap();
+            // Blob bodies are base64 media, not JSON. The native welcome now
+            // uploads octet's immutable byte mark before its first frame.
+            if raw.verb == "b" {
+                continue;
+            }
             let body: Value = serde_json::from_str(&raw.body).unwrap();
             match raw.verb.as_str() {
                 "q" if body["q"] == "hello" => {

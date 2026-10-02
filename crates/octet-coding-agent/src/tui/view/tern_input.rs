@@ -164,11 +164,11 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             }
             None
         }
-        Incoming::Event(Event::Action { sf, id, act, .. })
-            if sf == super::tern::SURFACE && id.starts_with("panel.") =>
-        {
-            let shell = state.borrow();
-            if id != &format!("panel.{}", shell.panel_epoch)
+        Incoming::Event(Event::Action {
+            sf, id, act, value, ..
+        }) if sf == super::tern::SURFACE && id.starts_with("panel.") => {
+            let mut shell = state.borrow_mut();
+            if !super::tern_picker::owns_action(&shell, id)
                 || !shell
                     .panel
                     .as_ref()
@@ -176,12 +176,32 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             {
                 return None;
             }
+            if act == "scope" {
+                super::tern_picker::scope(&mut shell, value.as_deref()?)?;
+                return None;
+            }
+            let session = matches!(shell.panel, Some(super::Panel::SessionPicker { .. }));
+            let act = if session && act == "strip" {
+                match value.as_deref()? {
+                    action @ ("workspace" | "sort" | "named" | "paths") => action,
+                    _ => return None,
+                }
+            } else {
+                act.as_str()
+            };
             drop(shell);
             bound_key(
                 state,
-                match act.as_str() {
+                match act {
+                    "workspace" if session => "tui.input.tab",
+                    "sort" if session => "app.session.toggleSort",
+                    "named" if session => "app.session.toggleNamedFilter",
+                    "paths" if session => "app.session.togglePath",
+                    "search" if session => "app.session.search",
+                    "rename" if session => "app.session.rename",
+                    "delete" if session => "app.session.delete",
                     "confirm" => "tui.select.confirm",
-                    "cancel" => "tui.select.cancel",
+                    "cancel" | "close" => "tui.select.cancel",
                     _ => return None,
                 },
             )

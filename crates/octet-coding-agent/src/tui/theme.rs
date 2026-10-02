@@ -899,6 +899,24 @@ impl OctetTheme {
         )
     }
 
+    /// Native equivalent of the default prompt wash's contrast-balanced fill.
+    pub(crate) fn native_prompt_rgb(&self, source: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
+        let target = match self.background {
+            TerminalBackground::Dark => 0.10,
+            TerminalBackground::Light => 0.88,
+            TerminalBackground::Unknown => return None,
+        };
+        let color = balance_to_luminance(
+            Rgb {
+                red: source.0,
+                green: source.1,
+                blue: source.2,
+            },
+            target,
+        );
+        Some((color.red, color.green, color.blue))
+    }
+
     /// Whether prompt rows are painted with each turn's stored model colour as
     /// a full-cell provenance card. The default theme opts in explicitly; a
     /// theme that sets `prompt_wash = false` keeps prompt rows on the surface's

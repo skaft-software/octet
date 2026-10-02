@@ -85,17 +85,14 @@ fn walk(nodes: &[Node], visit: &mut impl FnMut(&Node)) {
 }
 
 #[test]
-fn composer_and_completions_are_flat_native_octet_not_omp_glass_or_rows() {
+fn composer_uses_native_layout_hooks_with_octet_controls_and_no_rows() {
     let (shell, mut surface, _) = setup(2);
     shell.state.borrow_mut().editor.set_text("/");
     shell.state.borrow_mut().context_estimate = Some((1234, 131072));
     surface.flush(&shell.state).unwrap();
     let projection = &surface.sent;
     let composer = find_node(&projection.dock, "composer").unwrap();
-    assert_eq!(
-        composer.p.as_ref().unwrap().as_map()["role"],
-        "octet.composer"
-    );
+    assert_eq!(composer.p.as_ref().unwrap().as_map()["role"], "omp.editor");
     assert!(find_node(&projection.dock, "composer.context").is_some());
     assert!(projection.layer.iter().any(|node| node.k == Kind::Overlay));
     walk(&projection.dock, &mut |node| {
@@ -169,6 +166,8 @@ fn assistant_replies_are_labelled_cards_not_default_prose() {
         )));
     surface.flush(&shell.state).unwrap();
     let identity = shell.state.borrow().transcript_commit_ids[0];
+    let group = find_node(&surface.sent.main, &id(identity, "assistant.group")).unwrap();
+    assert_eq!(group.p.as_ref().unwrap().as_map()["role"], "omp.assistant");
     let card = find_node(&surface.sent.main, &id(identity, "assistant")).unwrap();
     // A labelled custom-message card, like omp's replies, instead of a bare
     // `md` node that Tern renders with its default prose look.
@@ -177,11 +176,45 @@ fn assistant_replies_are_labelled_cards_not_default_prose() {
     assert_eq!(props["role"], "octet.assistant");
     assert_eq!(props["frame"], "card");
     assert_eq!(props["head"][0]["t"], "Sonnet 4.5");
+    // Reader typography requires the Markdown leaf directly below the native
+    // assistant hook, even inside the labelled card's body wrapper.
+    let native_body = find_node(&surface.sent.main, &id(identity, "assistant.body")).unwrap();
+    assert_eq!(native_body.k, Kind::Col);
+    assert_eq!(
+        native_body.p.as_ref().unwrap().as_map()["role"],
+        "omp.assistant"
+    );
+    assert_eq!(
+        native_body.c.as_ref().unwrap()[0].id,
+        id(identity, "assistant.md")
+    );
     // Streaming still lives on the single Markdown leaf, so a growing reply
     // patches one node instead of re-sending the card.
     let body = find_node(&surface.sent.main, &id(identity, "assistant.md")).unwrap();
     assert_eq!(body.k, Kind::Md);
     assert_eq!(body.p.as_ref().unwrap().as_map()["stream"], true);
+}
+
+#[test]
+fn reasoning_projection_keeps_native_layout_and_tightened_markdown() {
+    let (shell, mut surface, _) = setup(2);
+    shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Reasoning(Box::new(
+            AssistantBlock::streaming_reasoning("one\n\n\n\ntwo\n\n```rust\n\n\nlet x = 1;\n```"),
+        )));
+    surface.flush(&shell.state).unwrap();
+    let identity = shell.state.borrow().transcript_commit_ids[0];
+    let group = find_node(&surface.sent.main, &id(identity, "reasoning.group")).unwrap();
+    assert_eq!(group.p.as_ref().unwrap().as_map()["role"], "omp.assistant");
+    let section = find_node(&surface.sent.main, &id(identity, "reasoning")).unwrap();
+    assert_eq!(section.p.as_ref().unwrap().as_map()["role"], "omp.thinking");
+    let body = find_node(&surface.sent.main, &id(identity, "reasoning.md")).unwrap();
+    assert_eq!(
+        body.p.as_ref().unwrap().as_map()["text"],
+        "one\n\ntwo\n\n```rust\n\n\nlet x = 1;\n```"
+    );
 }
 
 #[test]
@@ -805,4 +838,338 @@ fn native_picker_carries_totals_focus_and_match_hits() {
         "provider-agnostic hit range"
     );
     assert_eq!(props["actions"][0]["keys"][0], "enter");
+}
+
+#[test]
+fn provider_scopes_filter_host_indices_and_reject_stale_or_noncanonical_ids() {
+    use super::super::tern_picker;
+    let (mut shell, _, _) = setup(2);
+    shell.state.native().lock().unwrap().accepting_input = true;
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Models"),
+        items: vec!["alpha".into(), "beta".into(), "gamma".into()],
+        descriptions: vec![None; 3],
+        selected: 2,
+        filter: String::new(),
+        action: PanelAction::SelectGroupedModel {
+            models: ["a", "b", "c"]
+                .map(|id| octet_ai::ModelId(id.into()))
+                .to_vec(),
+            providers: vec!["one".into(), "two".into(), "one".into()],
+            details: Vec::new(),
+            scope: None,
+        },
+    });
+    let handler = shell.tern_input_handler();
+    let old_id = tern_picker::id(&shell.state.borrow());
+    let scope = |id: &str, value: &str| {
+        Incoming::Event(Event::Action {
+            sf: SURFACE.into(),
+            id: id.into(),
+            act: "scope".into(),
+            value: Some(value.into()),
+            mods: None,
+        })
+    };
+    handler(scope(&old_id, "provider.01"));
+    assert_eq!(tern_picker::id(&shell.state.borrow()), old_id);
+    handler(scope(&old_id, "provider.2")); // duplicate, not a sidebar id
+    assert_eq!(tern_picker::id(&shell.state.borrow()), old_id);
+    handler(scope(&old_id, "provider.1"));
+    let current = tern_picker::id(&shell.state.borrow());
+    assert_ne!(current, old_id);
+    let node = tern_picker::node(&shell.state.borrow()).unwrap();
+    assert_eq!(
+        node.p.as_ref().unwrap().as_map()["order"],
+        json!([{"group":"provider.1","label":"two","count":1},"1"])
+    );
+    handler(scope(&old_id, "all"));
+    assert_eq!(tern_picker::id(&shell.state.borrow()), current);
+    assert!(tern_picker::select(&mut shell.state.borrow_mut(), "0").is_none());
+    assert!(tern_picker::select(&mut shell.state.borrow_mut(), "1").is_some());
+    handler(scope(&current, "all"));
+    assert_ne!(tern_picker::id(&shell.state.borrow()), current);
+}
+
+#[test]
+fn thinking_sheet_routes_exact_owned_controls_and_keeps_native_list_focus() {
+    use crate::config::ThinkingLevel;
+    let (mut shell, mut surface, _) = setup(2);
+    shell.state.native().lock().unwrap().accepting_input = true;
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Thinking"),
+        items: vec!["off".into(), "high".into()],
+        descriptions: vec![None; 2],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectThinking(vec![ThinkingLevel::Off, ThinkingLevel::High]),
+    });
+    surface.flush(&shell.state).unwrap();
+    let panel = super::super::tern_picker::id(&shell.state.borrow());
+    assert_eq!(surface.sent.focus.as_deref(), Some(panel.as_str()));
+    assert_eq!(surface.sent.layer[0].k, Kind::Overlay);
+    assert!(find_node(&surface.sent.layer, &panel).is_some_and(|node| node.k == Kind::List));
+    let handler = shell.tern_input_handler();
+    let action = |id: String| {
+        Incoming::Event(Event::Action {
+            sf: SURFACE.into(),
+            id,
+            act: "confirm".into(),
+            value: None,
+            mods: None,
+        })
+    };
+    assert!(handler(action(format!("{panel}.actions"))).is_none());
+    assert!(handler(action(format!("{panel}.confirm.suffix"))).is_none());
+    assert!(handler(action(format!("{panel}.confirm"))).is_some());
+    handler(Incoming::Event(Event::Select {
+        sf: SURFACE.into(),
+        id: panel.clone(),
+        item: format!("{panel}.item.1"),
+    }));
+    assert!(matches!(
+        shell.state.borrow().panel.as_ref(),
+        Some(Panel::SelectList { selected: 1, .. })
+    ));
+    let close = |id: String| {
+        Incoming::Event(Event::Action {
+            sf: SURFACE.into(),
+            id,
+            act: "close".into(),
+            value: None,
+            mods: None,
+        })
+    };
+    assert!(handler(close(format!("{panel}.sheet.suffix"))).is_none());
+    assert!(handler(close(format!("{panel}.sheet"))).is_some());
+    shell.close_panel();
+    assert!(handler(action(format!("{panel}.confirm"))).is_none());
+    assert!(handler(close(format!("{panel}.sheet"))).is_none());
+}
+
+#[test]
+fn welcome_uploads_identical_hashed_bytes_once_and_replays_after_eviction() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use sha2::{Digest, Sha256};
+    let (shell, mut surface, output) = setup(8);
+    shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+    surface.flush(&shell.state).unwrap();
+    let blobs = output.blobs();
+    assert_eq!(blobs.len(), 1);
+    let bytes = STANDARD.decode(&blobs[0].body).unwrap();
+    assert_eq!(
+        blobs[0].params["id"],
+        format!("{:x}", Sha256::digest(&bytes))
+    );
+    let svg = String::from_utf8(bytes).unwrap();
+    assert!(svg.contains("<svg"));
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.blobs().len(), 1);
+    surface
+        .observe(&Incoming::Event(Event::Gone {
+            sf: Some(SURFACE.into()),
+            ids: vec!["main".into()],
+        }))
+        .unwrap();
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.blobs().len(), 2);
+    assert_eq!(
+        output.blobs()[0].params["id"],
+        output.blobs()[1].params["id"]
+    );
+}
+
+#[test]
+fn model_preview_carries_only_bounded_public_facts() {
+    let (mut shell, mut surface, _) = setup(2);
+    let detail = crate::tui::pickers::ModelPickerDetail {
+        name: "Model".into(),
+        context: 100_000,
+        output: 16_000,
+        price: "$1 · $2".into(),
+        cache_price: Some("$0.1".into()),
+        input: "text · image".into(),
+        badges: vec!["vision".into(), "tools".into()],
+        source: vec![
+            ("knowledge".into(), "2026-01".into()),
+            ("api_key".into(), "SECRET".into()),
+        ],
+    };
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Models"),
+        items: vec!["model".into()],
+        descriptions: vec![None],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectGroupedModel {
+            models: vec![octet_ai::ModelId("model".into())],
+            providers: vec!["provider".into()],
+            details: vec![detail],
+            scope: None,
+        },
+    });
+    surface.flush(&shell.state).unwrap();
+    let json = serde_json::to_string(&surface.sent.layer).unwrap();
+    assert!(json.contains("Cache read / M"));
+    assert!(json.contains("2026-01"));
+    assert!(json.contains("vision"));
+    assert!(!json.contains("SECRET"));
+    assert!(!json.contains("api_key"));
+}
+
+#[test]
+fn session_picker_keeps_preview_actions_loading_and_host_selection() {
+    use super::super::{OrdinarySurfaceLifecycle, PickerState};
+    use crate::session_store::SessionMeta;
+    let (mut shell, mut surface, _) = setup(2);
+    let path = std::path::PathBuf::from("/tmp/local-session.jsonl");
+    let session = SessionMeta {
+        id: "session".into(),
+        path: path.clone(),
+        title: "First prompt".into(),
+        name: Some("Named session".into()),
+        tags: vec!["work".into()],
+        pinned: false,
+        archived: false,
+        trashed_at_ms: None,
+        purge_after_ms: None,
+        forked_from_session_id: Some("parent".into()),
+        forked_from_entry_id: None,
+        message_count: 12,
+        modified: std::time::SystemTime::now(),
+        workspace: Some("/tmp/project".into()),
+    };
+    let mut picker = PickerState::new(vec![session], Some(path));
+    picker.surface.lifecycle = OrdinarySurfaceLifecycle::loading("all workspaces");
+    shell.open_panel(Panel::SessionPicker { picker });
+    surface.flush(&shell.state).unwrap();
+    let props = surface.sent.layer[0].p.as_ref().unwrap().as_map();
+    assert_eq!(props["noun"], "sessions");
+    assert_eq!(props["state"], "loading");
+    assert_eq!(props["message"], "all workspaces");
+    assert_eq!(props["current"], json!(["0"]));
+    assert!(props["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["id"] == "delete" && action["disabled"] == true));
+    assert!(find_node(&surface.sent.layer, "panel.session.facts").is_some());
+    shell.state.native().lock().unwrap().accepting_input = true;
+    let handler = shell.tern_input_handler();
+    let id = super::super::tern_picker::id(&shell.state.borrow());
+    let action = |act: &str| {
+        Incoming::Event(Event::Action {
+            sf: SURFACE.into(),
+            id: id.clone(),
+            act: act.into(),
+            value: None,
+            mods: None,
+        })
+    };
+    assert_eq!(
+        handler(action("rename")),
+        Some(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('r'),
+                crossterm::event::KeyModifiers::CONTROL
+            )
+        ))
+    );
+    assert_eq!(
+        handler(action("sort")),
+        Some(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('s'),
+                crossterm::event::KeyModifiers::CONTROL
+            )
+        ))
+    );
+    assert!(handler(Incoming::Event(Event::Action {
+        sf: SURFACE.into(),
+        id: id.clone(),
+        act: "strip".into(),
+        value: Some("named".into()),
+        mods: None
+    }))
+    .is_some());
+    assert!(handler(Incoming::Event(Event::Action {
+        sf: SURFACE.into(),
+        id: id.clone(),
+        act: "strip".into(),
+        value: Some("delete".into()),
+        mods: None
+    }))
+    .is_none());
+    shell.set_size(60, 30);
+    let node = super::super::tern_picker::node(&shell.state.borrow()).unwrap();
+    assert_eq!(node.p.as_ref().unwrap().as_map()["preview"], "below");
+    assert_eq!(
+        node.p.as_ref().unwrap().as_map()["strip"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    shell.close_panel();
+    assert!(handler(action("rename")).is_none());
+}
+
+#[test]
+fn native_agent_uses_authoritative_telemetry_and_terminal_clocks() {
+    use super::super::SubagentActivityView;
+    let (shell, mut surface, _) = setup(2);
+    let child = octet_agent::DelegationTelemetryChild {
+        child_id: "child".into(),
+        task_name: "Inspect".into(),
+        profile: Some("explore".into()),
+        model: "model".into(),
+        state: "running".into(),
+        phase: "using_tool".into(),
+        current_tool: Some("read".into()),
+        tool_use_count: 3,
+        input_tokens: 100,
+        cache_read_tokens: 20,
+        cache_write_tokens: 10,
+        output_tokens: 50,
+        estimated_output_tokens: Some(60),
+        reasoning_tokens: 30,
+        total_tokens: 180,
+        cost: None,
+        cost_microdollars: Some(2_500),
+        elapsed_ms: 1200,
+        failure_class: None,
+        failure_reason: None,
+        effective_tool_policy: octet_agent::SandboxConfig::new(".")
+            .effective_tool_policy(octet_agent::EffectPolicy::Controlled),
+        orchestration_provenance: octet_agent::DelegationOrchestrationProvenance::all(
+            octet_agent::DelegationPolicySource::ParentInherited,
+        ),
+        session: None,
+    };
+    shell.state.borrow_mut().subagent_activity = Some(SubagentActivityView {
+        status_label: "1 running".into(),
+        telemetry: vec![child],
+        ..Default::default()
+    });
+    surface.flush(&shell.state).unwrap();
+    let node = find_node(&surface.sent.dock, "subagent.child").unwrap();
+    assert_eq!(node.k, Kind::Agent);
+    let props = node.p.as_ref().unwrap().as_map();
+    assert_eq!(props["stats"]["tokens"], 180); // no double-counted reasoning or streamed estimates
+    assert_eq!(props["stats"]["cost"], 0.0025);
+    assert_eq!(props["stats"]["age"], 1200);
+    assert_eq!(props["tool"]["name"], "read");
+    shell
+        .state
+        .borrow_mut()
+        .subagent_activity
+        .as_mut()
+        .unwrap()
+        .telemetry[0]
+        .cost_microdollars = None;
+    surface.flush(&shell.state).unwrap();
+    let node = find_node(&surface.sent.dock, "subagent.child").unwrap();
+    assert!(node.p.as_ref().unwrap().as_map()["stats"]
+        .get("cost")
+        .is_none());
 }

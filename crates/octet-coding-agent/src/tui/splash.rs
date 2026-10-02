@@ -91,6 +91,30 @@ pub(crate) fn render_logo(
         .collect()
 }
 
+/// Retained native mark, using the same byte geometry and settled gradient.
+pub(crate) fn native_svg(
+    model_accent: Option<(u8, u8, u8)>,
+    solid: Option<(u8, u8, u8)>,
+) -> String {
+    let mut svg = String::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 24" width="96" height="24" shape-rendering="crispEdges">"#,
+    );
+    for (column, bit) in BYTE.iter().enumerate() {
+        let (r, g, b) = solid.map_or_else(
+            || model_accent.map_or(COLORS[column], |accent| mix(COLORS[column], accent, 0.58)),
+            |solid| gradient_stop(solid, column),
+        );
+        let y = if *bit == b'0' { 12 } else { 0 };
+        svg.push_str(&format!(
+            r##"<rect x="{}" y="{y}" width="12" height="{}" fill="#{r:02x}{g:02x}{b:02x}"/>"##,
+            column * 12,
+            24 - y
+        ));
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
 fn mix(a: (u8, u8, u8), b: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
     let channel = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * amount) as u8;
     (channel(a.0, b.0), channel(a.1, b.1), channel(a.2, b.2))

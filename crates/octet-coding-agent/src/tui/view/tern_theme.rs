@@ -151,6 +151,59 @@ fn variant(theme: &OctetTheme) -> Map<String, Value> {
             },
         );
     }
+    if let Some(accent) = theme.model_rgb(None) {
+        if theme.prompt_wash() {
+            if let Some((r, g, b)) = theme.native_prompt_rgb(accent) {
+                put(&mut out, "userMessageBg", Color::Rgb(r, g, b));
+                let text = if theme.background() == TerminalBackground::Light {
+                    (32, 35, 39)
+                } else {
+                    (230, 230, 235)
+                };
+                put(
+                    &mut out,
+                    "userMessageText",
+                    Color::Rgb(text.0, text.1, text.2),
+                );
+            }
+        }
+        let mix = |b: (u8, u8, u8), amount: f32| {
+            let channel = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount) as u8;
+            Color::Rgb(
+                channel(accent.0, b.0),
+                channel(accent.1, b.1),
+                channel(accent.2, b.2),
+            )
+        };
+        let base = if theme.background() == TerminalBackground::Light {
+            (255, 255, 255)
+        } else {
+            (21, 24, 32)
+        };
+        for (token, amount) in [
+            ("thinkingMinimal", 0.65),
+            ("thinkingLow", 0.5),
+            ("thinkingMedium", 0.3),
+            ("selectedBg", 0.82),
+        ] {
+            if token != "selectedBg" || theme.is_compiled_default() {
+                put(&mut out, token, mix(base, amount));
+            }
+        }
+        let high = if theme.background() == TerminalBackground::Light {
+            (0, 0, 0)
+        } else {
+            (255, 255, 255)
+        };
+        for (token, amount) in [
+            ("thinkingXhigh", 0.25),
+            ("thinkingMax", 0.45),
+            ("thinkingUltra", 0.6),
+        ] {
+            put(&mut out, token, mix(high, amount));
+        }
+    }
+
     out
 }
 
@@ -277,6 +330,28 @@ foreground = "#252020"
             a.palette.dark.as_ref().unwrap()["accent"],
             hex(a.dark.semantic_style("model_accent").foreground).unwrap()
         );
+    }
+
+    #[test]
+    fn custom_fills_survive_model_adaptation_when_prompt_wash_is_disabled() {
+        let source = r##"
+[metadata]
+adaptive = false
+[tokens]
+prompt_wash = false
+selected_bg = "#123456"
+[roles."surface.user"]
+background = "#203040"
+"##;
+        let theme = crate::tui::theme::test_theme_source_with(
+            source,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        );
+        let native = NativeTheme::resolve(&theme, Some(ModelLab::DeepSeek), "test").unwrap();
+        let palette = native.palette.dark.unwrap();
+        assert_eq!(palette["userMessageBg"], "#203040");
+        assert_eq!(palette["selectedBg"], "#123456");
     }
 
     #[test]

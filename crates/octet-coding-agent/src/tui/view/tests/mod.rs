@@ -51,6 +51,7 @@ mod subagent_rendering_tests;
 mod support;
 mod terminal_handoff_pty_tests;
 mod theme_and_chrome_tests;
+mod threaded_native_resize_tests;
 mod tool_and_diff_card_tests;
 mod transcript_cache_and_resume_tests;
 mod transcript_grouping_tests;

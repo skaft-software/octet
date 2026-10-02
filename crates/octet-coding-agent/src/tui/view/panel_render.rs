@@ -26,12 +26,13 @@ mod search_filter;
 mod session_picker;
 
 pub(super) use search_filter::filtered_indices_for_action;
-use search_filter::searched_indices_for_action;
+pub(super) use search_filter::searched_indices_for_action;
 #[cfg(test)]
 use search_filter::{
     filtered_indices_with_groups, PANEL_SEARCH_CACHE, PANEL_SEARCH_CACHE_MAX_BYTES,
     PANEL_SEARCH_CACHE_MAX_ITEMS, PANEL_SEARCH_CACHE_MAX_SOURCE_BYTES,
 };
+pub(super) use session_picker::format_age as session_age;
 pub(super) use session_picker::panel_action_footer;
 pub(super) use session_picker::session_picker_ordering;
 #[cfg(test)]
@@ -1342,6 +1343,8 @@ mod grouped_model_tests {
                 octet_ai::ModelId("c".into()),
             ],
             providers: vec!["Anthropic".into(), "OpenAI".into(), "OpenAI".into()],
+            details: Vec::new(),
+            scope: None,
         }
     }
 

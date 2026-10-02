@@ -134,6 +134,7 @@ pub(super) struct TernSurface {
     force_focus: bool,
     credit_blocked: Option<Instant>,
     images: super::tern_images::NativeImages,
+    brand: super::tern_welcome::Brand,
     receipts:
         std::collections::VecDeque<(u64, Option<super::renderer_geometry::PanelRenderReceipt>)>,
 }
@@ -170,6 +171,7 @@ impl TernSurface {
             credit_blocked: None,
             receipts: Default::default(),
             images: Default::default(),
+            brand: Default::default(),
         }
     }
 
@@ -208,6 +210,14 @@ impl TernSurface {
                         Kind::Item,
                         Kind::Tool,
                         Kind::Diff,
+                        Kind::Card,
+                        Kind::Icon,
+                        Kind::Kbd,
+                        Kind::Effort,
+                        Kind::Meter,
+                        Kind::Kv,
+                        Kind::Badge,
+                        Kind::Status,
                     ]
                     .into_iter()
                     .all(|kind| self.client.supports(kind))
@@ -245,6 +255,7 @@ impl TernSurface {
                 self.main_key = None;
                 self.receipts.clear();
                 self.images = Default::default();
+                self.brand = Default::default();
                 self.last_key = None;
                 self.theme_key = None;
                 self.client.reset_surface(SURFACE);
@@ -431,11 +442,13 @@ impl TernSurface {
             self.images
                 .prepare(shell, self.client.supports(Kind::Image))?;
             self.images.upload(&mut self.client)?;
+            self.brand.prepare(shell, &mut self.client)?;
         }
         let mut next = project(
             shell,
-            self.client.reduce_motion(),
+            &self.client,
             &self.images,
+            &self.brand,
             main_changed,
             editor_revision,
             &self.collapsed,
@@ -566,8 +579,9 @@ fn apply_disclosure(nodes: &mut [Node], collapsed: &HashMap<String, bool>) {
 
 fn project(
     shell: &ShellState,
-    reduce_motion: bool,
+    client: &TernClient,
     images: &super::tern_images::NativeImages,
+    brand: &super::tern_welcome::Brand,
     main_changed: bool,
     editor_revision: u64,
     collapsed: &HashMap<String, bool>,
@@ -575,7 +589,7 @@ fn project(
     let mut out = Projection::default();
     if main_changed && !shell.startup_pending {
         if shell.startup_card_started_at.is_some() {
-            out.main.push(welcome(shell));
+            out.main.push(super::tern_welcome::node(shell, brand));
         }
         for (index, block) in shell.transcript.iter().enumerate() {
             // Commit IDs survive prepends, deletion, resume and streaming.
@@ -590,13 +604,19 @@ fn project(
         ("extension.header", &chrome.header),
         ("extension.above", &chrome.extension_above),
         ("pending", &chrome.pending),
-        ("subagents", &chrome.subagents),
     ] {
         if !rows.is_empty() {
             out.dock.push(ansi_rows(id, rows));
         }
     }
-    if let Some(working) = working_row(shell, reduce_motion) {
+    if client.supports(Kind::Agent) {
+        if let Some(agents) = super::tern_agents::node(shell) {
+            out.dock.push(agents);
+        }
+    } else if !chrome.subagents.is_empty() {
+        out.dock.push(ansi_rows("subagents", &chrome.subagents));
+    }
+    if let Some(working) = working_row(shell, client.reduce_motion()) {
         out.dock.push(working);
     }
     out.dock.push(composer(shell));
@@ -610,9 +630,9 @@ fn project(
     }
     out.panel_receipt = super::renderer_geometry::PanelRenderReceipt::capture(shell, &chrome.panel);
     if let Some(picker) = super::tern_picker::node(shell) {
-        out.focus = Some(picker.id.clone());
+        out.focus = Some(super::tern_picker::id(shell));
         out.layer.push(picker);
-    } else if let Some(overlay) = report(shell) {
+    } else if let Some(overlay) = report(shell, client.supports(Kind::Table)) {
         out.layer.push(overlay);
     } else if !chrome.panel.is_empty()
         || shell.overlay.is_some()
@@ -653,73 +673,6 @@ fn ansi_rows(id: &str, lines: &[String]) -> Node {
     Node::new(id, Kind::Ansi, Props::new().set("text", lines.join("\n")))
 }
 
-fn welcome(shell: &ShellState) -> Node {
-    let logo = if shell.theme.unicode() {
-        " ██ ████\n████████"
-    } else {
-        " ## ####\n########"
-    };
-    Node::with_children(
-        "welcome",
-        Kind::Row,
-        Props::new()
-            .role("octet.welcome")
-            .set("gap", "sm")
-            .set("align", "center")
-            .set("wrap", true),
-        vec![
-            Node::new(
-                "welcome.byte",
-                Kind::Text,
-                Props::new()
-                    .text("spans", vec![Span::styled(logo, "accent")])
-                    .set("wrap", "none")
-                    .set("aria", "octet byte mark: 01101111"),
-            ),
-            Node::with_children(
-                "welcome.copy",
-                Kind::Col,
-                Props::new().set("gap", "sm"),
-                vec![
-                    Node::new(
-                        "welcome.name",
-                        Kind::Text,
-                        Props::new().text(
-                            "spans",
-                            vec![
-                                Span::styled("octet", "strong"),
-                                Span::styled(format!("  v{}", env!("CARGO_PKG_VERSION")), "dim"),
-                            ],
-                        ),
-                    ),
-                    Node::new(
-                        "welcome.model",
-                        Kind::Text,
-                        Props::new().text(
-                            "spans",
-                            vec![Span::styled(
-                                sanitize_for_terminal(&shell.model_display),
-                                "accent",
-                            )],
-                        ),
-                    ),
-                    Node::new(
-                        "welcome.hint",
-                        Kind::Text,
-                        Props::new().text(
-                            "spans",
-                            vec![Span::styled(
-                                "/ commands · ! shell · ctrl+o details",
-                                "muted",
-                            )],
-                        ),
-                    ),
-                ],
-            ),
-        ],
-    )
-}
-
 fn id(identity: u64, suffix: &str) -> String {
     format!("t{identity}.{suffix}")
 }
@@ -750,12 +703,20 @@ fn assistant_node(identity: u64, block: &AssistantBlock, shell: &ShellState) -> 
             )
             .set("frame", "card")
             .set("gap", "sm"),
-        vec![Node::new(
-            id(identity, "assistant.md"),
-            Kind::Md,
-            Props::new()
-                .set("text", tighten_markdown(&block.text))
-                .set("stream", !block.finished),
+        // Tern's reader typography targets Markdown directly below an
+        // omp.assistant node. A card inserts its own body wrapper, so retain
+        // that native layout hook inside the labelled card as well.
+        vec![Node::with_children(
+            id(identity, "assistant.body"),
+            Kind::Col,
+            Props::new().role("omp.assistant"),
+            vec![Node::new(
+                id(identity, "assistant.md"),
+                Kind::Md,
+                Props::new()
+                    .set("text", tighten_markdown(&block.text))
+                    .set("stream", !block.finished),
+            )],
         )],
     )
 }
@@ -832,27 +793,55 @@ fn block_node(
                 )],
             ))
         }
-        TranscriptBlock::Assistant(block) => Some(assistant_node(identity, block, shell)),
+        TranscriptBlock::Assistant(block) => Some(Node::with_children(
+            id(identity, "assistant.group"),
+            Kind::Col,
+            Props::new().role("omp.assistant"),
+            vec![assistant_node(identity, block, shell)],
+        )),
         TranscriptBlock::Reasoning(block) => Some(Node::with_children(
-            id(identity, "reasoning"),
-            Kind::Section,
-            Props::new()
-                .role("octet.thinking")
-                .text("head", vec![Span::styled("Thinking", "thinkingText")])
-                .set(
-                    "took",
-                    block
-                        .reasoning_elapsed
-                        .map_or(0, |elapsed| elapsed.as_millis() as u64),
-                )
-                .set("collapsible", true)
-                .set("collapsed", !shell.verbose_tools),
-            vec![Node::new(
-                id(identity, "reasoning.md"),
-                Kind::Md,
+            id(identity, "reasoning.group"),
+            Kind::Col,
+            Props::new().role("omp.assistant"),
+            vec![Node::with_children(
+                id(identity, "reasoning"),
+                Kind::Section,
                 Props::new()
-                    .set("text", tighten_markdown(&block.text))
-                    .set("stream", !block.finished),
+                    .role("omp.thinking")
+                    .text(
+                        "head",
+                        vec![Span::styled(
+                            if block.finished {
+                                block.reasoning_elapsed.map_or_else(
+                                    || "Thoughts".into(),
+                                    |elapsed| {
+                                        format!(
+                                            "Thought for {:.1}s",
+                                            elapsed.as_secs_f64().max(0.1)
+                                        )
+                                    },
+                                )
+                            } else {
+                                "Thinking".into()
+                            },
+                            "muted",
+                        )],
+                    )
+                    .set(
+                        "took",
+                        block
+                            .reasoning_elapsed
+                            .map_or(0, |elapsed| elapsed.as_millis() as u64),
+                    )
+                    .set("collapsible", true)
+                    .set("collapsed", !shell.verbose_tools),
+                vec![Node::new(
+                    id(identity, "reasoning.md"),
+                    Kind::Md,
+                    Props::new()
+                        .set("text", tighten_markdown(&block.text))
+                        .set("stream", !block.finished),
+                )],
             )],
         )),
         TranscriptBlock::Tool(panel) => Some(tool_node(
@@ -860,6 +849,7 @@ fn block_node(
             panel,
             shell.verbose_tools,
             images,
+            shell.workspace.as_deref(),
             collapsed,
         )),
         TranscriptBlock::Shell(output) => {
@@ -875,9 +865,35 @@ fn block_node(
                 NoticeTone::ToolActive => "accent",
             },
         )),
-        TranscriptBlock::Outcome(outcome) => Some(octet_tern::scene::turn_usage_spans(
+        TranscriptBlock::Outcome(outcome) => Some(Node::with_children(
             id(identity, "outcome"),
-            outcome_parts(outcome),
+            Kind::Row,
+            Props::new()
+                .role("omp.turn.usage")
+                .set("gap", "xs")
+                .set("align", "center"),
+            vec![
+                Node::new(
+                    id(identity, "outcome.glyph"),
+                    Kind::Text,
+                    Props::new().text(
+                        "spans",
+                        vec![Span::styled(
+                            shell.theme.glyph(match &outcome.outcome {
+                                crate::presentation::RunOutcome::Completed { .. } => "success",
+                                crate::presentation::RunOutcome::Failed { .. } => "error",
+                                _ => "warning",
+                            }),
+                            "muted",
+                        )],
+                    ),
+                ),
+                Node::new(
+                    id(identity, "outcome.text"),
+                    Kind::Text,
+                    Props::new().text("spans", outcome_parts(outcome)),
+                ),
+            ],
         )),
         TranscriptBlock::Compaction(compaction) => Some(Node::with_children(
             id(identity, "compaction"),
@@ -931,7 +947,7 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
     };
     let age = run.elapsed_at(Instant::now()).as_millis() as u64;
     let mut node = octet_tern::scene::working_row("work", &sanitize_for_terminal(label), age, None);
-    node.p = Some(node.p.unwrap_or_default().role("octet.activity"));
+    node.p = Some(node.p.unwrap_or_default().role("omp.working"));
     if reduce_motion || !shell.theme.capabilities().animation {
         node.c.as_mut().expect("working row")[0] = Node::new(
             "work.spin",
@@ -953,75 +969,139 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
 fn composer(shell: &ShellState) -> Node {
     let focused = super::normal_editor_focused(shell) && !shell.startup_pending;
     let running = shell.run.is_active();
-    // Flat semantic primitives: no omp.editor role, liquid glass, branded
-    // gradient, rounded badges, inset highlight, or terminal-injected omp mark.
-    let mut controls = vec![
-        Node::new(
-            "composer.model",
-            Kind::Text,
+    let level = if shell.reasoning.is_empty() {
+        "off"
+    } else {
+        &shell.reasoning
+    };
+    let mut children = Vec::new();
+    if let Some((used, total)) = shell.context_estimate.filter(|(_, total)| *total > 0) {
+        children.push(Node::new(
+            "composer.context",
+            Kind::Meter,
             Props::new()
-                .role("octet.composer.model")
-                .text(
-                    "spans",
-                    vec![Span::styled(
-                        sanitize_for_terminal(if shell.model_display.is_empty() {
-                            &shell.model
-                        } else {
-                            &shell.model_display
-                        }),
-                        "accent mono strong",
-                    )],
+                .role("omp.composer.context")
+                .set("style", "bar")
+                .set("value", (used as f64 / total as f64).min(1.0))
+                .set(
+                    "label",
+                    format!("{:.0}%", used as f64 / total as f64 * 100.0),
                 )
-                .set("wrap", "none")
-                .set("truncate", "end")
+                .set("total", crate::presentation::compact_context_limit(total))
+                .set("thresholds", json!({"warn":0.6,"bad":0.85}))
+                .set("title", format!("Context: {used} of {total} tokens")),
+        ));
+    }
+    children.push(Node::with_children(
+        "composer.line",
+        Kind::Row,
+        Props::new()
+            .role("omp.composer.line")
+            .set("align", "start")
+            .set("gap", "sm"),
+        vec![Node::new(
+            "composer.editor",
+            Kind::Editor,
+            Props::new()
+                .set("text", shell.editor.text())
+                .set(
+                    "cursor",
+                    shell.editor.text()[..shell.editor.cursor()]
+                        .encode_utf16()
+                        .count(),
+                )
+                .set("readonly", !focused)
+                .set("maxLines", 12)
+                .set("placeholder", "Ask octet — / commands · @ files · ! shell"),
+        )],
+    ));
+    let mut controls = vec![
+        Node::with_children(
+            "composer.model",
+            Kind::Row,
+            Props::new()
+                .role("omp.composer.model")
+                .set("gap", "xs")
+                .set("align", "center")
                 .set("actions", json!({"click":"model"}))
                 .set("title", "Choose model"),
-        ),
-        Node::new(
-            "composer.effort",
-            Kind::Text,
-            Props::new()
-                .role("octet.composer.effort")
-                .text(
-                    "spans",
-                    vec![Span::styled(
-                        format!(
-                            "effort {}",
-                            if shell.reasoning.is_empty() {
-                                "off"
-                            } else {
-                                &shell.reasoning
-                            }
+            vec![
+                Node::new(
+                    "composer.model.icon",
+                    Kind::Icon,
+                    Props::new().set("name", "model"),
+                ),
+                Node::new(
+                    "composer.model.name",
+                    Kind::Text,
+                    Props::new()
+                        .set("wrap", "none")
+                        .set("truncate", "end")
+                        .text(
+                            "spans",
+                            vec![Span::styled(
+                                sanitize_for_terminal(if shell.model_display.is_empty() {
+                                    &shell.model
+                                } else {
+                                    crate::presentation::model::footer_model_name(
+                                        &shell.model_display,
+                                        &shell.model,
+                                    )
+                                }),
+                                "accent",
+                            )],
                         ),
-                        "muted mono",
-                    )],
-                )
-                .set("wrap", "none")
+                ),
+                Node::new(
+                    "composer.model.chev",
+                    Kind::Icon,
+                    Props::new().set("name", "chev"),
+                ),
+            ],
+        ),
+        Node::with_children(
+            "composer.effort",
+            Kind::Row,
+            Props::new()
+                .role("omp.composer.effort")
+                .set("gap", "xs")
+                .set("align", "center")
                 .set("actions", json!({"click":"effort"}))
                 .set("title", "Cycle reasoning effort"),
+            vec![
+                Node::new(
+                    "composer.effort.glyph",
+                    Kind::Effort,
+                    Props::new().set("level", level),
+                ),
+                Node::new(
+                    "composer.effort.label",
+                    Kind::Text,
+                    Props::new().set("text", level).set("wrap", "none"),
+                ),
+            ],
         ),
-        Node::leaf("composer.gap", Kind::Row),
+        Node::new(
+            "composer.extras",
+            Kind::Status,
+            Props::new()
+                .role("omp.composer.extras")
+                .set("transparent", true)
+                .set("grow", 1),
+        ),
     ];
-    controls[2].p = Some(Props::new().set("grow", 1));
-    if let Some((used, total)) = shell.context_estimate.filter(|(_, total)| *total > 0) {
+    if let Some(cost) = shell.displayed_session_cost_microdollars() {
         controls.push(Node::new(
-            "composer.context",
+            "composer.usage",
             Kind::Text,
             Props::new()
-                .role("octet.composer.context")
-                .text(
-                    "spans",
-                    vec![Span::styled(
-                        format!(
-                            "context {:.0}% / {}K",
-                            used as f64 / total as f64 * 100.0,
-                            total / 1000
-                        ),
-                        "dim mono",
-                    )],
-                )
+                .role("omp.composer.usage")
                 .set("wrap", "none")
-                .set("title", format!("Context: {used} of {total} tokens")),
+                .set(
+                    "text",
+                    format!("${}.{:06}", cost / 1_000_000, cost % 1_000_000),
+                )
+                .set("title", "Session cost"),
         ));
     }
     controls.push(Node::new(
@@ -1030,72 +1110,39 @@ fn composer(shell: &ShellState) -> Node {
         } else {
             "composer.send"
         },
-        Kind::Text,
+        if running { Kind::Text } else { Kind::Kbd },
         Props::new()
-            .role("octet.composer.action")
-            .text(
-                "spans",
-                vec![Span::styled(
-                    if running { "Stop" } else { "Send" },
-                    if running {
-                        "error strong mono"
-                    } else {
-                        "accent strong mono"
-                    },
-                )],
-            )
-            .set("wrap", "none")
+            .role(if running {
+                "omp.composer.stop"
+            } else {
+                "omp.composer.send"
+            })
+            .set("text", if running { "Stop" } else { "Send" })
+            .set("keys", ["enter"])
+            .set("title", if running { "Stop" } else { "Send" })
             .set(
                 "actions",
-                json!({"click": if running { "stop" } else { "send" }}),
+                json!({"click":if running { "stop" } else { "send" }}),
             ),
+    ));
+    children.push(Node::with_children(
+        "composer.bar",
+        Kind::Row,
+        Props::new()
+            .role("omp.composer.bar")
+            .set("gap", "sm")
+            .set("align", "center"),
+        controls,
     ));
     Node::with_children(
         "composer",
         Kind::Col,
-        // Tone is octet's model accent, so Tern tints this node's chrome with
-        // the active model instead of its own fixed terminal accent.
-        Props::new()
-            .role("octet.composer")
-            .tone(Tone::Accent)
-            .set("gap", "sm"),
-        vec![
-            Node::new("composer.rule", Kind::Rule, Props::new().tone(Tone::Accent)),
-            Node::new(
-                "composer.editor",
-                Kind::Editor,
-                Props::new()
-                    .role("octet.composer.input")
-                    .set("text", shell.editor.text())
-                    .set(
-                        "cursor",
-                        shell.editor.text()[..shell.editor.cursor()]
-                            .encode_utf16()
-                            .count(),
-                    )
-                    .set("readonly", !focused)
-                    .set("maxLines", 12)
-                    .set("placeholder", "Ask octet anything")
-                    .text(
-                        "prompt",
-                        vec![Span::styled(shell.theme.glyph("prompt"), "accent")],
-                    ),
-            ),
-            Node::with_children(
-                "composer.bar",
-                Kind::Row,
-                Props::new()
-                    .role("octet.composer.bar")
-                    .set("gap", "sm")
-                    .set("align", "center")
-                    .set("wrap", true),
-                controls,
-            ),
-        ],
+        Props::new().role("omp.editor").tone(Tone::Accent),
+        children,
     )
 }
 
-fn report(shell: &ShellState) -> Option<Node> {
+fn report(shell: &ShellState, tables: bool) -> Option<Node> {
     let (title, purpose, body) = match shell.overlay.as_ref()? {
         super::ShellOverlay::Text(text) => (
             "octet".to_owned(),
@@ -1131,10 +1178,7 @@ fn report(shell: &ShellState) -> Option<Node> {
                     Kind::Md,
                     Props::new().set("text", tighten_markdown(source)),
                 ),
-                super::ReportBody::Context(_) => ansi_rows(
-                    "report.body",
-                    &super::viewport::overlay_lines(shell, shell.size.0, usize::from(shell.size.1)),
-                ),
+                super::ReportBody::Context(context) => context.native_node(tables),
             };
             (
                 sanitize_for_terminal(&report.surface.title),
@@ -1196,9 +1240,23 @@ fn tool_node(
     panel: &super::ToolPanel,
     verbose: bool,
     images: &super::tern_images::NativeImages,
+    workspace: Option<&std::path::Path>,
     collapsed_overrides: &HashMap<String, bool>,
 ) -> Node {
     let (target, target_kind) = tool_target(panel);
+    let href = (target_kind == "path")
+        .then(|| {
+            let path = std::path::Path::new(&target);
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                workspace?.join(path)
+            };
+            url::Url::from_file_path(absolute)
+                .ok()
+                .map(|url| url.to_string())
+        })
+        .flatten();
     let status = if !panel.finished {
         "running"
     } else if panel.is_error {
@@ -1223,6 +1281,11 @@ fn tool_node(
         .copied()
         .unwrap_or(!verbose && panel.finished);
     let mut body = Vec::new();
+    let compact_read = panel.name == "read"
+        && panel.finished
+        && !panel.is_error
+        && !verbose
+        && target_kind == "path";
     if let Some(diff) = super::tool_render::tool_diff(panel) {
         // Diffs stay mounted while collapsed: Tern hides them, and the user
         // can disclose without waiting for a re-projected child.
@@ -1231,7 +1294,7 @@ fn tool_node(
             &target,
             &diff,
         ));
-    } else if !panel.output.trim().is_empty() && (!collapsed || panel.is_error) {
+    } else if !compact_read && !panel.output.trim().is_empty() && (!collapsed || panel.is_error) {
         // Collapsed successful tools project summary-only (header/target):
         // mounting the full output in the same frame that flips `collapsed`
         // paints one expanded frame before the terminal hides it. Errors keep
@@ -1262,6 +1325,34 @@ fn tool_node(
             )
         }));
     }
+    if compact_read {
+        body.insert(
+            0,
+            Node::with_children(
+                id(index, "file"),
+                Kind::Row,
+                Props::new()
+                    .role("omp.tool.file")
+                    .set("gap", "xs")
+                    .set("href", &href)
+                    .set("actions", json!({"click":"open"})),
+                vec![
+                    Node::new(
+                        id(index, "file.icon"),
+                        Kind::Icon,
+                        Props::new().set("name", "file"),
+                    ),
+                    Node::new(
+                        id(index, "file.name"),
+                        Kind::Text,
+                        Props::new()
+                            .text("spans", vec![Span::styled(&target, "strong")])
+                            .set("truncate", "middle"),
+                    ),
+                ],
+            ),
+        );
+    }
     let mut node = octet_tern::scene::tool_card(
         id(index, "tool"),
         &panel.name,
@@ -1275,8 +1366,11 @@ fn tool_node(
     node.p = Some(
         node.p
             .unwrap_or_default()
-            .role("octet.tool")
-            .set("collapsed", collapsed),
+            .role(format!("omp.tool.{}", panel.name))
+            .set("href", &href)
+            .set("frame", if compact_read { "inline" } else { "card" })
+            .set("collapsible", !compact_read)
+            .set("collapsed", !compact_read && collapsed),
     );
     node
 }
@@ -1356,7 +1450,7 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
             elapsed, summary, ..
         } => (
             Some(*elapsed),
-            format!("{} tools", summary.tool_calls),
+            format!("completed · {} tools", summary.tool_calls),
             "muted",
         ),
         RunOutcome::Failed { elapsed, .. } => (Some(*elapsed), "failed".to_owned(), "error"),
@@ -1365,12 +1459,29 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
         }
         RunOutcome::NeedsInput { .. } => (None, "needs input".to_owned(), "warning"),
     };
-    let mut spans = Vec::with_capacity(3);
+    let mut spans = Vec::with_capacity(7);
     if let Some(duration) = duration {
         spans.push(Span::styled(format_duration(duration), "dim"));
         spans.push(Span::new(" · "));
     }
     spans.push(Span::styled(verdict, token));
+    if let Some(rate) = outcome.tokens_per_second {
+        spans.push(Span::styled(format!(" · {rate:.1} tok/s"), "dim"));
+    }
+    match &outcome.outcome {
+        RunOutcome::CompletedWithWarnings { warnings, .. } => {
+            spans.push(Span::styled(format!(" · {warnings} warnings"), "warning"))
+        }
+        RunOutcome::Failed { reason, .. } => spans.push(Span::styled(
+            format!(" · {}", sanitize_for_terminal(reason)),
+            "error",
+        )),
+        RunOutcome::NeedsInput { prompt } => spans.push(Span::styled(
+            format!(" · {}", sanitize_for_terminal(prompt)),
+            "warning",
+        )),
+        _ => {}
+    }
     spans
 }
 

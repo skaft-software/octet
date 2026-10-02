@@ -131,13 +131,15 @@ because portable protocols can't report its position.
 
 The renderer uses a complete retained frame, synchronized frames, and exact
 first-to-last changed-range repainting. Completions, panels, reports, and streamed
-Markdown participate in the same algorithm. Resize bursts settle before repairing
-only live rows; width changes reflow the semantic transcript, while height-only
-changes reuse its wrapping. Resize, PageUp, and historical repairs do not clear
-saved lines or replay the complete history. Already-emitted native history stays
-as snapshots; PageUp, copy, and the session contain the authoritative transcript
-when a historical result changes. The hardware composer cursor stays visible
-through panels, resizing, and renderer resumes.
+Markdown participate in the same algorithm; visible changes do not force history
+replay. Dimension changes and canonical changes above the old viewport clear and
+replay the complete native transcript, so saved and live output remain complete.
+This can reset your terminal's reading position, and replay work grows with
+history. PageUp and `--mouse app` instead use a separate bounded semantic viewport.
+Resize bursts settle after 75 ms of quiet (150 ms maximum); width changes reflow
+the transcript, while height-only changes reuse its wrapping. Away-and-back
+resizes also rebuild native history. The hardware composer cursor stays visible
+inside synchronized frames through panels, resizing, and renderer resumes.
 [Rendering details](design/octet-tui.md#terminal-guarantees).
 
 Layouts adapt between wide and narrow terminals and fall back from truecolor to

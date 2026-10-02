@@ -1,6 +1,6 @@
 //! Data-first native pickers over the same host catalogues and filtering policy.
 
-use octet_tern::wire::{Kind, Node, Props};
+use octet_tern::wire::{Kind, Node, Props, Span};
 use serde_json::{json, Value};
 
 use super::{
@@ -57,6 +57,23 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
     }
     if !interactive(panel) {
         return None;
+    }
+    if let Panel::SelectList {
+        action: action @ PanelAction::SelectThinking(levels),
+        selected,
+        filter,
+        items,
+        descriptions,
+        ..
+    } = panel
+    {
+        let order = filtered_indices_for_action(items, descriptions, action, filter);
+        return Some(thinking_node(
+            shell,
+            levels,
+            &order,
+            order.get(*selected).copied(),
+        ));
     }
     let (surface, items, order, selected, query) = match panel {
         Panel::SelectList {
@@ -134,7 +151,9 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
             }
         }
     }
-    Some(Node::new(id(shell), Kind::Picker, Props::new().role("octet.picker")
+    let (state, message) = surface.lifecycle.native_state(std::time::Instant::now());
+    let props = Props::new().role("octet.picker")
+        .set("state", state).set("message", message.map(safe))
         .set("title", safe(&surface.title)).text("subtitle", surface.purpose.as_deref().map(safe).unwrap_or_default())
         .set("query", query.map(Value::from).unwrap_or(Value::Null))
         .set("cursor", query.map(|query| query.encode_utf16().count()))
@@ -143,7 +162,340 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
         .set("hits", Value::Object(hits))
         .set("selected", selected.map(|index| index.to_string())).set("layout", "rows").set("size", if order.len() > 10 { "lg" } else { "md" }).set("preview", "none")
         .set("focus", "list")
-        .set("empty", "No matches").set("actions", json!([{"id":"confirm","label":"Select","keys":["enter"],"primary":true},{"id":"cancel","label":"Close","keys":["esc"],"end":true}]))))
+        .set("empty", "No matches").set("actions", json!([{"id":"confirm","label":"Select","keys":["enter"],"primary":true},{"id":"cancel","label":"Close","keys":["esc"],"end":true}]));
+    let (props, preview) = decorate(shell, panel, props, &order, selected);
+    Some(Node::with_children(id(shell), Kind::Picker, props, preview))
+}
+
+/// Presentation enrichments keep selection indices in the host's catalogue.
+fn decorate(
+    shell: &ShellState,
+    panel: &Panel,
+    mut props: Props,
+    order: &[usize],
+    selected: Option<usize>,
+) -> (Props, Vec<Node>) {
+    let safe = |value: &str| sanitize_ordinary_surface_cell(value, shell.theme.unicode());
+    if let Panel::SessionPicker { picker } = panel {
+        return super::tern_sessions::decorate(shell, picker, props, selected);
+    }
+    let Panel::SelectList {
+        action,
+        items,
+        descriptions,
+        filter,
+        ..
+    } = panel
+    else {
+        return (props, Vec::new());
+    };
+    match action {
+        PanelAction::SelectGroupedModel {
+            models,
+            providers,
+            details,
+            scope,
+        } => {
+            let catalogue = models.iter().enumerate().map(|(index, model)| {
+                let detail = details.get(index);
+                let label = detail.map(|detail| detail.name.as_str()).unwrap_or_else(|| items[index].strip_suffix(" (current)").unwrap_or(&items[index]));
+                json!({"id":index.to_string(), "label":safe(label), "detail":[{"t":safe(&model.0),"s":"dim mono"}],
+                    "facts":{"ctx":detail.map(|detail| detail.context),"price":detail.map(|detail| safe(&detail.price))},
+                    "badges":[]})
+            }).collect::<Vec<_>>();
+            let all_matches = super::panel_render::searched_indices_for_action(
+                items,
+                descriptions,
+                action,
+                filter,
+            );
+            let mut scopes = vec![
+                json!({"id":"all","label":"All models","icon":"list","count":all_matches.len()}),
+            ];
+            let mut active_scope = "all".to_owned();
+            for (index, provider) in providers.iter().enumerate() {
+                if providers[..index].contains(provider) {
+                    continue;
+                }
+                let scope_id = format!("provider.{index}");
+                if scope.as_ref() == Some(provider) {
+                    active_scope = scope_id.clone();
+                }
+                // TSP's provider-mark slot supports seeded text, not image blobs.
+                let initials = provider.chars().take(2).collect::<String>().to_uppercase();
+                scopes.push(json!({"id":scope_id,"label":safe(provider),"mark":{"text":safe(&initials),"seed":provider.to_lowercase()},"group":"Providers",
+                    "count":all_matches.iter().filter(|index| &providers[**index] == provider).count()}));
+            }
+            let mut grouped_order = Vec::new();
+            let mut last = None;
+            for index in order {
+                let provider = &providers[*index];
+                if last != Some(provider) {
+                    grouped_order.push(json!({"group":format!("provider.{}", providers.iter().position(|item| item == provider).unwrap()),"label":safe(provider),"count":order.iter().filter(|index| &providers[**index] == provider).count()}));
+                    last = Some(provider);
+                }
+                grouped_order.push(Value::String(index.to_string()));
+            }
+            let current = models
+                .iter()
+                .position(|model| model.0 == shell.model)
+                .map(|index| index.to_string())
+                .into_iter()
+                .collect::<Vec<_>>();
+            props = props.set("title", "Models").set("subtitle", "").set("icon", "model").set("noun", "models").set("placeholder", "Search models…")
+                .set("items", catalogue).set("order", grouped_order).set("scopes", scopes).set("scope", active_scope)
+                .set("current", current).set("size", "lg").set("preview", "side")
+                .set("columns", json!([{"id":"ctx","head":"Ctx","format":"num","priority":3},{"id":"price","head":"$/M in · out","format":"price","priority":2}]))
+                .set("actions", json!([{"id":"confirm","label":"Switch","keys":["enter"],"primary":true},{"id":"cancel","label":"Close","keys":["esc"],"end":true}]));
+            let preview = selected
+                .and_then(|index| {
+                    details.get(index).map(|detail| {
+                        model_preview(shell, index, &models[index].0, &providers[index], detail)
+                    })
+                })
+                .unwrap_or_default();
+            (props, preview)
+        }
+        _ => (props, Vec::new()),
+    }
+}
+
+fn model_preview(
+    shell: &ShellState,
+    index: usize,
+    model: &str,
+    provider: &str,
+    detail: &crate::tui::pickers::ModelPickerDetail,
+) -> Vec<Node> {
+    let safe = |value: &str| sanitize_ordinary_surface_cell(value, shell.theme.unicode());
+    let mut badges = detail
+        .badges
+        .iter()
+        .map(|badge| safe(badge))
+        .collect::<Vec<_>>();
+    if model == shell.model {
+        badges.insert(0, "current".into());
+    }
+    let mut facts = vec![
+        ("Provider", safe(provider)),
+        ("Context", count_label(detail.context)),
+        ("Max output", count_label(detail.output)),
+        ("Price / M in · out", safe(&detail.price)),
+        ("Input", safe(&detail.input)),
+    ];
+    if let Some(price) = &detail.cache_price {
+        facts.push(("Cache read / M", safe(price)));
+    }
+    for (key, value) in &detail.source {
+        facts.push((
+            match key.as_str() {
+                "knowledge" => "Knowledge cutoff",
+                "release_date" => "Released",
+                "last_updated" => "Updated",
+                "open_weights" => "Open weights",
+                _ => continue,
+            },
+            safe(value),
+        ));
+    }
+    vec![
+        Node::new("panel.preview.name", Kind::Text, Props::new().text("spans", vec![Span::styled(safe(&detail.name), "strong")])),
+        Node::new("panel.preview.id", Kind::Text, Props::new().text("spans", vec![Span::styled(safe(model), "dim mono")]).set("wrap", "word")),
+        Node::with_children("panel.preview.badges", Kind::Row, Props::new().set("gap", "xs").set("wrap", true), badges.into_iter().enumerate().map(|(badge_index, badge)| Node::new(format!("panel.preview.{index}.badge{badge_index}"), Kind::Badge, Props::new().set("text", &badge).set("tone", if badge == "current" { "success" } else { "muted" }))).collect()),
+        Node::new("panel.preview.facts", Kind::Kv, Props::new().set("items", facts.into_iter().map(|(key, value)| json!({"k":[{"t":key,"s":"muted"}],"v":[{"t":value,"s":"mono"}]})).collect::<Vec<_>>())),
+    ]
+}
+
+fn thinking_node(
+    shell: &ShellState,
+    levels: &[crate::config::ThinkingLevel],
+    order: &[usize],
+    selected: Option<usize>,
+) -> Node {
+    let panel = id(shell);
+    let item_id = |index| format!("{panel}.item.{index}");
+    let items = order
+        .iter()
+        .map(|index| {
+            let level = levels[*index];
+            let description = thinking_detail(level);
+            Node::new(
+                item_id(*index),
+                Kind::Item,
+                Props::new()
+                    .text(
+                        "label",
+                        vec![
+                            Span::styled(
+                                "● ",
+                                if level == crate::config::ThinkingLevel::Off {
+                                    "dim"
+                                } else {
+                                    "accent"
+                                },
+                            ),
+                            Span::styled(level.label(), "mono"),
+                        ],
+                    )
+                    .text("detail", description)
+                    .text(
+                        "value",
+                        vec![Span::styled(
+                            if level.label() == shell.reasoning {
+                                shell.theme.glyph("success")
+                            } else {
+                                ""
+                            },
+                            "success",
+                        )],
+                    ),
+            )
+        })
+        .collect();
+    Node::with_children(
+        format!("{panel}.sheet"),
+        Kind::Overlay,
+        Props::new()
+            .role("omp.overlay.thinking")
+            .set("modal", true)
+            .set("size", "sm")
+            .text("head", "Thinking"),
+        vec![
+            Node::new(
+                format!("{panel}.model"),
+                Kind::Text,
+                Props::new().text(
+                    "spans",
+                    vec![Span::styled(
+                        sanitize_ordinary_surface_cell(
+                            crate::presentation::model::footer_model_name(
+                                &shell.model_display,
+                                &shell.model,
+                            ),
+                            shell.theme.unicode(),
+                        ),
+                        "muted",
+                    )],
+                ),
+            ),
+            Node::with_children(
+                &panel,
+                Kind::List,
+                Props::new()
+                    .set("selected", selected.map(item_id))
+                    .set("max", json!({"lines":9})),
+                items,
+            ),
+            Node::with_children(
+                format!("{panel}.actions"),
+                Kind::Row,
+                Props::new().set("gap", "sm").set("align", "center"),
+                vec![
+                    Node::new(
+                        format!("{panel}.hint"),
+                        Kind::Text,
+                        Props::new().text("spans", vec![Span::styled("↑ ↓ choose", "dim")]),
+                    ),
+                    Node::new(
+                        format!("{panel}.gap"),
+                        Kind::Row,
+                        Props::new().set("grow", 1),
+                    ),
+                    Node::new(
+                        format!("{panel}.cancel"),
+                        Kind::Kbd,
+                        Props::new()
+                            .set("keys", ["esc"])
+                            .set("title", "Close")
+                            .set("actions", json!({"click":"cancel"})),
+                    ),
+                    Node::new(
+                        format!("{panel}.confirm"),
+                        Kind::Kbd,
+                        Props::new()
+                            .set("keys", ["enter"])
+                            .set("title", "Apply")
+                            .set("actions", json!({"click":"confirm"})),
+                    ),
+                ],
+            ),
+        ],
+    )
+}
+
+/// Only the current thinking sheet's exact control IDs can route actions.
+pub(super) fn owns_action(shell: &ShellState, node: &str) -> bool {
+    let panel = id(shell);
+    node == panel
+        || (matches!(
+            shell.panel,
+            Some(Panel::SelectList {
+                action: PanelAction::SelectThinking(_),
+                ..
+            })
+        ) && ["sheet", "confirm", "cancel"]
+            .iter()
+            .any(|suffix| node == format!("{panel}.{suffix}")))
+}
+
+fn count_label(value: u64) -> String {
+    value
+        .to_string()
+        .as_bytes()
+        .rchunks(3)
+        .rev()
+        .map(|chunk| std::str::from_utf8(chunk).expect("decimal digits"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn thinking_detail(level: crate::config::ThinkingLevel) -> &'static str {
+    use crate::config::ThinkingLevel::*;
+    match level {
+        Off => "No reasoning",
+        On => "Reasoning enabled",
+        Minimal => "Very brief reasoning",
+        Low => "Light reasoning",
+        Medium => "Balanced depth and latency",
+        High => "Deep reasoning",
+        Xhigh => "Extended reasoning",
+        Max => "Maximum reasoning",
+        Ultra => "Maximum reasoning with subagents",
+    }
+}
+
+/// Provider navigation uses exactly the same index projection as keyboard input.
+pub(super) fn scope(shell: &mut ShellState, value: &str) -> Option<()> {
+    let Panel::SelectList {
+        action: PanelAction::SelectGroupedModel {
+            providers, scope, ..
+        },
+        selected,
+        ..
+    } = shell.panel.as_mut()?
+    else {
+        return None;
+    };
+    let next = if value == "all" {
+        None
+    } else {
+        let index = value.strip_prefix("provider.")?.parse::<usize>().ok()?;
+        if value != format!("provider.{index}") {
+            return None;
+        }
+        let provider = providers.get(index)?;
+        if providers[..index].contains(provider) {
+            return None;
+        }
+        Some(provider.clone())
+    };
+    if *scope != next {
+        *scope = next;
+        *selected = 0;
+        shell.panel_epoch = shell.panel_epoch.wrapping_add(1);
+        shell.painted_panel = None;
+    }
+    Some(())
 }
 
 /// Case-insensitive occurrences of `query` in `label` as UTF-16 `[from, to)`
@@ -187,7 +539,19 @@ fn match_ranges(label: &str, query: &str) -> Vec<Value> {
 }
 
 pub(super) fn select(shell: &mut ShellState, item: &str) -> Option<()> {
-    let raw: usize = item.parse().ok()?;
+    let raw: usize = if matches!(
+        shell.panel,
+        Some(Panel::SelectList {
+            action: PanelAction::SelectThinking(_),
+            ..
+        })
+    ) {
+        item.strip_prefix(&format!("{}.item.", id(shell)))?
+            .parse()
+            .ok()?
+    } else {
+        item.parse().ok()?
+    };
     let panel = shell.panel.as_mut()?;
     if !interactive(panel) {
         return None;
@@ -227,6 +591,10 @@ pub(super) fn filter(shell: &ShellState) -> Option<&str> {
         return None;
     }
     match panel {
+        Panel::SelectList {
+            action: PanelAction::SelectThinking(_),
+            ..
+        } => None,
         Panel::SelectList { filter, .. } => Some(filter),
         Panel::SessionPicker { picker } => Some(&picker.filter),
         _ => None,

@@ -131,27 +131,37 @@ claim is supported.
 
 ## Scroll and resize work boundary
 
-Octet explicitly enables the preserving Pi renderer. Structural repairs emit
-only the live viewport and do not allocate a replay-output buffer proportional
-to retained history or send `ED 2`/`ED 3`. Saved native rows remain emitted
-snapshots; session/source/copy and application-owned navigation retain canonical
-results. Initial native paint and ordinary append still emit complete history,
-including an eagerly materialized resumed branch.
+Octet uses the v0.8.1 canonical Pi clear/replay policy, not the generic library's
+optional saved-snapshot policy. Dimension changes and canonical changes above
+the old viewport emit `ED 2`/`ED 3` and rebuild the complete native document inside
+one synchronized frame, including cursor restoration. Ordinary appends and
+visible-row diffs are unchanged; overlays and disclosure do not unconditionally
+force replay. Terminal-owned resume eagerly materializes the complete branch.
+The bounded PageUp/`--mouse app` semantic viewport is a separate ownership mode,
+not a substitute for complete canonical native history.
 
 Resize notifications settle after 75 ms of quiet with a 150 ms maximum delay;
 composer edits/readiness changes bypass settling. Height-only changes keep
-wrapped block caches, and a resize epoch covers away-and-back dimensions.
-Threaded visual anchors are promoted using the old renderer layout before width
-reflow. Tests scale retained history while bounding repair bytes and verify
-semantic reading positions, saved sentinels, and Kitty placement restoration.
+wrapped block caches. A changed resize epoch forces replay even after an
+away-and-back resize, including final and suspend flushes. Threaded visual
+anchors are promoted using the old renderer layout before width reflow.
+Production-factory continuous VT regressions check every saved and live marker
+after height, width, and away-and-back resize, coalesced output, and historical
+insertion; separate tests cover layout reuse and semantic reading positions.
 
-This removes history-sized **wire replay and replay-output allocation**, not
-all history-sized work. Width reflow, canonical frame construction, semantic
-source mapping, image-bearing full-component fallbacks, and retrospective layout
-can still depend on history. Saved-row preservation does not establish native
-wheel-offset/selection behavior or GPU
-paint smoothness. Keep physical-terminal and long-duration qualification
-separate from library and PTY evidence.
+Post-paint animation visibility uses the renderer's actual native seam and sparse
+active-heading offsets from revision-fenced completed-frame geometry, not a
+monotonic pre-write estimate. A tall-progress → short-result regression checks
+visible `Working` self-waking without resize or more semantic notifications. This
+closes that reproduced freeze path, not every freeze or physical-terminal journey.
+
+Complete structural rebuilds scale **wire replay and replay-output allocation**
+with history and can reset the native reading position. Width reflow, canonical
+frame construction, semantic source mapping, image-bearing full-component
+fallbacks, and retrospective layout can also depend on history. No constant
+live-grid repair bound or saved-snapshot product guarantee is claimed. Keep
+physical-terminal reflow, selection, paint smoothness, and long-duration
+qualification separate from library and PTY evidence.
 
 ## Visual stability is separate from throughput
 

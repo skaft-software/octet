@@ -1314,10 +1314,92 @@ fn model_provider_heading(catalog: &ModelCatalog, model: &octet_ai::ModelSpec) -
     }
 }
 
+/// Public presentation facts only; endpoint headers and model presets never enter TSP.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelPickerDetail {
+    pub(crate) name: String,
+    pub(crate) context: u64,
+    pub(crate) output: u64,
+    pub(crate) price: String,
+    pub(crate) cache_price: Option<String>,
+    pub(crate) input: String,
+    pub(crate) badges: Vec<String>,
+    pub(crate) source: Vec<(String, String)>,
+}
+
+fn native_model_detail(model: &octet_ai::ModelSpec) -> ModelPickerDetail {
+    use octet_ai::Modality;
+    let caps = &model.capabilities;
+    let mut badges = Vec::new();
+    if caps.reasoning.is_some() {
+        badges.push("reasoning".into());
+    }
+    if caps.input_modalities.contains(Modality::Image) {
+        badges.push("vision".into());
+    }
+    if caps.input_modalities.contains(Modality::Audio) {
+        badges.push("audio".into());
+    }
+    if caps.tools {
+        badges.push("tools".into());
+    }
+    if caps.structured_output {
+        badges.push("structured output".into());
+    }
+    let input = [(Modality::Image, "image"), (Modality::Audio, "audio")]
+        .into_iter()
+        .filter(|(modality, _)| caps.input_modalities.contains(*modality))
+        .map(|(_, label)| label)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let input = if input.is_empty() {
+        "text".into()
+    } else {
+        format!("text · {input}")
+    };
+    let metadata =
+        octet_ai::model_metadata::model_capability_metadata(&model.endpoint.0, &model.api_name);
+    let source = ["knowledge", "release_date", "last_updated", "open_weights"]
+        .into_iter()
+        .filter_map(|key| {
+            let value = metadata.as_ref()?.get(key)?;
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                serde_json::Value::Bool(value) => value.to_string(),
+                _ => return None,
+            };
+            Some((key.to_owned(), value))
+        })
+        .collect();
+    ModelPickerDetail {
+        name: model_label(model),
+        context: model.limits.context_window,
+        output: model.limits.max_output_tokens,
+        price: model.pricing.as_ref().map_or_else(
+            || "—".into(),
+            |pricing| {
+                format!(
+                    "{} · {}",
+                    compact_rate_value(pricing.input),
+                    compact_rate_value(pricing.output)
+                )
+            },
+        ),
+        cache_price: model
+            .pricing
+            .as_ref()
+            .map(|pricing| compact_rate_value(pricing.cache_read)),
+        input,
+        badges,
+        source,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelPickerPresentation {
     pub(crate) ids: Vec<ModelId>,
     pub(crate) providers: Vec<String>,
+    pub(crate) details: Vec<ModelPickerDetail>,
     pub(crate) labels: Vec<String>,
     pub(crate) descriptions: Vec<Option<String>>,
 }
@@ -1345,6 +1427,7 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
                 model_label(model),
                 model.id.clone(),
                 model_picker_metadata(model),
+                native_model_detail(model),
             )
         })
         .collect::<Vec<_>>();
@@ -1377,10 +1460,12 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
     let mut presentation = ModelPickerPresentation {
         ids: Vec::with_capacity(rows.len()),
         providers: Vec::with_capacity(rows.len()),
+        details: Vec::with_capacity(rows.len()),
         labels: Vec::with_capacity(rows.len()),
         descriptions: Vec::with_capacity(rows.len()),
     };
-    for (provider, label, id, metadata) in rows {
+    for (provider, label, id, metadata, detail) in rows {
+        presentation.details.push(detail);
         let media = if metadata.media.is_empty() {
             String::new()
         } else {
@@ -1467,6 +1552,8 @@ where
         action: PanelAction::SelectGroupedModel {
             models: presentation.ids,
             providers: presentation.providers,
+            details: presentation.details,
+            scope: None,
         },
     });
     shell.render();
@@ -1495,6 +1582,7 @@ where
                                 presentation.descriptions,
                                 presentation.ids,
                                 presentation.providers,
+                                presentation.details,
                             );
                         }
                         Ok(false) => {} // The launch identity is no longer current.
@@ -1613,6 +1701,8 @@ where
         PanelAction::SelectGroupedModel {
             models: presentation.ids.clone(),
             providers: presentation.providers,
+            details: presentation.details,
+            scope: None,
         },
     )
     .await?

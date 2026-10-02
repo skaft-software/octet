@@ -977,6 +977,8 @@ pub(crate) enum PanelAction {
     SelectGroupedModel {
         models: Vec<ModelId>,
         providers: Vec<String>,
+        details: Vec<crate::tui::pickers::ModelPickerDetail>,
+        scope: Option<String>,
     },
     /// Select a session by path.
     SelectSession(Vec<std::path::PathBuf>),
@@ -3686,6 +3688,7 @@ impl InteractiveShell {
             let _ = render_tx.try_send(RenderCommand::Render);
         } else if let Some(tui) = self.tui.as_mut() {
             tui.request_render();
+            self.state.frame_written_at(tui.rendered_viewport_top());
         }
     }
 
@@ -6220,6 +6223,7 @@ impl InteractiveShell {
         descriptions: Vec<Option<String>>,
         ids: Vec<ModelId>,
         providers: Vec<String>,
+        details: Vec<crate::tui::pickers::ModelPickerDetail>,
     ) -> bool {
         let mut state = self.state.borrow_mut();
         let Some(Panel::SelectList {
@@ -6246,9 +6250,17 @@ impl InteractiveShell {
                 .cloned();
         *current_items = items;
         *current_descriptions = descriptions;
+        let scope = match action {
+            PanelAction::SelectGroupedModel { scope, .. } => scope
+                .clone()
+                .filter(|provider| providers.contains(provider)),
+            _ => None,
+        };
         *action = PanelAction::SelectGroupedModel {
             models: ids,
             providers,
+            details,
+            scope,
         };
         let filtered =
             filtered_indices_for_action(current_items, current_descriptions, action, filter);
@@ -7594,11 +7606,14 @@ mod surface_frame;
 mod surface_layout;
 mod terminal_text;
 pub(crate) mod tern;
+mod tern_agents;
 mod tern_completion;
 mod tern_images;
 pub(crate) mod tern_input;
 mod tern_picker;
+mod tern_sessions;
 mod tern_theme;
+mod tern_welcome;
 mod tool_render;
 mod transcript_cache;
 mod transcript_navigation;
