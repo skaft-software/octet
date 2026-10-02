@@ -2140,10 +2140,13 @@ impl ShellState {
         }
         let cache = self.transcript_cache.get_mut();
         cache.dirty = true;
-        // A render is coalesced, so a hot streaming block can be touched many
-        // times before the next frame. Record it once rather than making each
-        // frame linearly scan the complete transcript for revision changes.
-        if !cache.dirty_blocks.contains(&index) {
+        // New blocks and invalidated widths are rendered with their latest
+        // revision without a dirty entry. Only deduplicate replacements for
+        // already cached rows, not every block in an unpainted hydration batch.
+        if cache.width.is_some()
+            && index < cache.block_revisions.len()
+            && !cache.dirty_blocks.contains(&index)
+        {
             cache.dirty_blocks.push(index);
         }
     }
@@ -7566,6 +7569,8 @@ mod changelog_tests;
 mod ordinary_surface_contract_tests;
 #[cfg(test)]
 mod path_completion_tests;
+#[cfg(test)]
+mod resume_bookkeeping_tests;
 #[cfg(test)]
 mod startup_readiness_tests;
 #[cfg(test)]

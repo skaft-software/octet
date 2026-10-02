@@ -14,6 +14,35 @@ use crate::{ColorDepth, TerminalCapabilities, Theme};
 
 const ADVERSARIAL: &str = "# Heading\n\nA **strong** link to [docs](https://example.com) and `code`.\n\n- first\n  - nested\n- second\n\n```rust\nfn main() {\n    println!(\"界\");\n}\n```\n";
 
+#[test]
+fn finalized_constructor_parses_once_without_streaming_work() {
+    let cases = [
+        "",
+        ADVERSARIAL,
+        "[late][ref]\n\n| a | b |\n|---|---|\n| 界 | 👩‍💻 |\n\n[ref]: https://example.com\n",
+        "```mermaid\ngraph LR\n A --> B\n```\n\n$\\frac{1}{2}$\n",
+        "unterminated ```\r\n\t\x1b[2J\u{202e}e\u{301}",
+    ];
+    for text in cases {
+        let mut stream = StreamingMarkdown::from_finalized_text(text);
+        assert_eq!(stream.raw_bytes(), text.as_bytes());
+        assert_eq!(stream.raw_text(), text);
+        assert_eq!(stream.committed(), &markdown::parse(text));
+        assert!(stream.is_finished());
+        assert!(stream.unstable_source().is_empty());
+        let stats = stream.stats();
+        assert_eq!(stats.parse_passes, 1);
+        assert_eq!(stats.reparsed_bytes, text.len() as u64);
+        assert_eq!(stats.fence_scanned_bytes, 0);
+        assert_eq!(stats.preview_scanned_bytes, 0);
+        assert_eq!(stats.preview_copied_bytes, 0);
+        stream.finish();
+        stream.push_str("ignored after completion");
+        assert_eq!(stream.stats(), stats);
+        assert_eq!(stream.raw_text(), text);
+    }
+}
+
 fn prior_list_marker(line: &str) -> bool {
     line.starts_with("- ")
         || line.starts_with("* ")

@@ -26,6 +26,51 @@ fn backend_normalizes_bare_lf_without_changing_existing_crlf() {
 }
 
 #[test]
+fn normalized_frames_borrow_their_source_and_preserve_chunk_boundaries() {
+    let source = "界 👩‍💻\r\nnext\r\n";
+    let mut preceding_cr = false;
+    assert!(matches!(
+        normalize_line_endings(source, &mut preceding_cr),
+        Cow::Borrowed(_)
+    ));
+    for source in ["", source, "\n界\r\n\n👩‍💻\r\n", "a\r\nb\nc\r\n"] {
+        let mut previous = false;
+        let expected = normalize_line_endings(source, &mut previous).into_owned();
+        for split in (0..=source.len()).filter(|index| source.is_char_boundary(*index)) {
+            let mut previous = false;
+            let mut actual = normalize_line_endings(&source[..split], &mut previous).into_owned();
+            // An empty write must not lose a trailing CR from the prior chunk.
+            assert!(normalize_line_endings("", &mut previous).is_empty());
+            actual.push_str(&normalize_line_endings(&source[split..], &mut previous));
+            assert_eq!(actual, expected, "split at {split}");
+        }
+    }
+}
+
+#[test]
+fn diagnostic_payload_is_retained_only_when_logging_is_enabled() {
+    let payload = "synthetic native history\r\n".repeat(40_000);
+    let mut backend = terminal();
+    backend.write(SYNC_OUTPUT_BEGIN);
+    backend.write(&payload);
+    assert!(backend.pending_log.is_empty());
+    assert_eq!(backend.pending_log.capacity(), 0);
+    backend.write(SYNC_OUTPUT_END);
+    let expected = backend.out.clone();
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("synthetic-write.log");
+    let mut logged = terminal();
+    logged.write_log = Some(File::create(&path).unwrap());
+    logged.write(SYNC_OUTPUT_BEGIN);
+    logged.write(&payload);
+    assert!(!logged.pending_log.is_empty());
+    logged.write(SYNC_OUTPUT_END);
+    assert_eq!(logged.out, expected);
+    assert_eq!(std::fs::read(path).unwrap(), expected);
+}
+
+#[test]
 fn synchronized_frame_is_one_atomic_backend_write_even_without_csi_2026_support() {
     let mut backend = terminal();
     backend.write(SYNC_OUTPUT_BEGIN);

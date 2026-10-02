@@ -4255,51 +4255,49 @@ fn apply_configured_custom_model_overrides(
     configured: &[crate::auth::custom::CustomModel],
     auto_discover: bool,
 ) -> Vec<crate::auth::custom::CustomModel> {
+    merge_custom_models_with_overrides(
+        discovered,
+        configured,
+        auto_discover,
+        std::collections::hash_map::RandomState::new(),
+    )
+}
+
+fn merge_custom_models_with_overrides<S>(
+    discovered: Vec<crate::auth::custom::CustomModel>,
+    configured: &[crate::auth::custom::CustomModel],
+    auto_discover: bool,
+    hash_builder: S,
+) -> Vec<crate::auth::custom::CustomModel>
+where
+    S: std::hash::BuildHasher + Clone,
+{
     if configured.is_empty() {
         return discovered;
     }
-    if !auto_discover {
-        // Explicit opt-out: the registry is truth and the endpoint's
-        // self-description is not consulted for this provider.
-        let mut merged = Vec::with_capacity(discovered.len() + configured.len());
-        for model in discovered {
-            merged.push(
-                configured
-                    .iter()
-                    .find(|override_model| override_model.api_name == model.api_name)
-                    .cloned()
-                    .unwrap_or(model),
-            );
-        }
-        for model in configured {
-            if !merged
-                .iter()
-                .any(|existing| existing.api_name == model.api_name)
-            {
-                merged.push(model.clone());
-            }
-        }
-        return merged;
+    let mut configured_by_name =
+        std::collections::HashMap::with_capacity_and_hasher(configured.len(), hash_builder.clone());
+    for model in configured {
+        // The original lookup used `find`: exact, case-sensitive identity and
+        // the first configured entry win even when the registry has duplicates.
+        configured_by_name
+            .entry(model.api_name.as_str())
+            .or_insert(model);
     }
-
-    // Custom OpenAI-compatible providers with discovery enabled treat
-    // endpoint-asserted limits as authoritative; the registry is a
-    // seed/fallback. A stale `context_window` pin must never clobber a live
-    // `max_model_len` assertion, otherwise every startup cache write and
-    // hourly refresh re-entombs the stale value and restarts can never
-    // converge after a server profile switch. All non-limit fields keep
-    // configured-wins behavior: the user's file remains the better source
-    // for display names, capability flags, reasoning values, pricing, and
-    // presets. Output is the tighter of both caps, clamped to the live
-    // window, so a vLLM `input+output <= max_model_len` profile shrink is
-    // always honored in the safe (smaller) direction.
-    let mut merged = Vec::with_capacity(discovered.len() + configured.len());
+    let capacity = discovered.len() + configured.len();
+    let mut emitted_names =
+        std::collections::HashSet::with_capacity_and_hasher(capacity, hash_builder);
+    let mut merged = Vec::with_capacity(capacity);
     for model in discovered {
-        match configured
-            .iter()
-            .find(|override_model| override_model.api_name == model.api_name)
-        {
-            Some(configured_model) => {
+        // Inventory duplicates are intentionally retained in their original
+        // order. Membership only suppresses appended configured entries.
+        emitted_names.insert(model.api_name.clone());
+        match configured_by_name.get(model.api_name.as_str()).copied() {
+            Some(configured_model) if auto_discover => {
+                // Endpoint-asserted limits are authoritative; every non-limit
+                // field (names, capabilities, reasoning, pricing, presets)
+                // remains configured-wins. Output keeps the tighter cap,
+                // clamped to the effective window.
                 let mut effective = configured_model.clone();
                 if model.context_window_asserted {
                     effective.context_window = model.context_window;
@@ -4320,14 +4318,13 @@ fn apply_configured_custom_model_overrides(
                 effective.max_output_tokens_asserted = model.max_output_tokens_asserted;
                 merged.push(effective);
             }
+            // Explicit opt-out: the registry is truth, including its limits.
+            Some(configured_model) => merged.push(configured_model.clone()),
             None => merged.push(model),
         }
     }
     for model in configured {
-        if !merged
-            .iter()
-            .any(|existing| existing.api_name == model.api_name)
-        {
+        if emitted_names.insert(model.api_name.clone()) {
             merged.push(model.clone());
         }
     }
@@ -8521,6 +8518,10 @@ mod bounded_env_tests {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "bootstrap/tests/custom_model_inventory_indexing.rs"]
+mod custom_model_inventory_indexing_tests;
 
 #[cfg(test)]
 mod reasoning_ingress_review_tests {
