@@ -1426,13 +1426,13 @@ impl AiClient {
         overrides: crate::RequestOverrides,
         poll_after_ms: Option<u64>,
     ) -> Result<ResponseStream, AiError> {
+        let started = Instant::now();
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         Self::validate_deferred_overrides(&overrides)?;
         let transport = self.deferred_endpoint_transport(model)?;
         let (request, diagnostics) = prepare_host_request(model, req)?;
         self.mark_request_dispatch();
-        let started = Instant::now();
         let stream = transport
             .submit_deferred(
                 HostStreamModel::from(model),
@@ -1463,6 +1463,7 @@ impl AiClient {
         leaf_generation: u64,
         wait_ms: Option<u64>,
     ) -> Result<ResponseStream, AiError> {
+        let started = Instant::now();
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         permit.consume(leaf_generation)?;
@@ -1480,7 +1481,6 @@ impl AiClient {
         }
         let transport = self.deferred_endpoint_transport(model)?;
         self.mark_request_dispatch();
-        let started = Instant::now();
         let stream = transport
             .fetch_deferred(HostStreamModel::from(model), handle, wait_ms)
             .await?;
