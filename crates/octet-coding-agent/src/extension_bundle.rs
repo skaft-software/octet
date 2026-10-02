@@ -241,11 +241,6 @@ fn validate_bundle_manifest(
     archive_root: &str,
 ) -> anyhow::Result<InstalledBundleManifest> {
     validate_bundle_id(&manifest.name)?;
-    if manifest.name == super::extension_package::PACKAGE_ID {
-        anyhow::bail!(
-            "octet-serve is an application package and must use package.toml, not an executable-extension bundle"
-        );
-    }
     if manifest.name != archive_root {
         anyhow::bail!(
             "extension manifest name {:?} does not match archive directory {:?}",
@@ -670,7 +665,7 @@ pub(super) fn list_installed(root: &Path) -> anyhow::Result<Vec<InstalledBundle>
         let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if validate_bundle_id(&id).is_err() || id == super::extension_package::PACKAGE_ID {
+        if validate_bundle_id(&id).is_err() {
             continue;
         }
         let file_type = entry
@@ -871,7 +866,6 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "octet-browse",
                 "octet-computer-use",
                 "octet-mcp",
                 "octet-subagents",
@@ -1049,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_requires_exact_octet_compatibility_and_cannot_claim_serve_id() {
+    fn bundle_requires_exact_octet_compatibility() {
         let source = manifest("test-extension");
         let parsed = octet_agent::ExtensionManifest::parse(&source).unwrap();
         validate_bundle_manifest(&parsed, "test-extension").unwrap();
@@ -1060,9 +1054,5 @@ mod tests {
         );
         let parsed = octet_agent::ExtensionManifest::parse(&missing).unwrap();
         assert!(validate_bundle_manifest(&parsed, "test-extension").is_err());
-
-        let serve = source.replace("test-extension", "octet-serve");
-        let parsed = octet_agent::ExtensionManifest::parse(&serve).unwrap();
-        assert!(validate_bundle_manifest(&parsed, "octet-serve").is_err());
     }
 }

@@ -230,15 +230,6 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   snapshot, so read state before each indexed action. The bundled skill documents
   the full observe-act-verify loop.
 
-## Relationship to octet-browse
-
-`octet-browse` is [deprecated but still installable](../octet-browse/README.md#deprecation).
-It drives an isolated, Octet-owned Chromium with manual authentication, which
-remains the safer surface for authenticated page work. This bundle drives your
-actual desktop, so it can see anything you can see — including a browser you
-already have open. Prefer Browse for anything involving a login or a saved
-session.
-
 ## Tests
 
 The suite runs without a driver; the integration tests skip automatically when

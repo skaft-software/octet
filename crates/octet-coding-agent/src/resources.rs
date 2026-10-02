@@ -1859,7 +1859,7 @@ Environment:
             "CHANGELOG.md",
             "THIRD_PARTY_NOTICES.md",
             "LICENSE",
-            "extensions/octet-browse/REFERENCE.md",
+            "extensions/octet-mcp/REFERENCE.md",
             "extensions/octet-subagents/REFERENCE.md",
             "crates/octet-ai/src/responses_ws.rs",
             "sdk/typescript/src/api_v03.ts",
@@ -1870,8 +1870,8 @@ Environment:
         for name in [
             "../SECURITY.md",
             "/README.md",
-            "extensions/octet-browse/extension.toml",
-            "extensions/octet-browse/extension.py",
+            "extensions/octet-mcp/extension.toml",
+            "extensions/octet-mcp/config.example.json",
             "crates/octet-coding-agent/src/main.rs",
             // The retired parity inventory is not part of the public package.
             "docs/reference/pi-compat/profiles/0.84.4.json",

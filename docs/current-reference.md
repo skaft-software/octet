@@ -10,8 +10,7 @@ not a second user manual.
 | Topic / old anchor | Canonical content |
 | --- | --- |
 | <a id="optional-packages"></a>Optional packages | [Package choices and availability](installation.md#optional-packages) |
-| <a id="executable-extension-bundles"></a>Executable extension bundles | [Package CLI](cli.md#packages-and-serve), [activation menu](commands.md#extension-activation-menu), [extension contract](extensions.md) |
-| <a id="graphical-serve-extension"></a>Graphical Serve extension | [Serve package commands](cli.md#packages-and-serve) and [graphical guide](experimental/octet-serve/README.md) |
+| <a id="executable-extension-bundles"></a>Executable extension bundles | [Package CLI](cli.md#packages), [activation menu](commands.md#extension-activation-menu), [extension contract](extensions.md) |
 | <a id="container"></a>Container | [Source container build](installation.md#container) |
 | <a id="quick-start"></a>Quick start | [Provider setup](providers.md) |
 | <a id="use-a-cloud-model"></a>Use a cloud model | [Cloud credentials and models](providers.md#cloud-setup), [Codex login](providers.md#codex-subscription-login) |

@@ -383,8 +383,8 @@ current reload generation. A malformed manifest, rejected link, or ID mismatch
 does not prevent healthy skills from loading and no longer disappears into
 startup-only stderr.
 
-The extension menu enumerates managed executable bundles rather than the
-separate `octet-serve` application. It edits only the selected name in the user
+The extension menu enumerates managed executable bundles. It edits only the
+selected name in the user
 config's `enabled_extensions`, preserves independent trust grants and unrelated
 activation, refuses to redirect a shadowed global bundle to project/explicit
 code, and performs a full idle-boundary rebuild so the new process set is live.

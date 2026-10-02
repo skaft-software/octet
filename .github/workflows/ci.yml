@@ -31,9 +31,7 @@ jobs:
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
-      - run: cargo audit --file extensions/octet-serve/Cargo.lock
       - run: cargo deny check
-      - run: cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
 
   quality:
     runs-on: ubuntu-24.04
@@ -67,7 +65,6 @@ jobs:
             scripts/build-octet-image.sh \
             scripts/package-octet-extension-release.sh \
             scripts/package-octet-release.sh \
-            scripts/package-octet-serve-release.sh \
             scripts/test-binary-installer.sh \
             scripts/package-octet-npm.sh \
             scripts/test-octet-npm.sh \
@@ -100,13 +97,9 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --doc --profile ci-test --locked
-      - run: cargo fmt --manifest-path extensions/octet-serve/Cargo.toml -- --check
-      - run: cargo clippy --manifest-path extensions/octet-serve/Cargo.toml --all-targets --locked -- -D warnings
-      - run: cargo test --manifest-path extensions/octet-serve/Cargo.toml --profile ci-test --locked
       # Cargo 1.90 stabilized packaging interdependent workspace crates. Keep
       # the dedicated compilation check on the 1.86 MSRV in the job below; use
-      # 1.90 only to assemble the publishable crates together. The serve feature depends on the
-      # publish-excluded optional extension.
+      # 1.90 only to assemble the publishable crates together.
       - name: Install Rust 1.90 packaging toolchain
         run: rustup toolchain install 1.90.0 --profile minimal --no-self-update
       - run: cargo +1.90.0 package --workspace --exclude octet-coding-agent --locked --no-verify
@@ -141,9 +134,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version-file: apps/web/.node-version
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          node-version: "22.13.0"
       - name: Verify generated API 0.3 artifacts and language conformance
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -155,8 +146,7 @@ jobs:
           PYTHONPATH=sdk/python python3 -m unittest sdk/python/tests/test_extension_api_v03.py
           node sdk/typescript/tests/api_v03_conformance.mjs
           node sdk/typescript/tests/package_conformance.mjs
-          npm ci --prefix apps/web
-          apps/web/node_modules/.bin/tsc -p sdk/typescript/tsconfig.json
+          npx --yes --package typescript@5.9.3 tsc -p sdk/typescript/tsconfig.json
 
   test:
     strategy:
@@ -183,42 +173,13 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - run: cargo check --workspace --all-targets --all-features --locked
 
-  web:
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: apps/web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: apps/web/.node-version
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
-      - run: npm ci
-      - run: npm audit --audit-level=high
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run check:fonts
-      - run: npm run build
-      - run: npm run check:external
-      - run: npm run bundle:check
-      - run: cargo build -p octet-coding-agent --bin octet --features serve --locked
-        working-directory: ${{ github.workspace }}
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
-      - run: npm run test:e2e:live
-
   smoke-install:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - run: cargo install --debug --locked --path crates/octet-coding-agent --bins --features serve --root "$RUNNER_TEMP/octet-install"
+      - run: cargo install --debug --locked --path crates/octet-coding-agent --bins --root "$RUNNER_TEMP/octet-install"
       - run: "$RUNNER_TEMP/octet-install/bin/octet --version"
       - run: "$RUNNER_TEMP/octet-install/bin/octet --help"
       - name: Smoke-test installed native host
@@ -227,4 +188,3 @@ jobs:
           printf '%s\n' '{"protocol_version":1,"request_id":"ci-smoke","command":"hello"}' \
             | "$RUNNER_TEMP/octet-install/bin/octet-host" \
             | grep -F '"type":"hello"' >/dev/null
-      - run: scripts/smoke-octet-serve-installed.sh "$RUNNER_TEMP/octet-install/bin/octet"

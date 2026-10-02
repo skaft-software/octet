@@ -43,7 +43,6 @@ payload identity and order.
 | --- | --- |
 | TUI attachment or built-in `read` | PNG/JPEG/GIF/WebP images, **5 MiB each**; native WAV/MP3 audio, **20 MiB each**, only with a compatible model on OpenAI Chat Completions. |
 | Native `octet-host` `media` | Same per-file limits; at most **8 images / 20 MiB total**, **4 audio clips / 40 MiB total**, and **12 items per request**. [Run request contract](sdk.md#run-requests). |
-| Serve web composer | PNG/JPEG/GIF/WebP and bounded document context. Audio attachments are **not implemented**. [Serve](experimental/octet-serve/README.md). |
 
 Attachments remain ordered with text. Each user submission admits at most
 **8 images / 20 MiB of inline image bytes** before decoding; this does not

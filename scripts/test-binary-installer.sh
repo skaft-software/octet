@@ -189,7 +189,7 @@ for line in pathlib.Path(sys.argv[4]).read_text().splitlines():
 if variant == "missing-reference":
     del files["SECURITY.md"]
 if variant == "extension-runtime":
-    files["extensions/octet-browse/extension.py"] = b"# must not ship\n"
+    files["extensions/octet-mcp/extension.py"] = b"# must not ship\n"
 directories = [package] + sorted({
     f"{package}/{parent.as_posix()}"
     for name in files for parent in pathlib.PurePosixPath(name).parents
@@ -416,7 +416,7 @@ while read -r kind relative; do
     case "$relative" in docs/*|examples/*|sdk/*) continue ;; esac
     test -f "$positive_home/share/octet/$relative"
 done < "$script_directory/../docs/package-assets.txt"
-test ! -e "$positive_home/share/octet/extensions/octet-browse/extension.py"
+test ! -e "$positive_home/share/octet/extensions/octet-mcp/extension.py"
 
 test -f "$positive_home/share/octet/docs/index.md"
 test -f "$positive_home/share/octet/docs/current-reference.md"

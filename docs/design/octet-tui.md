@@ -453,8 +453,7 @@ adjustments in the middle, and output reserve/remaining capacity at the right.
 Every displayed component owns a distinct colour, and a category already
 accounted for by its actual owner is not duplicated as a decorative slice.
 
-`/extensions` lists managed executable bundles only; the separately packaged
-`octet-serve` application is not an activation target. Enter updates only the
+`/extensions` lists managed executable bundles only. Enter updates only the
 selected name in the user config's `enabled_extensions`, never trust, then
 rebuilds the Agent and extension host at the idle boundary so enable and disable
 take effect immediately. A project or explicit definition shadowing the managed

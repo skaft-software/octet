@@ -1,6 +1,6 @@
 # Distribution channels
 
-Octet 0.8.1 native, Serve and five executable-bundle asset availability is recorded
+Octet 0.8.1 native and executable-bundle asset availability is recorded
 on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1).
 Public-install results are recorded there. See [installation](installation.md) for
 native installation or a source build, and [release notes](releases/v0.8.1.md)
@@ -26,15 +26,14 @@ retains its historical version-matched assets and channel evidence.
 | Product library | `octet_sdk` |
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
-| Executable bundles | `octet-browse`, `octet-computer-use`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
-| Separate application package | `octet-serve` |
+| Executable bundles | `octet-computer-use`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK, Serve and five executable-bundle distribution versions | `0.8.1`; installed compatibility `requires_octet = "=0.8.1"` |
+| Product, SDK, and four executable-bundle distribution versions | `0.8.1`; installed compatibility `requires_octet = "=0.8.1"` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
-Current extension authoring and the five executable-bundle manifests target API
+Current extension authoring and the four executable-bundle manifests target API
 `0.4`, the feature-negotiated wire supported by the Python `Extension` runtime
 alongside retained `0.1`/`0.2`. Canonical API `0.3` remains a separate supported
 wire; generated `0.3` types are not a complete `0.3` process runtime. The minimal
@@ -52,12 +51,11 @@ The release workflows do not publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets; verify public installation after upload. |
-| Five executable bundles | `release-serve.yml` | Separate exact-version `octet-browse`, `octet-computer-use`, `octet-mcp`, `octet-subagents`, and `octet-web-search` archives; install/update never enables them or persists trust grants. |
+| Four executable bundles | `release-serve.yml` | Separate exact-version `octet-computer-use`, `octet-mcp`, `octet-subagents`, and `octet-web-search` archives; install/update never enables them or persists trust grants. |
 | npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft/octet*` packages, platform-first. Requires verified registry ownership and trusted publishers for all four packages; disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication required; the public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Do not advertise registry installation. Publishing the CLI/dependency graph and verifying registry ownership is separate work. |
 | Homebrew | `homebrew-formula.yml` | Separate signed-asset handoff and protected tap pull request; not automatic with the binary release. |
-| Serve | `release-serve.yml` | Separate exact-version application package and installation checks. |
 | Python/TypeScript SDK registries | Not provided by the CLI release workflow | Source SDKs/generated bindings are not automatically published to PyPI or npm by the four-package CLI job. |
 
 Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the

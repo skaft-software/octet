@@ -127,9 +127,9 @@ def main():
         invoke(code, source, package, listing, success=False)
         security.unlink()
         shutil.copyfile(ROOT / "SECURITY.md", security)
-        browse = source / "extensions/octet-browse"
-        browse.rename(source / "extensions/browse-real")
-        browse.symlink_to(source / "extensions/browse-real", target_is_directory=True)
+        browse = source / "extensions/octet-mcp"
+        browse.rename(source / "extensions/mcp-real")
+        browse.symlink_to(source / "extensions/mcp-real", target_is_directory=True)
         invoke(code, source, package, listing, success=False)
 
     if args.package:

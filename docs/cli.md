@@ -226,7 +226,7 @@ the report, not necessarily a nonzero harness exit.
 [Instructions/prompts/skills](instructions.md) and [resource discovery](resources.md)
 cover precedence, file bounds, trust, and reload.
 
-## Packages and Serve
+## Packages
 
 For reviewed local archives:
 
@@ -236,7 +236,7 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The five executable bundles and separate Serve application are pinned to the
+The four executable bundles are pinned to the
 running host exactly. This checkout's source manifests require `=0.8.1`;
 previously published 0.8.0 bundles require `=0.8.0`. The
 [0.8.1 release](https://github.com/skaft-software/octet/releases/tag/v0.8.1)
@@ -249,18 +249,11 @@ octet extension update NAME
 octet extension remove NAME
 ```
 
-The executable catalog is `octet-browse`, `octet-computer-use`, `octet-mcp`,
+The executable catalog is `octet-computer-use`, `octet-mcp`,
 `octet-subagents`, and `octet-web-search`. Checksummed bundles publish atomically under
 `~/.octet/extensions/<id>`; local updates must match the managed package ID.
 No install hook, dependency provisioning, activation, trust, or process launch
 occurs. Packaged skills require explicit loading. [Packaging contract](extensions.md).
-
-Serve is a separate version-matched application package. With a reviewed,
-compatible package installed, `octet serve` starts its loopback web interface;
-`octet serve --no-open --port 0` avoids opening a browser and lets the OS select a
-port. `extension install/update/remove octet-serve` use the published catalog;
-local archive forms above also apply. Removal leaves sessions
-and other Serve data intact. [Serve setup and limits](experimental/octet-serve/README.md).
 
 `--experimental-streamable-http-mcp` is a conspicuous **one-shot process-owner**
 opt-in for otherwise-blocked remote MCP. It is not required for local stdio MCP.

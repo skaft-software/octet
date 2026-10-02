@@ -65,9 +65,8 @@ table, and test commands.
 
 ## Not qualified here
 
-- This bundle does not implement a *browser* surface. For page-level work,
-  including anything authenticated, prefer the still-supported
-  [octet-browse](../octet-browse/README.md) (now deprecated for new automation
-  but retained for its isolated, manual-auth profile).
+- This bundle does not implement a *browser* surface. Page-level work goes
+  through the desktop you already run, including any signed-in browser session,
+  with the observe-act-verify loop below.
 - Physical-teardown detection, hard process-loss cleanup, and cross-platform
   installed-package qualification remain with the driver project.

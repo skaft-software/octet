@@ -110,7 +110,7 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-Executable extension bundles and the separate Serve application are pinned to
+Executable extension bundles are pinned to
 the host version. Install assets matching octet `0.8.1` from its version-pinned
 release, or run reviewed source extensions from this checkout with
 `--extension-dir ./extensions`. The 0.8.0 bundles require their 0.8.0 host.
@@ -126,22 +126,19 @@ For a reviewed local archive instead, use
 Installation does not enable, persist a trust grant, start code, or provision
 dependencies. Full access implicitly trusts selected executable extensions;
 enablement remains explicit. Safe mode keeps executable extensions stopped.
-Executable bundles are separate from the terminal binary and from the graphical
-Serve application. Use [resource discovery](resources.md) for source selection
+Executable bundles are separate from the terminal binary. Use [resource discovery](resources.md) for source selection
 and [extensions](extensions.md) for exact packaging, trust, atomic update, and
 removal rules. Catalog install/update selects the package matching the running
-octet version; command forms are in the [CLI reference](cli.md#packages-and-serve).
+octet version; command forms are in the [CLI reference](cli.md#packages).
 
 | Package | Canonical setup and limits |
 | --- | --- |
 | `octet-web-search` | [Brave Search (recommended) or SearXNG](../extensions/octet-web-search/README.md); public search/fetch, not a browser. |
-| `octet-browse` | **Deprecated**, still installable. [Visible isolated browser](../extensions/octet-browse/README.md); authentication is manual. Prefer the computer-use extension for new automation; see [deprecation notes](../extensions/octet-browse/README.md#deprecation). |
 | `octet-computer-use` | [Native desktop control](../extensions/octet-computer-use/README.md) (macOS/Windows/Linux) via a locally installed MIT-licensed Cua Driver; provisioning is explicit, OS permissions are yours to grant. |
 | `octet-mcp` | [MCP bridge](../extensions/octet-mcp/README.md); local stdio is supported, remote Streamable HTTP is blocked by default. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
-| `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
-The five executable-bundle manifests declare API `0.4`, distribution version
+The four executable-bundle manifests declare API `0.4`, distribution version
 `0.8.1`, and require octet `=0.8.1`; older bundles remain pinned to their
 host. Distribution and host versions are independent boundaries; an API number does not bypass the exact
 host pin. See [current authoring](extensions.md) for the Python API 0.4 process

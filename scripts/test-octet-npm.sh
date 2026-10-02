@@ -446,7 +446,7 @@ for mutation, message in [("changed", b"npm changed inventoried documentation by
             archive.addfile(member, io.BytesIO(data) if data is not None else None)
         if mutation in {"link", "traversal", "unexpected", "duplicate"}:
             name = {"link": "package/share/octet/docs/link", "traversal": "package/../escape",
-                    "unexpected": "package/share/octet/extensions/octet-browse/extension.py", "duplicate": ordinary}[mutation]
+                    "unexpected": "package/share/octet/extensions/octet-mcp/extension.py", "duplicate": ordinary}[mutation]
             member = tarfile.TarInfo(name)
             member.mode = 0o644
             if mutation == "link":

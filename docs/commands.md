@@ -115,8 +115,7 @@ UI or exactly-once inference after a transport interruption.
 
 ## Extension activation menu
 
-`/extensions` lists managed executable bundles, not the separate Serve
-application. Up/Down selects; Enter enables/disables only the selected user
+`/extensions` lists managed executable bundles. Up/Down selects; Enter enables/disables only the selected user
 `enabled_extensions` entry. It never writes a trust grant: full access implicitly
 trusts enabled extensions, while safe mode keeps executable extensions stopped.
 Selecting enabled `octet-web-search` opens the provider picker: Brave Search is recommended,

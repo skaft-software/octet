@@ -77,10 +77,7 @@ cargo test --workspace --all-targets --all-features --profile ci-test --locked
 cargo test --workspace --doc --profile ci-test --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo audit
-cargo audit --file extensions/octet-serve/Cargo.lock
 cargo deny check
-cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
-(cd apps/web && npm ci && npm audit --audit-level=high)
 git diff --check
 ```
 
@@ -94,8 +91,7 @@ fixtures and malformed-stream coverage. Session changes should cover restart
 and torn-tail behavior.
 
 The live multimodal test is intentionally ignored unless an explicitly
-configured compatible endpoint is available. Stable Serve releases must pass the
-disposable configured-provider matrix in ordinary CI. Maintainers may also run
+configured compatible endpoint is available. Maintainers may also run
 the separately approved credentialed checks in
 [configured-provider acceptance](docs/experimental/octet-serve/provider-acceptance.md)
 against the immutable release SHA. Live checks are optional; release qualification

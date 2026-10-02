@@ -71,23 +71,19 @@ than injecting the skill body. Resolve references relative to the skill director
 to `references/` or `templates/`; normal sandbox/path policy still applies, and
 `read` must be enabled.
 
-TUI and Serve do not have the same activation contract:
+Skill activation is not a durable state in the terminal frontends:
 
-- In the TUI, `/skills load NAME` resolves the skill and prefills `/skill:NAME`.
+- `/skills load NAME` resolves the skill and prefills `/skill:NAME`.
   Submitting that draft expands the `SKILL.md` body into an ordinary user message
   (plus optional arguments); it does not append a durable activation event.
   `/skills off` can record deactivation only for an activation already present on
   the branch.
-- Serve's slash-command worker appends a durable `SkillActivated` event on load
-  and `SkillDeactivated` on off. The activation event is Serve-only; TUI `off`
-  can only deactivate pre-existing state. Plain, print, and RPC do not gain this
-  activation path; their prompt preparation only expands explicit `/skill:NAME`
-  text as ordinary prompt content.
+- Plain, print, and RPC runs expand explicit `/skill:NAME` text as ordinary
+  prompt content; they do not gain an activation path.
 
-An inlined TUI body is therefore subject to ordinary history and compaction: it may
+An inlined body is therefore subject to ordinary history and compaction: it may
 be summarized away, and resume does not reconstruct a separate active-skill state
-from it. Serve activation state can be reconstructed from its session events and
-compaction snapshots; this is not a promise of durable TUI activation.
+from it. This is not a promise of durable skill activation.
 
 Skill package resource reads are bounded: discovery caps YAML frontmatter at 32
 KiB and `SKILL.md` at 256 KiB; a supporting text read is capped at 512 KiB and

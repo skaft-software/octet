@@ -37,7 +37,7 @@ scripts/package-octet-release.sh TARGET /tmp/octet-release vX.Y.Z "$PWD"
 
 Supporting generators: `scripts/generate-octet-release-metadata.py`,
 `scripts/create-source-archive.py`, `scripts/package-octet-npm.sh`,
-`scripts/generate-homebrew-formula.py`, `scripts/package-octet-serve-release.sh`.
+`scripts/generate-homebrew-formula.py`.
 
 ## 3. Local smoke test
 
