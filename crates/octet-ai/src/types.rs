@@ -1648,6 +1648,9 @@ pub struct Response {
     /// This is transport data, not assistant content, and is never serialized
     /// into model context.
     pub deferred: Option<crate::deferred::DeferredHandle>,
+    /// Attempt-scoped client observations and optional server generation timing.
+    /// Not assistant content, durable usage authority, or reconstructed GPU time.
+    pub inference: Option<crate::inference::InferenceMetrics>,
     /// Lossy mode diagnostics. Empty in Strict mode.
     pub diagnostics: Vec<crate::error::Diagnostic>,
 }

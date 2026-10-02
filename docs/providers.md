@@ -656,6 +656,16 @@ the [transport notes](design/octet-ai.md#opt-in-endpoint-lifecycle-feedback).
 
 </details>
 
+## Inference measurements (unreleased)
+
+Every supported conversation codec/transport shares attempt-scoped client
+observations, independently of billing and optional native server timing.
+[Inference measurements](inference-metrics.md) defines sources, scopes,
+unavailability, `/status`, JSONL/NDJSON/RPC events and the route coverage matrix.
+Server timing is reported only when a recognized matching terminal count/duration
+pair exists; client E2E throughput is never labeled server decode speed. No
+live-provider timing accuracy or released availability is implied.
+
 ## Reasoning
 
 ```sh

@@ -42,6 +42,23 @@ Hosts must surface those diagnostics at a lifecycle boundary. Shutdown is
 bounded, but cannot cancel an uninterruptible OS write; a timed-out worker may
 outlive its caller, and pending records are not claimed delivered.
 
+## Inference observations (unreleased)
+
+`AgentEvent::ProviderInference` carries independently frozen client and optional
+server metrics before agent settlement. The JSONL observer emits a bounded
+`provider_inference` record with attempt/logical-turn identity and no provider
+payload. Provider-request spans add `inference_scope`, `client_*` and `server_*`
+completion attributes, preserving usage buckets and uncertainty separately.
+[Inference measurements](inference-metrics.md) defines native sources, units,
+missing/invalid/provisional/conflicting states, transport scopes and forwarding.
+
+The legacy JSONL `ttft_ms` is first **agent-observed nonempty output delta**,
+not exact server first-token time. `generation_ms` remains a compatibility alias
+for `first_delta_to_turn_finished_ms`: it includes terminal framing and agent
+settlement after the first delta and must not be interpreted as server decode.
+Use the separately scoped inference record for client timing or a recognized
+server count/duration pair for **server-reported generation throughput**.
+
 ## Observer spans
 
 `octet_agent::telemetry::spans` is a small, dependency-light substrate:

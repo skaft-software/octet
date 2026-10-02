@@ -172,6 +172,7 @@ pub(super) fn steering_event_stream(
     completed: Arc<StdMutex<Option<crate::AssistantMessage>>>,
     diagnostics: Vec<crate::Diagnostic>,
     redactor: CredentialRedactor,
+    started_at: Instant,
 ) -> std::pin::Pin<
     Box<dyn futures_core::Stream<Item = Result<crate::steering::SteeringEvent, AiError>> + Send>,
 > {
@@ -196,9 +197,15 @@ pub(super) fn steering_event_stream(
                 builder.set_tool_definitions(&req.tools)?;
                 builder.requested_service_tier = req.responses.as_ref().and_then(|o|o.service_tier);
                 builder.set_buffer_ambiguous_compatibility_content(req.compatibility==crate::CompatibilityMode::Lossy);
+                let (origin, scope) = if first {
+                    (started_at, crate::inference::ClientTimingScope::Request)
+                } else {
+                    (Instant::now(), crate::inference::ClientTimingScope::ResponseSegment)
+                };
                 if first { for diagnostic in &diagnostics { builder.add_diagnostic(diagnostic.clone()); } first=false; }
                 let (tx, mut rx) = mpsc::channel(1);
                 let guard = crate::stream::guard(try_stream! { while let Some(event) = rx.recv().await { yield event; } });
+                let guard = crate::inference::measured_stream(guard, origin, scope);
                 segment = Some((id,builder,tx,guard));
             }
             let (id,builder,tx,guard) = segment.as_mut()

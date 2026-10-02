@@ -240,13 +240,23 @@ terminal paint. See [benchmark methods](../benchmarks/README.md).
 ### TUI output throughput
 
 The completion line's `tok/s E2E (last turn)` and `/status` throughput divide
-provider-reported output tokens (including reasoning) by the locally observed
-interval from `TurnStarted` to accepted `TurnFinished` for the latest attempt.
-The interval includes initial waiting, hidden thinking, network buffering, and
-local event processing/settlement. It is **not server-side generation speed**
-or a whole-task average. A retry starts a fresh interval; earlier attempts,
-retry backoff, and tool execution between turns are not aggregated into it.
-Missing request timing or zero reported output leaves the rate unavailable.
+provider-reported output tokens (including reasoning) by the latest ordinary
+AI-client request-to-canonical-completion interval. The sample freezes before
+agent persistence, settlement and terminal gates; polling still includes
+network buffering, local decode, scheduling and consumer backpressure. Legacy
+external event producers without client metrics retain the explicitly
+agent-observed `TurnStarted`-to-`TurnFinished` fallback, including settlement.
+Neither is **server-side generation speed** or a whole-task average. Retries
+start fresh samples; successor steering segments and deferred submit/poll scopes
+do not manufacture a request E2E rate. Missing timing or zero output leaves the
+rate unavailable.
+
+Recognized terminal native count/duration pairs appear separately as
+`server-reported generation`, with source/original units or explicit
+unavailability in `/status`. Their native definition is not automatically
+post-first-token decode or GPU-active time. See the unreleased
+[inference measurement contract](../inference-metrics.md) for codec/transport
+coverage, error/provisional handling and qualification limits.
 
 Do not divide all reported output tokens by first-visible-delta-to-completion
 time: hidden reasoning can consume most of the output budget before any text

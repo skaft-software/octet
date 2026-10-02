@@ -232,6 +232,7 @@ async fn run_prompt(
                 channel: OutputChannel::Reasoning,
                 text,
             } if show_reasoning => pending_output.push_str(&text),
+            AgentEvent::ProviderInference { .. } => {}
             AgentEvent::ProviderLifecycle { lifecycle } => {
                 // `--print` stdout is response-only. Surface opt-in endpoint
                 // telemetry only as a separate stderr diagnostic.

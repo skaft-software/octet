@@ -293,6 +293,7 @@ Streaming events include:
 
 - `model_delta`, `output_media`;
 - opt-in `provider_lifecycle` readiness telemetry;
+- `provider_inference` frozen client/server measurements (unreleased);
 - `provider_retry`, `provider_waiting_for_network`, `provider_operation_retry`,
   `provider_usage_uncertain`, `candidate_rejected`;
 - `tool_start`, `tool_policy`, `tool_progress`, `tool_finish`;
@@ -317,6 +318,16 @@ all host hooks and reservation commit gates finish.
 `provider_lifecycle.data` has `state` `queued`/`loading`/`ready` and nullable
 bounded `detail`. It emits only for explicitly opted-in configured endpoints,
 and is advisory telemetry, not model output or durable content.
+
+`provider_inference.data.metrics` carries independent `client`, `server` and
+`server_unavailable` observations. Offsets/durations are integer nanoseconds;
+client scopes distinguish request, steering successor, deferred submit and poll.
+The nullable server pair retains native source/unit provenance. Missing timing
+is unavailable, never a client-derived server decode rate. This additive event
+changes neither protocol `1`, assistant messages nor durable usage authority.
+CLI JSON/RPC uses `{"type":"provider_inference","metrics":{...}}` outside
+message updates. See [inference measurements](inference-metrics.md) for exact
+sources, boundaries, fields and qualification limits.
 
 `provider_retry.data` carries `attempt`, `max_attempts`, `delay_ms`, and sanitized
 `error`. Discard all provisional output/media from the failed attempt, including

@@ -218,6 +218,18 @@ async fn converse_stream_fixture_signs_exact_wire_body_and_preserves_usage() {
             _ => None,
         })
         .expect("Bedrock fixture must finish");
+    let metrics = response.inference.as_ref().unwrap();
+    let client = metrics.client.as_ref().unwrap();
+    assert_eq!(
+        client.scope,
+        Some(octet_ai::inference::ClientTimingScope::Request)
+    );
+    assert!(client.first_text_ns.is_some());
+    assert_eq!(client.reported_output_tokens, response.usage.output_tokens);
+    assert_eq!(
+        metrics.server_unavailable,
+        Some(octet_ai::inference::ServerTimingUnavailable::NotReported)
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         StreamEvent::TextDelta { delta, .. } if delta == "hello"

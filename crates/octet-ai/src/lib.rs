@@ -45,6 +45,7 @@ pub mod error;
 pub mod faux;
 pub mod host_transport;
 pub mod images;
+pub mod inference;
 mod json_repair;
 pub mod media;
 pub mod model_metadata;
@@ -103,6 +104,11 @@ pub use faux::{
     FauxToolCall,
 };
 pub use host_transport::{HostStreamModel, HostStreamTransport};
+pub use inference::{
+    ClientInferenceMetrics, ClientTimingScope, InferenceMetrics, ReportedTimingUnit,
+    ServerGenerationMetrics, ServerTimingSource, ServerTimingUnavailable,
+};
+
 pub use images::{
     GeneratedImage, ImageApi, ImageCancellation, ImageGenerationOptions, ImageGenerationRequest,
     ImageGenerationResponse, ImageInput, ImageModality, ImageModel, ImageModelCatalog,

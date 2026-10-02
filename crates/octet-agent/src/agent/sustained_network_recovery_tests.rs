@@ -35,6 +35,7 @@ impl octet_ai::HostStreamTransport for OfflineTransport {
                 response_id: None,
                 responses_output: None,
                 deferred: None,
+                inference: None,
                 diagnostics: Vec::new(),
             })),
         ])))

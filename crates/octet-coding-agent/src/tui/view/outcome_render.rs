@@ -110,6 +110,24 @@ pub(super) fn render_outcome(
         &outcome_line(&outcome.outcome, outcome.tokens_per_second, theme),
         width,
     )];
+    if matches!(
+        outcome.outcome,
+        RunOutcome::Completed { .. } | RunOutcome::CompletedWithWarnings { .. }
+    ) {
+        if let Some(rate) = outcome
+            .server_generation
+            .as_ref()
+            .and_then(|m| m.tokens_per_second())
+        {
+            lines.push(fit_line(
+                &subdued_text(
+                    theme,
+                    &format!("{rate:.1} tok/s server-reported generation (last turn)"),
+                ),
+                width,
+            ));
+        }
+    }
     let detail = match &outcome.outcome {
         // Inference diagnostics are credential-redacted at the request boundary.
         // Bound and terminal-sanitize them again at this presentation boundary.
@@ -344,5 +362,45 @@ mod tests {
         let copied = block_copy_text(&TranscriptBlock::Outcome(OutcomeBlock::new(outcome, None)));
         assert!(copied.starts_with("failed · 9.4s\nProvider unavailable␇\n"));
         assert!(copied.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+    #[test]
+    fn completion_labels_server_generation_separately_from_e2e() {
+        let theme = crate::tui::theme::test_theme();
+        let mut block = OutcomeBlock::new(
+            RunOutcome::Completed {
+                elapsed: Duration::from_secs(2),
+                summary: crate::presentation::RunSummary {
+                    files_changed: 0,
+                    tool_calls: 0,
+                    warnings: 0,
+                },
+            },
+            Some(50.0),
+        );
+        block.server_generation = Some(octet_ai::ServerGenerationMetrics {
+            source: octet_ai::ServerTimingSource::TimingsPredicted,
+            tokens: 100,
+            generation_ns: 500_000_000,
+            reported_unit: octet_ai::ReportedTimingUnit::Milliseconds,
+            prompt_ns: None,
+            queue_ns: None,
+            total_ns: None,
+        });
+        let text = render_outcome(&block, &theme, 120, false)
+            .iter()
+            .map(|line| sexy_tui_rs::strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("50 tok/s E2E (last turn)"), "{text}");
+        assert!(
+            text.contains("200.0 tok/s server-reported generation (last turn)"),
+            "{text}"
+        );
+        assert!(!text.contains("decode"), "{text}");
     }
 }

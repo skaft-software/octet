@@ -265,6 +265,42 @@ pub struct CompletionAttributes {
     /// Whether the recorded usage is a known subtotal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_uncertain_usage: Option<bool>,
+    /// Client clock origin, not a server clock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_scope: Option<octet_ai::inference::ClientTimingScope>,
+    /// Client origin to canonical completion, before persistence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_elapsed_ns: Option<u64>,
+    /// First nonempty canonical output offset, not a token timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_first_output_ns: Option<u64>,
+    /// First answer-text offset, independent of reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_first_text_ns: Option<u64>,
+    /// First streamed reasoning offset, not hidden thinking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_first_reasoning_ns: Option<u64>,
+    /// First nonempty tool-argument offset before tool admission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_first_tool_arguments_ns: Option<u64>,
+    /// Nonempty canonical output events, never token count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_output_events: Option<u64>,
+    /// Last observed output to canonical completion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_completion_tail_ns: Option<u64>,
+    /// Native server generation counter, independent of billing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_generation_tokens: Option<u64>,
+    /// Matching native server generation duration, in nanoseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_generation_ns: Option<u64>,
+    /// Recognized server count/duration wire contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_timing_source: Option<octet_ai::inference::ServerTimingSource>,
+    /// Explicit reason the server rate is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_timing_unavailable: Option<octet_ai::inference::ServerTimingUnavailable>,
 }
 
 impl CompletionAttributes {
@@ -280,12 +316,40 @@ impl CompletionAttributes {
             total_tokens: Some(usage.total_tokens),
             cache_hit_rate: cache_hit_rate(usage),
             has_uncertain_usage: None,
+            ..Self::default()
         }
     }
 
     /// Marks whether the recorded usage is a known subtotal.
     pub fn with_uncertainty(mut self, uncertain: bool) -> Self {
         self.has_uncertain_usage = Some(uncertain);
+        self
+    }
+
+    /// Adds independent frozen client/server inference observations. This never
+    /// replaces usage buckets or derives server timing from client offsets.
+    pub fn with_inference(
+        mut self,
+        metrics: Option<&octet_ai::inference::InferenceMetrics>,
+    ) -> Self {
+        if let Some(metrics) = metrics {
+            if let Some(client) = &metrics.client {
+                self.inference_scope = client.scope;
+                self.client_elapsed_ns = Some(client.elapsed_ns);
+                self.client_first_output_ns = client.first_output_ns;
+                self.client_first_text_ns = client.first_text_ns;
+                self.client_first_reasoning_ns = client.first_reasoning_ns;
+                self.client_first_tool_arguments_ns = client.first_tool_arguments_ns;
+                self.client_output_events = Some(client.output_events);
+                self.client_completion_tail_ns = client.completion_tail_ns();
+            }
+            if let Some(server) = &metrics.server {
+                self.server_generation_tokens = Some(server.tokens);
+                self.server_generation_ns = Some(server.generation_ns);
+                self.server_timing_source = Some(server.source);
+            }
+            self.server_timing_unavailable = metrics.server_unavailable;
+        }
         self
     }
 
@@ -482,6 +546,102 @@ pub fn agent_telemetry_schema() -> TelemetrySchema {
             "Known usage is only a subtotal",
         ),
     );
+    end_attributes.insert(
+        "inference_scope".into(),
+        attribute(
+            AttributeType::String,
+            false,
+            "Client clock origin, not a server clock.",
+        ),
+    );
+    end_attributes.insert(
+        "client_elapsed_ns".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "Client origin to canonical completion, before persistence.",
+        ),
+    );
+    end_attributes.insert(
+        "client_first_output_ns".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "First nonempty canonical output offset, not a token timestamp.",
+        ),
+    );
+    end_attributes.insert(
+        "client_first_text_ns".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "First answer-text offset, independent of reasoning.",
+        ),
+    );
+    end_attributes.insert(
+        "client_first_reasoning_ns".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "First streamed reasoning offset, not hidden thinking.",
+        ),
+    );
+    end_attributes.insert(
+        "client_first_tool_arguments_ns".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "First nonempty tool-argument offset before tool admission.",
+        ),
+    );
+    end_attributes.insert(
+        "client_output_events".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "Nonempty canonical output events, never token count.",
+        ),
+    );
+    end_attributes.insert(
+        "client_completion_tail_ns".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "Last observed output to canonical completion.",
+        ),
+    );
+    end_attributes.insert(
+        "server_generation_tokens".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "Native server generation counter, independent of billing.",
+        ),
+    );
+    end_attributes.insert(
+        "server_generation_ns".into(),
+        attribute(
+            AttributeType::Number,
+            false,
+            "Matching native server generation duration, in nanoseconds.",
+        ),
+    );
+    end_attributes.insert(
+        "server_timing_source".into(),
+        attribute(
+            AttributeType::String,
+            false,
+            "Recognized server count/duration wire contract.",
+        ),
+    );
+    end_attributes.insert(
+        "server_timing_unavailable".into(),
+        attribute(
+            AttributeType::String,
+            false,
+            "Explicit reason the server rate is unavailable.",
+        ),
+    );
     let mut spans = BTreeMap::new();
     for name in [
         RunSpan::NAME,
@@ -643,5 +803,58 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].status, SpanStatus::Error);
         assert!(spans[0].settled);
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+    #[test]
+    fn inference_span_attributes_do_not_overwrite_accounting() {
+        let metrics = octet_ai::InferenceMetrics {
+            client: Some(octet_ai::ClientInferenceMetrics {
+                scope: Some(octet_ai::ClientTimingScope::Request),
+                elapsed_ns: 2_000_000_000,
+                first_output_ns: Some(100_000_000),
+                ..Default::default()
+            }),
+            server: Some(octet_ai::ServerGenerationMetrics {
+                source: octet_ai::ServerTimingSource::TimingsPredicted,
+                tokens: 100,
+                generation_ns: 500_000_000,
+                reported_unit: octet_ai::ReportedTimingUnit::Milliseconds,
+                prompt_ns: None,
+                queue_ns: None,
+                total_ns: None,
+            }),
+            server_unavailable: None,
+        };
+        let usage = octet_ai::Usage {
+            output_tokens: 150,
+            reasoning_tokens: 50,
+            ..Default::default()
+        };
+        let attrs =
+            attributes_of(&CompletionAttributes::usage(&usage).with_inference(Some(&metrics)))
+                .unwrap();
+        assert_eq!(attrs["output_tokens"], AttributeValue::Number(150.0));
+        assert_eq!(
+            attrs["server_generation_tokens"],
+            AttributeValue::Number(100.0)
+        );
+        assert_eq!(
+            attrs["client_elapsed_ns"],
+            AttributeValue::Number(2_000_000_000.0)
+        );
+        assert_eq!(
+            attrs["server_timing_source"],
+            AttributeValue::String("timings_predicted".into())
+        );
+        let schema = agent_telemetry_schema();
+        for key in attrs.keys() {
+            assert!(schema.spans[ProviderRequestSpan::NAME]
+                .end_attributes
+                .contains_key(key));
+        }
     }
 }

@@ -375,6 +375,7 @@ impl octet_ai::HostStreamTransport for CompactionSummaryScript {
                 response_id: None,
                 responses_output: None,
                 deferred: None,
+                inference: None,
                 diagnostics: Vec::new(),
             })),
         ])))
@@ -744,6 +745,7 @@ impl octet_ai::HostStreamTransport for ToolBudgetTransport {
                 response_id: None,
                 responses_output: None,
                 deferred: None,
+                inference: None,
                 diagnostics: Vec::new(),
             })),
         ])))
@@ -997,6 +999,7 @@ async fn natural_run_has_no_terminal_gate_summary_projection_or_evidence_collect
                     response_id: None,
                     responses_output: None,
                     deferred: None,
+                    inference: None,
                     diagnostics: Vec::new(),
                 })),
             ])))
