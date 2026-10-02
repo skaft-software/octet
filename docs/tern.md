@@ -174,6 +174,10 @@ image kinds and rejected/disabled payloads retain text placeholders.
 A hidden pane suspends presentation without failing the renderer: credit
 starvation and rejected background frames while hidden are not timeouts, and
 returning to the tab forces a frame and re-asserts native keyboard focus.
+An OS focus return that arrives with no TSP `Visible` event (another app or
+overlay was in front, e.g. screen recording) takes the same recovery path via
+the frontend's `FocusGained` signal: the next frame is forced, `composer.editor`
+focus is re-asserted, and the draft is refreshed.
 Resize, zoom and appearance events preserve native ownership and retained
 identity. Explicit eviction reopens the surface and replays its regions. Credit
 exhaustion coalesces changes until acknowledgements arrive; negotiation,
