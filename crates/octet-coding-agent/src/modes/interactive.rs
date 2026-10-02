@@ -832,8 +832,7 @@ fn settle_goal(
 }
 
 fn answer_now_prompt(instruction: Option<String>) -> String {
-    const DIRECTIVE: &str =
-        "Answer now using only the evidence already gathered. Do not call tools. State any remaining uncertainty.";
+    const DIRECTIVE: &str = "Answer now using only the evidence already gathered. Do not call tools. State any remaining uncertainty.";
     instruction
         .map(|instruction| format!("{}\n\n{DIRECTIVE}", instruction.trim()))
         .unwrap_or_else(|| DIRECTIVE.to_owned())
@@ -1533,8 +1532,8 @@ async fn logout_custom(
 }
 
 fn show_hotkeys(shell: &mut InteractiveShell) {
-    let text = shell.hotkeys_text();
-    shell.show_report_text("Hotkeys", "Resolved user keybindings", text);
+    let text = shell.hotkeys_markdown();
+    shell.show_report_markdown("Hotkeys", "Resolved user keybindings", &text);
 }
 
 fn copy_last_assistant(shell: &mut InteractiveShell) {
@@ -5422,12 +5421,9 @@ where
                 .agent
                 .open_delegated_session_reference(principal, reference)
             {
-                Ok(Some(session)) => delegated_session_text(
-                    &session,
-                    &theme,
-                    initial_width,
-                    verbose_tools,
-                )?,
+                Ok(Some(session)) => {
+                    delegated_session_text(&session, &theme, initial_width, verbose_tools)?
+                }
                 Ok(None) => format!(
                     "{}\n\nThe delegated transcript is no longer available for this parent session.",
                     fallback_detail
@@ -5456,13 +5452,9 @@ where
                     .agent
                     .open_delegated_session_reference(principal, reference)
                 {
-                    Ok(Some(session)) => delegated_session_text(
-                        &session,
-                        &theme,
-                        width,
-                        verbose_tools,
-                    )
-                    .map(Some),
+                    Ok(Some(session)) => {
+                        delegated_session_text(&session, &theme, width, verbose_tools).map(Some)
+                    }
                     Ok(None) => Ok(Some(format!(
                         "{}\n\nThe delegated transcript is no longer available for this parent session.",
                         current_fallback
@@ -9249,7 +9241,9 @@ async fn run_interactive_once(
     // Live models.dev metadata refreshes off the startup path, at most every
     // six hours; later catalog builds and lookups use it once cached.
     tokio::spawn(crate::models_dev::refresh(config.offline));
-    let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
+    let mut input = EventStream::new()
+        .with_cede_flag(shell.terminal_input_parking())
+        .with_tern_handler(shell.tern_input_handler());
     if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
         && !config.plain

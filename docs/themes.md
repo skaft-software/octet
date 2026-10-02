@@ -84,6 +84,17 @@ model-color wash. `Cards` and `Still` set it to `false`. Unknown background
 profiles are always unpainted, so `prompt_wash` never invents a fill where the
 terminal could be light, dark or custom.
 
+## Native Tern appearance
+
+Inside Tern, octet sends resolved dark and light semantic palettes and reapplies
+the active model accent on selection. Native projection uses the validated
+loaded theme snapshot, so switching models does not re-read or reinterpret
+custom theme files. The composer is flat, octet-branded native structure rather
+than omp's liquid-glass editor. Historical prompt colors remain scoped to each
+turn. TSP owns fonts and widget geometry, so custom layouts and ANSI-only style
+flags are not exact cell-for-cell native contracts. See [octet in Tern](tern.md)
+for compatibility limits and protocol verification.
+
 ## Activity status contrast
 
 `Thinking` and `Working` use model-family foreground colors only, and the

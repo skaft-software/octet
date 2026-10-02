@@ -6,6 +6,7 @@ members = [
     "crates/octet-agent",
     "crates/octet-coding-agent",
     "crates/octet-migrate-types",
+    "crates/octet-tern",
 ]
 exclude = ["extensions/octet-serve"]
 

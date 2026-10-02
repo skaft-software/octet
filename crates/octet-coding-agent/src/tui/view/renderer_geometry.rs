@@ -182,7 +182,7 @@ impl ReportRenderReceipt {
                     styled: b,
                 },
             ) => a == b && Arc::ptr_eq(left, right),
-            (super::ReportBody::Markdown(left), super::ReportBody::Markdown(right)) => {
+            (super::ReportBody::Markdown(left, _), super::ReportBody::Markdown(right, _)) => {
                 Arc::ptr_eq(left, right)
             }
             (super::ReportBody::Context(left), super::ReportBody::Context(right)) => {
