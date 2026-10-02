@@ -129,6 +129,26 @@ impl ExecutableExtensions {
             .collect()
     }
 
+    /// Worker controls remain a runtime slash surface; extension setup stays
+    /// in `/extensions`. Only the live first-party owner can advertise it.
+    pub(crate) fn tui_command_suggestions(&self) -> Vec<(String, String)> {
+        self.processes
+            .iter()
+            .filter(|process| {
+                process.descriptor().manifest.name == SUBAGENTS_EXTENSION_NAME
+                    && process.is_running()
+            })
+            .flat_map(|process| {
+                process
+                    .contributions()
+                    .commands
+                    .iter()
+                    .filter(|command| command.name == "subagents")
+                    .map(|command| (command.name.clone(), command.description.clone()))
+            })
+            .collect()
+    }
+
     /// Returns the manifest identity that owns one registered slash command.
     pub fn command_owner(&self, command: &str) -> Option<String> {
         self.processes.iter().find_map(|process| {
@@ -333,8 +353,6 @@ impl ExecutableExtensions {
         .ok_or_else(|| anyhow::anyhow!("{extension} no longer offers {label:?}"))
     }
 
-    // Every caller is a Unix process-fixture test.
-    #[cfg(all(test, unix))]
     pub async fn execute_command_with_confirmation<H>(
         &mut self,
         name: &str,

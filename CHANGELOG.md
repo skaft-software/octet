@@ -138,17 +138,21 @@ receipt.
     close, status, and profile reset.
   - **Web search**: Brave Search or SearXNG, a new SearXNG endpoint change, and
     Brave log-out.
-  - **Subagents**: the live worker list (Ctrl+X stops a worker, also mid-run
-    through `/extensions`), wait, reattach, and stop all.
+  - **Subagents**: enable or disable orchestration; runtime worker inspection
+    and control stay in `/subagents`, not extension configuration.
   - **MCP**: a full server manager. A guided form adds a server; each server
     can be shown, refreshed, restarted, stopped, enabled or disabled, edited,
     or removed. Edits are validated like a launch before `~/.octet/mcp.json` is
     replaced, and apply live without restarting the other servers.
   Extensions answer the new `menu/collect` request (`contributes.menu = true`,
   `ext.menu` in the Python SDK); others get an entry per declared command.
-  Extension commands are no longer typed after the slash in the terminal UI,
-  and typing one names the extension to open instead. The web UI keeps them for
-  now. Menu actions may run for up to 30 minutes instead of the 30-second
+  Other extension commands are no longer typed after the slash in the terminal
+  UI, and typing one names the extension to open instead. `/subagents` remains
+  a runtime command: bare, list and status open the live roster, including
+  mid-run; `/subagents stop <name-or-id|all>` uses the bounded owner-bound stop
+  queue. Other worker operations wait for idle. Slash completion follows the
+  first-party extension's live registration. The web UI keeps extension
+  commands for now. Menu actions may run for up to 30 minutes instead of the 30-second
   request deadline, so long installs finish.
 - Make Files tab search in the web UI usable on large projects (#459). It no
   longer walks build output, dependencies, VCS state or hidden directories

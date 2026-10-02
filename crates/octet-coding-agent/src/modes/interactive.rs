@@ -123,15 +123,18 @@ where
     outcome
 }
 
-struct InteractiveExtensionConfirmations<'a> {
+struct InteractiveExtensionConfirmations<'a, S> {
     shell: &'a mut InteractiveShell,
-    input: &'a mut EventStream,
+    input: &'a mut S,
     /// Process handles captured before the extension runtime took its mutable
     /// borrow, so a presented dialog can still announce its boundary.
     dialogs: &'a crate::extensions::ExtensionLifecycleSnapshot,
 }
 
-impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionConfirmations<'_> {
+impl<S> crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionConfirmations<'_, S>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     fn wait_for_cancel<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
             loop {
@@ -258,6 +261,9 @@ pub enum PendingIdleAction {
     // the reported defect, so the queue cannot even represent it.
     /// Extension management that owns the application (menu, reload, actions).
     Extensions(commands::ExtensionsSubcommand),
+    /// Worker commands that need the idle application owner (wait, reattach,
+    /// inspect, and pane planning); live list and stop controls never queue here.
+    Subagents(Vec<String>),
     /// `/settings` mutations that must own the application (theme, images,
     /// default model/reasoning). Reports are rendered immediately instead.
     Settings(commands::SettingsCommand),
@@ -2162,6 +2168,12 @@ where
         }
         Command::Exit => *quit_requested = true,
         Command::Unknown(text) => {
+            if let Some(arguments) = subagents_command_arguments(&text, extensions) {
+                push_pending_action(queue, PendingIdleAction::Subagents(arguments));
+                shell.notice("subagent command queued for the next idle boundary");
+                shell.render();
+                return Ok(());
+            }
             let name = split_prompt_invocation(&text).map_or("", |(name, _)| name);
             match extensions.command_owner(name) {
                 Some(owner) => shell.error(format!(
@@ -2606,9 +2618,9 @@ fn show_active_subagent_stop_result(shell: &mut InteractiveShell, result: anyhow
     match result {
         Ok(output) => shell.show_extension_output(
             "Subagent stop",
-            format!("Stop request responded; terminal settlement is not confirmed. Check /extensions.\n\n{output}"),
+            format!("Stop request responded; terminal settlement is not confirmed. Check /subagents.\n\n{output}"),
         ),
-        Err(error) => shell.error(format!("subagent stop not confirmed: {error}; check /extensions")),
+        Err(error) => shell.error(format!("subagent stop not confirmed: {error}; check /subagents")),
     }
     shell.render();
 }
@@ -2699,7 +2711,7 @@ where
                 return Ok(settled_outcome.take().expect("settled root outcome"));
             }
             if *quit_requested || shell.close_requested() {
-                shell.error("subagent stop response interrupted by shutdown; check /extensions after restart".into());
+                shell.error("subagent stop response interrupted by shutdown; check /subagents after restart".into());
                 shell.render();
                 return Ok(HostRunOutcome::shutdown());
             }
@@ -3299,17 +3311,34 @@ where
                             shell.render();
                             continue;
                         }
-                        // While workers run, /extensions opens their live list
-                        // (Ctrl+X stops one); the full menu waits for idle.
-                        if matches!(&command, Command::Extensions(commands::ExtensionsSubcommand::Menu))
-                            && active_subagent_snapshot(executable_extensions)
-                                .is_some_and(|snapshot| !snapshot.items.is_empty())
-                            && open_active_subagent_list(shell, executable_extensions)
-                        {
-                            subagents_open = true;
-                            subagent_document = None;
-                            shell.render();
-                            continue;
+                        if let Command::Unknown(text) = &command {
+                            if let Some(arguments) = subagents_command_arguments(text, executable_extensions) {
+                                if subagent_list_requested(&arguments) {
+                                    subagents_open = open_active_subagent_list(shell, executable_extensions);
+                                    subagent_document = None;
+                                    shell.render();
+                                    continue;
+                                }
+                                if let [action, target] = arguments.as_slice() {
+                                    if action == "stop" {
+                                        if subagent_stops.len() + usize::from(subagent_stop.is_some()) >= 8 {
+                                            shell.error("subagent stop queue is full; retry after a response".into());
+                                        } else if aborting || *quit_requested || shell.close_requested() {
+                                            shell.error("subagent stop not admitted while closing".into());
+                                        } else {
+                                            match executable_extensions.subagent_stop_control(target.clone(), &inspection.resource_owner) {
+                                                Ok(stop) => {
+                                                    subagent_stops.push_back(stop);
+                                                    shell.notice("subagent stop queued; waiting for the owner-bound response (not terminal settlement)");
+                                                }
+                                                Err(error) => shell.error(format!("subagent stop not admitted: {error}")),
+                                            }
+                                        }
+                                        shell.render();
+                                        continue;
+                                    }
+                                }
+                            }
                         }
                         let context = run.context_snapshot();
                         if let Err(error) = handle_active_command(
@@ -3660,6 +3689,9 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
             .map(|skill| (format!("skill:{}", skill.id), skill.description.clone()))
             .collect::<Vec<_>>(),
     ));
+    shell.set_extension_commands(Arc::from(
+        app.executable_extensions.tui_command_suggestions(),
+    ));
     shell.set_context_estimate(context_estimate, context_window(&app.model));
     shell.set_session_telemetry(
         app.agent.session(),
@@ -3723,6 +3755,8 @@ fn apply_extension_background(
     // Extension contributions can arrive (or change) after the initial
     // handshake; keep the composer's slash-command list in step so commands
     // like /subagents are enterable as soon as their owning process is ready.
+    changed |=
+        shell.set_extension_commands(Arc::from(executable_extensions.tui_command_suggestions()));
     changed
 }
 
@@ -5202,12 +5236,80 @@ fn subagent_stop_target(
     })
 }
 
-async fn subagents_view(
+/// Admit only the runtime command registered by the first-party package.
+fn subagents_command_arguments(
+    text: &str,
+    extensions: &crate::extensions::ExecutableExtensions,
+) -> Option<Vec<String>> {
+    let (name, arguments) = split_prompt_invocation(text)?;
+    (name == "subagents"
+        && extensions.command_owner(name).as_deref()
+            == Some(crate::extensions::SUBAGENTS_EXTENSION_NAME))
+    .then(|| arguments.split_whitespace().map(str::to_owned).collect())
+}
+
+fn subagent_list_requested(arguments: &[String]) -> bool {
+    arguments.is_empty()
+        || matches!(arguments, [action] if matches!(action.as_str(), "list" | "status"))
+}
+
+// Keep runtime-command construction out of the idle dispatcher's poll frame.
+fn run_subagents_command<'a, S>(
+    app: &'a mut App,
+    shell: &'a mut InteractiveShell,
+    input: &'a mut S,
+    arguments: Vec<String>,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin + 'a,
+{
+    Box::pin(async move {
+        // Revalidate after an idle-boundary reload or session transition. Another
+        // extension declaring the same command never gains worker authority.
+        if app
+            .executable_extensions
+            .command_owner("subagents")
+            .as_deref()
+            != Some(crate::extensions::SUBAGENTS_EXTENSION_NAME)
+        {
+            shell.error(
+                "first-party subagent command is unavailable; see /extensions status".into(),
+            );
+            return Ok(());
+        }
+        let open_list = subagent_list_requested(&arguments);
+        let dialogs = app.executable_extensions.lifecycle_snapshot();
+        let result = {
+            let mut confirmations = InteractiveExtensionConfirmations {
+                shell,
+                input,
+                dialogs: &dialogs,
+            };
+            app.executable_extensions
+                .execute_command_with_confirmation("subagents", arguments, &mut confirmations)
+                .await
+        };
+        request_extension_ui(shell, app);
+        match result {
+            Ok(Some(output)) if open_list => subagents_view(app, shell, input, output).await?,
+            Ok(Some(output)) if output.trim().is_empty() => shell.notice("/subagents completed"),
+            Ok(Some(output)) => shell.show_extension_output("subagents", output),
+            Ok(None) => shell.error("first-party subagent command is unavailable".into()),
+            Err(error) => shell.error(format!("subagent command failed: {error}")),
+        }
+        Ok(())
+    })
+}
+
+async fn subagents_view<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     command_output: String,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let unavailable = (!command_output.trim().is_empty()).then_some(command_output);
     if unavailable.as_deref().is_some_and(|output| {
         output.contains("failed closed")
@@ -6082,6 +6184,9 @@ async fn apply_pending_actions(
                 } else {
                     execute_skills_command(&mut app, shell, sub).await?;
                 }
+            }
+            PendingIdleAction::Subagents(arguments) => {
+                run_subagents_command(&mut app, shell, input, arguments).await?;
             }
             PendingIdleAction::Extensions(sub) => {
                 // Reuse the idle dispatcher verbatim so the menu, reload, and
@@ -7637,55 +7742,60 @@ async fn run_idle_command(
             return run_idle_shell_escape(app, shell, input, escape).await;
         }
         Command::Unknown(text) => {
-            let selection = shell.selected_plain_text();
-            match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {
-                Ok(Some(rendered)) => {
-                    if app.config.debug_prompt {
-                        shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
+            if let Some(arguments) = subagents_command_arguments(&text, &app.executable_extensions)
+            {
+                run_subagents_command(&mut app, shell, input, arguments).await?;
+            } else {
+                let selection = shell.selected_plain_text();
+                match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {
+                    Ok(Some(rendered)) => {
+                        if app.config.debug_prompt {
+                            shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
+                        }
+                        return Ok(IdleCommandOutcome::Submit {
+                            app: Box::new(app),
+                            input: ComposedInput::from_text(rendered.text),
+                        });
                     }
-                    return Ok(IdleCommandOutcome::Submit {
-                        app: Box::new(app),
-                        input: ComposedInput::from_text(rendered.text),
-                    });
-                }
-                Ok(None) => {
-                    // Extensions are configured and operated only from
-                    // /extensions; their commands are menu entries there.
-                    let name = split_prompt_invocation(&text)
-                        .map(|(name, _)| name.to_owned())
-                        .unwrap_or_default();
-                    if let Some(owner) = app.executable_extensions.command_owner(&name) {
-                        shell.error(format!(
+                    Ok(None) => {
+                        // Other extension commands remain setup/configuration
+                        // entries under /extensions, not worker runtime controls.
+                        let name = split_prompt_invocation(&text)
+                            .map(|(name, _)| name.to_owned())
+                            .unwrap_or_default();
+                        if let Some(owner) = app.executable_extensions.command_owner(&name) {
+                            shell.error(format!(
                             "/{name} is no longer a command: open /extensions and choose {owner}"
                         ));
-                    } else {
-                        // A slash command may still name an extension that
-                        // is starting, degraded, or parked. Say so instead of
-                        // a bare unknown.
-                        let not_ready: Vec<String> = app
-                            .executable_extensions
-                            .summaries()
-                            .into_iter()
-                            .filter(|summary| {
-                                summary.enabled
+                        } else {
+                            // A slash command may still name an extension that
+                            // is starting, degraded, or parked. Say so instead of
+                            // a bare unknown.
+                            let not_ready: Vec<String> =
+                                app.executable_extensions
+                                    .summaries()
+                                    .into_iter()
+                                    .filter(|summary| {
+                                        summary.enabled
                                     && (!summary.running
                                         || summary.health.as_ref().is_some_and(|health| {
                                             health.state != octet_agent::ExtensionHealthState::Ready
                                         }))
-                            })
-                            .map(|summary| summary.name)
-                            .collect();
-                        if text.starts_with('/') && !not_ready.is_empty() {
-                            shell.error(format!(
+                                    })
+                                    .map(|summary| summary.name)
+                                    .collect();
+                            if text.starts_with('/') && !not_ready.is_empty() {
+                                shell.error(format!(
                                 "unknown command: {text} (extensions not ready: {} — see /extensions status)",
                                 not_ready.join(", ")
                             ));
-                        } else {
-                            shell.error(format!("unknown command: {text}"));
+                            } else {
+                                shell.error(format!("unknown command: {text}"));
+                            }
                         }
                     }
+                    Err(error) => shell.error(error.to_string()),
                 }
-                Err(error) => shell.error(error.to_string()),
             }
         }
     }

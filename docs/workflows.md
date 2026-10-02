@@ -66,9 +66,10 @@ Unless you narrow them, workers get the same tools as the main session. They run
 one level deep, with at most 8 active and 32 kept in the record. They inherit
 your permissions and cost and token limits, and you can cancel them and read
 their transcripts. They share your working directory, which isn't isolation.
-Open `/extensions`, then octet-subagents, then **Workers** (or just
-`/extensions` during a run) to see each worker's phase, tool calls, tokens,
-spend and transcript. See [Subagents](../extensions/octet-subagents/README.md).
+Open `/subagents`, including during a run, to see each worker's phase, tool
+calls, tokens, spend and transcript. Use `/subagents stop <name-or-id|all>` to
+request interruption; `/extensions` only manages extension enablement and
+configuration. See [Subagents](../extensions/octet-subagents/README.md).
 
 Extensions need full-access mode, and installing, enabling and trusting are
 separate steps. Catalog setup works once the matching release is published

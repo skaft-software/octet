@@ -499,7 +499,8 @@ fn dynamic_slash_discovery_contains_only_registered_executable_names() {
             super::input_overlays::SlashSuggestionProvenance::Skill => {
                 skill_names.contains(suggestion.name.as_str())
             }
-            super::input_overlays::SlashSuggestionProvenance::Builtin => {
+            super::input_overlays::SlashSuggestionProvenance::Builtin
+            | super::input_overlays::SlashSuggestionProvenance::Extension => {
                 unreachable!("only dynamic slash suggestions should reach this registration check")
             }
         };
@@ -521,6 +522,38 @@ fn dynamic_slash_discovery_contains_only_registered_executable_names() {
         suggestion.name == "workspace-review"
             && suggestion.provenance == super::input_overlays::SlashSuggestionProvenance::Skill
     }));
+}
+
+#[test]
+fn subagent_slash_completion_tracks_registration_without_resetting_selection() {
+    let mut shell = InteractiveShell::test_shell();
+    let commands = Arc::from(vec![("subagents".into(), "Browse workers".into())]);
+    shell.apply_edit(EditAction::Char('/'));
+    assert!(!input_slash_suggestions(&shell.state.borrow())
+        .iter()
+        .any(|item| item.name == "subagents"));
+    assert!(shell.set_extension_commands(Arc::clone(&commands)));
+    shell.state.borrow_mut().slash_selection = 1;
+    assert!(!shell.set_extension_commands(commands));
+    assert_eq!(shell.state.borrow().slash_selection, 1);
+    for character in "suba".chars() {
+        shell.apply_edit(EditAction::Char(character));
+    }
+    let rendered = render_slash_suggestions(&shell.state.borrow(), 80, 10).join("\n");
+    assert!(rendered.contains("/subagents"), "{rendered}");
+    assert!(
+        rendered.contains("extension · Browse workers"),
+        "{rendered}"
+    );
+    shell.complete_slash_command();
+    assert_eq!(shell.pending(), "/subagents ");
+    shell.clear_editor();
+    for character in "/suba".chars() {
+        shell.apply_edit(EditAction::Char(character));
+    }
+    assert!(shell.slash_popup_open());
+    assert!(shell.set_extension_commands(Arc::from(Vec::new())));
+    assert!(!shell.slash_popup_open());
 }
 
 #[test]

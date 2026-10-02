@@ -231,7 +231,7 @@ class PresentationTests(unittest.TestCase):
         self.assertNotIn("parent_id", nodes["worker:agent-1"])
         self.assertEqual(nodes["worker:agent-2"]["parent_id"], "worker:agent-1")
 
-    def test_the_options_menu_follows_the_sessions_workers(self):
+    def test_options_menu_keeps_worker_operations_on_subagents(self):
         clock = ManualClock()
         host = FakeHostState(clock)
         client = host.client()
@@ -239,11 +239,9 @@ class PresentationTests(unittest.TestCase):
         context = {"host": {"session_id": "parent-session"}}
 
         empty = orchestrator.menu(context)
-        self.assertEqual(empty["status"]["state"], "empty")
-        self.assertEqual([item["id"] for item in empty["items"]], ["workers", "panes"])
-        self.assertFalse(empty["items"][0].get("recommended"))
-        # An empty argument list is the host's cue to open its live worker list.
-        self.assertEqual(empty["items"][0]["arguments"], [])
+        self.assertEqual(empty["items"], [])
+        self.assertIn("/subagents", empty["detail"])
+        self.assertNotIn("status", empty)
 
         current_owner = owner()
         result = orchestrator.spawn(
@@ -251,20 +249,8 @@ class PresentationTests(unittest.TestCase):
         )
         host.start(result["worker"]["id"])
         orchestrator.status(client, current_owner, {})
-        busy = orchestrator.menu(context)
-        self.assertEqual(busy["status"], {"state": "running", "label": "1 running · 1 total"})
-        items = {item["id"]: item for item in busy["items"]}
-        self.assertTrue(items["workers"]["recommended"])
-        self.assertEqual(items["wait"]["arguments"], ["wait"])
-        self.assertEqual(items["stop-all"]["arguments"], ["stop", "all"])
-        self.assertTrue(items["stop-all"]["destructive"])
-        self.assertEqual(
-            [child["arguments"] for child in items["panes"]["items"]],
-            [["open-all", "tmux"], ["open-all", "herdr"]],
-        )
-        for item in busy["items"]:
-            for action in item.get("items", [item]):
-                self.assertEqual(action["command"], "subagents")
+        self.assertEqual(orchestrator.menu(context), empty)
+        self.assertEqual(orchestrator.menu({}), empty)
 
     def test_narrow_command_fixture_and_stop_fallback_fail_closed(self):
         clock = ManualClock()

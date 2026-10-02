@@ -1023,7 +1023,7 @@ async fn every_safety_input_refuses_with_its_own_notice() {
                 ..LiveSafetyInputs::default()
             },
             RefusalReason::BackgroundWorkers(1),
-            "reload refused · 1 background worker is active; stop it from /extensions, or reload with the worker-detach opt-in",
+            "reload refused · 1 background worker is active; stop it from /subagents, or reload with the worker-detach opt-in",
         ),
         (
             LiveSafetyInputs {
@@ -1031,7 +1031,7 @@ async fn every_safety_input_refuses_with_its_own_notice() {
                 ..LiveSafetyInputs::default()
             },
             RefusalReason::BackgroundWorkers(3),
-            "reload refused · 3 background workers are active; stop them from /extensions, or reload with the worker-detach opt-in",
+            "reload refused · 3 background workers are active; stop them from /subagents, or reload with the worker-detach opt-in",
         ),
     ];
     for (inputs, reason, expected) in cases {
@@ -1132,7 +1132,7 @@ async fn worker_detach_opt_in_warns_names_the_count_and_keeps_the_durable_head_f
     assert_eq!(
         refused.notice(),
         Some(
-            "reload refused · 3 background workers are active; stop them from /extensions, or reload with the worker-detach opt-in"
+            "reload refused · 3 background workers are active; stop them from /subagents, or reload with the worker-detach opt-in"
         )
     );
     assert!(hook_order(&refused_hooks).is_empty());
@@ -1701,7 +1701,7 @@ fn notices_are_pinned_in_one_place() {
     );
     assert_eq!(
         notice::refused(RefusalReason::BackgroundWorkers(2)),
-        "reload refused · 2 background workers are active; stop them from /extensions, or reload with the worker-detach opt-in"
+        "reload refused · 2 background workers are active; stop them from /subagents, or reload with the worker-detach opt-in"
     );
     assert_eq!(
         notice::exec_failed(&std::io::Error::other("boom")),

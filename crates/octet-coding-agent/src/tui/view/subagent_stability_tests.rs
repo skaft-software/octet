@@ -77,7 +77,7 @@ fn subagent_live_lines_update_without_invalidating_earlier_history() {
                 );
                 drop(state);
                 let frame = frame_text(&shell, width);
-                assert!(frame.contains("/extensions"), "{width}: {frame}");
+                assert!(frame.contains("/subagents"), "{width}: {frame}");
                 if width >= 46 {
                     assert!(frame.contains("inspect-markdown"), "{frame}");
                     assert!(frame.contains("↑12.8K ↓220"), "{frame}");
@@ -87,7 +87,7 @@ fn subagent_live_lines_update_without_invalidating_earlier_history() {
                 child.state = status.into();
                 publish(&mut shell, &child);
                 let updated = shell.state.borrow().rendered_transcript(width).join("\n");
-                assert!(updated.contains("/extensions"));
+                assert!(updated.contains("/subagents"));
                 assert!(
                     matches!(shell.state.borrow().transcript.last(), Some(TranscriptBlock::Subagents(summary)) if if status == "running" { summary.running == 1 } else { summary.succeeded == 1 }),
                     "{updated}"
@@ -654,7 +654,7 @@ fn transcript_roster_is_bounded_and_preserves_the_composer() {
             let frame = frame_text(&shell, width);
             assert!(frame.contains("DRAFT-MARKER"), "{width}x{height}: {frame}");
             assert!(
-                frame.contains("/extensions"),
+                frame.contains("/subagents"),
                 "omitted rows need an inspector hint: {frame}"
             );
             assert!(
@@ -671,7 +671,7 @@ fn transcript_roster_is_bounded_and_preserves_the_composer() {
                 .position(|row| row.contains("DRAFT-MARKER"))
                 .unwrap();
             assert!(draft_row > 0);
-            assert!(transcript_text(&shell).contains("/extensions"));
+            assert!(transcript_text(&shell).contains("/subagents"));
             assert!(chrome.subagents.is_empty());
             assert!(
                 chrome.transcript_rows > 0,
@@ -1226,7 +1226,7 @@ fn queued_subagent_remains_a_mutable_tail_until_settlement() {
                 };
                 assert_eq!(
                     summary.label(),
-                    format!("Subagents · 1 {expected} · /extensions")
+                    format!("Subagents · 1 {expected} · /subagents")
                 );
                 assert!(state.has_active_event_dot());
                 let _ = state.rendered_transcript(120);
@@ -1277,7 +1277,7 @@ fn queued_subagent_remains_a_mutable_tail_until_settlement() {
             assert_eq!(summary.total(), 1);
             assert_eq!(
                 summary.label(),
-                format!("Subagents · 1 {outcome} · /extensions")
+                format!("Subagents · 1 {outcome} · /subagents")
             );
             assert!(summary.live_workers.is_empty());
             let _ = state.rendered_transcript(120);

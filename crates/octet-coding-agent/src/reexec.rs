@@ -299,12 +299,12 @@ pub(crate) mod notice {
                 "session persistence is still in flight".to_owned()
             }
             RefusalReason::BackgroundWorkers(1) => {
-                "1 background worker is active; stop it from /extensions, or reload with the worker-detach opt-in"
+                "1 background worker is active; stop it from /subagents, or reload with the worker-detach opt-in"
                     .to_owned()
             }
             RefusalReason::BackgroundWorkers(count) => {
                 format!(
-                    "{count} background workers are active; stop them from /extensions, or reload with the worker-detach opt-in"
+                    "{count} background workers are active; stop them from /subagents, or reload with the worker-detach opt-in"
                 )
             }
             RefusalReason::NoSessionIdentity => {

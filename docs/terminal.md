@@ -219,10 +219,12 @@ is neither. [Tool presentation](design/octet-tui.md#tool-presentation).
 While workers are active, a bounded, tool-like **Subagents** block in the
 transcript updates in place. It no longer stays pinned above the input. Its
 heading counts worker states, and up to four child lines show active tasks with
-input and output tokens. Ctrl+O keeps disclosure. The worker list
-(`/extensions`, then octet-subagents, then **Workers**, or just `/extensions`
-during a run) shows the complete roster (up to 32) and failure details. Enter
-opens a worker's read-only transcript and Ctrl+X stops the selected worker.
+input and output tokens. Ctrl+O keeps disclosure. `/subagents` opens the live
+worker list, including during a run, with the complete roster (up to 32) and
+failure details. Enter opens a worker's read-only transcript and Ctrl+X stops
+the selected worker. `/subagents stop <name-or-id|all>` also works during a run;
+other worker operations wait for idle. `/extensions` manages extension
+enablement and configuration instead.
 Finished workers' usage is added once to the main session's ledger, so cost
 limits count it. [Worker
 display](../extensions/octet-subagents/README.md#tui-and-serve-presentation).

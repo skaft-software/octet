@@ -363,7 +363,8 @@ remain disabled; the appearance selector is not a theme loader. See
 - `/name [name]`, `/export [path]` — name and safely export the current session.
 - `/prompt [name] [arguments]` — inspect or expand prompt templates.
 - `/skills search|load|reload|off ...` — inspect, invoke, reload, or deactivate skills; TUI load-prefill does not establish durable activation.
-- `/extensions [status|reload]` — enable, set up, and configure managed executable bundles through each one's options menu, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped. octet-subagents' **Workers** entry navigates workers with arrow keys and opens owner-authorized read-only transcripts with Enter.
+- `/extensions [status|reload]` — enable, disable, set up, and configure managed executable bundles through each one's options menu, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped. Runtime worker controls do not belong in this menu.
+- `/subagents [list|status|inspect|wait|reattach|stop|open-all]` — runtime inspection and control owned by the ready first-party octet-subagents extension. Bare, list and status open the live worker roster, and stop uses the bounded owner-bound queue during a run; other operations wait for idle. Arrow keys navigate workers and Enter opens owner-authorized read-only transcripts.
 - `/help [command]` — show local command help and octet self-documentation.
 - `/status`, `/exit` — product status and lifecycle controls.
 
