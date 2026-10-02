@@ -31,6 +31,7 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         color: crate::config::ColorMode::Auto,
         mouse: crate::config::MouseMode::Auto,
         plain: false,
+        tern: crate::config::TernMode::Auto,
         show_images: false,
         session_dir: PathBuf::from("sessions"),
         compaction: CompactionPolicy::default(),

@@ -132,6 +132,9 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         color: ColorMode::Never,
         mouse: MouseMode::Off,
         plain: true,
+        // A host request owns no interactive terminal, so there is no pane to
+        // negotiate a native surface with.
+        tern: crate::config::TernMode::Off,
         show_images: false,
         session_dir,
         compaction: CompactionPolicy::default(),

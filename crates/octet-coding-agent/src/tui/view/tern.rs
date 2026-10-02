@@ -25,18 +25,61 @@ pub(super) const SURFACE: &str = "octet.session";
 const FRAME_INTERVAL: Duration = Duration::from_millis(32);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub(crate) fn enabled() -> bool {
-    match std::env::var("OCTET_TUI_TERN").ok().as_deref() {
-        Some("0" | "off" | "false" | "no") => false,
-        Some(_) => true,
-        // Unit tests drive the native surface explicitly; a developer running
-        // `cargo test` inside a Tern pane must not flip every renderer test
-        // onto the protocol path.
-        None => {
-            !cfg!(test)
-                && std::env::var("TERM_PROGRAM").is_ok_and(|v| v.eq_ignore_ascii_case("tern"))
-        }
+/// The resolved `--tern` / `OCTET_TERN` policy, published once at startup.
+///
+/// `enabled()` and `enabled_cached()` are reachable from the renderer thread
+/// and from the shared input filter, neither of which carries the resolved
+/// `Config`; one atomic written before the frontend starts keeps both on the
+/// same decision instead of re-reading the environment per event.
+static POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(AUTO);
+
+const AUTO: u8 = 0;
+const ON: u8 = 1;
+const OFF: u8 = 2;
+
+/// Publish the resolved configuration before the interactive frontend starts.
+///
+/// A later call overrides an earlier one, which is what the in-process reload
+/// path needs; `Auto` restores terminal detection.
+pub(crate) fn set_policy(mode: crate::config::TernMode) {
+    let value = match mode {
+        crate::config::TernMode::Auto => AUTO,
+        crate::config::TernMode::On => ON,
+        crate::config::TernMode::Off => OFF,
+    };
+    POLICY.store(value, std::sync::atomic::Ordering::Release);
+}
+
+fn policy() -> crate::config::TernMode {
+    match POLICY.load(std::sync::atomic::Ordering::Acquire) {
+        ON => crate::config::TernMode::On,
+        OFF => crate::config::TernMode::Off,
+        _ => crate::config::TernMode::Auto,
     }
+}
+
+/// The one decision, as a pure function of the policy and what the terminal
+/// says. Tests exercise this directly so no test ever has to mutate the
+/// process-wide policy while other renderer tests are negotiating.
+fn decide(mode: crate::config::TernMode, term_program: Option<&str>, tests: bool) -> bool {
+    if !mode.permitted() {
+        return false;
+    }
+    if mode.forced() {
+        return true;
+    }
+    // Unit tests drive the native surface explicitly; a developer running
+    // `cargo test` inside a Tern pane must not flip every renderer test
+    // onto the protocol path.
+    !tests && term_program.is_some_and(|value| value.eq_ignore_ascii_case("tern"))
+}
+
+pub(crate) fn enabled() -> bool {
+    decide(
+        policy(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        cfg!(test),
+    )
 }
 
 pub(crate) fn enabled_cached() -> bool {

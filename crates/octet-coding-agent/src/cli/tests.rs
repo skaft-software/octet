@@ -34,6 +34,7 @@ fn base() -> Cli {
         theme_dirs: vec![],
         color: None,
         mouse: None,
+        tern: None,
         plain: false,
         show_images: false,
         show_reasoning: false,

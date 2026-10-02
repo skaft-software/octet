@@ -691,6 +691,47 @@ fn os_focus_return_reasserts_native_focus_without_a_visible_event() {
 }
 
 #[test]
+fn tern_policy_gates_the_native_backend() {
+    use crate::config::TernMode;
+    // Off denies negotiation even inside an advertising terminal; On forces it
+    // where nothing advertises; Auto defers to the terminal, and a test binary
+    // never negotiates implicitly.
+    for (mode, term, expected) in [
+        (TernMode::Off, Some("tern"), false),
+        (TernMode::Off, None, false),
+        (TernMode::On, None, true),
+        (TernMode::On, Some("iterm"), true),
+        (TernMode::Auto, Some("tern"), true),
+        (TernMode::Auto, Some("iTerm.app"), false),
+        (TernMode::Auto, None, false),
+    ] {
+        assert_eq!(
+            super::decide(mode, term, false),
+            expected,
+            "{mode:?}/{term:?}"
+        );
+        // Test binaries keep the explicit opt-in requirement.
+        if mode == TernMode::Auto {
+            assert!(!super::decide(mode, term, true), "{mode:?}/{term:?}");
+        }
+    }
+}
+
+#[test]
+fn the_published_policy_round_trips_through_the_shared_gate() {
+    use crate::config::TernMode;
+    let before = super::policy();
+    for mode in [TernMode::On, TernMode::Off, TernMode::Auto] {
+        super::set_policy(mode);
+        assert_eq!(super::policy(), mode);
+    }
+    // The cached answer the input filter reads follows the same gate.
+    super::set_policy(TernMode::Off);
+    assert!(!super::enabled());
+    super::set_policy(before);
+}
+
+#[test]
 fn markdown_projection_collapses_stacked_blank_lines_but_preserves_fences() {
     assert_eq!(super::tighten_markdown("a\n\n\n\nb"), "a\n\nb");
     assert_eq!(

@@ -96,6 +96,7 @@ baseline. Executable sampling is separate from these resource-tree limits.
 | `OCTET_SYSTEM_PROMPT` | System-instruction replacement ([precedence](#precedence)). |
 | `OCTET_CACHE_RETENTION` | Cache retention. |
 | `OCTET_COLOR`, `OCTET_MOUSE`, `OCTET_THEME`, `OCTET_COLOR_SCHEME` | Terminal presentation. `OCTET_THEME` takes `auto`, `light`, `dark` or a discovered TOML theme name. `OCTET_COLOR_SCHEME` stays a background-detection override. |
+| `OCTET_TERN`, `OCTET_TUI_TERN` | Tern native rendering: `auto`, `on` or `off`. Defaults to `auto`, which negotiates native surfaces only inside a Tern pane. `OCTET_TUI_TERN` is the older spelling and is read only when `OCTET_TERN` is unset. |
 | `OCTET_SHOW_IMAGES` | `1` shows tool-result images inline. It isn't a media upload. |
 | `OCTET_WORKSPACE`, `OCTET_SESSION_DIR` | Workspace and session roots. |
 | `OCTET_MAX_TURNS` | Turn limit. |

@@ -190,9 +190,15 @@ produce an explicit notice before handing ownership to the ANSI renderer.
 Normal exit keeps native transcript history; suspension removes the active
 surface and a resumed renderer negotiates a fresh one.
 
-Detection uses `TERM_PROGRAM=tern`. Set `OCTET_TUI_TERN=0` to disable the native
-backend; other explicit values force negotiation. Outside Tern, the existing
-ANSI renderer is unchanged.
+Detection uses `TERM_PROGRAM=tern`, and the policy is a first-class setting:
+`--tern auto|on|off` (config key `tern`, env `OCTET_TERN`, older spelling
+`OCTET_TUI_TERN`). `auto` is the default and negotiates native surfaces only
+where the terminal advertises itself; `on` forces negotiation on any terminal,
+which is how the protocol path is exercised outside Tern; `off` disables the
+native backend outright and always renders ANSI, even inside a Tern pane. The
+resolved policy is published once before the frontend starts, so the renderer
+thread and the shared input filter always make the same decision. Outside Tern
+with the default policy, the existing ANSI renderer is unchanged.
 
 ## Verification without desktop controls
 

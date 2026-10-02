@@ -269,6 +269,10 @@ pub struct Cli {
     /// captures wheel scrolling and drag selection for the semantic viewport.
     #[arg(long, value_name = "MODE")]
     pub mouse: Option<String>,
+    /// Tern Surface Protocol rendering: auto negotiates native surfaces inside
+    /// a Tern pane, on forces them, off always uses the terminal renderer.
+    #[arg(long, value_name = "MODE")]
+    pub tern: Option<String>,
     /// Emit reasoning deltas in print mode.
     #[arg(long)]
     pub show_reasoning: bool,
@@ -417,6 +421,7 @@ struct ConfigLayer {
     theme: Option<String>,
     color: Option<String>,
     mouse: Option<String>,
+    tern: Option<String>,
     plain: Option<bool>,
     show_images: Option<bool>,
     /// User-level `/scoped-models` pattern list. Interactive cycling scope
@@ -476,6 +481,7 @@ impl ConfigLayer {
         override_some!(theme);
         override_some!(color);
         override_some!(mouse);
+        override_some!(tern);
         override_some!(plain);
         override_some!(show_images);
         override_some!(models);
@@ -1247,6 +1253,7 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         theme: env_value("OCTET_THEME"),
         color: env_value("OCTET_COLOR"),
         mouse: env_value("OCTET_MOUSE"),
+        tern: env_value("OCTET_TERN").or_else(|| env_value("OCTET_TUI_TERN")),
         // The interactive `/scoped-models` scope is a user-configuration
         // concern: the environment layer deliberately provides none of it, so a
         // headless run can never inherit an interactive selection by accident.
@@ -1410,6 +1417,10 @@ fn build_config_with_global_path_and_diagnostics(
     let mouse = match cli.mouse.as_deref().or(values.mouse.as_deref()) {
         Some(value) => config::MouseMode::parse(value)?,
         None => config::MouseMode::Auto,
+    };
+    let tern = match cli.tern.as_deref().or(values.tern.as_deref()) {
+        Some(value) => config::TernMode::parse(value)?,
+        None => config::TernMode::Auto,
     };
     let system_prompt = cli.system_prompt.or(values.system_prompt);
     let effect_policy_source = if cli.safe_mode || cli.effect_policy.is_some() {
@@ -1698,6 +1709,7 @@ fn build_config_with_global_path_and_diagnostics(
         color,
         mouse,
         plain: cli.plain || values.plain.unwrap_or(false),
+        tern,
         show_images: cli.show_images || values.show_images.unwrap_or(false),
         session_dir: cli
             .session_dir

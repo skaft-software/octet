@@ -29,6 +29,11 @@
 - Tern: draw follow-up assistant messages as labelled native cards (model label
   over the projected `customMessage*` palette) instead of a bare Markdown node
   in Tern's default prose look.
+- Add a setting to turn Tern's native TUI rendering on and off:
+  `--tern auto|on|off`, config key `tern`, env `OCTET_TERN` (the older
+  `OCTET_TUI_TERN` still applies when it is unset). `auto` (default)
+  negotiates native surfaces only inside a Tern pane, `on` forces negotiation
+  anywhere, and `off` always uses the terminal renderer.
 
 ## [0.8.2] - 2026-09-30
 

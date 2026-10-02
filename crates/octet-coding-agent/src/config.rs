@@ -60,6 +60,45 @@ impl MouseMode {
     }
 }
 
+/// Tern Surface Protocol rendering policy for the interactive frontend.
+///
+/// `Auto` (the default) negotiates native surfaces only when the terminal
+/// advertises itself (`TERM_PROGRAM=tern`), so every other terminal keeps the
+/// ANSI renderer untouched. `On` forces negotiation regardless of detection,
+/// which is how a non-Tern host is exercised against the protocol path. `Off`
+/// disables the native backend outright and always renders ANSI, even inside
+/// Tern.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TernMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl TernMode {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "on" | "true" | "yes" | "1" => Ok(Self::On),
+            "off" | "false" | "no" | "0" => Ok(Self::Off),
+            _ => anyhow::bail!("invalid tern mode {value:?}; use auto, on, or off"),
+        }
+    }
+
+    /// Whether octet may negotiate a native Tern surface at all. `Auto` still
+    /// requires terminal detection, so this is the cheap deny-first gate.
+    pub fn permitted(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Whether the terminal's own advertisement must be ignored and the
+    /// protocol path attempted unconditionally.
+    pub fn forced(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 /// Frontend selected for this invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -451,6 +490,10 @@ pub struct Config {
     pub mouse: MouseMode,
     /// Force the chronological ASCII frontend even on a capable TTY.
     pub plain: bool,
+    /// Tern Surface Protocol policy for the interactive frontend. `Auto`
+    /// negotiates native surfaces only inside a Tern pane; `Off` always keeps
+    /// the ANSI renderer.
+    pub tern: TernMode,
     /// Opt in to bounded inline image placement for interactive tool results.
     /// Plain, print, and noninteractive frontends always remain payload-free.
     pub show_images: bool,
@@ -590,6 +633,24 @@ mod tests {
         assert!(!MouseMode::Terminal.application_owned());
         assert!(!MouseMode::Off.application_owned());
         assert!(MouseMode::parse("sometimes").is_err());
+    }
+
+    #[test]
+    fn tern_mode_gates_native_surfaces_without_touching_detection() {
+        assert_eq!(TernMode::default(), TernMode::Auto);
+        assert_eq!(TernMode::parse("auto").unwrap(), TernMode::Auto);
+        assert_eq!(TernMode::parse("on").unwrap(), TernMode::On);
+        assert_eq!(TernMode::parse("1").unwrap(), TernMode::On);
+        assert_eq!(TernMode::parse("off").unwrap(), TernMode::Off);
+        assert_eq!(TernMode::parse("0").unwrap(), TernMode::Off);
+        assert!(TernMode::parse("sometimes").is_err());
+        // Off denies negotiation outright; On forces it past detection; Auto
+        // still waits for the terminal to advertise itself.
+        assert!(!TernMode::Off.permitted());
+        assert!(TernMode::Auto.permitted());
+        assert!(!TernMode::Auto.forced());
+        assert!(TernMode::On.permitted());
+        assert!(TernMode::On.forced());
     }
 
     #[test]

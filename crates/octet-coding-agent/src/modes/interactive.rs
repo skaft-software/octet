@@ -9232,6 +9232,9 @@ async fn run_interactive_once(
     let initial_prompt = config.initial_prompt.clone();
     let theme = load_theme(&config);
     let size = Arc::new(Mutex::new(crossterm::terminal::size().unwrap_or((80, 24))));
+    // Published before the frontend starts: the renderer thread and the shared
+    // input filter both read the resolved policy, and neither carries Config.
+    crate::tui::view::tern::set_policy(config.tern);
     let mut shell =
         InteractiveShell::enter_with_mouse(theme, size, config.mouse.application_owned())?;
     // Best-effort re-exec support: a host that cannot report its own executable

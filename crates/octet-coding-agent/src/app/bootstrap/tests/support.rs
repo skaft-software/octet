@@ -24,6 +24,7 @@ pub(super) fn config(directory: &std::path::Path, model: Option<&str>) -> Config
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,
         plain: false,
+        tern: crate::config::TernMode::Auto,
         show_images: false,
         session_dir: directory.join("sessions"),
         compaction: CompactionPolicy::default(),

@@ -626,6 +626,7 @@ pub(crate) mod tests {
             color: crate::config::ColorMode::Auto,
             mouse: crate::config::MouseMode::Auto,
             plain: false,
+            tern: crate::config::TernMode::Auto,
             show_images: false,
             session_dir: directory.path().join("sessions"),
             compaction: CompactionPolicy::default(),
