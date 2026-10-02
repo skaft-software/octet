@@ -124,6 +124,7 @@ impl Agent {
         &mut self,
         input: UserInput,
         tools_enabled: bool,
+        prewarm_responses: bool,
     ) -> Result<Run<'_>, AgentError> {
         if self.reasoning == octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)
             && self.delegation.is_none()
@@ -162,6 +163,14 @@ impl Agent {
             Vec::new()
         };
         require_tool_schema_budget(&initial_tool_defs, self.tool_schema_budget_bytes)?;
+        // Capture only settled context, before appending this submission.
+        // Opening is deferred until the first request passes run admission;
+        // merely constructing a Run (or an idle RPC host) performs no I/O.
+        let mut responses_prewarm = if prewarm_responses {
+            self.responses_prewarm_request().ok().flatten()
+        } else {
+            None
+        };
         let completion_policy = self.completion_policy;
         let mut terminal_gate_evidence =
             TerminalGateEvidence::for_run(completion_policy, &self.session, &input)?;
@@ -890,6 +899,17 @@ impl Agent {
                 let ev = AgentEvent::TurnStarted;
                 notify_observers(&observers, &ev);
                 yield ev;
+                if let Some((warm_client, warm_model, warm_request)) = responses_prewarm.take() {
+                    let timeout = warm_model.endpoint.timeout.min(Duration::from_secs(30));
+                    // This is connection/context setup, not another generation
+                    // attempt. Include it in first-turn timing, but not usage,
+                    // retry budgets, or the durable assistant/tool ledger.
+                    tokio::select! {
+                        biased;
+                        _ = abort.wait() => break 'run FinishReason::Aborted,
+                        _ = tokio::time::timeout(timeout, warm_client.prewarm_responses(&warm_model, warm_request)) => {},
+                    }
+                }
                 let qualified = !native_enabled && qualified_inference_replacement(&model, &request);
                 // A continuation needs the same settings, but not a clone of
                 // the full history: required_input_request replaces messages

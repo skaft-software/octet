@@ -45,6 +45,21 @@ catalog build. Once idle, `/model` opens from current routes and enriches the
 fleet in the background; filtering and highlighted model identity survive the
 refresh, while cancellation/failure leaves the active selection untouched.
 
+For OpenAI Responses routes that prefer WebSockets, plain, print (including
+JSON), and RPC prompt runs best-effort prewarm the settled system/tool/context
+prefix with `generate=false`, before the first admitted generation. Idle RPC
+readiness and construction of an undriven run do not open a provider connection.
+The warmup is caller-driven, cancellable by the run's abort control, and bounded
+to 30 seconds or the shorter endpoint timeout. Failure proceeds through ordinary
+inference and its HTTP/SSE fallback. A live pooled connection or latched fallback
+is not warmed again. SDK `Agent::prompt` and no-tools runs remain unchanged;
+headless hosts opt in through `Agent::prompt_with_responses_prewarm`.
+
+Warmup emits no assistant turn, tool call, usage record, or generation attempt.
+Its elapsed time is included in the first turn's timing. This accounting boundary
+does not promise that the provider will not bill warmup input, nor guarantee
+backend prompt-cache hits or a latency improvement.
+
 Startup resolves the persistent session before final model selection:
 
 1. Select a new, latest, named, or interactively picked session, or fork a

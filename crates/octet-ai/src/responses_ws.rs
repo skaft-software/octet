@@ -810,6 +810,7 @@ impl ResponsesWsPool {
 
     /// Performs a best-effort `generate=false` request used to establish a
     /// provider-side continuation while a caller is still preparing a turn.
+    /// A live cached connection or a latched HTTP fallback needs no warmup.
     pub(crate) async fn prewarm(
         &self,
         key: &str,
@@ -826,6 +827,17 @@ impl ResponsesWsPool {
             .into());
         };
         object.insert("generate".to_owned(), Value::Bool(false));
+        {
+            let state = self.state.lock().await;
+            if state.disabled.contains(key)
+                || state
+                    .sessions
+                    .get(key)
+                    .is_some_and(|connection| connection.alive.load(Ordering::Acquire))
+            {
+                return Ok(());
+            }
+        }
         let deadline = tokio::time::Instant::now() + startup_timeout;
         let mut events = self
             .request(
