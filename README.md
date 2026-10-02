@@ -6,7 +6,7 @@
 
 **A high-performance coding agent.**
 
-[![Release: 0.8.2](https://img.shields.io/badge/release-0.8.2-536dfe?style=flat-square)](docs/releases/v0.8.2.md)
+[![Candidate: 0.8.2](https://img.shields.io/badge/candidate-0.8.2-536dfe?style=flat-square)](docs/releases/v0.8.2.md)
 
 octet reads code, edits files, and runs commands from your terminal. It has a
 native Rust core, supports cloud and local models, saves resumable sessions,
@@ -23,35 +23,40 @@ enabled extensions run with your operating-system permissions, and nothing asks
 first. `--safe-mode` asks before every shell call and file change, but it is an
 approval policy, not a sandbox. See [Security](SECURITY.md#permissions).
 
-This is **octet 0.8.2**. See the [release notes](docs/releases/v0.8.2.md)
-for changes and supported installation channels.
+This checkout is the **octet 0.8.2 candidate**, not a published release. See the
+[release notes](docs/releases/v0.8.2.md) for scope and remaining qualification.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ## Install
 
-**Native installer:** macOS Apple silicon/Intel and GNU/Linux x86-64, no
-Node.js required:
+**0.8.2 is not published yet.** Use the source-build instructions below for this
+candidate. The native and npm commands are planned post-publication instructions,
+not currently available 0.8.2 installation channels.
+
+**Native installer (after publication):** macOS Apple silicon/Intel and GNU/Linux
+x86-64, no Node.js required:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/skaft-software/octet/releases/download/v0.8.2/install-octet.sh | sh
 ```
 
-**npm:** same platforms, if you already have Node.js:
+**npm (after publication):** same platforms, if you already have Node.js:
 
 ```sh
-npm install -g @skaft/octet
+npm install -g @skaft/octet@0.8.2
 octet --version   # octet 0.8.2
 ```
 
-The launcher pulls the matching signed platform package
+The planned launcher pulls the matching signed platform package
 (`@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`, or
-`@skaft/octet-linux-x64-gnu`) with npm provenance. Both lanes are published
+`@skaft/octet-linux-x64-gnu`) with npm provenance. Both lanes must be published
 from the same verified release assets; see
 [distribution](docs/distribution.md) to pin an exact version.
 
-Availability, signed assets and public-install results are tracked on the
+After approved publication, signed assets and public-install results must be
+recorded on the
 [GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.2).
 See [release notes](docs/releases/v0.8.2.md) and
 [installation](docs/installation.md) for scope, prerequisites and channel availability.

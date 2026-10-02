@@ -257,9 +257,10 @@ octet extension list
 The five executable bundles and the separate Serve app are pinned exactly to the
 running host. This checkout's source manifests require `=0.8.2`, and the
 published 0.8.0 bundles require `=0.8.0`. The [0.8.2
-release](https://github.com/skaft-software/octet/releases/tag/v0.8.2) records
-signed assets and public-install evidence. Catalog installs need verified
-published assets that match the running host version:
+candidate notes](releases/v0.8.2.md) record planned distribution and remaining
+qualification, not publication. The 0.8.2 release assets are unavailable; use
+reviewed source extensions or local archives until approved publication.
+Catalog installs need verified published assets that match the running host version:
 
 ```text
 octet extension install NAME

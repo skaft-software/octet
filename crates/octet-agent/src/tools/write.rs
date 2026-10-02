@@ -201,9 +201,6 @@ fn create_or_replace(
         Some(format_unified_creation_diff(path, content))
     };
 
-    prepared
-        .commit_if(content.as_bytes(), || cancellation.is_cancelled())
-        .map_err(|error| file_error(display_path, error))?;
     let verb = if exists { "replaced" } else { "created" };
     let hash = content_hash(content.as_bytes());
     let output = ToolOutput::new(format!("ok\n{display_path}  {verb} hash={hash}"));
@@ -212,13 +209,17 @@ fn create_or_replace(
     let diff = detail;
     // Metadata is durable/presentation-only; the model-visible text stays
     // concise. The exact-match result plus content hash guard the mutation.
-    match diff {
-        Some(diff) => match output.try_with_metadata(serde_json::json!({ "diff": diff })) {
-            Ok(output) => Ok(output),
-            Err(error) => Err(ToolError::new(format!("error internal\n{error}"))),
-        },
-        None => Ok(output),
-    }
+    let output = match diff {
+        Some(diff) => output
+            .try_with_metadata(super::bounded_diff_metadata(diff))
+            .map_err(|error| ToolError::new(format!("error internal\n{error}")))?,
+        None => output,
+    };
+    // All fallible output validation happens before the atomic mutation.
+    prepared
+        .commit_if(content.as_bytes(), || cancellation.is_cancelled())
+        .map_err(|error| file_error(display_path, error))?;
+    Ok(output)
 }
 
 #[cfg(test)]

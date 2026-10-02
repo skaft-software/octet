@@ -10,6 +10,8 @@ command = "extension.py"
 [capabilities]
 # Provisioning installs the MIT-licensed `cua-driver` distribution from the
 # configured package index into octet-owned state under ~/.octet/computer-use.
+# Default macOS setup also installs Cua's verified signed host from its tagged
+# release under that same root, without replacing a global application.
 # The driver is then launched as a child process to read the desktop and to act
 # on it, which necessarily requires filesystem and process authority.
 filesystem = "unrestricted"

@@ -7,8 +7,10 @@ and web search—and the separate Serve application through `octet extension`. S
 [executable bundle setup](installation.md#optional-packages) for the tool
 integrations. The application-package format on this page is specifically for
 `octet-serve`; Serve is not an executable-extension activation target.
-The [0.8.2 release record](releases/v0.8.2.md) records matching signed packages
-and public-install verification.
+The [0.8.2 candidate record](releases/v0.8.2.md) lists planned distribution and
+remaining qualification. Matching 0.8.2 packages are not published; catalog
+installation requires approved publication. Use reviewed source extensions or
+locally built, version-matched archives for candidate testing.
 
 ## Commands
 

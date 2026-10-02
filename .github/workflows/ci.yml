@@ -277,6 +277,10 @@ jobs:
           Write-Output "octet-host.exe hello: $hello"
       - name: Test the native terminal frontend (capabilities, console writer, ConPTY)
         run: |
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib auth::subscription
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib auth::meta
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib tui::terminal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --test windows_conpty -- --nocapture

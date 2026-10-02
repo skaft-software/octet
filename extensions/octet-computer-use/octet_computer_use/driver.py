@@ -929,6 +929,12 @@ def desktop_app() -> Optional[Path]:
     if override:
         path = Path(override)
         return path if path.exists() else None
+    # Setup owns this app and never overwrites /Applications. Prefer it when
+    # present so a version-matched private install actually becomes the host.
+    if platform.system().lower() == "darwin":
+        owned = DriverPaths.for_home().root / "desktop" / "CuaDriver.app"
+        if owned.is_dir():
+            return owned
     for candidate in DESKTOP_APP_CANDIDATES.get(platform.system().lower(), ()):
         path = Path(candidate)
         if path.exists():
@@ -1001,11 +1007,10 @@ def start_desktop_app(app: Optional[Path] = None) -> bool:
     host = app or desktop_app()
     if host is None or platform.system().lower() != "darwin":
         return False
-    identifier = desktop_app_display_name(host)
-    arguments = ["/usr/bin/open", "-n", "-g"]
-    # ``-g`` keeps the app in the background: a foreground automation host would
-    # steal focus from whatever the user is actually doing.
-    arguments += ["-b", identifier] if identifier else ["-a", host.name[:-4]]
+    # Launch the selected path, not its bundle identifier: a private setup app
+    # may not yet be registered, and a global app can share that identifier.
+    # ``-g`` keeps the automation host from stealing the user's focus.
+    arguments = ["/usr/bin/open", "-n", "-g", "-a", str(host)]
     try:
         completed = _run(arguments, timeout=LAUNCH_TIMEOUT_SECONDS)
     except ProvisionError:

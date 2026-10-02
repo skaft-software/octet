@@ -53,6 +53,13 @@
 
 ### Fixed
 
+- Complete macOS setup with Cua's version-matched signed desktop app when it is
+  missing. Verify its release checksum and Developer ID, install only under
+  octet-owned state, and launch that exact app path without replacing a global
+  application or granting permissions.
+- Send an exact window target without the conflicting legacy cursor `scope`,
+  and use a fresh action-session identity after setup/reconnect in the same
+  process so **Set up again** no longer requires restarting octet.
 - The options menu now shows what each action reported. Setup, **Check
   status**, the Jev actions and the jev-use actions returned a tool-shaped
   result, and the menu's result document renders only a `text` field, so a

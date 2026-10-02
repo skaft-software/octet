@@ -1,8 +1,9 @@
 # npm trusted publishing
 
-**The octet npm CLI is published at 0.8.2 with npm provenance.** Native GitHub
-releases and npm publication are independent; see [installation](../installation.md)
-for current install instructions. This maintainer reference describes packaging,
+**The octet 0.8.2 npm CLI is not published.** It is a planned channel for the
+source candidate; native GitHub releases and npm publication need independent
+approval and verification. See [installation](../installation.md) for the
+currently available source-build route. This maintainer reference describes packaging,
 protected publication, and recovery for the four immutable packages. The
 source/release repository is `skaft-software/octet`; future npm releases use
 trusted publishers for that identity. The already-published native v0.7.0
@@ -48,8 +49,8 @@ offline install; they do **not** prove registry publication or macOS acceptance.
 All files in the [public documentation inventory](../package-assets.txt) are
 retained byte-for-byte from the verified native assets. The 0.8.1 npm publication
 followed the signed native release, so its bundled docs are that release-time
-snapshot and may still describe npm as unpublished; the current repository docs
-reflect the later npm publication. Do not rewrite or republish immutable 0.8.1
+snapshot and may still describe npm as unpublished. That historical publication
+does not qualify the 0.8.2 candidate. Do not rewrite or republish immutable 0.8.1
 packages to refresh docs; a later native release can carry updated documentation.
 Packing restores files that npm's ignore rules would omit before final checksums
 and provenance are computed; it never substitutes checkout documentation.
@@ -114,9 +115,10 @@ provenance is understood; revocation or closure is an explicit maintainer action
 
 ## Installation and updates
 
-The current published CLI is `@skaft/octet@0.8.2`, with npm provenance. For
-supported platforms and setup details, see the user-facing
-[installation guide](../installation.md). The version-pinned install command is:
+The planned CLI is `@skaft/octet@0.8.2`; it is not published yet, and no 0.8.2
+registry provenance or public-install acceptance is established. See the
+[installation guide](../installation.md) for the source-build route. Only after
+verified publication, use the version-pinned install command:
 
 ```sh
 npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.2

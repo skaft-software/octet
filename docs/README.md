@@ -3,7 +3,8 @@
 octet is a fast, small coding host for cloud and local models. Extensions add
 tools and bounded, host-shaped integrations. They don't promise Pi execution
 parity or an everything-as-extension platform. These docs describe **octet
-0.8.2**. [Installation](installation.md) lists the supported channels.
+0.8.2 candidate**, not a published release. [Installation](installation.md) separates
+source builds from planned publication channels.
 
 ## Getting started
 

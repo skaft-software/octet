@@ -5,7 +5,8 @@
 //! Each provider owns exactly one file under `~/.octet/credentials/`. The file
 //! is created `0600` before any secret byte is written, replaced atomically, and
 //! never read through a symlink. Refresh-token rotation is serialized by an
-//! advisory lock on the containing directory, so two octet processes cannot
+//! advisory lock on the directory (Unix) or a stable private lock file (Windows),
+//! so two octet processes cannot
 //! both spend the same one-shot refresh token and lock the user out.
 
 use std::fmt;
@@ -100,7 +101,8 @@ impl StoredCredential {
 ///
 /// The lock is held on the credential *directory* rather than the credential
 /// file, because octet replaces credential files atomically: a lock taken on
-/// the file inode would be silently abandoned by the replacement.
+/// the file inode would be silently abandoned by the replacement. Windows uses a
+/// dedicated lock file because `LockFileEx` cannot lock a directory.
 #[must_use = "the refresh lock must be retained until the protected operation completes"]
 pub(crate) struct RefreshLock {
     directory: std::fs::File,
@@ -117,6 +119,14 @@ impl std::fmt::Debug for RefreshLock {
             .field("locked", &self.locked)
             .finish()
     }
+}
+
+#[cfg(not(unix))]
+const REFRESH_LOCK_FILE_NAME: &str = ".subscription-refresh.lock";
+
+fn lock_contention(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 impl RefreshLock {
@@ -197,8 +207,15 @@ impl OAuthStore {
     /// and rotates nothing, leaving the credential exactly as its owner had it.
     pub(crate) fn lock_refresh_within(&self, wait: std::time::Duration) -> Result<RefreshLock> {
         let path = self.refresh_lock_directory()?;
+        #[cfg(unix)]
         let directory = octet_agent::secure_fs::open_private_directory_for_lock(&path)
             .with_context(|| format!("opening refresh lock directory {}", path.display()))?;
+        #[cfg(not(unix))]
+        let directory = {
+            let lock_path = path.join(REFRESH_LOCK_FILE_NAME);
+            octet_agent::secure_fs::open_private_lock_file(&lock_path)
+                .with_context(|| format!("opening refresh lock file {}", lock_path.display()))?
+        };
         let deadline = std::time::Instant::now() + wait;
         loop {
             match fs2::FileExt::try_lock_exclusive(&directory) {
@@ -209,7 +226,7 @@ impl OAuthStore {
                         locked: true,
                     });
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if lock_contention(&error) => {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
                         bail!(
@@ -338,7 +355,11 @@ mod tests {
 
     fn temporary_store(label: &'static str) -> (OAuthStore, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
-        let store = OAuthStore::new(directory.path().join("credential.json"), label);
+        // Elevated Windows runners may give tempfile's root to Administrators.
+        // Have secure_fs create a current-user-owned child, as production does.
+        let credentials = directory.path().join("credentials");
+        octet_agent::secure_fs::create_private_directory_all(&credentials).unwrap();
+        let store = OAuthStore::new(credentials.join("credential.json"), label);
         (store, directory)
     }
 
@@ -483,6 +504,28 @@ mod tests {
         // The contended attempt must leave no phantom holder behind.
         drop(held);
         let _reacquired = store.lock_refresh().unwrap();
+    }
+
+    #[test]
+    fn refresh_replacement_keeps_the_lock_until_the_new_credential_is_durable() {
+        let (store, _guard) = temporary_store("grok");
+        store.save(&credential()).unwrap();
+        let held = store.lock_refresh().unwrap();
+        let mut rotated = store.load_while_refresh_locked(&held).unwrap().unwrap();
+        rotated.access_token = "rotated-access".into();
+        rotated.refresh_token = "rotated-refresh".into();
+        store.save_while_refresh_locked(&rotated, &held).unwrap();
+        assert!(store
+            .lock_refresh_within(std::time::Duration::ZERO)
+            .is_err());
+        held.finish().unwrap();
+        let lock = store.lock_refresh().unwrap();
+        let loaded = store.load_while_refresh_locked(&lock).unwrap().unwrap();
+        assert_eq!(loaded.access_token, "rotated-access");
+        assert_eq!(loaded.refresh_token, "rotated-refresh");
+        lock.finish().unwrap();
+        store.delete().unwrap();
+        assert!(store.load().unwrap().is_none());
     }
 
     #[test]

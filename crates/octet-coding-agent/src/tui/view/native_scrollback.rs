@@ -327,7 +327,13 @@ fn render_shell_update_inner(
     let projected_transcript_len = stable_prefix + replacement.len();
     drop(cache);
     append_chrome(&mut replacement, chrome, stable_prefix);
-    if !include_commit_metadata {
+    // Row coordinates from the old width/session cannot fence a reflowed
+    // status. The physical viewport is re-anchored below, so establish its new
+    // seam instead of retaining a larger historical top and freezing Working.
+    if resized || transcript_replaced {
+        state.native_animation_viewport_top.set(None);
+    }
+    if !include_commit_metadata || resized || transcript_replaced {
         record_native_animation_viewport(state, stable_prefix + replacement.len());
     }
     let pinned = include_commit_metadata.then(|| {

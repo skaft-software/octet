@@ -1,9 +1,10 @@
 # octet Browse
 
-**Distribution: 0.8.2.** This bundle needs exactly octet 0.8.2. Use the
-[version-matched installation](../../docs/installation.md) and the [0.8.2
-release record](../../docs/releases/v0.8.2.md) for signed assets and
-public-install evidence.
+**Source candidate distribution: 0.8.2.** This bundle needs exactly octet 0.8.2.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.2 candidate record](../../docs/releases/v0.8.2.md) for availability and
+remaining qualification. 0.8.2 assets are not published; use the reviewed
+source-checkout route below until publication is approved.
 
 A visible, isolated Chromium window for inspecting pages and taking bounded
 browser actions. You sign in manually. octet Browse never uses your normal

@@ -26,7 +26,7 @@ from octet_computer_use.jev_use_binding import TOOLS as JEV_USE_TOOLS, PREFIX as
 # have been started, but never raise a confirmation.
 PUBLISHED_TOOLS: Sequence[Tuple[str, str, str]] = (
     ("computer_use_status", "read_driver_health", "Report whether the Cua Driver is provisioned, its version, and OS permission status without changing anything."),
-    ("computer_use_setup", "provision", "Provision the MIT-licensed Cua Driver into octet-owned state. Downloads from the configured package index."),
+    ("computer_use_setup", "provision", "Provision the MIT-licensed Cua Driver into octet-owned state. Downloads from the package index and, on macOS, installs its verified signed host from Cua releases when needed."),
     ("computer_use_installed_apps", "list_apps", "List installed and running applications available to the driver."),
     ("computer_use_windows", "list_windows", "List top-level windows currently known to the desktop session."),
         ("computer_use_window_state", "get_window_state", "Return one window's accessibility tree, with a screenshot when include_screenshot is true. Re-snapshot before each element-indexed action."),

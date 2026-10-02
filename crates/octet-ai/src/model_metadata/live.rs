@@ -426,6 +426,14 @@ fn check_pricing(live: &LivePricing, snapshot: Option<LivePricing>) -> Result<()
             for (name, live, built_in) in [
                 ("input", live.input, snapshot.input),
                 ("output", live.output, snapshot.output),
+                ("cache_read", live.cache_read, snapshot.cache_read),
+                ("cache_write", live.cache_write_5m, snapshot.cache_write_5m),
+                // Missing reasoning prices use the output rate at billing.
+                (
+                    "reasoning",
+                    live.reasoning.unwrap_or(live.output),
+                    snapshot.reasoning.unwrap_or(snapshot.output),
+                ),
             ] {
                 if built_in > 0 && live == 0 {
                     return Err(format!("{name} price became zero"));

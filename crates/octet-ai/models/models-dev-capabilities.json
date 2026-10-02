@@ -1544,8 +1544,7 @@
     "modalities": {
       "input": [
         "text",
-        "image",
-        "audio"
+        "image"
       ],
       "output": [
         "text"
@@ -4314,9 +4313,6 @@
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
-      },
-      {
         "type": "effort",
         "values": [
           "low",
@@ -4574,6 +4570,71 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "nvidia/deepseek-ai/deepseek-v4.1-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "nvidia/google/diffusiongemma-26b-a4b-it": {
+    "limit": {
+      "context": 250000,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DiffusionGemma 26B A4B IT",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "nvidia/google/gemma-2-2b-it": {
@@ -5748,6 +5809,32 @@
     ],
     "structured_output": true,
     "tool_call": true
+  },
+  "nvidia/nvidia/nemotron-3.5-content-safety": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 128000,
+      "output": 8192
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nemotron 3.5 Content Safety",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "tool_call": false
   },
   "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b": {
     "limit": {
@@ -8489,6 +8576,34 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "opencode/fledge-alpha-free": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Fledge Alpha Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "opencode/gemini-3-flash": {
@@ -11755,6 +11870,29 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/apodex/apodex-1.1-mini:free": {
+    "limit": {
+      "context": 262144,
+      "output": 235929
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Apodex 1.1 Mini (free)",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/arcee-ai/trinity-large-thinking": {
     "limit": {
       "context": 262144,
@@ -12151,7 +12289,7 @@
   "openrouter/deepseek/deepseek-chat-v3-0324": {
     "limit": {
       "context": 163840,
-      "output": 147456
+      "output": 115200
     },
     "modalities": {
       "input": [
@@ -12302,7 +12440,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -14227,7 +14365,7 @@
     "name": "MiniMax-M2.7",
     "reasoning": true,
     "reasoning_options": [],
-    "structured_output": true,
+    "structured_output": false,
     "tool_call": true
   },
   "openrouter/minimax/minimax-m3": {
@@ -14679,7 +14817,7 @@
     },
     "limit": {
       "context": 262144,
-      "output": 98304
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -15190,7 +15328,7 @@
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -18425,7 +18563,7 @@
   "openrouter/qwen/qwen3.8-27b": {
     "limit": {
       "context": 1000000,
-      "output": 235929
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -19305,6 +19443,25 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/unbiased/pareto-26.10-preview": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Pareto 26.10 Preview",
+    "reasoning": false,
+    "structured_output": false,
+    "tool_call": true
+  },
   "openrouter/undi95/remm-slerp-l2-13b": {
     "limit": {
       "context": 6144,
@@ -20052,7 +20209,7 @@
   "openrouter/z-ai/glm-5.3": {
     "limit": {
       "context": 1048576,
-      "output": 943717
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20728,7 +20885,7 @@
   "openrouter/~z-ai/glm-latest": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 235929
     },
     "modalities": {
       "input": [

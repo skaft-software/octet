@@ -116,6 +116,7 @@ pub(crate) fn reconcile(
     tokens: Tokens,
     previous: Option<&StoredCredential>,
 ) -> Result<StoredCredential> {
+    let initial_grant = previous.is_none();
     let previous = previous.cloned().unwrap_or_else(|| StoredCredential {
         version: super::store::CREDENTIAL_VERSION,
         access_token: String::new(),
@@ -131,6 +132,9 @@ pub(crate) fn reconcile(
         RefreshMode::Retaining => tokens
             .refresh
             .unwrap_or_else(|| previous.refresh_token.clone()),
+        // The first device grant returns the identity, not an inference key.
+        // Subsequent mints keep that identity and ignore any refresh field.
+        RefreshMode::Minting if initial_grant => tokens.access.clone(),
         RefreshMode::Minting => previous.refresh_token.clone(),
         RefreshMode::Never => String::new(),
     };
@@ -235,6 +239,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(minted.refresh_token, "identity-token");
+    }
+
+    #[test]
+    fn a_minting_device_grant_retains_its_initial_identity() {
+        let identity = reconcile(
+            "Meta",
+            RefreshMode::Minting,
+            tokens("initial-identity", Some("ignored"), 60),
+            None,
+        )
+        .unwrap();
+        assert_eq!(identity.refresh_token, "initial-identity");
+        let minted = reconcile(
+            "Meta",
+            RefreshMode::Minting,
+            tokens("api-key", None, 60),
+            Some(&identity),
+        )
+        .unwrap();
+        assert_eq!(minted.access_token, "api-key");
+        assert_eq!(minted.refresh_token, "initial-identity");
     }
 
     #[test]

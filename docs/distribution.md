@@ -1,14 +1,19 @@
 # Distribution channels
 
-Octet 0.8.2 native, Serve and five executable-bundle asset availability is
-recorded on the [version-pinned GitHub
-release](https://github.com/skaft-software/octet/releases/tag/v0.8.2).
-Public-install results are recorded there too. See
-[installation](installation.md) for native installation or a source build, and
-the [release notes](releases/v0.8.2.md) for changes. The GitHub release records
-publication verification. npm is published at `@skaft/octet@0.8.2` (launcher
-plus three signed platform packages, with npm provenance); Homebrew, crates.io
-and SDK registries remain separate, unpublished channels.
+Octet 0.8.2 is a **source candidate, not a published release**. Its canonical
+GitHub tag, native/Serve/executable-bundle release assets and all four npm
+packages are unavailable. Use the source-build route in
+[installation](installation.md). The commands below describe publication
+contracts and planned post-publication installation, not currently usable
+0.8.2 downloads.
+
+After approved publication, the [version-pinned GitHub
+release](https://github.com/skaft-software/octet/releases/tag/v0.8.2) must record
+signed assets and public-install verification. See the
+[release notes](releases/v0.8.2.md) for scope and remaining qualification. The
+planned npm channel is `@skaft/octet@0.8.2` (launcher plus three signed platform
+packages, with provenance). Homebrew, crates.io and SDK registries remain
+separate, unpublished channels.
 
 The repository is now `skaft-software/octet`. The immutable v0.7.0 assets keep
 their original `skaft-software/ygg` signing identity, and v0.7.1 and later use
@@ -17,7 +22,7 @@ repository. Don't recreate the old name.
 
 ## Package identities
 
-This release's distribution is **0.8.2**. The distribution version does not
+This candidate's distribution target is **0.8.2**. The distribution version does not
 change independent API and schema versions. The [0.7.6
 release](releases/v0.7.6.md) keeps its historical version-matched assets and
 channel evidence.
@@ -74,22 +79,22 @@ ripgrep):
 cargo install --locked --git https://github.com/skaft-software/octet --tag v0.8.2 --bins octet-coding-agent
 ```
 
-The public `v0.8.2` tag must exist before you use this command.
+The public `v0.8.2` tag does not exist yet; it must exist before you use this command.
 `cargo install octet` and registry-based `cargo install octet-coding-agent`
 aren't the supported Cargo path.
 
-The npm channel is published at 0.8.2: four `@skaft/octet*` packages (launcher
-plus three platform packages), built from the verified release assets with
-trusted publishers and registry provenance verification. Pin the version to
-reproduce one exact release:
+The planned npm channel has four `@skaft/octet*` packages (launcher plus three
+platform packages), built from verified release assets with trusted publishers
+and registry provenance verification. **0.8.2 is not published to npm.** Only
+after verified publication, pin the version to reproduce one exact release:
 
 ```sh
 npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.2
 ```
 
-`npm install -g @skaft/octet` tracks the `latest` dist-tag instead, which is the
-command published on the front page. Published versions are immutable, so a
-pinned install can't be silently replaced.
+`npm install -g @skaft/octet` tracks the `latest` dist-tag instead; it is not an
+installation of this unpublished candidate. Published versions are immutable,
+so a pinned install can't be silently replaced.
 
 ## Reviewed model metadata
 
@@ -170,9 +175,9 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 
 ## Other channels
 
-The v0.8.2 version-pinned shell installer targets macOS arm64 and x64 and
-GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms and is
-published as `@skaft/octet@0.8.2`. See the [npm release
+The planned v0.8.2 version-pinned shell installer targets macOS arm64 and x64 and
+GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms and would
+publish as `@skaft/octet@0.8.2`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and
 provenance checks. Bun is unqualified. Cargo can build and install the local
 checkout without a registry channel. Installing from the public canonical tag

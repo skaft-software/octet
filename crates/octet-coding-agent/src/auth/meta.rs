@@ -107,6 +107,15 @@ impl MetaFlow {
         http: &reqwest::Client,
         identity: &StoredCredential,
     ) -> Result<StoredCredential> {
+        self.mint_with_url(http, identity, API_KEY_MINT_URL).await
+    }
+
+    async fn mint_with_url(
+        &self,
+        http: &reqwest::Client,
+        identity: &StoredCredential,
+        url: &str,
+    ) -> Result<StoredCredential> {
         if !identity.has_refresh_token() {
             bail!(
                 "{} credential has no identity token; sign in again",
@@ -121,7 +130,7 @@ impl MetaFlow {
         // token this request spends.
         authorization.set_sensitive(true);
         let response = http
-            .post(API_KEY_MINT_URL)
+            .post(url)
             .header("accept", "application/json")
             .header("content-type", "application/json")
             .header("x-api-version", API_KEY_MINT_VERSION)
@@ -179,5 +188,77 @@ impl MetaFlow {
         // `account_id` forward preserves the non-secret diagnostic without
         // re-decoding anything at resolution time.
         reconcile(self.label(), RefreshMode::Minting, tokens, Some(identity))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    #[tokio::test]
+    async fn initial_device_identity_can_mint_persist_and_remint_api_keys() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/device"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_code": "private-device", "user_code": "ABCD", "interval": 1,
+                "expires_in": 30, "verification_uri": "https://auth.meta.com/verify"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "identity-secret", "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/mint"))
+            .and(header("authorization", "Bearer identity-secret"))
+            .and(header("x-api-version", API_KEY_MINT_VERSION))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "api_key": "inference-key"
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let http = reqwest::Client::new();
+        let identity = DeviceGrant::new(
+            CLIENT_ID,
+            format!("{}/device", server.uri()),
+            format!("{}/token", server.uri()),
+            &[],
+            &[],
+        )
+        .run(&MetaFlow, &http, true)
+        .await
+        .unwrap();
+        assert_eq!(identity.refresh_token, "identity-secret");
+        let credential = MetaFlow
+            .mint_with_url(&http, &identity, &format!("{}/mint", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(credential.access_token, "inference-key");
+        assert_eq!(credential.refresh_token, "identity-secret");
+        let directory = tempfile::tempdir().unwrap();
+        let store = super::super::subscription::store::OAuthStore::new(
+            directory.path().join("credentials/meta.json"),
+            "Meta",
+        );
+        store.save(&credential).unwrap();
+        let persisted = store.load().unwrap().unwrap();
+        let reminted = MetaFlow
+            .mint_with_url(&http, &persisted, &format!("{}/mint", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(reminted.access_token, "inference-key");
+        assert_eq!(reminted.refresh_token, "identity-secret");
     }
 }

@@ -1,9 +1,11 @@
 # octet computer-use
 
-**Distribution: 0.8.2.** This bundle requires exactly octet 0.8.2.
+**Source candidate distribution: 0.8.2.** This bundle requires exactly octet 0.8.2.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.2 release record](../../docs/releases/v0.8.2.md) for signed assets and
-public-install evidence. Windows and Linux desktop parity remain unqualified.
+[0.8.2 candidate record](../../docs/releases/v0.8.2.md) for availability and
+remaining qualification. 0.8.2 assets are not published; use a reviewed source
+checkout with `--extension-dir ./extensions` until publication is approved.
+Windows and Linux desktop parity remain unqualified.
 
 Operate native desktop applications on **macOS, Windows, and Linux** through a
 locally installed [Cua Driver](https://github.com/trycua/cua), the MIT-licensed
@@ -28,7 +30,8 @@ octet --enable-extension octet-computer-use
 Then open `/extensions`, choose **octet-computer-use** (choosing a disabled
 extension enables it first), and pick **Set up computer use**. Setup shows each
 step live as it runs and does everything computer use needs: it provisions the
-driver, installs the bundled model-colored cursor themes, installs the GNOME
+driver and the signed macOS desktop host when needed, installs the bundled
+model-colored cursor themes, installs the GNOME
 Shell helper on GNOME Wayland, checks your permissions (macOS asks you to allow
 access), and at the end offers the optional Jev setup. **Check status** re-runs
 the driver self-check and permission probe, and the menu's header shows the
@@ -47,8 +50,15 @@ Python (macOS's Xcode Python is 3.9), setup builds the driver's runtime from a
 compatible `python3` on `PATH` or a standard macOS install (Homebrew or
 python.org). With none available, it stops and names the version to install.
 
-The `computer_use_setup` agent tool provisions only the driver; it cannot
-install themes. Theme installation is deliberately a trusted local operation,
+The `computer_use_setup` agent tool provisions the driver and, in default macOS
+host mode, its version-matched signed app; it cannot install themes. Missing
+macOS hosts are downloaded from Cua's tagged GitHub release, checked against its
+SHA-256 manifest and Cua's Apple Developer ID, and installed under
+`~/.octet/computer-use/desktop/CuaDriver.app`. A matching existing app is reused;
+setup never replaces `/Applications/CuaDriver.app` or runs a remote installer
+script. The setup-owned app takes precedence when present, while
+`OCTET_CUA_DESKTOP_APP` remains an explicit override.
+Theme installation is deliberately a trusted local operation,
 not an agent tool. On Linux, whose driver wheel ships no theme compiler, the
 bundle writes the same reviewed artifacts straight into the driver's theme store
 (`~/.local/share/cua-driver/cursor-themes`), and it also does so the first time
@@ -69,8 +79,9 @@ self-check, and your operating system's permission state. It never prompts.
 The driver needs permission to observe and control the desktop. **This bundle
 never grants an operating-system permission for you.** Grant it yourself:
 
-- **macOS** — by default, the signed `/Applications/CuaDriver.app` host needs
-  Accessibility and Screen Recording grants. If it is unavailable or cannot
+- **macOS** — the selected signed `CuaDriver.app` (setup-owned, or an existing
+  `/Applications/CuaDriver.app`) needs Accessibility and Screen Recording grants.
+  If it is unavailable or cannot
   verify its grants, computer use reports `unavailable` rather than silently
   switching to cursorless direct mode. Set `OCTET_CUA_DESKTOP_HOST=0` only when
   you explicitly want direct mode, which inherits the grants of the app running
@@ -97,7 +108,7 @@ effectful actions only when no display session is reachable.
 
 | Runtime | When it is used | Needs | Agent cursor |
 | --- | --- | --- | --- |
-| `desktop-host` | Default on macOS when signed `/Applications/CuaDriver.app` and its grants are live | Grants given to that Cua Driver app | Yes, after cursor-state verification |
+| `desktop-host` | Default on macOS when the selected signed `CuaDriver.app` and its grants are live | Grants given to that Cua Driver app | Yes, after cursor-state verification |
 | `direct` | Non-macOS by default, or macOS only with `OCTET_CUA_DESKTOP_HOST=0` | The grants of the app running octet; on Linux, a reachable display session | On Linux (X11, wlroots Wayland such as Hyprland/Sway, or GNOME via its Shell helper); otherwise no |
 | `unavailable` | macOS host is missing or cannot prove live grants while host mode is selected | Install/authorize the signed Cua app, or explicitly opt into direct mode | No |
 
@@ -171,6 +182,15 @@ cua-driver permissions status --json
 After this, `permissions status` reports `source.attribution: "driver-daemon"` and
 the grants survive respawns and reboots. The extension uses the signed Cua host's
 daemon permission probe and fails closed if the selected host cannot establish them.
+
+### Observed macOS qualification limit
+
+The closeout smoke exercised the signed host, snapshots, window-scoped cursor,
+element-token typing/readback and a same-process setup restart. Driver 0.31.0
+rejected `click` with the wrapper's `snapshot_id` argument (`unknown argument
+snapshot_id`); snapshot-bound/indexed clicking remains unqualified. Successful
+element-token typing is not evidence that that click path works. Do not retry
+a failed click by guessing coordinates or targeting another window.
 
 ## Windows
 
@@ -256,7 +276,7 @@ matters, run octet inside a VM.
 | Tool | Driver tool | Notes |
 | --- | --- | --- |
 | `computer_use_status` | local | Provisioning, version, permissions, self-check. |
-| `computer_use_setup` | local | Install the driver from the package index. |
+| `computer_use_setup` | local | Install the driver from the package index and its signed macOS host when needed. |
 | `computer_use_installed_apps` | `list_apps` | Read-only. |
 | `computer_use_windows` | `list_windows` | Read-only. Optional `on_screen_only: true` filters to visible windows; `false` includes off-screen windows. |
 | `computer_use_window_state` | `get_window_state` | Read-only. Accessibility tree by default; screenshot with `include_screenshot: true`. |
@@ -306,7 +326,8 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   into these fixed variants.
 - **One action session.** Cursor setup, public session start/end, and eligible
   driver actions share one driver session; ending it clears the binding so a
-  subsequent action must establish a new session.
+  subsequent action must establish a new session. Each reopened transport gets
+  a fresh session identity, including **Set up again** within the same process.
 - **Bounded outputs.** Text and structured driver output are bounded below
   Octet's 256 KiB structured-content limit while preserving window IDs, snapshot
   IDs, element tokens, and coordinates. Screenshots are published as artifacts,
@@ -319,8 +340,8 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   already gives its own tool subprocesses, so launched apps start as they do
   from the desktop. Provider tokens and arbitrary ambient variables are not
   forwarded.
-- **No secrets, no silent installs.** The bundle never types credentials for you
-  and never downloads a driver outside the standard package install you trigger.
+- **No secrets, no silent installs.** The bundle never types credentials for you.
+  Driver and signed-host downloads happen only during setup you trigger.
   Where the host Python cannot create a venv with pip (Debian and Ubuntu
   without `python3-venv`), that install downloads the same published Linux
   wheel from the package index, verifies its SHA-256 against the index, and

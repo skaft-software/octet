@@ -383,7 +383,14 @@ impl PseudoConsole {
         let output = self.raw();
         self.parser.process(&output[self.processed..]);
         self.processed = output.len();
-        self.parser.screen().contents()
+        // ConPTY can emit full-width rows as soft wraps. `contents()` joins
+        // those into logical lines, hiding correctly redrawn physical rules.
+        // This harness asserts screen geometry, not copy/selection text.
+        let screen = self.parser.screen();
+        screen
+            .rows(0, screen.size().1)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn wait_for(&mut self, description: &str, predicate: impl Fn(&str) -> bool) -> String {

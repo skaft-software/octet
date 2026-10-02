@@ -247,6 +247,36 @@ fn truncate_utf8(value: &mut String, max_bytes: usize) {
     value.truncate(keep);
 }
 
+/// Keep presentation diffs within the serialized metadata budget, including
+/// JSON escaping. Raw UTF-8 size alone does not bound control-character diffs.
+pub(crate) fn bounded_diff_metadata(mut diff: String) -> serde_json::Value {
+    let escaped_len = |ch: char| match ch {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{0008}' | '\u{000c}' => 2,
+        ch if ch <= '\u{001f}' => 6,
+        ch => ch.len_utf8(),
+    };
+    let envelope = r#"{"diff":""}"#.len();
+    let budget = crate::tool::MAX_TOOL_METADATA_BYTES - envelope;
+    if diff.chars().map(escaped_len).sum::<usize>() > budget {
+        let content_budget = budget
+            - UNIFIED_DIFF_TRUNCATION_MARKER
+                .chars()
+                .map(escaped_len)
+                .sum::<usize>();
+        let mut used = 0;
+        let keep = diff
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                used += escaped_len(ch);
+                (used > content_budget).then_some(offset)
+            })
+            .expect("oversized diff exceeds the smaller content budget");
+        diff.truncate(keep);
+        diff.push_str(UNIFIED_DIFF_TRUNCATION_MARKER);
+    }
+    serde_json::json!({ "diff": diff })
+}
+
 /// Build a minimal, bounded unified diff showing the replacement with
 /// surrounding context lines so the rendered output is scannable at a glance.
 /// Hunk counts always describe the complete replacement, even when the body is

@@ -10,7 +10,10 @@ table, and test commands.
 ## Boundary and authority
 
 - The driver is third-party software installed from the standard package index
-  into `~/.octet/computer-use`. It is not vendored, not forked, and contains no
+  into `~/.octet/computer-use`. Default macOS setup also installs its matching
+  signed app from Cua's tagged release after SHA-256 and Developer ID checks;
+  that app stays in octet-owned state, never replacing a global application.
+  It is not vendored, not forked, and contains no
   part of OpenAI's CUA runtime. This bundle never downloads a driver outside the
   user-triggered `computer_use_setup` tool or **Set up computer use** menu
   action (under `/extensions`), and
@@ -54,12 +57,14 @@ table, and test commands.
   resulting enabled state before reporting readiness. Failures surface and block
   actions rather than silently proceeding cursorless.
 - Public start/end operations switch or clear that same session; subsequent
-  actions attach to the active session, and extension shutdown ends it.
+  actions attach to the active session, and extension shutdown ends it. A new
+  transport always generates a fresh session identity, even within one PID.
 
 ## Platform notes
 
-- **macOS** — by default, the signed `/Applications/CuaDriver.app` is the
-  desktop host and owns the daemon's permission identity and cursor overlay. If
+- **macOS** — the setup-owned signed `CuaDriver.app`, or a matching existing
+  `/Applications/CuaDriver.app`, owns the daemon's permission identity and cursor
+  overlay. LaunchServices opens that exact selected app path. If
   the host is missing or cannot prove its permissions, runtime status is
   `unavailable`; octet does not silently fall back to a cursorless direct
   runtime. `OCTET_CUA_DESKTOP_HOST=0` explicitly opts into direct mode. An

@@ -14,13 +14,14 @@ import platform
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from octet_extension import Extension, RpcError, image_content, text_content, tool_result
 
 from octet_computer_use import driver as driver_module
-from octet_computer_use import cursor_theme, gnome_helper, service, jev_use_binding, jev_use_jobs
+from octet_computer_use import cursor_theme, desktop_host, gnome_helper, service, jev_use_binding, jev_use_jobs
 from octet_computer_use.driver_client import DriverClient, McpError
 from octet_computer_use.jev import (
     Candidate,
@@ -161,10 +162,11 @@ def cursor_session() -> str:
 
     Uniqueness is what makes the cursor work on every launch: the driver binds a
     session name to the transport that first claims it, so a shared name would
-    be refused after any restart.
+    be refused after any restart. A PID alone is not enough: setup and
+    reconnect can create another transport within this same extension process.
     """
 
-    return "%s-%d" % (CURSOR_SESSION_PREFIX, os.getpid())
+    return "%s-%d-%s" % (CURSOR_SESSION_PREFIX, os.getpid(), uuid.uuid4().hex)
 
 
 def _schema_for(driver_tool: str) -> Dict[str, Any]:
@@ -429,8 +431,8 @@ class ComputerUse:
             host_usable = bool(app_binary and driver_module.desktop_app_usable(app_binary))
             if driver_module.cursor_host_required() and not host_usable:
                 raise McpError(
-                    "Computer use is unavailable: the signed Cua Driver app at "
-                    "/Applications/CuaDriver.app is unavailable or lacks live permissions; "
+                    "Computer use is unavailable: the selected signed Cua Driver app "
+                    "is unavailable or lacks live permissions; "
                     "refusing to fall back to a cursorless direct runtime."
                 )
             app_daemon = bool(app_binary and host_usable)
@@ -677,7 +679,6 @@ class ComputerUse:
             # object. Never forward desktop scope through the public tool.
             arguments["target"] = {"kind": "window", "pid": arguments.pop("pid"),
                                    "window_id": arguments.pop("window_id")}
-            arguments["scope"] = "window"
 
         if client.requires_confirmation(driver_tool) and confirmations_enabled():
             if self._permissions_block(driver_tool):
@@ -838,6 +839,7 @@ class ComputerUse:
     def provision(self, version: str = "", *, progress: Optional[Any] = None) -> Dict[str, Any]:
         self.shutdown()
         binary = driver_module.provision(self._paths, version=version, progress=progress)
+        desktop_host.provision(self._paths, binary, progress=progress)
         with self._lock:
             self._installed_hint = True
             self._last_status = None

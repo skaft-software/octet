@@ -375,7 +375,9 @@ mod wire_tests {
         )
     }
 
-    #[tokio::test(start_paused = true)]
+    // Wiremock services real sockets on another runtime; virtual time can
+    // expire the device grant while its response is still in flight.
+    #[tokio::test]
     async fn a_device_grant_presents_the_code_and_polls_until_the_user_finishes() {
         let (server, polls) = pending_then_rotated().await;
         Mock::given(method("POST"))

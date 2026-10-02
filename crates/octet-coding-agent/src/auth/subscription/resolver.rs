@@ -371,7 +371,10 @@ mod tests {
         flow.mode = mode;
         flow.skew = skew;
         Fixture {
-            store: OAuthStore::new(guard.path().join("credential.json"), "Test Provider"),
+            store: OAuthStore::new(
+                guard.path().join("credentials/credential.json"),
+                "Test Provider",
+            ),
             flow: Arc::new(flow),
             _guard: guard,
         }
@@ -528,7 +531,10 @@ mod tests {
     async fn a_token_endpoint_that_renews_nothing_is_refused() {
         let (server, _) = rotating_token_endpoint().await;
         let guard = tempfile::tempdir().unwrap();
-        let store = OAuthStore::new(guard.path().join("credential.json"), "Test Provider");
+        let store = OAuthStore::new(
+            guard.path().join("credentials/credential.json"),
+            "Test Provider",
+        );
         // An already-expired credential, so the echo check is the only thing
         // that can reject the response.
         store.save(&credential(-10)).unwrap();
@@ -658,7 +664,10 @@ mod tests {
         // resolution fails with a message naming the provider instead.
         flow.headers = vec![("x-rejected", "one\ntwo".to_owned())];
         let guard = tempfile::tempdir().unwrap();
-        let store = OAuthStore::new(guard.path().join("credential.json"), "Test Provider");
+        let store = OAuthStore::new(
+            guard.path().join("credentials/credential.json"),
+            "Test Provider",
+        );
         store.save(&credential(600)).unwrap();
         let resolver =
             SubscriptionResolver::new(Arc::new(flow) as Arc<dyn SubscriptionFlow>, store.clone());
@@ -675,7 +684,10 @@ mod tests {
         let mut flow = TestFlow::new(UNROUTABLE.to_owned());
         flow.headers = vec![("x-provider-identity", "octet-test".to_owned())];
         let guard = tempfile::tempdir().unwrap();
-        let store = OAuthStore::new(guard.path().join("credential.json"), "Test Provider");
+        let store = OAuthStore::new(
+            guard.path().join("credentials/credential.json"),
+            "Test Provider",
+        );
         store.save(&credential(600)).unwrap();
         let resolver =
             SubscriptionResolver::new(Arc::new(flow) as Arc<dyn SubscriptionFlow>, store);

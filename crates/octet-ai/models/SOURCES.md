@@ -89,9 +89,11 @@ keeps the built-in data for that model only, and the cache lists it under
 
 - a rate above $100,000 per million tokens, or a limit above 100M tokens, is
   malformed;
-- an input or output price the snapshot publishes may not become zero or fall
-  more than tenfold, so a live quote cannot make a hard cost ceiling undercount
-  sharply;
+- a positive input, output, cache-read or cache-write price the snapshot
+  publishes may not become zero or fall more than tenfold; effective reasoning
+  rates receive the same check, including their output-price fallback. A cache
+  bucket already published as zero stays valid, so this does not invent charges
+  for free or unpublished cache rates;
 - a route the snapshot does not price needs non-zero input and output rates;
   and
 - a catalog that is not an object, or that yields no usable record, is ignored
@@ -107,6 +109,35 @@ to this snapshot per model, so a route that disappears upstream keeps its
 built-in data. Live records are consumed exactly like snapshot records: the
 precedence rules above are unchanged, and a failed refresh leaves the metadata
 in use as it was.
+
+## Reviewed metadata refresh (v0.8.2)
+
+The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256
+`404d33ff898888b1e4a1074770f207c87210e050e32151687fae255dd4dda6b6`.
+Relative to the preceding PR head, the four outputs contain:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 921 | 6 | 0 | 22 |
+| Canonical names | 402 | 3 | 0 | 0 |
+| Capability routes | 943 | 6 | 0 | 10 |
+
+The 22 changed prices cover 20 OpenRouter routes and two Fireworks routes.
+OpenRouter DeepSeek V4 Pro now quotes $0.2088/$0.4176/$0.0174 per million
+input/output/cache-read tokens; its exact integer-rate regression follows that
+quote. Fireworks V4.1 Flash and its latest router now quote $0.30/$1.20/$0.006.
+Kimi K2 Thinking loses its published cache-read quote, while Qwen3.8 27B's
+OpenRouter input quote increases from $0.0249 to $0.42. These are reviewed
+aggregator-route records, never direct-provider tariffs or availability claims.
+
+Capability review includes lower OpenRouter output limits for DeepSeek V4 Flash
+(131,072) and Qwen3.8 27B (131,072), higher limits for Kimi K2 Thinking (235,929)
+and Nemotron 3.5 Lightning (131,072), removal of Inkling's audio input and
+MiniMax-M2.7's structured-output assertion, and removal of Kimi K3's toggle
+assertion. Existing endpoint precedence, subscription allowlists and extraction
+exclusions remain unchanged. Direct DeepSeek schedule pricing stays unverified
+and excluded. The live pre-release comparison passed after this refresh; it must
+be rerun before freezing a later source revision.
 
 ## GPT-6 contract review (2026-09-23)
 

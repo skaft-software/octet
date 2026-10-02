@@ -90,15 +90,26 @@ pub(crate) async fn bounded_body(response: reqwest::Response, label: &str) -> Re
 
 /// Whether an error code is safe to place in a user-visible message.
 ///
-/// Only short ASCII codes are echoed. Anything else — including a provider that
-/// reuses `error` for prose or for the submitted secret — is dropped and the
-/// caller reports the status alone.
+/// Only recognized OAuth codes are echoed. Token-shaped strings are not safe:
+/// a provider can reflect a submitted device code or token in this field.
 fn is_safe_error_code(code: &str) -> bool {
-    !code.is_empty()
-        && code.len() <= 64
-        && code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    matches!(
+        code,
+        "invalid_request"
+            | "invalid_client"
+            | "invalid_grant"
+            | "unauthorized_client"
+            | "unsupported_grant_type"
+            | "invalid_scope"
+            | "access_denied"
+            | "authorization_denied"
+            | "authorization_pending"
+            | "slow_down"
+            | "expired_token"
+            | "unsupported_response_type"
+            | "server_error"
+            | "temporarily_unavailable"
+    )
 }
 
 /// Extract an allow-listed OAuth error code from a response body.
@@ -284,6 +295,22 @@ mod tests {
         assert!(safe_error_code(r#"{"error":"é"}"#).is_none());
         assert!(safe_error_code("not json").is_none());
         assert!(safe_error_code("[]").is_none());
+    }
+
+    #[test]
+    fn reflected_credentials_never_reach_error_diagnostics() {
+        for secret in ["device-SECRET", "access_TOKEN", "sk-secret", "abc123"] {
+            for error in [
+                serde_json::json!(secret),
+                serde_json::json!({"code": secret}),
+            ] {
+                let body = serde_json::json!({"error": error}).to_string();
+                assert!(safe_error_code(&body).is_none());
+                let diagnostic =
+                    request_failed("device poll", reqwest::StatusCode::BAD_REQUEST, &body);
+                assert!(!format!("{diagnostic:#} {diagnostic:?}").contains(secret));
+            }
+        }
     }
 
     #[test]

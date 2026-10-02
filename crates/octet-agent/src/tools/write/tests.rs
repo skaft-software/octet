@@ -250,3 +250,30 @@ async fn rejects_directory_and_escaping_paths() {
         .unwrap_err();
     assert!(err.message.contains(".."), "{err}");
 }
+
+#[tokio::test]
+async fn escaped_diff_metadata_cannot_fail_after_a_successful_mutation() {
+    let f = fixture();
+    let content = "\u{0001}".repeat(20_000) + "λ";
+    // Exercise both creation and replacement with a diff that expands 6x
+    // during JSON serialization.
+    for initial in [None, Some("old")] {
+        if let Some(initial) = initial {
+            std::fs::write(f.workspace.join("escaped.txt"), initial).unwrap();
+        }
+        let out = WriteTool
+            .execute(json!({"path": "escaped.txt", "content": content}), &f.ctx())
+            .await
+            .unwrap();
+        assert!(out.text.starts_with("ok"));
+        assert_eq!(
+            std::fs::read_to_string(f.workspace.join("escaped.txt")).unwrap(),
+            content
+        );
+        let metadata = out.details().unwrap().metadata().unwrap();
+        assert!(
+            serde_json::to_vec(metadata).unwrap().len() <= crate::tool::MAX_TOOL_METADATA_BYTES
+        );
+        assert!(diff_metadata(&out).contains("unified diff truncated"));
+    }
+}

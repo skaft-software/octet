@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-30
+
+See [release notes](docs/releases/v0.8.2.md) for candidate scope, availability,
+and qualification limits. The date identifies this candidate, not a publication
+receipt.
+
 - Sign in to paid plans without a long-lived API key, the way Codex sign-in
   already works. `--login grok`, `--login kimi`, `--login meta`, and
   `--login openrouter` each run the provider's own OAuth grant and store one
@@ -39,11 +45,25 @@
   that session replay does not turn into context. Tool cards render the same
   diffs from that channel, so the UI is unchanged, and sessions recorded before
   this change still show their diffs. Stale-file detection, exact-match
-  reporting, and diff resource evidence are unchanged.
+  reporting, and diff resource evidence are unchanged. Bound the serialized
+  metadata, including JSON escaping, and validate the result before committing
+  the file so a successful mutation cannot be reported as a metadata failure.
 
-## [0.8.2] - 2026-09-30
-
-See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits.
+- Retain Meta's initial device identity across API-key minting and renewal;
+  hold subscription refresh locks across credential replacement on Windows as
+  well as Unix. Omit unrecognized OAuth error codes from diagnostics rather
+  than reflecting credential-shaped provider text.
+- Protect live cache-read, cache-write and effective reasoning prices against
+  zeroing or greater-than-tenfold drops, just like input and output prices.
+- Re-anchor active status rows after history reflow so `Working` shimmer and its
+  elapsed clock continue after a narrow-to-wide resize.
+- Complete default macOS computer-use setup with a checksum- and Developer
+  ID-verified signed host in octet-owned state when needed. Target cursor moves
+  with the current driver's exact-window contract, and reopen setup with a fresh
+  transport-owned session identity.
+- Refresh and review all four models.dev snapshots together: 921 pricing routes,
+  402 names and 943 capability routes. Direct DeepSeek schedule pricing remains
+  excluded; public metadata does not establish live inference acceptance.
 
 - Add GPT-6.1 Sol on OpenAI API keys and ChatGPT (Codex) sign-in. On Codex it
   leads the fallback model list, starts at low reasoning, and offers Ultra only
@@ -97,8 +117,9 @@ See [release notes](docs/releases/v0.8.2.md) for scope, availability, and limits
   first), which shows its state and offers only what applies. Actions show
   their steps live and can be cancelled with Esc; confirmations, choices, and
   hidden key entry appear in place, and destructive actions ask first.
-  - **Computer use**: Set up computer use does the whole setup (driver, cursor
-    themes, GNOME helper, permission check, optional Jev); also Check status,
+  - **Computer use**: Set up computer use does the whole setup (driver, signed
+    macOS host when needed, cursor themes, GNOME helper, permission check,
+    optional Jev); also Check status,
     Jev keys, and the jev-use recipe with its jobs.
   - **Browser**: setup follows the install through Chromium's download; open,
     close, status, and profile reset.

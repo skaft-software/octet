@@ -159,3 +159,49 @@ fn overlay_lookups_prefer_live_records_and_fall_back_per_record() {
         super::super::capability_metadata_in(Some(overlay), "baseten/zai-org/GLM-5.2").unwrap();
     assert_eq!(record["modalities"]["input"], serde_json::json!(["text"]));
 }
+
+#[test]
+fn every_billed_bucket_is_checked_against_the_snapshot() {
+    let snapshot = LivePricing {
+        input: 1_000_000,
+        output: 2_000_000,
+        cache_read: 100_000,
+        cache_write_5m: 1_250_000,
+        reasoning: Some(5_000_000),
+    };
+    assert!(check_pricing(&snapshot, Some(snapshot)).is_ok());
+    for bucket in ["cache_read", "cache_write", "reasoning"] {
+        for rate in [0, 1] {
+            let mut live = snapshot;
+            match bucket {
+                "cache_read" => live.cache_read = rate,
+                "cache_write" => live.cache_write_5m = rate,
+                _ => live.reasoning = Some(rate),
+            }
+            let rejection = check_pricing(&live, Some(snapshot)).unwrap_err();
+            assert!(rejection.starts_with(bucket), "{rejection}");
+        }
+    }
+    let expensive_reasoning = LivePricing {
+        reasoning: Some(50_000_000),
+        ..snapshot
+    };
+    assert!(check_pricing(
+        &LivePricing {
+            reasoning: None,
+            ..snapshot
+        },
+        Some(expensive_reasoning)
+    )
+    .unwrap_err()
+    .starts_with("reasoning"));
+    // An unpublished built-in cache price may acquire a valid live rate.
+    let unpublished = LivePricing {
+        cache_read: 0,
+        cache_write_5m: 0,
+        ..snapshot
+    };
+    assert!(check_pricing(&snapshot, Some(unpublished)).is_ok());
+    // A known free cache bucket remains legitimately free.
+    assert!(check_pricing(&unpublished, Some(unpublished)).is_ok());
+}

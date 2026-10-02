@@ -183,7 +183,10 @@ mod tests {
         outcome: std::result::Result<(), &'static str>,
     ) -> (Arc<dyn SubscriptionFlow>, OAuthStore, tempfile::TempDir) {
         let guard = tempfile::tempdir().unwrap();
-        let store = OAuthStore::new(guard.path().join("credential.json"), "Stub Provider");
+        let store = OAuthStore::new(
+            guard.path().join("credentials/credential.json"),
+            "Stub Provider",
+        );
         (Arc::new(StubFlow { outcome }), store, guard)
     }
 

@@ -170,3 +170,61 @@ fn resize_settling_coalesces_bursts_without_starving_input_or_continuous_draggin
         Some(RESIZE_SETTLE_INTERVAL)
     );
 }
+
+#[test]
+fn threaded_working_clocks_remain_live_after_width_reflow() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(40, 12);
+    shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Assistant(Box::new(
+            AssistantBlock::finalized("long historical prose ".repeat(160)),
+        )));
+    shell.begin_run("openai");
+    let component = component(&shell, false);
+    let mut rows = component.render(40);
+    shell.state.frame_written();
+    assert!(shell.state.borrow().has_active_status_shimmer());
+    shell.set_size(120, 32);
+    update(&shell, &component, 120, &mut rows);
+    let mut state = shell.state.borrow_mut();
+    assert!(
+        state.has_active_status_shimmer(),
+        "visible Working must keep shimmering after reflow"
+    );
+    assert!(
+        state.has_active_status_timer(),
+        "visible Working must keep its elapsed clock after reflow"
+    );
+    let phase = state.status_shimmer_frame;
+    let index = state.active_reasoning.unwrap();
+    let revision = state.block_revisions[index];
+    state.advance_status_shimmer_by(2);
+    state.advance_status_timer();
+    assert_eq!(state.status_shimmer_frame, phase + 2);
+    assert_eq!(state.block_revisions[index], revision + 2);
+}
+
+#[test]
+fn conpty_soft_wrapped_rules_are_full_width_physical_rows() {
+    for glyph in ['─', '-'] {
+        let mut parser = vt100::Parser::new(32, 120, 0);
+        // A console host may emit adjacent full-width rows without CRLF.
+        parser.process(
+            format!(
+                "{}> draft{}",
+                glyph.to_string().repeat(120),
+                " ".repeat(113)
+            )
+            .as_bytes(),
+        );
+        let full_width_rule =
+            |line: &str| line.chars().count() == 120 && line.chars().all(|ch| ch == glyph);
+        assert!(!parser.screen().contents().lines().any(full_width_rule));
+        assert!(parser
+            .screen()
+            .rows(0, 120)
+            .any(|row| full_width_rule(&row)));
+    }
+}

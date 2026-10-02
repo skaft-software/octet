@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from octet_computer_use import entrypoint, service
@@ -1611,7 +1612,8 @@ class CursorSessionTests(unittest.TestCase):
             else:
                 os.environ["OCTET_CUA_CONFIRM"] = original
         session = computer._cursor_session
-        self.assertEqual(session, entrypoint.cursor_session())
+        self.assertEqual(session, next(args["session"] for tool, args in client.calls
+                                       if tool == "start_session"))
         self.assertTrue(computer._cursor_ready)
         for tool in ("start_session", "set_agent_cursor_motion", "set_agent_cursor_enabled",
                      "get_agent_cursor_state", "click"):
@@ -1638,10 +1640,40 @@ class CursorSessionTests(unittest.TestCase):
                 os.environ["OCTET_CUA_CONFIRM"] = original
 
         dispatched = [(tool, args) for tool, args in client.calls if tool == "press_key"]
-        self.assertEqual([args["session"] for _tool, args in dispatched],
-                         [entrypoint.cursor_session(), "review-session", entrypoint.cursor_session()])
+        sessions = [args["session"] for tool, args in client.calls if tool == "start_session"]
+        self.assertEqual([args["session"] for _tool, args in dispatched], sessions)
+        self.assertEqual(sessions[1], "review-session")
+        self.assertNotEqual(sessions[0], sessions[2], "reconnect must not reuse a transport's session")
         self.assertTrue(any(tool == "end_session" and args.get("session") == "review-session"
                             for tool, args in client.calls))
+
+    def test_setup_again_uses_a_new_session_on_the_reopened_transport(self):
+        computer, client = self._computer()
+        owned = {}
+        def enforce_owner(transport):
+            call = transport.call
+            def invoke(tool, arguments=None, **kwargs):
+                if tool == "start_session":
+                    name = arguments["session"]
+                    if name in owned and owned[name] is not transport:
+                        return {"isError": True, "content": [{"type": "text", "text": "already owned"}]}
+                    owned[name] = transport
+                return call(tool, arguments, **kwargs)
+            transport.call = invoke
+        enforce_owner(client)
+        computer.client()
+        previous = computer._cursor_session
+        with mock.patch.object(entrypoint.driver_module, "provision", return_value=Path("/tmp/driver")), \
+                mock.patch.object(entrypoint.driver_module, "driver_version", return_value="0.31.0"), \
+                mock.patch.object(entrypoint.desktop_host, "provision", return_value=None):
+            computer.provision()
+        fresh = self._CursorClient()
+        enforce_owner(fresh)
+        computer._client, computer._app_daemon = fresh, True
+        computer.client()
+        self.assertTrue(computer._cursor_ready)
+        self.assertNotEqual(previous, computer._cursor_session)
+        self.assertEqual(len(owned), 2)
 
     def test_cursor_initialization_failure_fails_closed_before_action(self):
         computer, client = self._computer(enabled=False)
@@ -1703,7 +1735,7 @@ class CursorSessionTests(unittest.TestCase):
                 os.environ["OCTET_CUA_CONFIRM"] = original
         _tool, arguments = next((tool, args) for tool, args in client.calls if tool == "move_cursor")
         self.assertEqual(arguments["target"], {"kind": "window", "pid": 17, "window_id": 5})
-        self.assertEqual(arguments["scope"], "window")
+        self.assertNotIn("scope", arguments, "exact target and legacy scope cannot coexist")
         self.assertNotIn("pid", arguments)
         self.assertNotIn("window_id", arguments)
         self.assertEqual(arguments["session"], computer._cursor_session)
@@ -2276,7 +2308,7 @@ class DesktopHostTests(unittest.TestCase):
         name = cursor_session()
         self.assertTrue(name.startswith(CURSOR_SESSION_PREFIX + "-"))
         self.assertNotEqual(name, CURSOR_SESSION_PREFIX)
-        self.assertEqual(name, cursor_session())
+        self.assertNotEqual(name, cursor_session(), "each transport needs a fresh name, even in one PID")
         self.assertIn(str(os.getpid()), name)
 
     def test_cursor_motion_is_short_straight_and_fades_later(self):
@@ -2361,7 +2393,12 @@ class MenuCommandResultShapeTests(unittest.TestCase):
         self.assertEqual(_menu_result(None), {"text": ""})
 
     def test_menu_status_and_unknown_actions_render_their_text(self):
-        with tempfile.TemporaryDirectory() as directory:
+        # An installed global app is independent of this empty test home.
+        # Keep this read-only fixture offline on developer desktops too.
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(entrypoint.driver_module, "desktop_app", return_value=None), \
+                mock.patch.object(entrypoint.driver_module, "desktop_app_binary", return_value=None), \
+                mock.patch.dict(os.environ, {"OCTET_CUA_DESKTOP_HOST": "0"}):
             home = Path(directory)
             extension, _ = entrypoint.create_extension(home=home)
             command = extension._commands["computer-use"].handler

@@ -6,11 +6,17 @@
 
 ## Install native binaries
 
-Native release packages target macOS Apple silicon and Intel and GNU/Linux
-x86-64. The [v0.8.2 notes](releases/v0.8.2.md) list the changes. Availability,
-signed assets and public-install verification are recorded on the version-pinned
+**0.8.2 is a source candidate, not a published release.** Its GitHub tag, release
+assets and npm packages are unavailable. Use [a checkout](#build-from-a-checkout)
+until qualification and publication are approved. The commands in the native
+and npm sections below apply only after verified publication.
+
+Planned native release packages target macOS Apple silicon and Intel and GNU/Linux
+x86-64. The [v0.8.2 notes](releases/v0.8.2.md) list the candidate changes.
+After publication, signed assets and public-install verification must be recorded
+on the version-pinned
 [GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.2).
-Install with the matching installer from it:
+Then install with its matching installer:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -26,11 +32,11 @@ registries remain separate, unpublished channels. Bun is unqualified.
 
 ## Install from npm
 
-If you already have Node.js, npm installs the same signed platform package on
-macOS Apple silicon and Intel and GNU/Linux x86-64:
+After approved npm publication, Node.js can install the same signed platform
+package on macOS Apple silicon and Intel and GNU/Linux x86-64:
 
 ```sh
-npm install -g @skaft/octet
+npm install -g @skaft/octet@0.8.2
 octet --version   # octet 0.8.2
 ```
 
@@ -97,7 +103,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.8.2. Check `octet --version`, and use matching
+This checkout targets the octet 0.8.2 candidate. Check `octet --version`, and use matching
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -122,9 +128,9 @@ need Git for Windows or another Bash-compatible shell.
 ## Optional packages
 
 Executable extension bundles and the separate Serve application are pinned to
-the host version. Install assets matching octet `0.8.2` from its version-pinned
-release, or run reviewed source extensions from this checkout with
-`--extension-dir ./extensions`. The 0.8.0 bundles need their 0.8.0 host.
+the host version. After publication, install assets matching octet `0.8.2` from
+its version-pinned release. Until then, run reviewed source extensions from this
+checkout with `--extension-dir ./extensions`. The 0.8.0 bundles need their 0.8.0 host.
 
 ```sh
 octet extension install octet-web-search
