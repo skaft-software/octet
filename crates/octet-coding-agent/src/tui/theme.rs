@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use std::collections::BTreeMap;
-#[cfg(any(test, feature = "serve"))]
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -2386,7 +2386,7 @@ pub(crate) fn selectable_file_themes(
 
 /// Return the compiled default and all safe names selected by the shared
 /// resolver. Parsing is deferred to the loader so discovery stays best-effort.
-#[cfg(any(test, feature = "serve"))]
+#[cfg(test)]
 pub fn available_themes(config: &Config) -> Vec<String> {
     let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned()]);
     names.extend(compiled_file_theme_names().map(str::to_owned));

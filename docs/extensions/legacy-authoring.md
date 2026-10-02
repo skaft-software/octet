@@ -761,7 +761,7 @@ requires_octet = "=0.8.0"
 
 `requires_octet` is optional for unpackaged local copies but enforced when
 present. Installed bundles require an exact match to the running octet version.
-The first-party catalog is `octet-browse`, `octet-mcp`, `octet-subagents`, and
+The first-party catalog is `octet-computer-use`, `octet-mcp`, `octet-subagents`, and
 `octet-web-search`. The four working-tree manifests declare API `0.4`; their
 exact host pins still apply. This source metadata is not evidence of a
 published 0.8.0 bundle.
@@ -821,34 +821,3 @@ Local packages have no remembered remote update source; only published-catalog
 updates download. There is no automatic earlier-first-party hotfix migration,
 old-root scan, or retired-package cleanup. Existing Ygg installations/external
 data remain separate and untouched.
-
-## First-party application packages
-
-The complete Serve application package is separate from executable bundles. It
-uses `package.toml`, contains target-specific `bin/octet-serve-runtime`, and is
-never loaded by executable-extension discovery. These catalog commands also
-remain gated on matching publication:
-
-```console
-octet extension install octet-serve
-octet extension update octet-serve
-octet extension remove octet-serve
-octet serve
-```
-
-Installation under `~/.octet/extensions/octet-serve/` has its own manifest,
-executable, and `install.json`. The application manifest declares ID/version,
-exact octet version, target triple, launcher arguments, executable SHA-256, and
-loopback/process/workspace capabilities. Official installation uses a matching
-target archive and shared release `SHA256SUMS`; local archives use:
-
-```console
-octet extension install --path ./octet-serve-0.8.0-TARGET.tar.gz
-```
-
-The application archive retains its strict two-file payload and atomic install.
-`octet serve` revalidates compatibility/checksum before replacing the launcher
-process. As a first-party replacement octet process it inherits launcher config
-and provider environment, not the sanitized child environment used for
-model-controlled tools and executable extensions. Removal deletes only package
-files; sessions, project metadata, and other user data remain outside the directory.

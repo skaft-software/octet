@@ -7,9 +7,6 @@
 //! policy-derived trust, startup diagnostics, host-state refresh, slash commands,
 //! context composition, semantic status collection, and reload.
 
-#[cfg(feature = "serve")]
-pub mod serve;
-
 mod mutation_resources;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -98,20 +95,6 @@ pub const SUBAGENTS_EXTENSION_NAME: &str = "octet-subagents";
 pub const MCP_EXTENSION_NAME: &str = "octet-mcp";
 const EXPERIMENTAL_STREAMABLE_HTTP_MCP_ARGUMENT: &str = "--experimental-streamable-http-mcp";
 const MAX_CONTEXT_CONTRIBUTION_BYTES: usize = 64 * 1024;
-/// Returns whether configuration is eligible to launch the trusted observer.
-///
-/// The live process/handshake check remains authoritative; this conservative
-/// preflight is used only to avoid advertising Ultra in a frontend before its
-/// worker app has been built.
-#[cfg(feature = "serve")]
-pub fn subagents_extension_activation_configured(config: &Config) -> bool {
-    config.effect_policy == octet_agent::EffectPolicy::UnsafeHost
-        && config.sandbox.process_execution_allowed()
-        && config
-            .enabled_extensions
-            .iter()
-            .any(|name| name == SUBAGENTS_EXTENSION_NAME)
-}
 
 const MAX_EXTENSION_CONTEXT_BYTES: usize = 256 * 1024;
 const MAX_CONTEXT_LABEL_BYTES: usize = 1024;
@@ -3986,55 +3969,6 @@ impl ExecutableExtensions {
             &action.command,
             action.arguments,
             &mut command_confirmations,
-        )
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!("extension presentation action routed to an unavailable command")
-        })
-    }
-
-    /// Executes an authenticated Serve action with one command-scoped approval.
-    #[cfg(feature = "serve")]
-    pub async fn execute_presentation_action_for_serve(
-        &mut self,
-        extension: &str,
-        expected_extension_instance_id: &str,
-        expected_generation: u64,
-        expected_revision: u64,
-        action_id: &str,
-        confirmed: bool,
-    ) -> anyhow::Result<String> {
-        let action = self
-            .presentation_views()
-            .into_iter()
-            .find(|view| {
-                view.extension == extension
-                    && view.extension_instance_id == expected_extension_instance_id
-                    && view.generation == expected_generation
-                    && view.snapshot.revision == expected_revision
-            })
-            .and_then(|view| {
-                view.snapshot
-                    .actions
-                    .into_iter()
-                    .find(|action| action.id == action_id)
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                "extension presentation action {extension:?}/{action_id:?} is unavailable or stale"
-            )
-            })?;
-        if confirmed && !action.destructive {
-            anyhow::bail!("non-destructive extension action cannot carry approval");
-        }
-        if action.destructive && !confirmed {
-            anyhow::bail!("extension presentation action requires explicit confirmation");
-        }
-        self.execute_command_headless_scoped(
-            Some(extension),
-            &action.command,
-            action.arguments,
-            usize::from(action.destructive && confirmed),
         )
         .await?
         .ok_or_else(|| {
@@ -8818,25 +8752,6 @@ flags = [{ name = "fixture-option", type = "boolean", default = false }]
         assert!(config.invocation_trusted_extensions.is_empty());
     }
 
-    #[cfg(all(unix, feature = "serve"))]
-    #[test]
-    fn subagents_preflight_uses_full_access_trust_without_enabling() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config =
-            executable_extension_config(temp.path(), temp.path(), SUBAGENTS_EXTENSION_NAME);
-        config.invocation_trusted_extensions.clear();
-        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
-        assert!(subagents_extension_activation_configured(&config));
-        config.effect_policy = octet_agent::EffectPolicy::ControlledBashApproval;
-        assert!(!subagents_extension_activation_configured(&config));
-        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
-        config.sandbox.allow_process = false;
-        assert!(!subagents_extension_activation_configured(&config));
-        config.sandbox.allow_process = true;
-        config.enabled_extensions.clear();
-        assert!(!subagents_extension_activation_configured(&config));
-    }
-
     #[cfg(unix)]
     #[test]
     fn active_session_lifecycle_is_offered_only_to_interactive_frontends() {
@@ -10259,7 +10174,6 @@ commands = ["shared"]
         extensions.shutdown().await;
     }
 
-    #[cfg(all(unix, feature = "serve"))]
     #[tokio::test]
     async fn confirmed_presentation_action_funds_one_command_requested_confirmation() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -10274,7 +10188,7 @@ IFS= read -r initialize
 id=$(printf '%s' "$initialize" | request_id)
 printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.1","tools":[],"commands":[{"name":"setup","description":"Confirmed setup","usage":"/setup"}]}}\n' "$id"
 count=0
-while [ "$count" -lt 2 ]; do
+while [ "$count" -lt 1 ]; do
   IFS= read -r command
   id=$(printf '%s' "$command" | request_id)
   confirmation_id="setup-confirmation-$count"
@@ -10332,8 +10246,6 @@ confirmations = true
         snapshot.actions[0].arguments.clear();
         snapshot.actions[0].destructive = true;
         let generation = process.health_snapshot().generation;
-        let extension_instance_id = process.extension_instance_id().to_owned();
-        let revision = snapshot.revision;
         let mut extensions = ExecutableExtensions::default();
         extensions.receivers.push(process.subscribe());
         extensions.processes.push(process.clone());
@@ -10342,7 +10254,7 @@ confirmations = true
             ExtensionPresentationView {
                 extension: "serve-confirmation-fixture".into(),
                 generation,
-                extension_instance_id: extension_instance_id.clone(),
+                extension_instance_id: process.extension_instance_id().to_owned(),
                 resource_owner: None,
                 snapshot,
             },
@@ -10366,32 +10278,6 @@ confirmations = true
             )]
         );
 
-        let denied = extensions
-            .execute_presentation_action_for_serve(
-                "serve-confirmation-fixture",
-                &extension_instance_id,
-                generation,
-                revision,
-                "setup",
-                false,
-            )
-            .await
-            .unwrap_err();
-        assert!(denied
-            .to_string()
-            .contains("requires explicit confirmation"));
-        let output = extensions
-            .execute_presentation_action_for_serve(
-                "serve-confirmation-fixture",
-                &extension_instance_id,
-                generation,
-                revision,
-                "setup",
-                true,
-            )
-            .await
-            .unwrap();
-        assert_eq!(output, "setup started");
         assert!(process.shutdown().await);
     }
 

@@ -146,25 +146,6 @@ pub enum TopLevelCommand {
         #[command(flatten)]
         options: SetupCommand,
     },
-    /// Launch the loopback-only octet Serve application.
-    ///
-    /// Default builds dispatch to the installed extension runtime; builds with
-    /// the `serve` feature run the embedded implementation.
-    Serve {
-        /// Do not open the graphical client in the default browser.
-        #[arg(long)]
-        no_open: bool,
-        /// Loopback TCP port. Zero asks the operating system for a free port.
-        #[arg(long, default_value_t = 31415)]
-        port: u16,
-        /// Directory containing a development graphical shell.
-        #[arg(long, value_name = "DIR")]
-        web_root: Option<PathBuf>,
-        /// Name for the first provisional session created by this Serve launch.
-        /// Empty or whitespace-only input means "no name".
-        #[arg(long, value_name = "NAME")]
-        name: Option<String>,
-    },
 }
 
 /// Command-line launcher for `octet`.
@@ -3948,7 +3929,7 @@ max_output_bytes = 4096
 
     #[test]
     fn extension_package_commands_parse_without_a_prompt() {
-        let cli = Cli::try_parse_from(["octet", "extension", "install", "octet-serve"]).unwrap();
+        let cli = Cli::try_parse_from(["octet", "extension", "install", "octet-mcp"]).unwrap();
         assert!(cli.message.is_none());
         assert!(matches!(
             cli.command,
@@ -3957,11 +3938,11 @@ max_output_bytes = 4096
                     name: Some(ref name),
                     path: None,
                 }
-            }) if name == "octet-serve"
+            }) if name == "octet-mcp"
         ));
 
         let cli =
-            Cli::try_parse_from(["octet", "extension", "install", "--path", "./serve.tar.gz"])
+            Cli::try_parse_from(["octet", "extension", "install", "--path", "./bundle.tar.gz"])
                 .unwrap();
         assert!(matches!(
             cli.command,
@@ -4073,49 +4054,6 @@ max_output_bytes = 4096
         ));
         let cli = Cli::try_parse_from(["octet", "explain pi migration"]).unwrap();
         assert_eq!(cli.message.as_deref(), Some("explain pi migration"));
-    }
-
-    #[test]
-    fn serve_command_parses_forwarded_loopback_options() {
-        let cli = Cli::try_parse_from([
-            "octet",
-            "serve",
-            "--no-open",
-            "--port",
-            "0",
-            "--web-root",
-            "./web",
-        ])
-        .unwrap();
-        assert!(cli.message.is_none());
-        assert!(matches!(
-            cli.command,
-            Some(TopLevelCommand::Serve {
-                no_open: true,
-                port: 0,
-                web_root: Some(_),
-                name: None,
-            })
-        ));
-    }
-
-    #[test]
-    fn serve_command_accepts_a_startup_session_name() {
-        let cli = Cli::try_parse_from(["octet", "serve", "--name", "  release review  "]).unwrap();
-        match cli.command {
-            Some(TopLevelCommand::Serve {
-                no_open: false,
-                port: 31415,
-                web_root: None,
-                name: Some(name),
-            }) => assert_eq!(name, "  release review  "),
-            other => panic!("unexpected parse result {other:?}"),
-        }
-    }
-
-    #[test]
-    fn serve_command_rejects_a_name_without_a_value() {
-        assert!(Cli::try_parse_from(["octet", "serve", "--name"]).is_err());
     }
 
     #[test]

@@ -3,8 +3,7 @@
 Extensions add tools and bounded, host-shaped integrations to octet's fast,
 small coding host. They are not a promise to run unchanged Pi extensions or to
 replace every host subsystem. Browse, MCP, web search, and host-owned subagents
-remain supported integrations with their package-specific limits; Serve remains
-a separate application.
+remain supported integrations with their package-specific limits.
 
 Write new process extensions against **API `0.4`**, the current working-tree
 version. It uses the feature-negotiated JSON-RPC wire retained from API `0.2`.
@@ -141,7 +140,7 @@ for config examples, bounded manifest reads, diagnostics, and resolver APIs.
 Select `api_version = "0.4"` exactly; an extension's own `version` does not select
 the wire. Current source uses `octet_version`, `requires_octet`, `OCTET_*`, and
 `octet_extension`, with no aliases for earlier first-party wire names or imports.
-The local host, SDK source packages, and five executable bundles have distribution
+The local host, SDK source packages, and four executable bundles have distribution
 version **0.8.1**. This does not select an extension API or publish SDK registries.
 Catalog installation requires version-matched published assets; see
 [installation](installation.md) and the [release notes](releases/v0.8.1.md).
@@ -341,7 +340,6 @@ API `0.4`. Version-specific payloads and host-availability limits still apply.
 - <a id="python-sdk"></a>[Python SDK status](../sdk/python/README.md) and [legacy runtime](../sdk/python/legacy-runtime.md)
 - <a id="capability-boundaries"></a>[Capability ownership boundaries](extensions/legacy-authoring.md#capability-boundaries)
 - <a id="installable-extension-bundles"></a>[Bundle installation, update, removal, and validation](extensions/legacy-authoring.md#installable-extension-bundles)
-- <a id="first-party-application-packages"></a>[Separate Serve application packages](extensions/legacy-authoring.md#first-party-application-packages)
 
 See also the [legacy wire reference](extensions/PROTOCOL-REFERENCE.md) and
 [project tracking](https://github.com/orgs/skaft-software/projects/5).

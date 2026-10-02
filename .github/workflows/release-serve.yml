@@ -1,4 +1,4 @@
-name: octet Serve extension release
+name: octet extension release
 
 on:
   push:
@@ -51,7 +51,7 @@ jobs:
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
             tag=${GITHUB_REF_NAME#octet-serve-}
             if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then
-              echo "Serve source tags must start with octet-serve-" >&2
+              echo "extension release tags must start with octet-serve-" >&2
               exit 1
             fi
           else
@@ -68,7 +68,7 @@ jobs:
               exit 1
             fi
           elif [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "octet-serve-$tag" ]]; then
-            echo "Serve release pushes must use octet-serve-$tag" >&2
+            echo "extension release pushes must use octet-serve-$tag" >&2
             exit 1
           fi
 
@@ -95,7 +95,7 @@ jobs:
               exit 1
             fi
             if git diff --quiet "$source_commit" "$workflow_commit" -- .github/workflows/release-serve.yml; then
-              echo "tooling-only repair does not change the Serve release workflow" >&2
+              echo "tooling-only repair does not change the extension release workflow" >&2
               exit 1
             fi
             echo "using release tooling $workflow_commit to package immutable source $source_commit"
@@ -184,16 +184,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   security:
-    name: Audit Serve release dependencies
+    name: Audit release dependencies
     needs: resolve
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: apps/web/.node-version
       # Release audits and artifacts intentionally use clean dependency/build
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
@@ -202,103 +199,28 @@ jobs:
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
-      - run: cargo audit --file extensions/octet-serve/Cargo.lock
       - run: cargo deny check
-      - run: cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
-      - run: npm ci
-        working-directory: apps/web
-      - run: npm audit --audit-level=high
-        working-directory: apps/web
 
-  build:
+  launcher:
+    name: Build verification launcher
     needs: [resolve, security]
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: macos-15
-            target: aarch64-apple-darwin
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-        with:
-          targets: ${{ matrix.target }}
-      # Build publishable runtimes from clean runner state; release jobs do not
-      # restore mutable branch or pull-request compilation caches.
-      - name: Build optimized Serve runtime
-        run: cargo build --release --locked --target "${{ matrix.target }}" -p octet-coding-agent --features serve
-      - name: Verify runtime and embedded web bundle
-        run: |
-          target="${{ matrix.target }}"
-          binary="target/$target/release/octet"
-          test -x "$binary"
-          test "$("$binary" --version)" = "octet ${{ needs.resolve.outputs.version }}"
-          scripts/smoke-octet-serve-installed.sh "$binary"
-      - name: Package standalone extension archive reproducibly
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ needs.resolve.outputs.version }}"
-          scripts/package-octet-serve-release.sh \
-            "${{ matrix.target }}" \
-            "$RUNNER_TEMP/octet-serve-release" \
-            "${{ needs.resolve.outputs.tag }}"
-          scripts/package-octet-serve-release.sh \
-            "${{ matrix.target }}" \
-            "$RUNNER_TEMP/octet-serve-release-reproducibility-check" \
-            "${{ needs.resolve.outputs.tag }}"
-          archive="$RUNNER_TEMP/octet-serve-release/octet-serve-$version-${{ matrix.target }}.tar.gz"
-          repeated_archive="$RUNNER_TEMP/octet-serve-release-reproducibility-check/octet-serve-$version-${{ matrix.target }}.tar.gz"
-          test -f "$archive"
-          cmp "$archive" "$repeated_archive"
-      - name: Verify install, launch, list, and removal
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="${{ matrix.target }}"
-          version="${{ needs.resolve.outputs.version }}"
-          archive="$RUNNER_TEMP/octet-serve-release/octet-serve-$version-$target.tar.gz"
-          test -f "$archive"
-          cargo build --locked --target "$target" -p octet-coding-agent --no-default-features
-          launcher="$PWD/target/$target/debug/octet"
-          package_home="$RUNNER_TEMP/octet-package-home"
-          mkdir -p "$package_home/.octet/serve-data"
-          printf 'preserve\n' > "$package_home/.octet/serve-data/sentinel"
-          (
-            cd "$(dirname "$archive")"
-            HOME="$package_home" "$launcher" extension install --path "./$(basename "$archive")"
-          )
-          test -f "$package_home/.octet/extensions/octet-serve/package.toml"
-          test -x "$package_home/.octet/extensions/octet-serve/bin/octet-serve-runtime"
-          test -f "$package_home/.octet/extensions/octet-serve/install.json"
-          HOME="$package_home" "$launcher" extension list | grep -F "octet-serve"
-          HOME="$package_home" scripts/smoke-octet-serve-installed.sh "$launcher"
-          HOME="$package_home" "$launcher" extension remove octet-serve
-          test ! -e "$package_home/.octet/extensions/octet-serve"
-          grep -Fx "preserve" "$package_home/.octet/serve-data/sentinel"
-      - name: Preserve Linux launcher for published-package verification
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: octet-extension-test-launcher
-          path: target/x86_64-unknown-linux-gnu/debug/octet
-          if-no-files-found: error
-          retention-days: 2
+      # Published-package verification installs, updates, and removes the
+      # attached bundles from the settled release with this launcher; release
+      # jobs build from clean runner state, never a mutable cache.
+      - name: Build the extension launcher
+        run: cargo build --locked -p octet-coding-agent --no-default-features
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: octet-serve-${{ matrix.target }}
-          path: ${{ runner.temp }}/octet-serve-release/*.tar.gz
+          name: octet-extension-test-launcher
+          path: target/debug/octet
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 2
 
   build-bundles:
     name: Build executable-extension bundles
@@ -311,7 +233,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
       # Extension release bundles and their smoke-test launcher are built from
-      # clean runner state for the same trust reason as the Serve runtime.
+      # clean runner state for the same trust reason as the audit jobs.
       - name: Package the official executable-extension catalog reproducibly
         shell: bash
         run: |
@@ -394,7 +316,7 @@ jobs:
 
   publish:
     name: Sign and attach extension artifacts
-    needs: [resolve, build, build-bundles]
+    needs: [resolve, launcher, build-bundles]
     runs-on: ubuntu-24.04
     # Gate the only job that can sign or mutate a canonical release.
     environment: stable-release-publish
@@ -407,11 +329,6 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          pattern: octet-serve-*
-          path: release-assets
-          merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: octet-executable-extension-bundles
@@ -451,7 +368,7 @@ jobs:
           verify=(
             --certificate-identity "$COSIGN_IDENTITY"
             --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"
-            --certificate-github-workflow-name "octet Serve extension release"
+            --certificate-github-workflow-name "octet extension release"
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
             --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
           )
@@ -531,28 +448,7 @@ jobs:
           launcher="$PWD/test-bin/octet"
           chmod 0755 "$launcher"
           test_home="$RUNNER_TEMP/octet-published-package-home"
-          mkdir -p "$test_home/.octet/serve-data"
-          printf 'preserve\n' > "$test_home/.octet/serve-data/sentinel"
-
-          installed=false
-          for attempt in 1 2 3 4 5; do
-            if HOME="$test_home" "$launcher" extension install octet-serve; then
-              installed=true
-              break
-            fi
-            echo "release assets for $RELEASE_TAG are not readable yet (attempt $attempt)" >&2
-            sleep $((attempt * 2))
-          done
-          if [[ "$installed" != true ]]; then
-            echo "could not install octet-serve from $RELEASE_TAG" >&2
-            exit 1
-          fi
-
-          HOME="$test_home" "$launcher" extension update octet-serve
-          HOME="$test_home" "$launcher" extension list | grep -F "octet-serve"
-          HOME="$test_home" "$launcher" extension remove octet-serve
-          test ! -e "$test_home/.octet/extensions/octet-serve"
-          grep -Fx "preserve" "$test_home/.octet/serve-data/sentinel"
+          mkdir -p "$test_home"
 
           while IFS= read -r extension; do
             [[ -n "$extension" ]] || continue

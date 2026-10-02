@@ -128,21 +128,18 @@ class SourceDistributionVersionTests(unittest.TestCase):
                                  (self.root / "Cargo.toml").read_text(), re.MULTILINE).group(1)
 
     def test_first_party_source_manifests_and_installer_pins(self):
-        for name in ("Cargo.lock", "extensions/octet-serve/Cargo.lock"):
-            entries = re.findall(r'name = "(octet-[^"]+)"\nversion = "([^"]+)"',
-                                 (self.root / name).read_text())
-            self.assertEqual(len(entries), 5 if name == "Cargo.lock" else 3)
-            for package, version in entries:
-                with self.subTest(path=name, package=package):
-                    self.assertEqual(version, self.version)
-        for name in ("crates/octet-agent/Cargo.toml", "crates/octet-coding-agent/Cargo.toml",
-                     "extensions/octet-serve/Cargo.toml"):
+        name = "Cargo.lock"
+        entries = re.findall(r'name = "(octet-[^"]+)"\nversion = "([^"]+)"',
+                             (self.root / name).read_text())
+        self.assertEqual(len(entries), 4)
+        for package, version in entries:
+            with self.subTest(path=name, package=package):
+                self.assertEqual(version, self.version)
+        for name in ("crates/octet-agent/Cargo.toml", "crates/octet-coding-agent/Cargo.toml"):
             versions = re.findall(r'^octet-[^ ]+ = \{ version = "=([^"]+)"',
                                   (self.root / name).read_text(), re.MULTILINE)
             self.assertTrue(versions, name)
             self.assertEqual(set(versions), {self.version}, name)
-        self.assertIn(f'\nversion = "{self.version}"\n',
-                      (self.root / "extensions/octet-serve/Cargo.toml").read_text())
         # Source package/installer versions follow the current release. Public download
         # links are checked separately against the published release.
         self.assertIn(f'\nversion = "{self.version}"\n',
@@ -150,7 +147,7 @@ class SourceDistributionVersionTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
                          self.version)
         self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
-        for package in ("octet-browse", "octet-computer-use", "octet-mcp", "octet-subagents", "octet-web-search"):
+        for package in ("octet-computer-use", "octet-mcp", "octet-subagents", "octet-web-search"):
             manifest = (self.root / "extensions" / package / "extension.toml").read_text()
             with self.subTest(package=package):
                 self.assertIn(f'\nversion = "{self.version}"\n', manifest)

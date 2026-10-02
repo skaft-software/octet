@@ -1643,30 +1643,3 @@ fn sessions_export_preserves_metadata_visibility_and_requires_explicit_secrets_o
         "export never invokes the provider"
     );
 }
-
-/// #180 — `octet serve` accepts a startup session name. The installed extension
-/// runtime owns its own launch protocol, so a build without the embedded Serve
-/// runtime fails closed instead of silently dropping the requested name.
-#[cfg(not(feature = "serve"))]
-#[test]
-fn serve_name_fails_closed_without_the_embedded_serve_runtime() {
-    let fixture = Fixture::new(None);
-    let parsed = fixture.run(&["serve", "--help"]);
-    assert_success(&parsed);
-    let help = stdout_of(&parsed);
-    assert!(
-        help.contains("--name"),
-        "serve must accept a startup name: {help}"
-    );
-
-    let output = fixture.run(&["serve", "--name", "release review"]);
-    assert!(
-        !output.status.success(),
-        "the name must not be silently ignored"
-    );
-    assert!(
-        stderr_of(&output).contains("serve --name requires"),
-        "diagnostic: {}",
-        stderr_of(&output)
-    );
-}

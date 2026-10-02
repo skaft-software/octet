@@ -15,7 +15,6 @@ categories = ["command-line-utilities", "development-tools"]
 
 [features]
 default = []
-serve = ["dep:getrandom", "dep:octet-serve-backend", "tokio/net", "tokio/signal"]
 
 [lints]
 workspace = true
@@ -83,9 +82,7 @@ signal-hook = "0.4"
 sha2 = "0.10"
 ring = "0.17"
 libc = "0.2"
-getrandom = { version = "0.3", optional = true }
 globset = "0.4"
-octet-serve-backend = { version = "=0.8.1", path = "../../extensions/octet-serve", optional = true }
 
 [build-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- Remove the packaged Serve application, its browser client, and the macOS, iOS,
+  and shared Apple companions: `extensions/octet-serve`, `apps/web`,
+  `apps/macos`, `apps/ios`, and `apps/apple-shared`. The `octet serve` command,
+  the optional `serve` cargo feature and its embedded host, the Serve release
+  workflow and packaging scripts, and the matching CI, dependency, image, and
+  documentation entries go with them. The legacy `octet-serve`
+  application-package install lane is removed with it; previously published
+  release assets stay available in git history. The four remaining first-party
+  executable bundles are unchanged.
+- Remove the deprecated `octet-browse` bundle from the release catalog, its
+  documentation inventory, and the packaging/acceptance scripts that referenced
+  it. The bundled computer-use extension covers desktop and signed-in browser
+  sessions; authenticated page work drives the user's own browser instead of an
+  Octet-owned Chromium profile.
 - Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
   `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the
   verified immutable release assets with trusted publishing and registry

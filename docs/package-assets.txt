@@ -195,12 +195,8 @@ text docs/design/octet-command-picker-surfaces.md
 text docs/design/octet-presentation.md
 text docs/design/octet-tui.md
 text docs/design/performance.md
-text docs/design/serve-lifecycle-safety.md
 text docs/distribution.md
-text docs/experimental/octet-serve/README.md
-text docs/experimental/octet-serve/architecture.md
 text docs/experimental/octet-serve/provider-acceptance.md
-text docs/experimental/octet-serve/web-acceptance.md
 text docs/extensions.md
 text docs/extensions/API-0.4-REFERENCE.md
 text docs/extensions/HOOK-ENRICHMENT.md
@@ -223,7 +219,6 @@ text docs/maintainers/skills/release/SKILL.md
 text docs/media.md
 text docs/openrouter-batches.md
 text docs/package-assets.txt
-text docs/packages.md
 text docs/pi-migration.md
 text docs/provider-thinking.md
 text docs/providers.md
@@ -311,15 +306,10 @@ text examples/themes/Cards.toml
 text examples/themes/README.md
 text examples/themes/Still.toml
 text examples/themes/octet-default.toml
-text extensions/octet-browse/CONNECTORS.md
-text extensions/octet-browse/QUALIFICATION.md
-text extensions/octet-browse/README.md
-text extensions/octet-browse/REFERENCE.md
 text extensions/octet-computer-use/README.md
 text extensions/octet-mcp/README.md
 text extensions/octet-mcp/REFERENCE.md
 text extensions/octet-mcp/fixtures/tls/README.md
-text extensions/octet-serve/README.md
 text extensions/octet-snap-compact/README.md
 text extensions/octet-subagents/README.md
 text extensions/octet-subagents/REFERENCE.md

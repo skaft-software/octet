@@ -47,7 +47,7 @@ message, or `/clone` for the current head. [Sessions](sessions.md).
 Explicitly paste/drop a path through the terminal paste mechanism, or select it
 with `@` completion. Check the image/audio chip before submitting; typed paths
 alone are not attachments. Native audio is WAV/MP3 only on compatible OpenAI Chat
-routes; the graphical composer does not accept audio. See the
+routes. See the
 [audio/image recipe, formats, limits, and privacy rules](media.md).
 
 ## Subagents
@@ -76,6 +76,6 @@ The working-tree bundle declares API 0.4; exact host-version pins still apply.
 
 - Add repository instructions, prompts, and skills through [instructions](instructions.md) and [resource discovery](resources.md).
 - Add tools in any language through [extensions](extensions.md) and the [API 0.4 reference](extensions/API-0.4-REFERENCE.md). Use the current Python process recipe; retain exact-version examples and conformance tests rather than relabeling them.
-- Use [browser](../extensions/octet-browse/README.md), [web search](../extensions/octet-web-search/README.md), or [MCP](../extensions/octet-mcp/README.md) through their package guides.
+- Use [computer use](../extensions/octet-computer-use/README.md), [web search](../extensions/octet-web-search/README.md), or [MCP](../extensions/octet-mcp/README.md) through their package guides.
 - Inventory/import/restore Pi setup with [Pi migration](pi-migration.md).
-- Embed through the independent [native host protocol 1](sdk.md), or use the optional [graphical Serve interface](experimental/octet-serve/README.md).
+- Embed through the independent [native host protocol 1](sdk.md).
