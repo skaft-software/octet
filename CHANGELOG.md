@@ -19,6 +19,13 @@
 - Tern: draw user prompts as native cards so the fill never comes out ragged,
   keep native rendering past the second turn (turn-usage rows no longer reuse a
   node id), and stop a held Esc from leaking a Tern message into the editor.
+- Tern: collapse finished bash/`!` shell output to the command summary instead
+  of painting one expanded frame on completion (the completion now deletes the
+  live output child in the same frame that flips `collapsed`), keep failed
+  output visible, and re-assert `composer.editor` focus plus the draft when the
+  OS returns focus without a TSP `Visible` event (screen recording, space
+  switch). Native Markdown also caps stacked blank lines at one (code fences
+  untouched) and the welcome/composer gaps tighten from `lg`/`md` to `sm`.
 
 ## [0.8.2] - 2026-09-30
 

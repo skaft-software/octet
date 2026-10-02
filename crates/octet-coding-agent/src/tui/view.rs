@@ -3667,6 +3667,21 @@ impl InteractiveShell {
         }
     }
 
+    /// Record an OS-level keyboard-focus return for the native Tern surface.
+    ///
+    /// Crossterm `FocusGained` reaches the frontend even when Tern sends no
+    /// TSP `Visible(true)` (another app or overlay was in front). Bumping this
+    /// counter makes the next native `present()` force a frame and re-assert
+    /// `composer.editor` focus instead of early-returning on an unchanged key.
+    /// The bump is unconditional: it is only consumed by the native renderer.
+    pub(crate) fn request_tern_focus_resync(&self) {
+        self.state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .focus_resync += 1;
+    }
+
     /// Begin a presentation run as soon as input is accepted. This precedes
     /// compaction and `Agent::prompt`, so submission is acknowledged without
     /// waiting for a provider event.
