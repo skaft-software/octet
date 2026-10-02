@@ -97,6 +97,34 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
     } else {
         lines.push("Throughput     unavailable".to_owned());
     }
+    if let Some(metrics) = &state.last_turn_inference {
+        if let Some(server) = &metrics.server {
+            if let Some(rate) = server.tokens_per_second() {
+                lines.push(format!("Server timing  {rate:.1} tok/s generation, reported ({:?}; {} tokens / {:.6}s; native unit {:?}; not GPU-active or post-first-token decode)", server.source, server.tokens, server.generation_ns as f64 / 1e9, server.reported_unit));
+            }
+        } else {
+            lines.push(format!(
+                "Server timing  unavailable ({:?}); no client-derived substitute",
+                metrics.server_unavailable.unwrap_or_default()
+            ));
+        }
+        if let Some(estimate) = &metrics.decode_estimate {
+            lines.push(format!("Decode estimate ~{:.1} tok/s; {} visible-usage tokens; {:.3}s output window; {} arrival bursts; {:.1}% slope dispersion (not accuracy confidence); {} reasoning tokens excluded", estimate.tokens_per_second, estimate.reported_visible_tokens, estimate.observed_ns as f64 / 1e9, estimate.samples, estimate.relative_dispersion * 100.0, estimate.reasoning_tokens_excluded));
+        } else if let Some(reason) = metrics.decode_unavailable {
+            lines.push(format!(
+                "Decode estimate unavailable ({reason:?}); no E2E substitute"
+            ));
+        }
+        if let Some(client) = &metrics.client {
+            let offset = |value: Option<u64>| {
+                value.map_or_else(
+                    || "unavailable".to_owned(),
+                    |v| format!("{:.2}ms", v as f64 / 1e6),
+                )
+            };
+            lines.push(format!("Client timing  {:?}; first output {}, answer {}, reasoning {}, tool arguments {}; {} output events (not tokens); max gap {}; completion tail {} (includes buffering/backpressure)", client.scope, offset(client.first_output_ns), offset(client.first_text_ns), offset(client.first_reasoning_ns), offset(client.first_tool_arguments_ns), client.output_events, offset(client.max_output_gap_ns), offset(client.completion_tail_ns())));
+        }
+    }
     lines.join("\n")
 }
 
@@ -590,5 +618,37 @@ mod extension_output_tests {
         let styled = styled_extension_output(&theme, "Extensions", "no extensions configured");
         assert!(!styled.contains('\x1b'), "{styled:?}");
         assert!(styled.contains("Extensions"));
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+    #[test]
+    fn status_distinguishes_unavailable_server_timing_from_client_observations() {
+        let state = ShellState {
+            last_turn_inference: Some(octet_ai::InferenceMetrics {
+                client: Some(octet_ai::ClientInferenceMetrics {
+                    scope: Some(octet_ai::ClientTimingScope::Request),
+                    first_output_ns: Some(100_000_000),
+                    first_reasoning_ns: Some(100_000_000),
+                    first_text_ns: Some(800_000_000),
+                    elapsed_ns: 1_000_000_000,
+                    output_events: 2,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..ShellState::default()
+        };
+        let text = status_telemetry(&state, Instant::now());
+        assert!(text.contains("Server timing  unavailable"), "{text}");
+        assert!(text.contains("no client-derived substitute"), "{text}");
+        assert!(
+            text.contains("answer 800.00ms, reasoning 100.00ms"),
+            "{text}"
+        );
+        assert!(text.contains("2 output events (not tokens)"), "{text}");
+        assert!(!text.contains("tok/s generation"), "{text}");
     }
 }

@@ -209,6 +209,7 @@ text docs/extensions/PROTOCOL-REFERENCE.md
 text docs/extensions/legacy-authoring.md
 text docs/getting-started.md
 text docs/herdr.md
+text docs/inference-metrics.md
 text docs/installation.md
 text docs/instructions.md
 text docs/linux.md

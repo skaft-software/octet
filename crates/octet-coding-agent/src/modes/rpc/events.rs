@@ -379,6 +379,9 @@ impl EventTranslator {
             // The final TurnFinished message carries generated media in the
             // Pi-compatible content array; no provisional RPC event exists.
             AgentEvent::RecoveredOutput { .. } | AgentEvent::OutputMedia { .. } => {}
+            AgentEvent::ProviderInference { metrics } => {
+                output.send(json!({"type": "provider_inference", "metrics": metrics}))?;
+            }
             AgentEvent::ProviderLifecycle { lifecycle } => {
                 // Deliberately outside assistant-message updates: readiness is
                 // transient endpoint telemetry, never model content.

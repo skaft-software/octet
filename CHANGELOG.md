@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Separate conversation inference measurements from billing: all supported
+  codecs/transports carry frozen client output timing, while recognized native
+  terminal count/duration pairs retain server source/unit provenance and
+  explicitly unavailable states. Completion prefers native generation or a
+  usage-calibrated robust streaming decode estimate, never E2E; `/status` retains
+  independent diagnostics. A bounded cancellation-owned reader isolates timing
+  from UI polling and rejects saturated/insufficient evidence. Transient agent,
+  telemetry, NDJSON/RPC and observer
+  span metrics do not alter durable accounting. Steering successors and deferred
+  operations never manufacture equivalent E2E rates. These are deterministic
+  source contracts, not live-provider speed or released-feature claims. See
+  [inference measurements](docs/inference-metrics.md).
+
 ## [0.8.2] - 2026-09-30
 
 See [release notes](docs/releases/v0.8.2.md) for candidate scope, availability,

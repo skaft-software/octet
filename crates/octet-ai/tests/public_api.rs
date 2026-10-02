@@ -7,21 +7,23 @@ use octet_ai::{
     reduce_assistant_message_frames, select_vertex_credential, vertex_api_key_auth, AiClient,
     AiError, AssistantMessage, AssistantMessageFrame, AssistantMessageFrameEncoder, AssistantPart,
     AudioFormat, AudioMedia, AudioOutputOptions, AudioPayload, AudioVoice, Auth, AuthConfig,
-    AuthError, Capabilities, CatalogConfig, CompatibilityMode, ConfigError, Cost,
-    CredentialResolver, CredentialResolverRegistry, CredentialScheme, DecodeError, DeferredHandle,
+    AuthError, Capabilities, CatalogConfig, ClientInferenceMetrics, ClientTimingScope,
+    CompatibilityMode, ConfigError, Cost, CredentialResolver, CredentialResolverRegistry,
+    CredentialScheme, DecodeError, DecodeEstimate, DecodeEstimateUnavailable, DeferredHandle,
     DeferredHandleRejection, DeferredPollPermit, DeferredPollRefusalKind, Diagnostic, Endpoint,
     EndpointConfig, EndpointId, FauxDeferredStatus, FauxMessage, FauxOptions, FauxProvider,
     FauxResponse, FauxState, FauxToolCall, GeneratedImage, HeaderTransform, HookModelContext,
     HostRequestOptions, HttpError, ImageApi, ImageCancellation, ImageDetail,
     ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResponse, ImageInput,
     ImageMedia, ImageModality, ImageModel, ImageModelCatalog, ImageModelSpec, ImageOutput,
-    ImagePricing, ImageSource, ImageStopReason, JsonSchemaFormat, Media, Message, Mime, Modality,
-    ModalitySet, Model, ModelCatalog, ModelConfig, ModelId, ModelLimits, ModelSpec, OutputFormat,
-    OutputModalities, PayloadHook, Pricing, PricingError, PricingTier, Protocol, ProviderError,
-    ProviderMediaRef, ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
-    ReasoningEffortBudgets, ReasoningPart, ReasoningState, ReasoningStateKind, Request,
-    RequestBodyEncoding, RequestOverrides, RequestRuntime, ResolvedCredential, Response,
-    ResponseHook, ResponseStream, ResponsesRuntimeProfile, Secret, StopReason, StreamEvent,
+    ImagePricing, ImageSource, ImageStopReason, InferenceMetrics, JsonSchemaFormat, Media, Message,
+    Mime, Modality, ModalitySet, Model, ModelCatalog, ModelConfig, ModelId, ModelLimits, ModelSpec,
+    OutputFormat, OutputModalities, PayloadHook, Pricing, PricingError, PricingTier, Protocol,
+    ProviderError, ProviderMediaRef, ReasoningCapability, ReasoningConfig, ReasoningControl,
+    ReasoningEffort, ReasoningEffortBudgets, ReasoningPart, ReasoningState, ReasoningStateKind,
+    ReportedTimingUnit, Request, RequestBodyEncoding, RequestOverrides, RequestRuntime,
+    ResolvedCredential, Response, ResponseHook, ResponseStream, ResponsesRuntimeProfile, Secret,
+    ServerGenerationMetrics, ServerTimingSource, ServerTimingUnavailable, StopReason, StreamEvent,
     StreamProtocolError, TokenRate, ToolCall, ToolCallId, ToolChoice, ToolDef, ToolResult,
     ToolResultPart, TransportError, TransportPhase, UnsupportedError, Usage, UserMessage, UserPart,
     ValidationError, VertexCredential,
@@ -43,6 +45,11 @@ const _: fn() = || {
     assert_exported::<ImageGenerationResponse>();
     assert_exported::<ImageCancellation>();
     assert_exported::<FauxProvider>();
+    assert_exported::<DecodeEstimate>();
+    assert_exported::<DecodeEstimateUnavailable>();
+    assert_exported::<InferenceMetrics>();
+    assert_exported::<ClientInferenceMetrics>();
+    assert_exported::<ServerGenerationMetrics>();
 };
 
 #[test]

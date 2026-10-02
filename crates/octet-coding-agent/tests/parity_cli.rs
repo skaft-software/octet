@@ -418,6 +418,7 @@ fn json_mode_streams_a_session_header_first_delta_only_event_sequence() {
         "turn_start",
         "message_start",
         "message_end",
+        "provider_inference",
         "agent_end",
     ] {
         assert!(
@@ -426,6 +427,11 @@ fn json_mode_streams_a_session_header_first_delta_only_event_sequence() {
         );
     }
     for event in &events {
+        if event["type"] == "provider_inference" {
+            assert_eq!(event["metrics"]["client"]["scope"], "request");
+            assert!(event["metrics"]["client"]["elapsed_ns"].is_u64());
+            assert_eq!(event["metrics"]["server_unavailable"], "not_reported");
+        }
         if event["type"] == "message_update" {
             assert!(
                 event.get("message").is_none(),

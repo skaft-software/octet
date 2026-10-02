@@ -239,19 +239,25 @@ terminal paint. See [benchmark methods](../benchmarks/README.md).
 
 ### TUI output throughput
 
-The completion line's `tok/s E2E (last turn)` and `/status` throughput divide
-provider-reported output tokens (including reasoning) by the locally observed
-interval from `TurnStarted` to accepted `TurnFinished` for the latest attempt.
-The interval includes initial waiting, hidden thinking, network buffering, and
-local event processing/settlement. It is **not server-side generation speed**
-or a whole-task average. A retry starts a fresh interval; earlier attempts,
-retry backoff, and tool execution between turns are not aggregated into it.
-Missing request timing or zero reported output leaves the rate unavailable.
+The completion line prefers a matching native server generation count/duration.
+Without that, it shows a separately labeled robust decode estimate or explicit
+unavailability, never the E2E average. `/status` keeps request-to-completion E2E
+throughput separate from the decode estimate and native server observation.
 
-Do not divide all reported output tokens by first-visible-delta-to-completion
-time: hidden reasoning can consume most of the output budget before any text
-arrives, inflating that rate by orders of magnitude. Server-side generation
-throughput requires provider-supplied timing with matching token semantics.
+The receive-side reader runs ahead of terminal/agent polling with bounded event
+and byte admission; cancellation aborts it, and saturation suppresses estimates.
+A usage-calibrated median long-baseline fit of visible output progress excludes
+request/prefill and completion-tail time and corrects the first chunk's token
+mass. Hidden reasoning usage is excluded, and an unknown reasoning split cannot
+be assigned to answer-text time. Burst coalescing and slope dispersion reject
+unresolvable timing rather than claiming infinite decode speed.
+
+These are estimates under a token-density/arrival-cadence assumption. A stable
+fit cannot identify arbitrary proxy buffering, hidden GPU stages, preemption or
+speculative execution. Native generation is not automatically GPU-active time
+or post-first-token TPOT. See the unreleased
+[inference measurement contract](../inference-metrics.md) for the algorithm,
+thresholds, coverage and qualification limits.
 
 ## Startup attribution (opt-in)
 

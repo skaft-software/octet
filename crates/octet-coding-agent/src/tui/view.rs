@@ -177,15 +177,15 @@ struct CompactionBlock {
 #[derive(Clone, Debug)]
 struct OutcomeBlock {
     outcome: RunOutcome,
-    /// Final provider-reported output rate captured when the run settles.
-    tokens_per_second: Option<f64>,
+    /// Frozen native timing or robust estimate, never the E2E average.
+    inference: Option<Box<octet_ai::InferenceMetrics>>,
 }
 
 impl OutcomeBlock {
-    fn new(outcome: RunOutcome, tokens_per_second: Option<f64>) -> Self {
+    fn new(outcome: RunOutcome, inference: Option<octet_ai::InferenceMetrics>) -> Self {
         Self {
             outcome,
-            tokens_per_second,
+            inference: inference.map(Box::new),
         }
     }
 }
@@ -1429,9 +1429,10 @@ pub(crate) struct ShellState {
     /// First-token latency of the most recently completed provider
     /// response: request opened until the first generated token.
     pub(crate) last_turn_first_token: Option<Duration>,
-    /// Total provider time of the most recently completed provider
-    /// response: request opened until the response was fully generated.
+    /// Client elapsed time for the latest measured response, not server time.
+    /// Legacy event producers use request-to-TurnFinished, including settlement.
     pub(crate) last_turn_provider_elapsed: Option<Duration>,
+    pub(crate) last_turn_inference: Option<octet_ai::inference::InferenceMetrics>,
     /// (tool name, wall time) of recently completed tool calls, most
     /// recent last. Session-scoped and bounded; powers the `/status`
     /// tool wall-time line.
@@ -2040,6 +2041,7 @@ impl ShellState {
         self.turn_requested_at = None;
         self.last_turn_first_token = None;
         self.last_turn_provider_elapsed = None;
+        self.last_turn_inference = None;
         self.turn_streamed_output_bytes = 0;
         self.turn_output_tokens_before_generation = 0;
         self.run_cost_microdollars = 0;
@@ -3769,13 +3771,8 @@ impl InteractiveShell {
                 .saturating_add(run.elapsed_at(Instant::now()));
         }
         state.close_streaming_blocks();
-        let tokens_per_second = state
-            .last_turn_tokens_per_second
-            .filter(|rate| rate.is_finite() && *rate > 0.0);
-        state.push_block(TranscriptBlock::Outcome(OutcomeBlock::new(
-            outcome,
-            tokens_per_second,
-        )));
+        let block = OutcomeBlock::new(outcome, state.last_turn_inference.clone());
+        state.push_block(TranscriptBlock::Outcome(block));
         if !state.selected_model_owns_telemetry() {
             state.clear_turn_telemetry();
         }
@@ -3901,6 +3898,9 @@ impl InteractiveShell {
                 // provider retry. TurnFinished carries the durable assembled
                 // message; embedded callers receive the payload here directly.
             }
+            AgentEvent::ProviderInference { metrics } => {
+                state.last_turn_inference = Some(metrics.clone());
+            }
             AgentEvent::ProviderLifecycle { lifecycle } => {
                 // The run tracker accepts the event but deliberately refuses a
                 // late readiness update once real output or tool work began.
@@ -3921,6 +3921,10 @@ impl InteractiveShell {
                 }
             }
             AgentEvent::ProviderRetry { .. } | AgentEvent::CandidateRejected { .. } => {
+                state.last_turn_inference = None;
+                state.last_turn_tokens_per_second = None;
+                state.last_turn_generated_tokens = None;
+                state.last_turn_provider_elapsed = None;
                 state.discard_streaming_blocks();
                 state.open_working_status();
                 if let AgentEvent::ProviderRetry {
@@ -4082,6 +4086,7 @@ impl InteractiveShell {
                 state.last_turn_tokens_per_second = None;
                 state.last_turn_generated_tokens = None;
                 state.last_turn_provider_elapsed = None;
+                state.last_turn_inference = None;
                 state.last_turn_first_token = None;
             }
             AgentEvent::ToolStarted { id, name, args } => {
@@ -4303,6 +4308,18 @@ impl InteractiveShell {
                         output_tokens_per_second(turn_usage.output_tokens, elapsed)
                     });
                 state.last_turn_generated_tokens = Some(turn_usage.output_tokens);
+                if let Some(metrics) = state.last_turn_inference.clone() {
+                    state.last_turn_tokens_per_second = metrics
+                        .client
+                        .as_ref()
+                        .and_then(|c| c.end_to_end_tokens_per_second());
+                    state.last_turn_provider_elapsed = metrics
+                        .client
+                        .as_ref()
+                        .map(|c| Duration::from_nanos(c.elapsed_ns));
+                    state.last_turn_generated_tokens =
+                        metrics.client.as_ref().map(|c| c.reported_output_tokens);
+                }
                 // Provider usage is authoritative at this boundary. Prompt
                 // cache buckets all occupy context, while reasoning is already
                 // a subset of output, so canonical total_tokens is exactly the
@@ -7344,6 +7361,7 @@ impl InteractiveShell {
         state.close_streaming_blocks();
         state.jump_to_tail();
         state.last_turn_usage = checkpoint_usage;
+        state.last_turn_inference = None;
         state.last_turn_tokens_per_second = None;
         state.last_turn_generated_tokens = None;
         state.turn_generation_started_at = None;

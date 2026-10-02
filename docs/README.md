@@ -21,6 +21,7 @@ source builds from planned publication channels.
 - [CLI options](cli.md)
 - [Tools](tools.md)
 - [Models, providers and reasoning](providers.md)
+- [Inference measurements (unreleased)](inference-metrics.md)
 - [Images and audio](media.md)
 - [Sessions and goals](sessions.md)
 - [Session file format](session-format.md)

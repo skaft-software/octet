@@ -342,6 +342,7 @@ async fn run_prompt(
                         }
                     }
                     AgentEvent::OutputMedia { .. } => {}
+                    AgentEvent::ProviderInference { .. } => {}
                     AgentEvent::ProviderLifecycle { lifecycle } => {
                         // Lifecycle telemetry is diagnostic-only. Keep it out
                         // of this mode's response/log stdout so a caller can

@@ -35,6 +35,14 @@ pub(crate) async fn translate(
     model_id: &str,
 ) -> anyhow::Result<Option<HostRunOutcome>> {
     match event {
+        AgentEvent::ProviderInference { metrics } => {
+            emitter
+                .emit(
+                    "provider_inference",
+                    serde_json::json!({"metrics": metrics}),
+                )
+                .await?;
+        }
         AgentEvent::OutputDelta { channel, text } => {
             if channel == OutputChannel::Text {
                 append_bounded(&mut state.pending_text, &text, MAX_EVENT_TEXT_BYTES);

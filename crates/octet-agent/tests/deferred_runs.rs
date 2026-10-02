@@ -74,6 +74,7 @@ fn parked_response(model: &Model, handle: CodecDeferredHandle) -> Response {
         response_id: None,
         responses_output: None,
         deferred: Some(handle),
+        inference: None,
         diagnostics: Vec::new(),
     }
 }
@@ -96,6 +97,7 @@ fn settled_response(model: &Model) -> Response {
         response_id: Some("polled-response".into()),
         responses_output: None,
         deferred: None,
+        inference: None,
         diagnostics: Vec::new(),
     }
 }

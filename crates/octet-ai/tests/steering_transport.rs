@@ -222,8 +222,22 @@ async fn steering_mid_generation_late_acceptance_multiple_inputs_preserve_segmen
         matches!(&finished[0].message.content[0],AssistantPart::Text(t) if t=="original-prefix")
     );
     assert!(matches!(&finished[1].message.content[0],AssistantPart::Text(t) if t=="successor"));
-    for response in &finished {
+    for (index, response) in finished.iter().enumerate() {
         assert_eq!(response.usage.output_tokens, 2);
+        let metrics = response.inference.as_ref().unwrap();
+        let client = metrics.client.as_ref().unwrap();
+        let expected_scope = if index == 0 {
+            octet_ai::inference::ClientTimingScope::Request
+        } else {
+            octet_ai::inference::ClientTimingScope::ResponseSegment
+        };
+        assert_eq!(client.scope, Some(expected_scope));
+        assert!(client.first_text_ns.is_some());
+        assert_eq!(client.end_to_end_tokens_per_second().is_some(), index == 0);
+        assert_eq!(
+            metrics.server_unavailable,
+            Some(octet_ai::inference::ServerTimingUnavailable::NotReported)
+        );
     }
     let states = session.steering_updates();
     assert_eq!(

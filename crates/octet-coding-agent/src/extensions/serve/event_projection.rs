@@ -43,7 +43,8 @@ pub(super) async fn project_agent_event(
             persisted?;
         }
         AgentEvent::TurnStarted => {}
-        AgentEvent::ProviderLifecycle { .. }
+        AgentEvent::ProviderInference { .. }
+        | AgentEvent::ProviderLifecycle { .. }
         | AgentEvent::ProviderWaitingForNetwork { .. }
         | AgentEvent::ProviderOperationRetry { .. } => {
             // Serve's durable item protocol intentionally has no endpoint-status

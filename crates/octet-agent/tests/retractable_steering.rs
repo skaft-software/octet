@@ -34,6 +34,7 @@ impl HostStreamTransport for FinishedTransport {
             response_id: None,
             responses_output: None,
             deferred: None,
+            inference: None,
             diagnostics: Vec::new(),
         };
         Ok(Box::pin(futures_util::stream::iter(vec![

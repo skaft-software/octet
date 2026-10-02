@@ -1330,6 +1330,7 @@ impl Agent {
                     Ok(response) => {
                         turn_attempt_succeeded = true;
                         CompletionAttributes::usage(&response.usage)
+                            .with_inference(response.inference.as_ref())
                             .with_uncertainty(session.has_uncertain_usage())
                             .record(&request_guard.span);
                         stream_guard.finish(false);
@@ -1338,6 +1339,9 @@ impl Agent {
                     }
                     Err(reason) => break 'run reason,
                 };
+                if let Some(metrics) = response.inference.clone() {
+                    yield AgentEvent::ProviderInference { metrics };
+                }
                 // Context-recovery attempts are scoped to one logical provider
                 // turn. A successful response proves the current compacted
                 // prefix is accepted and restores the recovery budget for a
