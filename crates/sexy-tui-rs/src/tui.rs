@@ -458,6 +458,16 @@ impl<'a> TUI<'a> {
         &self.previous_frame
     }
 
+    /// First addressable logical row of the last primary-screen Pi paint.
+    ///
+    /// Unlike `rendered_frame().len() - rows`, this retains the physical seam
+    /// after a differential shrink and resets it after a complete replay.
+    /// Other renderer modes and an unpainted TUI return `None`.
+    pub fn rendered_viewport_top(&self) -> Option<usize> {
+        (!self.first_render && self.uses_pi_renderer() && self.alternate_screen_session.is_none())
+            .then_some(self.previous_viewport_top)
+    }
+
     /// Request a re-render at the next opportunity.
     pub fn request_render(&mut self) {
         self.request_render_force(false);

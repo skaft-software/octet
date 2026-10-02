@@ -109,8 +109,8 @@ impl<'a> TUI<'a> {
     /// `20be4b18d4c57487f8993d2762bace129f0cf7c6`.
     /// Keep this control flow structurally aligned with
     /// `packages/tui/src/tui.ts`; named upstream cases live in
-    /// `tests/pi_tui_render.rs`. Octet explicitly opts into saved-history
-    /// preservation; callers otherwise retain the upstream clear/replay policy.
+    /// `tests/pi_tui_render.rs`. Saved-history preservation is an explicit
+    /// opt-in; callers otherwise retain the upstream clear/replay policy.
     pub(super) fn render_pi_frame(&mut self) {
         let width_u16 = self.terminal.columns();
         let height_u16 = self.terminal.rows().max(1);
