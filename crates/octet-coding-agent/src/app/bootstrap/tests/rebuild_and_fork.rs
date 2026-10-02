@@ -223,3 +223,93 @@ fn fork_launch_copies_the_source_head_and_records_provenance() {
     );
     assert_eq!(metadata.forked_from_entry_id, Some(source_head.0));
 }
+
+#[test]
+fn resume_completes_a_narrowed_catalog_before_restoring_its_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = fresh_app(directory.path());
+
+    // A session on a route this launch never initialized.
+    let target = directory.path().join("deferred-route-session.jsonl");
+    let mut session = Session::create(&target).unwrap();
+    session
+        .append(EntryValue::Config {
+            model: Some(DEEPSEEK_MODEL_ID.to_string()),
+            reasoning: Some("high".to_string()),
+            reasoning_mode: None,
+        })
+        .unwrap();
+    drop(session);
+
+    // Simulate the runtime narrowing a config-proven route produces: the
+    // deferred provider's inventory is absent and the plan is not fleet. A
+    // narrowed launch without this state resolves every built-in id, so test
+    // catalogs must remove the deferred route's model by hand.
+    app.readiness = CatalogReadiness::Routes(vec!["openai"]);
+    let endpoint = EndpointId(crate::providers::DEEPSEEK.routes[0].endpoint_id.into());
+    assert!(app
+        .catalog
+        .remove_model_if_endpoint(&ModelId(DEEPSEEK_MODEL_ID.into()), &endpoint));
+    assert!(app
+        .catalog
+        .resolve(&ModelId(DEEPSEEK_MODEL_ID.into()))
+        .is_err());
+
+    // Before the fleet completion this resume failed with
+    // `Unknown model: ModelId("deepseek-v4-pro")`.
+    let app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::OpenExisting(target)),
+    )
+    .unwrap();
+    assert_eq!(app.model.spec.id.0, DEEPSEEK_MODEL_ID);
+    assert_eq!(
+        app.reasoning,
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+    );
+    assert!(
+        app.catalog
+            .resolve(&ModelId(DEEPSEEK_MODEL_ID.into()))
+            .is_ok(),
+        "the completed catalog must serve the restored route"
+    );
+    assert!(
+        app.readiness.is_fleet(),
+        "the completed plan must not re-discover on later rebuilds"
+    );
+}
+
+#[test]
+fn resume_still_fails_closed_when_the_completed_catalog_lacks_the_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = fresh_app(directory.path());
+    let target = directory.path().join("missing-route-session.jsonl");
+    let mut session = Session::create(&target).unwrap();
+    session
+        .append(EntryValue::Config {
+            model: Some("provider-model-without-a-credential".to_string()),
+            reasoning: None,
+            reasoning_mode: None,
+        })
+        .unwrap();
+    drop(session);
+    app.readiness = CatalogReadiness::Routes(vec!["openai"]);
+
+    let error = match rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::OpenExisting(target)),
+    ) {
+        Ok(_) => panic!("a model no route can serve must fail the resume closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("Unknown model"),
+        "a model no route can serve keeps its resolution error: {error:#}"
+    );
+}

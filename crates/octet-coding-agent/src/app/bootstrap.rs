@@ -8101,6 +8101,49 @@ impl Drop for ReleasedExtensionBindingCleanup {
     }
 }
 
+/// Resolve one model id a rebuild must serve, completing a narrowed catalog first.
+///
+/// A launch narrows its readiness plan from the selection its configuration
+/// could prove ([`catalog_readiness`]); a session resumed in-process — or a
+/// compaction route configured since that launch — can name a route the plan
+/// deferred. `bootstrap()` falls back to the fleet plan when the *configured*
+/// model cannot resolve, but a resumed session's model reaches the catalog only
+/// here, and the interactive launch answers an unresolvable restored selection
+/// with the model picker instead of a launch error. Give the in-process resume
+/// the same guarantee: complete the fleet catalog exactly once, like
+/// [`complete_delegation_catalog`], merging the route's context notes and
+/// reprojecting extension providers, instead of failing the resume with
+/// `Unknown model`. A model the completed catalog still cannot serve keeps the
+/// original resolution error, so a genuinely unavailable route still fails
+/// closed.
+fn resolve_model_or_complete_fleet(
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    client: &AiClient,
+    offline: bool,
+    catalog: &mut ModelCatalog,
+    readiness: &mut CatalogReadiness,
+    notes: &mut CodexContextNotes,
+    id: &ModelId,
+) -> anyhow::Result<Model> {
+    let unavailable = match catalog.resolve(id) {
+        Ok(model) => return Ok(model),
+        Err(error) => error,
+    };
+    if readiness.is_fleet() {
+        return Err(unavailable.into());
+    }
+    let (fleet_catalog, fleet_notes) =
+        model_catalog_for_readiness(offline, &CatalogReadiness::Fleet)?;
+    *catalog = fleet_catalog;
+    notes.merge(fleet_notes);
+    *readiness = CatalogReadiness::Fleet;
+    extensions.synchronize_provider_catalog(catalog, client);
+    match catalog.resolve(id) {
+        Ok(model) => Ok(model),
+        Err(_) => Err(unavailable.into()),
+    }
+}
+
 /// Recreate the Agent at an idle boundary. Taking `App` by value guarantees the
 /// old Agent and its session file are dropped before a session is reopened.
 pub fn rebuild_app(
@@ -8135,13 +8178,21 @@ pub fn rebuild_app(
         codex_context_notes.delivered.set(false);
     }
     let mut readiness = app.readiness.clone();
-    let compact_model = config
-        .compaction
-        .compact_model
-        .as_ref()
-        .map(|id| catalog.resolve(id))
-        .transpose()
-        .with_context(|| "configured compaction model could not be resolved")?;
+    let compact_model = match config.compaction.compact_model.as_ref() {
+        Some(id) => Some(
+            resolve_model_or_complete_fleet(
+                &mut app.executable_extensions,
+                &client,
+                config.offline,
+                &mut catalog,
+                &mut readiness,
+                &mut codex_context_notes,
+                id,
+            )
+            .with_context(|| "configured compaction model could not be resolved")?,
+        ),
+        None => None,
+    };
     let current_path = app.agent.session().path().to_owned();
     let same_session = selection.as_ref().is_none_or(|selection| match selection {
         SessionSelection::CreateNew(_) => false,
@@ -8164,11 +8215,18 @@ pub fn rebuild_app(
         }
         Some(SessionSelection::CreateNew(_)) | None => (PersistedSessionConfig::default(), None),
     };
-    let restored_model = persisted
-        .model
-        .as_ref()
-        .map(|id| catalog.resolve(id))
-        .transpose()?;
+    let restored_model = match persisted.model.as_ref() {
+        Some(id) => Some(resolve_model_or_complete_fleet(
+            &mut app.executable_extensions,
+            &client,
+            config.offline,
+            &mut catalog,
+            &mut readiness,
+            &mut codex_context_notes,
+            id,
+        )?),
+        None => None,
+    };
     let changing_model = new_model.is_some() || restored_model.is_some();
     let explicit_reasoning = new_reasoning.is_some();
     let old_model = model;
