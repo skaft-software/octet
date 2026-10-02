@@ -60,29 +60,10 @@ async fn run_stdio_loop() -> anyhow::Result<()> {
                     biased;
                     _ = crate::tui::terminal::wait_for_shutdown_signal() => break 'requests,
                     frame = &mut read => break frame?,
-                    warm = async {
-                        match idle_app.as_mut() {
-                            Some(app) => app.agent.drive_cache_warming().await,
-                            None => std::future::pending().await,
-                        }
-                    }, if !cache_warming_failed => {
-                        match warm {
-                            Ok(octet_agent::AgentEvent::CacheWarmed { cost, extension_override, .. }) => {
-                                // The prior request already emitted final_result:
-                                // idle maintenance is durable accounting + stderr,
-                                // never an extra protocol event for that request.
-                                if idle_app.as_ref().is_some_and(|app| app.config.show_cache_miss_notices) {
-                                    crate::output::stderr_line(crate::commands::cache_warmed_notice(cost, extension_override));
-                                }
-                            }
-                            Ok(octet_agent::AgentEvent::ProviderUsageUncertain) => {
-                                crate::output::stderr!("warning: cache warming usage is uncertain; session costs are a known subtotal.");
-                            }
-                            Ok(_) => {}
-                            Err(_) => {
-                                cache_warming_failed = true;
-                                crate::output::stderr!("warning: cache warming stopped; session usage may be uncertain.");
-                            }
+                    warm = run::drive_idle_cache_warming(idle_app.as_deref_mut()), if !cache_warming_failed => {
+                        if warm.is_err() {
+                            cache_warming_failed = true;
+                            crate::output::stderr!("warning: cache warming stopped; session usage may be uncertain.");
                         }
                     }
                 }

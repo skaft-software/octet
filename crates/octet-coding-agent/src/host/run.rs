@@ -20,6 +20,17 @@ pub(crate) enum RunRequestOutcome {
     Signaled,
 }
 
+pub(crate) async fn drive_idle_cache_warming(
+    app: Option<&mut crate::app::App>,
+) -> Result<(), octet_agent::AgentError> {
+    let Some(app) = app else {
+        return std::future::pending().await;
+    };
+    let event = app.agent.drive_cache_warming().await?;
+    events::report_idle_cache_warming(event, app.config.show_cache_miss_notices);
+    Ok(())
+}
+
 pub(crate) async fn run_request(
     emitter: &mut Emitter<'_>,
     request: RunRequest,

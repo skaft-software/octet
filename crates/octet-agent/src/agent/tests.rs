@@ -215,6 +215,47 @@ fn test_run_control(byte_limit: usize) -> (RunControl, mpsc::Receiver<Control>) 
     )
 }
 
+#[test]
+fn run_drop_fences_cache_warming_before_releasing_the_event_stream() {
+    struct DropProbe(RunControl);
+    impl Stream for DropProbe {
+        type Item = AgentEvent;
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Pending
+        }
+    }
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            assert!(!*self.0.admission.lock().unwrap());
+            assert!(matches!(
+                self.0.set_cache_warming_mode(crate::CacheWarmMode::Off),
+                Err(AgentError::RunEnded)
+            ));
+        }
+    }
+    let (control, _receiver) = test_run_control(128);
+    // Keep the receiver alive to isolate the admission fence from channel
+    // closure, just as a concurrent setter can observe before stream drop.
+    let run = Run {
+        stream: Box::pin(DropProbe(control.clone())),
+        control: control.clone(),
+        lifecycle: Arc::new(RunLifecycle {
+            finished: AtomicBool::new(false),
+            dropped: AtomicBool::new(false),
+        }),
+        context: Arc::new(ContextTracker::default()),
+        delegation: None,
+    };
+    drop(run);
+    assert_eq!(
+        control.cache_warming_mode(),
+        crate::CacheWarmMode::Streaming
+    );
+}
+
 fn gate_candidate(text: &str) -> AssistantMessage {
     AssistantMessage {
         content: vec![AssistantPart::Text(text.to_owned())],

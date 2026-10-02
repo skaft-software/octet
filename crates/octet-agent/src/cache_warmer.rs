@@ -297,7 +297,8 @@ pub(crate) struct CacheWarmer {
     mode_rx: tokio::sync::watch::Receiver<CacheWarmPolicy>,
     seen_policy: CacheWarmPolicy,
     status_tx: tokio::sync::watch::Sender<CacheWarmingStatus>,
-    active: Option<ActiveCache>,
+    // Keep the exact replay snapshot off the agent's async transition stack.
+    active: Option<Box<ActiveCache>>,
     work: Work,
     inactive: CacheWarmingStatus,
 }
@@ -497,7 +498,7 @@ impl CacheWarmer {
             return Ok(());
         };
         let now = Instant::now();
-        self.active = Some(ActiveCache {
+        self.active = Some(Box::new(ActiveCache {
             model: model.clone(),
             request: request.clone(),
             anchor,
@@ -512,7 +513,7 @@ impl CacheWarmer {
             next_wall_ms: 0,
             extension_override: false,
             decision: None,
-        });
+        }));
         self.schedule(session)
     }
 

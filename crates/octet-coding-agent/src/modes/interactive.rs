@@ -7466,7 +7466,28 @@ async fn run_idle_shell_escape(
     Ok(IdleCommandOutcome::Continue(Box::new(app)))
 }
 
-async fn run_idle_command(
+fn run_idle_command<'a>(
+    app: App,
+    shell: &'a mut InteractiveShell,
+    input: &'a mut EventStream,
+    command: Command,
+    goal_deadline: &'a mut Option<Instant>,
+    reexec: Option<&'a mut crate::reexec::ReexecController>,
+    reload: &'a mut crate::reload::ReloadSupervisor,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<IdleCommandOutcome>> + 'a>> {
+    // The complete dispatcher is too large to embed in every caller's future.
+    Box::pin(run_idle_command_inner(
+        app,
+        shell,
+        input,
+        command,
+        goal_deadline,
+        reexec,
+        reload,
+    ))
+}
+
+async fn run_idle_command_inner(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,

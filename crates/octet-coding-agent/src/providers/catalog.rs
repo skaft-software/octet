@@ -506,7 +506,7 @@ mod tests {
                 "claude-new-model",
                 None,
                 capabilities.clone(),
-                limits.clone(),
+                limits,
                 None,
             )
             .unwrap();
