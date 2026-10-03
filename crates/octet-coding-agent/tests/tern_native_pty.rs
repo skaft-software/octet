@@ -318,23 +318,34 @@ fn native_shell_keeps_full_command_and_never_sends_output_before_ctrl_o() {
     let mut pty = NativePty::spawn();
     pty.wait(|pty| pty.nodes.contains_key("composer.editor"));
     let marker = "output-requires-ctrl-o".repeat(40);
-    let command = format!("printf '%s\\n' '{marker}'");
+    let command = format!("printf '%s\\n' '{marker}'\nprintf 'second line\\n'");
     pty.send(format!("\x1b[200~!{command}\x1b[201~").as_bytes());
     pty.wait(|pty| pty.draft() == format!("!{command}"));
     pty.send(b"\r");
     pty.wait(|pty| {
-        pty.nodes
-            .values()
-            .any(|node| node["k"] == "tool" && node["p"]["status"] == "done")
+        pty.nodes.values().any(|node| {
+            node["id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with(".command.label"))
+                && node["p"]["spans"][1]["t"] == " · done"
+        })
     });
-    let tool = pty.nodes.values().find(|node| node["k"] == "tool").unwrap();
-    assert_eq!(tool["p"]["target"], command);
-    assert_eq!(tool["p"]["collapsed"], false);
-    assert_eq!(tool["p"]["collapsible"], false);
-    let output_id = format!(
-        "{}.out",
-        tool["id"].as_str().unwrap().strip_suffix(".shell").unwrap()
-    );
+    let command_leaf = pty.nodes.values().find(|node| node["k"] == "code").unwrap();
+    assert_eq!(command_leaf["p"]["text"], command);
+    assert_eq!(command_leaf["p"]["wrap"], true);
+    assert_eq!(command_leaf["p"]["numbers"], false);
+    let prefix = command_leaf["id"]
+        .as_str()
+        .unwrap()
+        .strip_suffix(".command")
+        .unwrap();
+    let rail = &pty.nodes[&format!("{prefix}.shell")];
+    assert_eq!(rail["k"], "row");
+    assert_eq!(rail["p"]["role"], "octet.command");
+    assert!(rail["p"].get("collapsed").is_none());
+    assert!(rail["p"].get("collapsible").is_none());
+    let output_id = format!("{prefix}.out");
+    let command_id = command_leaf["id"].as_str().unwrap().to_owned();
     // Inspect all emitted frames, not only the final tree: no transient mount.
     assert!(!String::from_utf8_lossy(&pty.output).contains(&format!("\"{output_id}\"")));
     pty.send(&[15]);
@@ -347,10 +358,7 @@ fn native_shell_keeps_full_command_and_never_sends_output_before_ctrl_o() {
     });
     pty.send(&[15]);
     pty.wait(|pty| !pty.nodes.contains_key(&output_id));
-    assert_eq!(
-        pty.nodes.values().find(|node| node["k"] == "tool").unwrap()["p"]["target"],
-        command
-    );
+    assert_eq!(pty.nodes[&command_id]["p"]["text"], command);
     pty.close();
 }
 
@@ -374,9 +382,18 @@ fn slash_completion_settings_and_theme_picker_keep_native_ownership() {
     pty.send(b"\x1b[27u");
     pty.wait(|pty| !pty.nodes.contains_key("report.body"));
     pty.send(b"/theme\r");
-    pty.wait(|pty| pty.nodes.values().any(|node| node["k"] == "picker"));
+    pty.wait(|pty| {
+        pty.nodes
+            .values()
+            .any(|node| node["k"] == "overlay" && node["p"]["role"] == "octet.picker")
+    });
+    assert!(pty.nodes.values().any(|node| node["k"] == "list"));
     pty.send(b"\x1b[27u");
-    pty.wait(|pty| !pty.nodes.values().any(|node| node["k"] == "picker"));
+    pty.wait(|pty| {
+        !pty.nodes
+            .values()
+            .any(|node| node["p"]["role"] == "octet.picker")
+    });
     assert!(!String::from_utf8_lossy(&pty.output).contains("Native Tern rendering unavailable"));
     assert!(!pty.nodes.values().any(|node| node["k"] == "rows"));
     pty.close();

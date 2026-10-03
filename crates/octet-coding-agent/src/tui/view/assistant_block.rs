@@ -14,7 +14,7 @@ use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::looks_like_diff;
 use crate::tui::theme::OctetTheme;
 
-fn reasoning_markdown_projection(source: &str) -> String {
+pub(super) fn reasoning_markdown_projection(source: &str) -> String {
     // OpenAI-style reasoning summaries can concatenate independently bolded
     // sections without whitespace: `**Plan****Verify**`. CommonMark treats the
     // middle four asterisks as literal text inside one strong span. Insert a

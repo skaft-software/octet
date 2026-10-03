@@ -134,11 +134,11 @@ impl InteractiveShell {
     /// executable resource is loaded here.
     pub fn reload_keybindings(&mut self) {
         self.input_dispatch.bindings.reload();
-        self.state
-            .native()
-            .lock()
-            .expect("native mailbox poisoned")
-            .bindings = Some(self.input_dispatch.bindings.clone());
+        {
+            let mut mailbox = self.state.native().lock().expect("native mailbox poisoned");
+            mailbox.bindings = Some(self.input_dispatch.bindings.clone());
+            mailbox.editor_resync = mailbox.editor_resync.saturating_add(1);
+        }
         self.input_dispatch.jump_forward = None;
     }
 
@@ -458,6 +458,7 @@ impl InteractiveShell {
     }
 
     fn scroll_to_top(&mut self) {
+        self.request_native_scroll(octet_tern::wire::ScrollBy::Start, 1);
         self.state.borrow().transcript_scroll_activity();
         if !self.state.borrow().run.is_active() {
             if let Err(error) = self.materialize_deferred_history() {

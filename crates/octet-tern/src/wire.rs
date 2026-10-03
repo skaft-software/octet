@@ -502,6 +502,40 @@ impl Node {
     }
 }
 
+/// How far to move the scroller holding a node.
+///
+/// Send a scroll op only when `hello.features` advertises `scroll`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScrollBy {
+    /// Up one line.
+    LineUp,
+    /// Down one line.
+    LineDown,
+    /// Up a viewport less one line.
+    PageUp,
+    /// Down a viewport less one line.
+    PageDown,
+    /// To the start.
+    Start,
+    /// To the end; a following ANSI block follows again.
+    End,
+}
+
+impl ScrollBy {
+    /// The wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LineUp => "line-up",
+            Self::LineDown => "line-down",
+            Self::PageUp => "page-up",
+            Self::PageDown => "page-down",
+            Self::Start => "start",
+            Self::End => "end",
+        }
+    }
+}
+
 /// One op in a frame.
 ///
 /// Field meanings follow the op names; the wire form is a positional array.
@@ -544,6 +578,8 @@ pub enum Op {
     Focus { id: Option<String> },
     /// Scroll a node into view.
     Reveal { id: String, where_: &'static str },
+    /// Move the scroller holding a node; requires the advertised `scroll` feature.
+    Scroll { id: String, by: ScrollBy },
     /// Suspend the surface's clocked motion.
     Suspend,
     /// Resume the surface's clocked motion.
@@ -619,6 +655,11 @@ impl Serialize for Op {
                 seq.serialize_element("reveal")?;
                 seq.serialize_element(id)?;
                 seq.serialize_element(where_)?;
+            }
+            Op::Scroll { id, by } => {
+                seq.serialize_element("scroll")?;
+                seq.serialize_element(id)?;
+                seq.serialize_element(by)?;
             }
             Op::Suspend => {
                 seq.serialize_element("suspend")?;
@@ -924,4 +965,37 @@ pub enum Event {
         /// Node ids.
         ids: Vec<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scroll_directions_match_the_wire_schema() {
+        for (by, name) in [
+            (ScrollBy::LineUp, "line-up"),
+            (ScrollBy::LineDown, "line-down"),
+            (ScrollBy::PageUp, "page-up"),
+            (ScrollBy::PageDown, "page-down"),
+            (ScrollBy::Start, "start"),
+            (ScrollBy::End, "end"),
+        ] {
+            assert_eq!(by.as_str(), name);
+            assert_eq!(serde_json::to_value(by).unwrap(), serde_json::json!(name));
+            assert_eq!(
+                serde_json::from_value::<ScrollBy>(serde_json::json!(name)).unwrap(),
+                by
+            );
+            assert_eq!(
+                serde_json::to_value(Op::Scroll {
+                    id: "main".into(),
+                    by,
+                })
+                .unwrap(),
+                serde_json::json!(["scroll", "main", name])
+            );
+        }
+        assert!(serde_json::from_str::<ScrollBy>("\"up\"").is_err());
+    }
 }

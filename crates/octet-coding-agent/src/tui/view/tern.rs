@@ -105,6 +105,7 @@ struct MainKey {
     cols: u16,
     verbose: bool,
     startup: (bool, bool),
+    remote_header: Option<crate::extensions::remote_ui::Projection>,
 }
 
 pub(super) struct TernSurface {
@@ -200,6 +201,7 @@ impl TernSurface {
                         Kind::Row,
                         Kind::Text,
                         Kind::Md,
+                        Kind::Code,
                         Kind::Editor,
                         Kind::Ansi,
                         Kind::Section,
@@ -276,6 +278,17 @@ impl TernSurface {
             Incoming::Event(Event::Toggle {
                 sf, id, collapsed, ..
             }) if sf == SURFACE => {
+                let node = find_node(&self.sent.main, id)
+                    .or_else(|| find_node(&self.sent.dock, id))
+                    .or_else(|| find_node(&self.sent.layer, id));
+                if !node.is_some_and(|node| {
+                    node.p
+                        .as_ref()
+                        .and_then(|props| props.as_map().get("collapsible"))
+                        == Some(&json!(true))
+                }) {
+                    return Ok(());
+                }
                 self.collapsed.insert(id.clone(), *collapsed);
                 self.last_key = None;
                 self.main_key = None;
@@ -312,6 +325,13 @@ impl TernSurface {
                         });
                     }
                 }
+            }
+        }
+        {
+            let mut mailbox = state.native().lock().expect("native mailbox poisoned");
+            mailbox.scroll_supported = self.ready && self.client.supports_feature("scroll");
+            if !mailbox.scroll_supported {
+                mailbox.scroll.clear();
             }
         }
         if !self.ready {
@@ -368,6 +388,12 @@ impl TernSurface {
             if self.last_key == Some(key)
                 && resync == self.last_resync
                 && focus_resync == self.last_focus_resync
+                && state
+                    .native()
+                    .lock()
+                    .expect("native mailbox poisoned")
+                    .scroll
+                    .is_empty()
                 && !crate::output::has_tui_diagnostics()
             {
                 return Ok(());
@@ -406,12 +432,23 @@ impl TernSurface {
                     shell.startup_pending,
                     shell.startup_card_started_at.is_some(),
                 ),
+                remote_header: shell
+                    .extension_ui
+                    .remote
+                    .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Header)
+                    .map(|_| shell.extension_ui.remote.clone()),
             };
             (RenderModel::capture(&mut shell), main_key, editor_revision)
         };
         // Accepted source chunks, including streaming text, are materialized
         // outside the frontend lock. Shell metadata is not the streamed source.
         self.owner.accept(model);
+        self.owner.state.native_keys = state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .bindings
+            .clone();
         let shell = &mut self.owner.state;
         if self.verbose != shell.verbose_tools {
             self.collapsed.clear();
@@ -439,8 +476,11 @@ impl TernSurface {
             .clone();
         let main_changed = self.main_key.as_ref() != Some(&main_key);
         if main_changed {
-            self.images
-                .prepare(shell, self.client.supports(Kind::Image))?;
+            self.images.prepare(
+                shell,
+                self.client.supports(Kind::Image),
+                shell.verbose_tools,
+            )?;
             self.images.upload(&mut self.client)?;
             self.brand.prepare(shell, &mut self.client)?;
         }
@@ -484,6 +524,14 @@ impl TernSurface {
         // hold a stale revision after input was impossible, and stale drafts
         // reject gestures on length mismatch.
         if resync != self.last_resync || focus_resync_now != self.last_focus_resync {
+            if let Some(editor_id) = super::tern_prompt::focus(shell) {
+                if let Some(editor) = find_node(&next.layer, &editor_id) {
+                    ops.push(Op::Set {
+                        id: editor.id.clone(),
+                        props: editor.p.clone().expect("editor props"),
+                    });
+                }
+            }
             if let Some(editor) = find_node(&next.dock, "composer.editor") {
                 ops.push(Op::Set {
                     id: editor.id.clone(),
@@ -497,8 +545,26 @@ impl TernSurface {
             });
             self.force_focus = false;
         }
+        let scroll = state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .scroll
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        ops.extend(scroll.iter().map(|by| Op::Scroll {
+            id: REGION_MAIN.into(),
+            by: *by,
+        }));
         if !ops.is_empty() {
             let sequence = self.client.frame_ops_now(SURFACE, ops)?;
+            state
+                .native()
+                .lock()
+                .expect("native mailbox poisoned")
+                .scroll
+                .drain(..scroll.len());
             self.receipts
                 .push_back((sequence, next.panel_receipt.clone()));
             self.last_sent = Some(now);
@@ -573,7 +639,7 @@ fn apply_disclosure(nodes: &mut [Node], collapsed: &HashMap<String, bool>) {
                 .p
                 .as_ref()
                 .and_then(|props| props.as_map().get("collapsible"))
-                != Some(&json!(false))
+                == Some(&json!(true))
             {
                 node.p = Some(node.p.take().unwrap_or_default().set("collapsed", value));
             }
@@ -595,7 +661,22 @@ fn project(
 ) -> Projection {
     let mut out = Projection::default();
     if main_changed && !shell.startup_pending {
-        if shell.startup_card_started_at.is_some() {
+        if shell
+            .extension_ui
+            .remote
+            .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Header)
+            .is_some()
+        {
+            out.main.push(ansi_rows(
+                "remote.header",
+                &super::remote_ui::render_welcome_card(
+                    shell,
+                    shell.size.0,
+                    usize::from(shell.size.1),
+                    Instant::now(),
+                ),
+            ));
+        } else if shell.startup_card_started_at.is_some() {
             out.main.push(super::tern_welcome::node(shell, brand));
         }
         for (index, block) in shell.transcript.iter().enumerate() {
@@ -616,17 +697,26 @@ fn project(
             out.dock.push(ansi_rows(id, rows));
         }
     }
-    if client.supports(Kind::Agent) {
-        if let Some(agents) = super::tern_agents::node(shell) {
-            out.dock.push(agents);
+    let remote_editor = shell
+        .extension_ui
+        .remote
+        .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+        .is_some()
+        && shell.panel.is_none()
+        && shell.tool_input_prompt.is_none();
+    let remote_fullscreen = shell.extension_ui.remote_fullscreen_overlay
+        && shell.panel.is_none()
+        && shell.tool_input_prompt.is_none();
+    if !remote_fullscreen {
+        if remote_editor {
+            out.dock.push(ansi_rows("remote.editor", &chrome.composer));
+        } else {
+            if let Some(working) = working_row(shell, client.reduce_motion()) {
+                out.dock.push(working);
+            }
+            out.dock.push(composer(shell));
         }
-    } else if !chrome.subagents.is_empty() {
-        out.dock.push(ansi_rows("subagents", &chrome.subagents));
     }
-    if let Some(working) = working_row(shell, client.reduce_motion()) {
-        out.dock.push(working);
-    }
-    out.dock.push(composer(shell));
     for (id, rows) in [
         ("extension.below", &chrome.extension_below),
         ("error", &chrome.error),
@@ -642,11 +732,11 @@ fn project(
             node.p
                 .take()
                 .unwrap_or_default()
-                .set("max", json!({"w":"144ch"})),
+                .set("max", json!({"w":"96ch"})),
         );
     }
     // The neutral dock column is Tern's native shared-column layout hook.
-    // Without it, the agent roster spans the pane while the editor is centered.
+    // Keep live chrome and the integrated composer aligned with the transcript.
     out.dock = vec![Node::with_children(
         "dock.content",
         Kind::Col,
@@ -654,15 +744,15 @@ fn project(
         std::mem::take(&mut out.dock),
     )];
     out.panel_receipt = super::renderer_geometry::PanelRenderReceipt::capture(shell, &chrome.panel);
-    if let Some(picker) = super::tern_picker::node(shell) {
+    if let Some(prompt) = super::tern_prompt::node(shell) {
+        out.focus = super::tern_prompt::focus(shell);
+        out.layer.push(prompt);
+    } else if let Some(picker) = super::tern_picker::node(shell) {
         out.focus = Some(super::tern_picker::id(shell));
         out.layer.push(picker);
     } else if let Some(overlay) = report(shell, client.supports(Kind::Table)) {
         out.layer.push(overlay);
-    } else if !chrome.panel.is_empty()
-        || shell.overlay.is_some()
-        || shell.tool_input_prompt.is_some()
-    {
+    } else if !chrome.panel.is_empty() || shell.overlay.is_some() {
         // Internally styled documents and approval labels remain native ANSI
         // content, not a second ANSI TUI or a pane-wide migration Rows node.
         // Approvals retain their bounded full-label consent receipt, accepted
@@ -670,11 +760,12 @@ fn project(
         let mut rows =
             super::viewport::overlay_lines(shell, shell.size.0, usize::from(shell.size.1));
         rows.extend(chrome.panel);
-        if shell.tool_input_prompt.is_some() {
-            rows.extend(chrome.composer);
-        }
         out.layer.push(Node::with_children(
-            format!("modal.{}", shell.panel_epoch),
+            if shell.panel.is_some() {
+                format!("modal.{}", shell.panel_epoch)
+            } else {
+                format!("report.{}", shell.overlay_epoch)
+            },
             Kind::Overlay,
             Props::new()
                 .role("octet.modal")
@@ -684,11 +775,13 @@ fn project(
             vec![ansi_rows("modal.body", &rows)],
         ));
     } else {
-        out.focus = Some("composer.editor".into());
-        if let Some(completion) =
-            super::tern_completion::Completion::capture_revision(shell, editor_revision)
-        {
-            out.layer.push(completion.node(shell));
+        out.focus = editor_focused(shell).then(|| "composer.editor".into());
+        if editor_focused(shell) {
+            if let Some(completion) =
+                super::tern_completion::Completion::capture_revision(shell, editor_revision)
+            {
+                out.layer.push(completion.node(shell));
+            }
         }
     }
     out
@@ -702,46 +795,19 @@ fn id(identity: u64, suffix: &str) -> String {
     format!("t{identity}.{suffix}")
 }
 
-/// A follow-up assistant message.
-///
-/// A bare `md` node is Tern's default prose: no label, no fill, so a turn's
-/// replies read as one wall of text. `omp` draws each reply as a labelled
-/// custom message — a card carrying the model label over the `customMessage*`
-/// palette tokens, which `tern_theme` already projects but nothing consumed.
-/// Projecting that same shape gives each message its own identity instead of
-/// the default look, and keeps streaming on the single `md` leaf so a growing
-/// reply still patches one node.
-fn assistant_node(identity: u64, block: &AssistantBlock, shell: &ShellState) -> Node {
-    let label = if shell.model_display.is_empty() {
-        &shell.model
-    } else {
-        &shell.model_display
-    };
+/// RAIL replies are unboxed reader prose. The retained Markdown identity is
+/// independent of model changes, disclosure, cursor motion and streaming.
+fn assistant_node(identity: u64, block: &AssistantBlock, _shell: &ShellState) -> Node {
     Node::with_children(
         id(identity, "assistant"),
-        Kind::Card,
-        Props::new()
-            .role("octet.assistant")
-            .text(
-                "head",
-                Text::Spans(vec![Span::styled(sanitize_for_terminal(label), "accent")]),
-            )
-            .set("frame", "card")
-            .set("gap", "sm"),
-        // Tern's reader typography targets Markdown directly below an
-        // omp.assistant node. A card inserts its own body wrapper, so retain
-        // that native layout hook inside the labelled card as well.
-        vec![Node::with_children(
-            id(identity, "assistant.body"),
-            Kind::Col,
-            Props::new().role("omp.assistant"),
-            vec![Node::new(
-                id(identity, "assistant.md"),
-                Kind::Md,
-                Props::new()
-                    .set("text", tighten_markdown(&block.text))
-                    .set("stream", !block.finished),
-            )],
+        Kind::Col,
+        Props::new().role("omp.assistant"),
+        vec![Node::new(
+            id(identity, "assistant.md"),
+            Kind::Md,
+            Props::new()
+                .set("text", tighten_markdown(&block.text))
+                .set("stream", !block.finished),
         )],
     )
 }
@@ -757,11 +823,29 @@ fn tighten_markdown(text: &str) -> String {
     let sanitized = sanitize_for_terminal(text);
     let mut out = String::with_capacity(sanitized.len());
     let mut blanks: usize = 0;
-    let mut in_fence = false;
+    let mut fence: Option<(u8, usize)> = None;
+    let mut indented_code = false;
     for line in sanitized.split('\n') {
         let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
+        let start = line.trim_start_matches(' ');
+        let marker = start.as_bytes().first().copied();
+        let run = marker.map_or(0, |marker| {
+            start.bytes().take_while(|byte| *byte == marker).count()
+        });
+        let fence_line =
+            line.len() - start.len() <= 3 && matches!(marker, Some(b'`' | b'~')) && run >= 3;
+        if fence.is_some() || fence_line {
+            if let Some((open, length)) = fence {
+                if fence_line
+                    && marker == Some(open)
+                    && run >= length
+                    && start[run..].trim().is_empty()
+                {
+                    fence = None;
+                }
+            } else {
+                fence = marker.map(|marker| (marker, run));
+            }
             blanks = 0;
             if !out.is_empty() {
                 out.push('\n');
@@ -769,7 +853,11 @@ fn tighten_markdown(text: &str) -> String {
             out.push_str(line);
             continue;
         }
-        if in_fence {
+        if !trimmed.is_empty() {
+            indented_code = line.starts_with("    ") || line.starts_with('\t');
+        }
+        if indented_code {
+            blanks = 0;
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -790,7 +878,12 @@ fn tighten_markdown(text: &str) -> String {
         }
         out.push_str(line);
     }
-    out.trim_matches('\n').to_owned()
+    let out = out.trim_start_matches('\n');
+    if fence.is_some() {
+        out.to_owned()
+    } else {
+        out.trim_end_matches('\n').to_owned()
+    }
 }
 
 fn block_node(
@@ -810,7 +903,7 @@ fn block_node(
             Some(Node::with_children(
                 id(identity, "user"),
                 Kind::Card,
-                Props::new().role("octet.user").tone(Tone::User),
+                Props::new().role("omp.user").tone(Tone::User),
                 vec![Node::new(
                     id(identity, "user.body"),
                     Kind::Md,
@@ -818,12 +911,14 @@ fn block_node(
                 )],
             ))
         }
+        TranscriptBlock::Assistant(block) if block.text.is_empty() => None,
         TranscriptBlock::Assistant(block) => Some(Node::with_children(
             id(identity, "assistant.group"),
             Kind::Col,
             Props::new().role("omp.assistant"),
             vec![assistant_node(identity, block, shell)],
         )),
+        TranscriptBlock::Reasoning(block) if block.text.trim().is_empty() => None,
         TranscriptBlock::Reasoning(block) => Some(Node::with_children(
             id(identity, "reasoning.group"),
             Kind::Col,
@@ -852,23 +947,33 @@ fn block_node(
                             "muted",
                         )],
                     )
-                    .set(
-                        "took",
-                        block
-                            .reasoning_elapsed
-                            .map_or(0, |elapsed| elapsed.as_millis() as u64),
-                    )
                     .set("collapsible", true)
-                    .set("collapsed", !shell.verbose_tools),
+                    .set(
+                        "collapsed",
+                        !shell.verbose_tools && !block.reasoning_expanded,
+                    ),
                 vec![Node::new(
                     id(identity, "reasoning.md"),
                     Kind::Md,
                     Props::new()
-                        .set("text", tighten_markdown(&block.text))
+                        .set(
+                            "text",
+                            tighten_markdown(
+                                &super::assistant_block::reasoning_markdown_projection(&block.text),
+                            ),
+                        )
                         .set("stream", !block.finished),
                 )],
             )],
         )),
+        TranscriptBlock::Tool(panel)
+            if panel.grouped_child
+                && !shell.verbose_tools
+                && !panel.is_error
+                && !matches!(panel.name.as_str(), "bash" | "exec") =>
+        {
+            None
+        }
         TranscriptBlock::Tool(panel) => Some(tool_node(
             identity,
             panel,
@@ -921,19 +1026,25 @@ fn block_node(
         TranscriptBlock::Compaction(compaction) => Some(Node::with_children(
             id(identity, "compaction"),
             Kind::Section,
-            Props::new().role("octet.compaction").text(
-                "head",
-                Text::Plain(sanitize_for_terminal(&compaction.label)),
-            ),
+            Props::new()
+                .role("octet.compaction")
+                .text(
+                    "head",
+                    Text::Plain(sanitize_for_terminal(&compaction.label)),
+                )
+                .set("collapsible", true)
+                .set("collapsed", !compaction.expanded && !shell.verbose_tools),
             vec![Node::new(
                 id(identity, "compaction.md"),
                 Kind::Md,
                 Props::new().set("text", tighten_markdown(&compaction.summary)),
             )],
         )),
-        TranscriptBlock::Subagents(subagents) => {
-            Some(text_node(identity, &subagents.label(), "muted"))
-        }
+        TranscriptBlock::Subagents(subagents) => Some(super::tern_agents::transcript(
+            identity,
+            subagents,
+            shell.verbose_tools,
+        )),
         TranscriptBlock::UpdateAvailable(version) => Some(text_node(
             identity,
             &format!("octet {version} is available"),
@@ -957,19 +1068,53 @@ fn text_node(identity: u64, text: &str, token: &str) -> Node {
 
 fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
     let run = shell.run.current().filter(|run| run.is_active())?;
-    let label = match run.phase() {
-        crate::presentation::RunPhase::Preparing { summary } => summary.as_str(),
-        crate::presentation::RunPhase::AwaitingProvider { .. } => "Waiting for provider",
-        crate::presentation::RunPhase::ProviderLifecycle { .. } => "Preparing model",
-        crate::presentation::RunPhase::Thinking => "Thinking",
-        crate::presentation::RunPhase::StreamingResponse => "Responding",
-        crate::presentation::RunPhase::PreparingToolCall => "Preparing tool",
-        crate::presentation::RunPhase::RunningTool { summary } => summary.as_str(),
-        crate::presentation::RunPhase::AwaitingApproval { prompt } => prompt.as_str(),
-        crate::presentation::RunPhase::Finished(_) => return None,
+    let now = Instant::now();
+    let activity = shell
+        .active_reasoning
+        .and_then(|index| match shell.transcript.get(index) {
+            Some(TranscriptBlock::Reasoning(block)) if !block.finished => Some(block),
+            _ => None,
+        });
+    let retry = activity.and_then(|block| block.retry_activity.as_ref());
+    let label = if let Some(retry) = retry {
+        retry.label_at(now)
+    } else {
+        match run.phase() {
+            crate::presentation::RunPhase::Preparing { summary } => summary.clone(),
+            crate::presentation::RunPhase::AwaitingProvider { .. } => "Working".into(),
+            crate::presentation::RunPhase::ProviderLifecycle {
+                provider,
+                state,
+                detail,
+            } => {
+                let mut label = format!(
+                    "{} · {}",
+                    crate::presentation::provider_status_name(provider),
+                    state.as_str()
+                );
+                if let Some(detail) = detail {
+                    label.push_str(&format!(" · {detail}"));
+                }
+                label
+            }
+            crate::presentation::RunPhase::Thinking => {
+                if activity.is_some_and(|block| !block.text.trim().is_empty()) {
+                    "Thinking"
+                } else {
+                    "Working"
+                }
+                .into()
+            }
+            crate::presentation::RunPhase::StreamingResponse => "Working".into(),
+            crate::presentation::RunPhase::PreparingToolCall => "Preparing tool".into(),
+            crate::presentation::RunPhase::RunningTool { .. } => return None,
+            crate::presentation::RunPhase::AwaitingApproval { prompt } => prompt.clone(),
+            crate::presentation::RunPhase::Finished(_) => return None,
+        }
     };
-    let age = run.elapsed_at(Instant::now()).as_millis() as u64;
-    let mut node = octet_tern::scene::working_row("work", &sanitize_for_terminal(label), age, None);
+    let age = run.elapsed_at(now).as_millis() as u64;
+    let mut node =
+        octet_tern::scene::working_row("work", &sanitize_for_terminal(&label), age, None);
     node.p = Some(node.p.unwrap_or_default().role("omp.working"));
     if reduce_motion || !shell.theme.capabilities().animation {
         node.c.as_mut().expect("working row")[0] = Node::new(
@@ -982,22 +1127,38 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             Kind::Text,
             Props::new().text(
                 "spans",
-                vec![Span::styled(sanitize_for_terminal(label), "muted")],
+                vec![Span::styled(sanitize_for_terminal(&label), "muted")],
             ),
         );
+    }
+    if retry.is_some() {
+        node.c
+            .as_mut()
+            .expect("working row")
+            .retain(|child| child.id != "work.elapsed");
     }
     Some(node)
 }
 
+pub(super) fn editor_focused(shell: &ShellState) -> bool {
+    super::normal_editor_focused(shell)
+        && shell
+            .extension_ui
+            .remote
+            .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+            .is_none()
+        && !shell.extension_ui.remote_fullscreen_overlay
+}
+
 fn composer(shell: &ShellState) -> Node {
-    let focused = super::normal_editor_focused(shell) && !shell.startup_pending;
+    let focused = editor_focused(shell) && !shell.startup_pending;
     let running = shell.run.is_active();
     let level = if shell.reasoning.is_empty() {
         "off"
     } else {
         &shell.reasoning
     };
-    let mut children = Vec::new();
+    let mut children = vec![Node::new("composer.rule", Kind::Rule, Props::new())];
     if let Some((used, total)) = shell.context_estimate.filter(|(_, total)| *total > 0) {
         children.push(Node::new(
             "composer.context",
@@ -1127,40 +1288,77 @@ fn composer(shell: &ShellState) -> Node {
                 .set("title", "Session cost"),
         ));
     }
+    let submit_binding = if running {
+        "app.interrupt"
+    } else {
+        "tui.input.submit"
+    };
+    let submit_key = super::tern_controls::key(shell, submit_binding);
+    let mut submit = Props::new()
+        .role(if running {
+            "omp.composer.stop"
+        } else {
+            "omp.composer.send"
+        })
+        .set("title", if running { "Stop" } else { "Send" });
+    if let Some(key) = submit_key {
+        submit = submit.set(
+            "actions",
+            json!({"click":if running { "stop" } else { "send" }}),
+        );
+        if !running {
+            submit = submit.set("keys", [key]);
+        }
+    }
+    if running || submit_key.is_none() {
+        submit = submit.set(
+            "text",
+            if submit_key.is_none() {
+                "Unavailable"
+            } else {
+                "Stop"
+            },
+        );
+    }
     controls.push(Node::new(
         if running {
             "composer.stop"
         } else {
             "composer.send"
         },
-        if running { Kind::Text } else { Kind::Kbd },
-        Props::new()
-            .role(if running {
-                "omp.composer.stop"
-            } else {
-                "omp.composer.send"
-            })
-            .set("text", if running { "Stop" } else { "Send" })
-            .set("keys", ["enter"])
-            .set("title", if running { "Stop" } else { "Send" })
-            .set(
-                "actions",
-                json!({"click":if running { "stop" } else { "send" }}),
-            ),
+        if running || submit_key.is_none() {
+            Kind::Text
+        } else {
+            Kind::Kbd
+        },
+        submit,
     ));
+    for (control, binding) in controls
+        .iter_mut()
+        .take(2)
+        .zip(["app.model.select", "app.thinking.cycle"])
+    {
+        if super::tern_controls::key(shell, binding).is_none() {
+            let mut props = control.p.take().expect("control props").as_map().clone();
+            props.remove("actions");
+            props.insert("title".into(), json!("Unavailable: keybinding is unbound"));
+            control.p = Some(Props::from_value(serde_json::Value::Object(props)));
+        }
+    }
     children.push(Node::with_children(
         "composer.bar",
         Kind::Row,
         Props::new()
             .role("omp.composer.bar")
             .set("gap", "sm")
-            .set("align", "center"),
+            .set("align", "center")
+            .set("wrap", true),
         controls,
     ));
     Node::with_children(
         "composer",
         Kind::Col,
-        Props::new().role("omp.editor").tone(Tone::Accent),
+        Props::new().set("gap", "xs"),
         children,
     )
 }
@@ -1172,9 +1370,20 @@ fn report(shell: &ShellState, tables: bool) -> Option<Node> {
             String::new(),
             Node::new(
                 "report.body",
-                Kind::Text,
+                if shell.extension_ui.remote_fullscreen_overlay {
+                    Kind::Ansi
+                } else {
+                    Kind::Text
+                },
                 Props::new()
-                    .set("text", sanitize_for_terminal(text))
+                    .set(
+                        "text",
+                        if shell.extension_ui.remote_fullscreen_overlay {
+                            text.to_string()
+                        } else {
+                            sanitize_for_terminal(text)
+                        },
+                    )
                     .set("wrap", "word"),
             ),
         ),
@@ -1216,7 +1425,7 @@ fn report(shell: &ShellState, tables: bool) -> Option<Node> {
         }
     };
     Some(Node::with_children(
-        format!("report.{}", shell.panel_epoch),
+        format!("report.{}", shell.overlay_epoch),
         Kind::Overlay,
         Props::new()
             .role("octet.report")
@@ -1253,9 +1462,9 @@ fn tool_target(panel: &super::ToolPanel) -> (String, &'static str) {
             }
         }
     }
-    let trimmed = panel.args.trim();
-    let trimmed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-    (trimmed.chars().take(160).collect(), "text")
+    // Unknown arguments are not a display contract and may contain credentials.
+    // Known targets above remain exact; never dump a raw argument envelope.
+    (String::new(), "text")
 }
 
 fn tool_node(
@@ -1291,7 +1500,10 @@ fn tool_node(
     if let Some(duration) = panel.duration {
         meta.push(Text::Plain(format_duration(duration)));
     }
-    if panel.finished && panel.is_error {
+    if panel.finished
+        && panel.is_error
+        && (verbose || !matches!(panel.name.as_str(), "bash" | "exec"))
+    {
         if let Some(reason) = &panel.failure_reason {
             meta.push(Text::Plain(sanitize_for_terminal(reason)));
         }
@@ -1395,10 +1607,43 @@ fn tool_node(
             ),
         );
     }
+    if let Some(decoration) = panel
+        .progress_decoration
+        .as_ref()
+        .filter(|_| !panel.finished && (!command_output || verbose))
+    {
+        body.push(Node::new(
+            id(index, "progress"),
+            Kind::Text,
+            Props::new()
+                .text(
+                    "spans",
+                    vec![Span::styled(
+                        sanitize_for_terminal(&match decoration.detail() {
+                            Some(detail) => format!("{} · {detail}", decoration.label()),
+                            None => decoration.label().to_owned(),
+                        }),
+                        "muted",
+                    )],
+                )
+                .set("wrap", "word"),
+        ));
+    }
+    if command_output {
+        return command_node(
+            index,
+            "tool",
+            &tool_title(&panel.display.label),
+            &target,
+            status,
+            meta,
+            body,
+        );
+    }
     let mut node = octet_tern::scene::tool_card(
         id(index, "tool"),
         &panel.name,
-        &tool_title(&panel.name),
+        &tool_title(&panel.display.label),
         &target,
         target_kind,
         status,
@@ -1410,7 +1655,7 @@ fn tool_node(
             .unwrap_or_default()
             .role(format!("omp.tool.{}", panel.name))
             .set("href", &href)
-            .set("frame", if compact_read { "inline" } else { "card" })
+            .set("frame", "inline")
             .set("collapsible", !compact_read && !command_output)
             .set("collapsed", !compact_read && !command_output && collapsed),
     );
@@ -1440,24 +1685,74 @@ fn shell_node(index: u64, shell: &super::ShellOutput, verbose: bool) -> Node {
             &sanitize_for_terminal(&shell.output),
         )]
     };
-    let mut node = octet_tern::scene::tool_card(
-        id(index, "shell"),
-        "bash",
+    command_node(
+        index,
+        "shell",
         "Bash",
         &sanitize_for_terminal(&shell.command),
-        "command",
         status,
         meta,
         body,
+    )
+}
+
+/// A command rail cannot collapse or ellipsize its input. Captured output has
+/// already been admitted by global verbosity before it reaches this builder.
+fn command_node(
+    index: u64,
+    suffix: &str,
+    title: &str,
+    command: &str,
+    status: &str,
+    meta: Vec<Text>,
+    mut body: Vec<Node>,
+) -> Node {
+    let mut heading = vec![
+        Span::styled(title, "accent"),
+        Span::styled(
+            format!(" · {status}"),
+            if status == "error" { "error" } else { "muted" },
+        ),
+    ];
+    for item in meta {
+        if let Text::Plain(text) = item {
+            heading.push(Span::styled(format!(" · {text}"), "muted"));
+        }
+    }
+    body.insert(
+        0,
+        Node::new(
+            id(index, "command"),
+            Kind::Code,
+            Props::new()
+                .set("text", command)
+                .set("lang", "bash")
+                .set("wrap", true)
+                .set("numbers", false),
+        ),
     );
-    node.p = Some(
-        node.p
-            .unwrap_or_default()
-            .role("octet.tool")
-            .set("collapsible", false)
-            .set("collapsed", false),
-    );
-    node
+    Node::with_children(
+        id(index, suffix),
+        Kind::Row,
+        Props::new()
+            .role("octet.command")
+            .set("gap", "sm")
+            .set("align", "start")
+            .set("wrap", true),
+        vec![
+            Node::new(
+                id(index, "command.label"),
+                Kind::Text,
+                Props::new().text("spans", heading).set("wrap", "word"),
+            ),
+            Node::with_children(
+                id(index, "command.body"),
+                Kind::Col,
+                Props::new().set("gap", "xs").set("grow", 1),
+                body,
+            ),
+        ],
+    )
 }
 
 fn tool_title(name: &str) -> String {
