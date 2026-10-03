@@ -56,6 +56,12 @@ pub enum AgentError {
     /// A declared model maximum is not a provider-enforced output bound.
     #[error("hard token or cost ceilings require an enforceable provider output limit; this operation sends no output cap")]
     OutputLimitUnavailable,
+    /// Planning estimates cannot prove a provider-tokenized input upper bound.
+    #[error("hard token or cost ceilings require an enforceable provider input bound; this route supplies only a planning estimate")]
+    InputLimitUnavailable,
+    /// Effective provider context could not be prepared safely before dispatch.
+    #[error("provider context preparation refused: {0}")]
+    ProviderContextPreparation(&'static str),
     /// A host-owned maximum outage duration expired during recovery.
     #[error("network recovery exceeded the host outage limit of {limit:?} (failed-attempt usage unknown: {usage_unknown})")]
     NetworkWaitLimit {
@@ -538,6 +544,8 @@ pub(super) fn provider_failure_phase(error: &AgentError) -> Option<&'static str>
         | AgentError::Cancelled
         | AgentError::UsageUncertain
         | AgentError::OutputLimitUnavailable
+        | AgentError::InputLimitUnavailable
+        | AgentError::ProviderContextPreparation(_)
         | AgentError::NetworkWaitLimit { .. }
         | AgentError::UnknownActiveTools(_)
         | AgentError::ActiveToolSetRefused(_)

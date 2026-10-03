@@ -182,13 +182,26 @@ export class RemoteUI {
     const { text } = await this.runtime.hostCall('composer/get', {}, store);
     store.state.host.composer_text = text; c.setText(text);
     const change = c.onChange, submit = c.onSubmit;
+    surface.editor = { pending: 0, applyingHost: false, tail: Promise.resolve() };
+    const ordered = action => {
+      const editor = surface.editor;
+      if (editor.pending >= 128) throw rpcError(-32012, 'bounds_exceeded editor update queue');
+      editor.pending++;
+      // Draft updates and submission are lossless, ordered effects, not frames.
+      // A failed checkpoint prevents later updates from claiming a successful
+      // handoff; the runtime surfaces the refusal rather than replaying it.
+      const promise = editor.tail.then(action).finally(() => { editor.pending--; });
+      editor.tail = promise;
+      this.runtime.track(promise, store);
+    };
     c.onChange = value => {
+      if (surface.editor.applyingHost) return;
       store.state.host.composer_text = value;
-      this.runtime.track(this.runtime.hostCall('composer/set', { text: value }, store), store);
+      ordered(() => this.runtime.hostCall('composer/set', { text: value }, store));
       change?.(value);
     };
     c.onSubmit = value => {
-      this.runtime.track(this.runtime.hostCall('session/send_user_message', { text: value }, store), store);
+      ordered(() => this.runtime.hostCall('session/send_user_message', { text: value }, store));
       submit?.(value);
     };
   }

@@ -5009,6 +5009,7 @@ async fn extension_management_menu(
                 .await?
             {
                 ExtensionMenuOutcome::Back => {}
+                ExtensionMenuOutcome::ReturnToIdle => return Ok(app),
                 ExtensionMenuOutcome::Disable => {
                     (app, _) = set_extension_enabled(app, shell, input, &choice.name, true).await?;
                 }
@@ -5055,6 +5056,7 @@ async fn extension_management_menu(
                         .await?;
                 }
                 ExtensionMenuOutcome::Back => {}
+                ExtensionMenuOutcome::ReturnToIdle => return Ok(app),
             }
             if shell.close_requested() {
                 return Ok(app);

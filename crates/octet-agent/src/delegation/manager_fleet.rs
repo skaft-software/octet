@@ -341,6 +341,28 @@ impl DelegationManager {
             .map_err(|error| format!("could not open child session: {error}"))?;
         let session = Session::open_read_only_with_file(record.session_path.clone(), file)
             .map_err(|error| format!("could not read child session: {error}"))?;
+        // The roster may precede a child's synced usage or uncertainty append.
+        // Recover spending from that ledger, not from the stale cached subtotal.
+        record.usage = Usage::default();
+        record.cost = Some(Cost::default());
+        for usage in session.usage_records() {
+            add_delegated_usage(&mut record.usage, &usage.usage);
+            match (record.cost.as_mut(), usage.cost) {
+                (Some(total), Some(cost)) => add_delegated_cost(total, cost),
+                (Some(_), None) => record.cost = None,
+                (None, _) => {}
+            }
+        }
+        record.usage_uncertain = session.has_uncertain_usage();
+        record.usage_exposure = record
+            .usage_uncertain
+            .then(|| session.usage_uncertainty_exposure())
+            .flatten();
+        record.cost_microdollars = if record.usage_uncertain {
+            None
+        } else {
+            record.cost.map(|cost| cost.total)
+        };
         Self::discard_inputs_delivered_to_session(record, &session)
     }
 
@@ -501,6 +523,11 @@ impl DelegationManager {
                 // reopen can reconcile them, even across another restart.
                 record.status = DelegatedAgentStatus::Detached;
                 record.detached = true;
+                // Missing authority cannot justify a finite spending bound.
+                record.usage_uncertain = true;
+                record.usage_exposure = None;
+                record.cost = None;
+                record.cost_microdollars = None;
                 record.durable_diagnostic = Some(bounded_text(&format!(
                     "child session authority could not be read; queued inputs retained without replay: {error}"
                 )));

@@ -470,10 +470,14 @@ impl ExecutableExtensions {
                     let cancelled = match incoming {
                         None => true,
                         Some(event) => {
-                            let consumed = confirmations.command_shell().is_some_and(|shell| {
-                                self.route_remote_ui_event(shell, &event)
-                            });
-                            !consumed && confirmations.command_event(event)
+                            if confirmations.command_cancellation_event(&event) {
+                                true
+                            } else {
+                                let consumed = confirmations.command_shell().is_some_and(|shell| {
+                                    self.route_remote_ui_event(shell, &event)
+                                });
+                                !consumed && confirmations.command_event(event)
+                            }
                         }
                     };
                     if cancelled {

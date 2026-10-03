@@ -78,7 +78,11 @@ It's a safety filter, **not proof that arbitrary prose or media has no secret**.
 only for a trusted destination. Private extension metadata (including
 annotations with no `public` flag) is always left out, in both JSON and HTML,
 even with `--include-secrets`. That filtering doesn't change the private source
-transcript.
+transcript. Private extension JSON string values may contain ordinary LF, CR,
+and TAB; JSONL stores them escaped. Object keys, namespaces and entry types
+remain control-free, and NUL, ESC and other controls remain rejected. Public
+metadata retains its control-free contract. Existing metadata byte, depth,
+node-count and key-size limits still apply.
 
 For a shareable page, run
 `octet sessions export SESSION_ID --format html --output ./session.html`. It

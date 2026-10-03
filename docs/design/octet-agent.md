@@ -44,9 +44,10 @@ synchronous tools and queued steering.
 - **Async tools:** only complete, durably committed calls from a wholly eligible
   batch enter the run-owned registry (at most one read wave). Advertised parallel tools
   are still checked against exact arguments, the effect broker, and hooks.
-  Independent observations may overlap the next response; their results become
-  durable in original call order **after** that response, which did not consume
-  them. Sync, effectful, mixed, and nonparallel batches remain barriers. Hard
+  Independent observations may overlap the next response. Ready results are
+  settled durably in original call order before its immutable request snapshot;
+  unfinished jobs do not delay that snapshot and settle after the response that
+  did not consume them. Sync, effectful, mixed, and nonparallel batches remain barriers. Hard
   cumulative ceilings serialize tool accounting; pending jobs disable compaction.
   Driven terminals cancel and settle jobs; dropping a run aborts task handles.
   Unresolved async calls after a crash receive indeterminate paired errors,
@@ -205,16 +206,17 @@ Failed-attempt usage is **unknown**, not zero. Every observed accepted failure
 is durably recorded before replacement, independently of successful usage and
 session branches. HTTP 5xx and 408 responses also carry unknown usage: a gateway
 failure can hide accepted upstream work. Replay authority is not zero-billing
-evidence. Each ambiguous attempt with an enforceable output cap retains its
-admitted input estimate plus that cap as a conservative token bound, priced at
-the route's worst-case rate when available. Hard cumulative ceilings charge
-known usage plus all such bounds, including after resume or later ceiling
-activation; the bound can over-count but cannot under-count admitted usage.
-A replacement attempt is admitted like any other request, on top of the failed
-attempt's bound. With bounded exposure a ceiling never changes whether a failure
-replays; it only refuses a replacement that no longer fits.
-Unbounded attempts (including native steering, unpriced routes for cost ceilings,
-and legacy records) still fail closed. Child exposure is mirrored by agent ID,
+evidence. A planning input estimate, prior observed usage, or models.dev context
+window does **not** establish an upper bound on provider-tokenized input. Current
+routes expose output caps but no sound enforced input admission bound. Finite
+session total-token or cost ceilings therefore fail closed **before dispatch**
+with `InputLimitUnavailable` (or `OutputLimitUnavailable` when even an output cap
+is unavailable). Uncapped execution is unchanged. Hard-ceiling generation is an
+explicitly unsupported route dimension, not a fully qualified budgeting feature.
+Each new ambiguous attempt retains **unbounded** unknown usage; successful later
+turns cannot make that earlier exposure finite. Historical bounded ledger records
+retain their accounting arithmetic but do not authorize a new finite-capped
+request. Child exposure is mirrored by agent ID,
 recording only the increase in each child's bound before its known usage subtotal.
 `ProviderUsageUncertain` is emitted on the first observed uncertainty and at
 run start for an already-uncertain session; successful turns do not clear it.
@@ -307,6 +309,41 @@ Before every provider turn, the agent estimates the complete request and retains
 
 Writes use an advisory exclusive lock, compare the observed file length under that lock, append complete record buffers, and call `sync_data` before updating in-memory state. Read-only inspection uses a shared lock and never repairs or truncates. Writable open performs explicit torn-tail recovery while exclusively locked. Files are `0600` on Unix and parsing is bounded by bytes and record count.
 
+## Effective provider-context preparation
+
+Native `ProviderContextHook` registrations run once, in order, against the last
+validated effective `Request` before context planning, output sizing, budget
+reservation, request freezing or a real dispatch. Their host context fences the
+Session resource owner, host session ID (not provider cache affinity), starting
+branch head and advertised tool generation. Only canonical messages and system
+prompt can be replaced; the canonical Session, provider route, credentials,
+tools and execution authority are unchanged. Complete tool-call/result pairs
+may be omitted and result text summarized; call identity, arguments, async
+execution authority, result status and unresolved calls must be preserved.
+Every intermediate request is strictly validated and bounded to 64 MiB of
+serialized canonical request. Hook errors are redacted and fail closed before
+provider I/O; ordered hooks share a five-second deadline capped by the endpoint
+timeout, with cancellation winning same-poll completion.
+
+The real preparation driver can activate a `ProviderContextSessionWait` while
+an owned hook snapshot future waits. Readiness is borrow-free; only that driver
+receives `&mut Session` to consume typed, bounded private append leaves. The
+service must revoke unclaimed leaves on drop, and a receipt can activate durable
+projection state only after a synced append. A legitimate private append freezes
+against the post-hook head and does not rerun a mutating hook merely because its
+own append advanced the branch. This native seam alone is not a Pi compatibility
+claim: a process adapter needs an authenticated direct producer and an actual
+consumer, not a foreground broadcast event or optimistic success.
+
+Optional synchronous idle Responses prewarming refuses when async projection
+hooks are registered; real inference and its exact cache refresh retain the
+validated effective request. Opaque Responses replay remains an explicit
+limitation: a changed canonical projection is refused when a hidden `input`
+window would ignore it. The host never silently drops provider replay state to
+make a projection appear to work. Effective request estimates are planning data,
+never a sound provider input upper bound: finite token/cost ceilings still refuse
+before dispatch when that authoritative bound is unavailable.
+
 ## Prompt-cache warming
 
 The same session owner polls `CacheWarmer` alongside provider opening, body
@@ -314,8 +351,8 @@ consumption and tool waits; retained hosts and delegated workers also poll its
 idle driver. Timer, advisory-hook and refresh futures live in the Agent, not a
 temporary `select!` branch, so competing input does not drop or repeat an
 accepted provider request. Real provider opens remain pinned across warming
-wakeups. Explicit cancellation drops the refresh and durably records its
-bounded uncertainty if dispatch was possible.
+wakeups. Explicit cancellation synchronously drops the refresh source and durably
+records unbounded uncertainty if dispatch was possible.
 
 Each real inference captures its exact request before dispatch. A refresh
 changes only the output cap to one; generated content and calls are discarded.

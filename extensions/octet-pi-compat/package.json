@@ -13,6 +13,7 @@
   "dependencies": {
     "jiti": "2.6.1",
     "@sinclair/typebox": "0.34.41",
-    "@earendil-works/pi-tui": "0.80.10"
+    "@earendil-works/pi-tui": "0.85.0",
+    "typebox": "1.1.12"
   }
 }

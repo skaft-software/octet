@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from octet_extension import text_content, tool_result
 
-from . import driver, jev_use
+from . import jev_use
 from .jev import resolve_key
 
 PREFIX = "computer_use_jev_use_"
@@ -139,9 +139,21 @@ def dispatch(operation: str, values: Mapping[str, Any], *, computer: Any,
                 report = jev_use.choose(request, home=home, cancellation=cancellation,
                                         api_key=key, **options)
             else:
-                health = driver.health(computer._paths).as_dict()
+                health = computer.status()
                 binary = health.get("runtime_binary")
-                if health.get("runtime") == "unavailable" or not binary or health.get("permissions") != "granted":
+                runtime = health.get("runtime")
+                platform_name = health.get("platform")
+                permissions = health.get("permissions")
+                permission_detail = health.get("permission_detail")
+                permission_probe_failed = (
+                    not isinstance(permission_detail, str)
+                    or not permission_detail.strip()
+                    or "did not answer" in permission_detail.lower()
+                    or permissions not in {"granted", "denied", "unknown"}
+                )
+                if (runtime == "unavailable" or not binary or health.get("doctor_ok") is not True
+                        or permissions == "denied" or permission_probe_failed
+                        or (platform_name in {"darwin", "linux"} and permissions != "granted")):
                     return _error("Cua Driver is not ready. Check computer_use_status and grant the selected runtime's permissions manually.")
                 report = jev_use.run(home=home, driver_binary=Path(binary),
                                      cancellation=cancellation, api_key=key, **options)

@@ -128,8 +128,8 @@ fn a_catalog_without_usable_records_is_an_error() {
 #[test]
 fn overlay_lookups_prefer_live_records_and_fall_back_per_record() {
     let (metadata, _) = live_metadata_from_models_dev(&fixture()).unwrap();
-    let overlay: &'static super::super::LiveOverlay =
-        Box::leak(Box::new(super::super::LiveOverlay::new(metadata)));
+    let owned_overlay = super::super::LiveOverlay::new(metadata);
+    let overlay = &owned_overlay;
     // Live-only models resolve by exact key and by their unique leaf.
     assert_eq!(
         super::super::lookup_key_in(Some(overlay), "openai/gpt-9-preview"),

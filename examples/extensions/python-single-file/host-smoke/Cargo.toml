@@ -1,0 +1,16 @@
+[package]
+name = "python-extension-host-smoke"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[profile.ci-test]
+inherits = "test"
+debug = "limited"
+incremental = false
+
+[dependencies]
+octet-agent = { path = "../../../../crates/octet-agent" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

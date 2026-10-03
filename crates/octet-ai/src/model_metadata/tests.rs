@@ -14,10 +14,13 @@ use super::*;
 fn generated_registry_resolves_canonical_and_unique_leaf_ids() {
     assert!(model_display_name("openai/gpt-4o-mini").is_some());
     assert_eq!(
-        model_display_name("alibaba/qwen3.6-27b"),
+        model_display_name("alibaba/qwen3.6-27b").as_deref(),
         Some("Qwen3.6 27B")
     );
-    assert_eq!(model_display_name("qwen3.6-27b"), Some("Qwen3.6 27B"));
+    assert_eq!(
+        model_display_name("qwen3.6-27b").as_deref(),
+        Some("Qwen3.6 27B")
+    );
 }
 
 #[test]
@@ -56,7 +59,7 @@ fn generated_capabilities_keep_exact_provider_scoped_source_assertions() {
         serde_json::json!(["text", "image"])
     );
     assert_eq!(
-        model_display_name("deepseek/deepseek-flash"),
+        model_display_name("deepseek/deepseek-flash").as_deref(),
         Some("DeepSeek V4.1 Flash")
     );
     for provider in ["openai", "codex", "custom", "openrouter"] {
@@ -64,6 +67,31 @@ fn generated_capabilities_keep_exact_provider_scoped_source_assertions() {
     }
     assert!(model_capability_metadata("deepseek", "DEEPSEEK-FLASH").is_none());
     assert!(model_pricing("deepseek", "deepseek-flash").is_none());
+}
+
+#[test]
+fn repeated_installs_release_old_overlays_and_return_owned_names() {
+    let previous = live_overlay();
+    let mut last = None;
+    let mut names = Vec::new();
+    for index in 0..128 {
+        let mut metadata = LiveModelMetadata::default();
+        metadata
+            .names
+            .insert("test/reclamation-only".into(), format!("Name {index}"));
+        install_live_metadata(metadata);
+        if let Some(weak) = last.take() {
+            assert!(std::sync::Weak::<LiveOverlay>::upgrade(&weak).is_none());
+        }
+        let overlay = live_overlay().unwrap();
+        last = Some(Arc::downgrade(&overlay));
+        names.push(model_display_name("test/reclamation-only").unwrap());
+    }
+    *LIVE.write().unwrap() = previous;
+    assert!(last.unwrap().upgrade().is_none());
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(name, &format!("Name {index}"));
+    }
 }
 
 #[test]

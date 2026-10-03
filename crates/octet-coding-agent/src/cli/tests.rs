@@ -1484,6 +1484,74 @@ fn host_authority_grants_migrate_and_revoke_without_changing_activation() {
     );
 }
 
+#[test]
+fn revoking_source_authority_removes_all_normalized_aliases_and_startup_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let path = root.join("config.toml");
+    let selected = root.join(".octet/extensions/fixture");
+    let unrelated_workspace = root.join("other-workspace");
+    let unrelated = unrelated_workspace.join(".octet/extensions/fixture");
+    for source in [&selected, &unrelated] {
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(
+            source.join("extension.toml"),
+            r#"
+name = "fixture"
+version = "0.3.0"
+api_version = "0.3"
+[entrypoint]
+command = "must-not-run"
+[contributes]
+flags = [{name = "fixture-authorized", type = "boolean", default = false}]
+"#,
+        )
+        .unwrap();
+    }
+    let exact = format!("fixture@{}", selected.join("extension.toml").display());
+    let alias = format!(
+        "fixture@{}",
+        selected.join("nested/../extension.toml").display()
+    );
+    let other = format!("fixture@{}", unrelated.join("extension.toml").display());
+    std::fs::write(&path, format!("enabled_extensions = ['fixture']\ntrusted_extensions = [{exact:?}, {alias:?}, {other:?}]\n")).unwrap();
+    let mut cli = base();
+    cli.workspace = Some(root.clone());
+    cli.safe_mode = true;
+    let mut config = build_config_with_global_path(cli, &root, Some(&path)).unwrap();
+    config.workspace_trusted = true;
+    config.extension_paths.clear();
+    assert_eq!(
+        crate::extensions::selected_extension_flag_declarations(&config).len(),
+        1
+    );
+    let grants = persist_extension_host_authority_to_path(&exact, false, &path).unwrap();
+    assert_eq!(grants, vec![other.clone()]);
+    // Reload the same menu result and invoke real startup declaration policy:
+    // the source is still enabled, but neither alias can authorize its code.
+    config.trusted_extensions = grants;
+    assert!(crate::extensions::selected_extension_flag_declarations(&config).is_empty());
+    config.workspace = unrelated_workspace;
+    assert_eq!(
+        crate::extensions::selected_extension_flag_declarations(&config).len(),
+        1
+    );
+
+    // Global name grants and exact global aliases are equivalent sources too.
+    let global = root.join("extensions/fixture");
+    std::fs::create_dir_all(&global).unwrap();
+    let global_exact = format!("fixture@{}", global.join("extension.toml").display());
+    std::fs::write(
+        &path,
+        format!("trusted_extensions = ['fixture', {global_exact:?}, {other:?}]\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        persist_extension_host_authority_to_path("fixture", false, &path).unwrap(),
+        vec![other]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn atomic_config_update_preserves_existing_permissions_and_uses_private_new_files() {

@@ -295,6 +295,16 @@ pub(super) fn negotiate_contributions_with_host_services(
                         .into(),
                 ));
             }
+            if manifest
+                .contributes
+                .hooks
+                .contains(&ExtensionHook::ProviderContext)
+                && !features.contains(EXTENSION_FEATURE_SESSION_ENTRIES)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "provider_context hook requires negotiated session_entries feature".into(),
+                ));
+            }
             if offered_host_services.agent_sessions
                 && manifest.name == "octet-subagents"
                 && !features.contains(EXTENSION_FEATURE_DELEGATION_TELEMETRY)

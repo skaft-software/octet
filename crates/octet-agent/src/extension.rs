@@ -209,6 +209,106 @@ pub trait CacheWarmingDecisionHook: Send + Sync {
     ) -> Option<CacheWarmingAction>;
 }
 
+/// Host-derived identity for one effective provider-context preparation.
+///
+/// These values fence a projection to the session branch and advertised tool
+/// snapshot the host is preparing. They do not grant permission to mutate the
+/// session or execute a tool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderContextProjectionContext {
+    /// Durable resource owner of the request being prepared.
+    pub resource_owner: String,
+    /// Host session identity, independent of provider cache affinity.
+    pub session_id: String,
+    /// Durable active-branch anchor observed before preparation.
+    pub head: Option<crate::session::EntryId>,
+    /// Revision of the host-policed advertised tool snapshot.
+    pub tool_generation: u64,
+}
+
+/// Proposed replacement of only the model-visible context of a request.
+///
+/// The canonical session is not rewritten. Tools, route, credentials, output
+/// caps and transport configuration cannot be replaced through this value.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderContextProjection {
+    /// Complete effective message history, using canonical roles.
+    pub messages: Vec<octet_ai::Message>,
+    /// Complete effective system prompt; `None` explicitly clears it.
+    pub system: Option<String>,
+}
+
+/// Run-owned service for authoritative private session appends while a context
+/// hook is pending. Implementations own a bounded typed queue, not a writer.
+/// Dropping the service must revoke its grants and refuse all unclaimed leaves.
+/// A persistence receipt may report success only after the supplied Session
+/// has durably committed the append. This is not an event/broadcast service.
+pub trait ProviderContextSessionWait: Send {
+    /// Optional guard-owned process hook future. It must own its pinned lease
+    /// and request snapshot, never borrow the owning Session or expose a writer.
+    fn projection_future(
+        &mut self,
+        _request: &octet_ai::Request,
+        _context: &ProviderContextProjectionContext,
+    ) -> Option<
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Option<ProviderContextProjection>, String>>
+                    + Send
+                    + 'static,
+            >,
+        >,
+    > {
+        None
+    }
+
+    /// Borrow-free readiness; an empty queue must remain pending.
+    fn ready(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+    /// Consume one admitted leaf on the sole Session owner. The implementation
+    /// must validate its activation/owner/namespace/operation binding before
+    /// claiming a commit and resolve rejected leaves without reporting success.
+    fn consume_next(
+        &mut self,
+        session: &mut crate::Session,
+        context: &ProviderContextProjectionContext,
+    ) -> Result<(), String>;
+}
+
+/// Context preparation before provider planning, admission and request freeze.
+///
+/// Hooks run in registration order against the last validated effective
+/// request. `Ok(None)` leaves that request unchanged. A failure must abort
+/// preparation, not silently fall back to potentially stale canonical context.
+/// The caller owns cancellation, deadlines, request-size bounds, and canonical
+/// role/tool-pair validation before any projection reaches the next hook or
+/// provider. Persistence acknowledgements must precede activation of durable
+/// projection state; this hook does not itself supply a persistence service. The native driver may activate the optional
+/// run-owned `begin_session_wait` service; process-backed projection dispatch must
+/// use its guard-owned future instead of an unbound foreground RPC.
+#[async_trait::async_trait]
+pub trait ProviderContextHook: Send + Sync {
+    /// Activate an optional bounded append service for this exact preparation.
+    /// The host calls this synchronously before polling the hook. A process
+    /// adapter may publish its grant only after returning a real consumer here;
+    /// it must not offer synchronous append through the foreground event queue.
+    /// Pure native projection hooks need no append service.
+    fn begin_session_wait(
+        &self,
+        _session: &crate::Session,
+        _context: &ProviderContextProjectionContext,
+    ) -> Result<Option<Box<dyn ProviderContextSessionWait>>, String> {
+        Ok(None)
+    }
+
+    /// Propose a model-visible context without changing execution authority.
+    async fn project_context(
+        &self,
+        request: &octet_ai::Request,
+        context: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String>;
+}
+
 /// Optional API 0.4 replacement for local parent-model summarization.
 /// The host selects this only for a vision-capable active model and owns the
 /// history boundary, validation, checkpoint and subsequent replay.
@@ -798,6 +898,7 @@ pub struct ExtensionHost {
     pub(crate) tool_call_hooks: Vec<Arc<dyn ToolCallHook>>,
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
     pub(crate) cache_warming_decision_hooks: Vec<Arc<dyn CacheWarmingDecisionHook>>,
+    pub(crate) provider_context_hooks: Vec<Arc<dyn ProviderContextHook>>,
     pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub(crate) duplicate_compaction_strategy: bool,
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
@@ -814,6 +915,7 @@ impl Default for ExtensionHost {
             tool_call_hooks: Vec::new(),
             provider_retry_hooks: Vec::new(),
             cache_warming_decision_hooks: Vec::new(),
+            provider_context_hooks: Vec::new(),
             compaction_strategy: None,
             duplicate_compaction_strategy: false,
             persistence_metadata_hooks: Vec::new(),
@@ -922,6 +1024,13 @@ impl ExtensionHost {
         self.cache_warming_decision_hooks.push(Arc::new(hook));
     }
 
+    /// Register effective provider-context preparation in deterministic order.
+    ///
+    /// Registration alone does not negotiate or advertise a subprocess feature.
+    pub fn provider_context_hook(&mut self, hook: impl ProviderContextHook + 'static) {
+        self.provider_context_hooks.push(Arc::new(hook));
+    }
+
     /// Register the one active local-compaction strategy. Competing providers
     /// are rejected when the Agent is constructed instead of depending on load order.
     pub fn compaction_strategy(&mut self, strategy: impl CompactionStrategy + 'static) {
@@ -1027,6 +1136,7 @@ impl ExtensionHost {
         scoped.tool_call_hooks = self.tool_call_hooks.clone();
         scoped.provider_retry_hooks = self.provider_retry_hooks.clone();
         scoped.cache_warming_decision_hooks = self.cache_warming_decision_hooks.clone();
+        scoped.provider_context_hooks = self.provider_context_hooks.clone();
         scoped.compaction_strategy = self.compaction_strategy.clone();
         scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();
@@ -1246,6 +1356,43 @@ mod tests {
         }
         assert_eq!(*observed.lock().unwrap(), [0, 1, 2, 3]);
         assert_eq!(action, CacheWarmingAction::Warm);
+    }
+
+    struct ContextHook;
+
+    #[async_trait::async_trait]
+    impl ProviderContextHook for ContextHook {
+        async fn project_context(
+            &self,
+            _request: &octet_ai::Request,
+            _context: &ProviderContextProjectionContext,
+        ) -> Result<Option<ProviderContextProjection>, String> {
+            Err("fixture refuses an unbound preparation".into())
+        }
+    }
+
+    #[test]
+    fn provider_context_hooks_preserve_registration_order_and_child_scoping() {
+        let mut host = ExtensionHost::new();
+        assert!(host.provider_context_hooks.is_empty());
+        host.tool(NamedTool("read"));
+        for _ in 0..3 {
+            host.provider_context_hook(ContextHook);
+        }
+        let cloned = host.clone();
+        let (scoped, _) = host
+            .scoped_tool_snapshot(&BTreeSet::from(["read".into()]))
+            .unwrap();
+        for inherited in [&cloned, &scoped] {
+            assert_eq!(inherited.provider_context_hooks.len(), 3);
+            for (original, inherited) in host
+                .provider_context_hooks
+                .iter()
+                .zip(&inherited.provider_context_hooks)
+            {
+                assert!(Arc::ptr_eq(original, inherited));
+            }
+        }
     }
 
     struct NoMetadata;

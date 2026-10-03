@@ -429,7 +429,9 @@ fn strip_workspace_prefix(path: &str, workspace: &Path) -> Option<String> {
         let workspace_norm = workspace_body.replace('/', "\\");
         let path_norm = path_body.replace('/', "\\");
         if path_norm.len() > workspace_norm.len() + 1
-            && path_norm[..workspace_norm.len()].eq_ignore_ascii_case(&workspace_norm)
+            && path_norm
+                .get(..workspace_norm.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&workspace_norm))
             && path_norm.as_bytes()[workspace_norm.len()] == b'\\'
         {
             let cut = path.len() - path_body.len() + workspace_norm.len() + 1;
@@ -440,6 +442,27 @@ fn strip_workspace_prefix(path: &str, workspace: &Path) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_unicode_workspace_prefix_comparison_is_boundary_safe() {
+    assert_eq!(
+        strip_workspace_prefix(r"C:\worké\outside.txt", Path::new(r"C:\workx")),
+        None
+    );
+    assert_eq!(
+        strip_workspace_prefix(r"C:\work😀\outside.txt", Path::new(r"\\?\C:\workxxx")),
+        None
+    );
+    assert_eq!(
+        strip_workspace_prefix(r"c:\répo\src\文件.rs", Path::new(r"\\?\C:\répo")),
+        Some(r"src\文件.rs".into())
+    );
+    assert_eq!(
+        strip_workspace_prefix(r"\\?\c:\répo\src\文件.rs", Path::new(r"C:\répo")),
+        Some(r"src\文件.rs".into())
+    );
 }
 
 async fn validated_remote_endpoint(

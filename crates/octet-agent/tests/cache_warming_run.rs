@@ -205,9 +205,11 @@ impl HostStreamTransport for Transport {
             .unwrap()
             .push((Instant::now(), request));
         if warm && self.pending_warm {
-            let dropped = self.warm_dropped.clone();
+            // Ownership begins when the handle is returned, not when its lazy
+            // body is first polled. Cancellation may drop an unpolled stream.
+            let guard = DropCounter(self.warm_dropped.clone());
             return Ok(Box::pin(async_stream::stream! {
-                let _guard = DropCounter(dropped);
+                let _guard = guard;
                 yield Ok(StreamEvent::Started { response_id: None });
                 std::future::pending::<()>().await;
             }));
@@ -492,18 +494,29 @@ async fn inference_body_warms_the_request_without_inserting_provider_output() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn opening_and_body_reserve_both_main_and_warm_against_the_cost_ceiling() {
+async fn finite_cost_ceiling_without_sound_input_bound_refuses_main_and_warm_before_dispatch() {
     for hold in [Hold::Opening, Hold::Body] {
         let (mut agent, transport, _observed, _executions, _workspace) =
             fixture(hold, Duration::from_secs(600), 0, false, false);
-        // The known seed plus either request's reservation fits individually,
-        // but the seed plus BOTH the main and warm reservations does not.
+        let settled_records = agent.session().usage_records().len();
+        // Context-window estimates cannot authorize either the main or
+        // auxiliary request under a finite cost ceiling. Opening/body warming
+        // lifecycles are separately qualified without this cap; finite token
+        // admission is covered separately in agent lib.
         agent.set_max_session_cost_microdollars(Some(1_300_000));
         let events = drive(&mut agent).await;
-        assert_eq!(transport.main_calls.load(Ordering::SeqCst), 1);
-        assert_snapshot(&transport, 0);
-        assert_isolated(&agent, &events, 0);
+        assert_eq!(transport.main_calls.load(Ordering::SeqCst), 0);
+        assert!(transport.requests.lock().unwrap().is_empty());
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::RunFinished {
+                reason: FinishReason::Failed(octet_agent::AgentError::InputLimitUnavailable),
+                ..
+            })
+        ));
+        assert_eq!(agent.session().usage_records().len(), settled_records);
         assert!(agent.session().cache_warm_records().is_empty());
+        assert!(!agent.session().has_uncertain_usage());
     }
 }
 

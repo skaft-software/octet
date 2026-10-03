@@ -12,7 +12,7 @@
 //! catalog lacks or failed to justify.
 
 use std::collections::BTreeMap;
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::pricing::{Pricing, TokenRate};
 
@@ -54,17 +54,16 @@ impl LiveOverlay {
     }
 }
 
-static LIVE: RwLock<Option<&'static LiveOverlay>> = RwLock::new(None);
+static LIVE: RwLock<Option<Arc<LiveOverlay>>> = RwLock::new(None);
 
 /// Make checked live metadata authoritative for every later lookup, falling
 /// back to the compiled snapshot per record.
 ///
-/// Installs happen at startup and after a background refresh, so each one
-/// leaks the previous overlay (a few hundred KiB at most) to keep every lookup
-/// a `'static` borrow like the compiled snapshot's.
+/// Replacing the overlay releases the previous allocation. Lookups return
+/// owned values and never retain a borrowed live record across replacement.
 pub fn install_live_metadata(metadata: LiveModelMetadata) {
-    let overlay: &'static LiveOverlay = Box::leak(Box::new(LiveOverlay::new(metadata)));
-    *LIVE.write().unwrap_or_else(PoisonError::into_inner) = Some(overlay);
+    *LIVE.write().unwrap_or_else(PoisonError::into_inner) =
+        Some(Arc::new(LiveOverlay::new(metadata)));
 }
 
 /// Whether live models.dev metadata is installed in this process.
@@ -72,19 +71,19 @@ pub fn live_metadata_installed() -> bool {
     live_overlay().is_some()
 }
 
-fn live_overlay() -> Option<&'static LiveOverlay> {
-    *LIVE.read().unwrap_or_else(PoisonError::into_inner)
+fn live_overlay() -> Option<Arc<LiveOverlay>> {
+    LIVE.read().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
 fn leaf(key: &str) -> &str {
     key.rsplit('/').next().unwrap_or(key)
 }
 
-fn lookup_key(key: &str) -> Option<&'static str> {
-    lookup_key_in(live_overlay(), key)
+fn lookup_key(key: &str) -> Option<String> {
+    lookup_key_in(live_overlay().as_deref(), key).map(str::to_owned)
 }
 
-fn lookup_key_in(overlay: Option<&'static LiveOverlay>, key: &str) -> Option<&'static str> {
+fn lookup_key_in<'a>(overlay: Option<&'a LiveOverlay>, key: &str) -> Option<&'a str> {
     overlay
         .and_then(|overlay| overlay.metadata.names.get(key))
         .map(String::as_str)
@@ -149,7 +148,7 @@ pub fn model_pricing(provider_id: &str, model_id: &str) -> Option<Pricing> {
         return None;
     }
     let key = format!("{provider}/{model}");
-    lookup_pricing_in(live_overlay(), &key)
+    lookup_pricing_in(live_overlay().as_deref(), &key)
 }
 
 /// Return models.dev source assertions for an exact built-in provider/model
@@ -160,7 +159,10 @@ pub fn model_pricing(provider_id: &str, model_id: &str) -> Option<Pricing> {
 /// controls to a known provider wire profile. No leaf aliases or inventory are
 /// inferred here; Codex and custom endpoints have no entry in this index.
 pub fn model_capability_metadata(provider_id: &str, model_id: &str) -> Option<serde_json::Value> {
-    capability_metadata_in(live_overlay(), &format!("{provider_id}/{model_id}"))
+    capability_metadata_in(
+        live_overlay().as_deref(),
+        &format!("{provider_id}/{model_id}"),
+    )
 }
 
 fn capability_metadata_in(overlay: Option<&LiveOverlay>, key: &str) -> Option<serde_json::Value> {
@@ -179,7 +181,7 @@ fn capability_metadata_in(overlay: Option<&LiveOverlay>, key: &str) -> Option<se
 /// is unique in the generated catalog. The historical `custom/` registry prefix
 /// is ignored, but repository/artifact suffixes are not guessed here; callers
 /// can apply a conservative fallback for models absent from models.dev.
-pub fn model_display_name(id: &str) -> Option<&'static str> {
+pub fn model_display_name(id: &str) -> Option<String> {
     let normalized = id.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return None;

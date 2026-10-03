@@ -368,11 +368,14 @@ pub(super) fn mirror_delegated_uncertainty(
 
 pub(crate) fn request_uncertainty_bound(
     model: &Model,
-    input_tokens: u64,
+    input_bound: Option<u64>,
     requested_output_tokens: u64,
     service_tier: Option<ServiceTier>,
     retention: CacheRetention,
 ) -> Option<UsageUncertaintyBound> {
+    // A planning estimate, observed prior usage, or declared context window
+    // does not bound the next encoded request's provider-tokenized input.
+    let input_tokens = input_bound?;
     let cap = octet_ai::effective_output_token_cap(model, Some(requested_output_tokens))?;
     let fallback_long_retention = retention == CacheRetention::Long
         && model.spec.protocol == Protocol::AnthropicMessages
@@ -421,7 +424,10 @@ pub(super) fn require_enforceable_output_cap(
         }
     }
     output_cap.ok_or(AgentError::OutputLimitUnavailable)?;
-    Ok(())
+    // Current transports enforce output caps only. None supplies an input
+    // tokenizer/template bound or a route-authoritative input admission bound.
+    // Refuse before dispatch instead of turning an estimate into a guarantee.
+    Err(AgentError::InputLimitUnavailable)
 }
 
 pub(super) fn reservation_output_tokens(

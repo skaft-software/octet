@@ -52,10 +52,12 @@ aside to `.octet-old-*`, and the staged file is published under the target
 name with a no-replace rename. No step overwrites a name it did not vacate
 itself: a writer that recreates the name in the displacement window wins
 (`Changed`, with the original kept under `.octet-old-*`), and readers can
-briefly see the target missing. Replacing a file that a cooperative holder
-keeps open for writing (session and journal descriptors, editors, `tempfile`
-handles) works; holders that do not share delete access report the file as
-in use instead. On-disk spelling (case and 8.3 aliases) and
+briefly see the target missing. A file held open for writing, even by a cooperative holder
+that shares delete access, reports in use: allowing those writes could silently
+discard an update made after the final comparison. Close the writable handle
+before replacement. The two-rename interruption gap remains a qualification
+blocker for both credentials and workspace files; error restoration is not crash
+recovery. On-disk spelling (case and 8.3 aliases) and
 read-only/hidden/system attributes carry over to the replacement.
 
 ## Pull-request test builds

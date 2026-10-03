@@ -916,7 +916,7 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
     )
     computer_use = ComputerUse(extension, home=home)
     jev_jobs = jev_use_jobs.Jobs(computer_use, extension, home=home)
-    extension.on_lifecycle("session/settled")(jev_jobs.session_settled)
+    extension.hook("session_end")(jev_jobs.session_end)
 
     def handler(name: str, arguments: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
         computer_use.select_model(context)

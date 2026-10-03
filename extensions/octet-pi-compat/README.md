@@ -40,9 +40,10 @@ explicit reconfiguration. These hashes are change detection, not a sandbox or
 an integrity claim over an extension's entire import graph. The shipped config
 is empty and does not discover/import any Pi user installation.
 
-Dependencies are pinned to jiti 2.6.1, TypeBox 0.34.41 and selected MIT Pi TUI
-0.80.10 modules; both `@earendil-works` and old `@mariozechner` imports alias to
-the same host facades. Setup uses `npm ci --ignore-scripts`, without global
+Dependencies are pinned to jiti 2.6.1, `typebox` 1.1.12, legacy
+`@sinclair/typebox` 0.34.41 and selected MIT Pi TUI 0.85.0 modules. The two
+TypeBox packages remain distinct; both `@earendil-works` and old `@mariozechner`
+Pi imports alias to the same host facades. Setup uses `npm ci --ignore-scripts`, without global
 installs, asset downloads, providers or model calls. There is no coding-agent npm
 dependency. jiti's disk transpilation cache is disabled.
 
@@ -87,6 +88,14 @@ in order. Events expose only facts actually supplied by octet; reading absent Pi
 fields (for example an `agent_end.messages` array) or returning an unapplied
 transformation/veto fails explicitly. Command argument arrays join with spaces;
 the wire cannot reconstruct original shell quoting.
+
+**pi-clm 1.0.0 is not qualified.** The unchanged pinned entrypoint still refuses
+unsupported `resources_discover` registration. Context-helper exports, effective
+context/payload transformations, authoritative synchronous `appendEntry`, and
+real compaction interception are not implemented. The selected 0.85.0 TUI/schema
+profile is not a claim that all Pi 0.85.0 runtime imports or CLM's seven behavioral
+gates work. `appendEntry` remains asynchronous; flushing a Promise after a hook
+cannot satisfy CLM's persist-before-activate contract.
 
 ## Remote frontend integration
 
@@ -141,5 +150,17 @@ real Doom WASM animation/resume, powerline footer snapshots, drawing mouse expor
 and an animated CustomEditor. Synthetic-host acceptance does not establish actual
 terminal painting. The separate Rust/frontend PTY suite has passed unchanged Doom,
 drawing, the powerline footer, and terminal restoration in actual octet. Native
-custom-editor draft restoration failed qualification, and startup comparison with
-Pi remains unrun. See [qualification and reproduction](../../docs/pi-compatibility.md#qualification-and-reproduction).
+custom-editor draft restoration previously failed qualification, and startup comparison with
+Pi remains unrun. The strict editor probe below now passes unchanged rainbow
+input, post-rescue native draft/editability, resize and terminal restoration.
+It also passed against the baseline adapter, so it does not establish a fix for
+the historical native failure. A separate delayed-host-echo regression reproduces
+and fixes loss of newer local input; writes/submissions are bounded and ordered.
+No Doom aspect-ratio or original-Pi performance parity is claimed.
+
+```sh
+python3 extensions/octet-pi-compat/test/native-editor.py /absolute/octet \
+  --editor /absolute/reviewed/rainbow-editor.ts
+```
+
+See [qualification and reproduction](../../docs/pi-compatibility.md#qualification-and-reproduction).

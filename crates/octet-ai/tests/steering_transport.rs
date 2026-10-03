@@ -382,6 +382,17 @@ async fn steering_sync_tool_pending_continues_on_same_socket_without_replay() {
                         is_error: false,
                     })],
                 })];
+                let mut incompatible = req.clone();
+                incompatible.responses = Some(ResponsesOptions {
+                    context_management: Some(
+                        json!([{"type":"compaction","compact_threshold":1000}]),
+                    ),
+                    ..Default::default()
+                });
+                assert!(matches!(
+                    control.continue_with(incompatible).await,
+                    Err(AiError::Config(_))
+                ));
                 control.continue_with(req).await.unwrap();
             }
             _ => {}
@@ -549,6 +560,179 @@ async fn steering_cancel_marks_pending_and_closes_local_socket() {
     accepted_rx.await.unwrap();
     assert_eq!(session.cancel()[0].state, SteeringState::Ambiguous);
     assert!(next(&mut session).await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn steering_rejections_before_id_allocation_preserve_other_submissions() {
+    for id in [None, Some(Value::Null)] {
+        let (listener, model) = listener().await;
+        let server = tokio::spawn(async move {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            recv(&mut socket).await;
+            created(&mut socket, "r1").await;
+            // Correlate an ID-less rejection by parent and echoed input, not by
+            // failing whichever submission happened to be sent first.
+            assert_eq!(recv(&mut socket).await["input"], "keep");
+            assert_eq!(recv(&mut socket).await["input"], "reject");
+            let mut steer = json!({"previous_response_id":"r1","input":"reject"});
+            if let Some(id) = id {
+                steer["id"] = id;
+            }
+            send(&mut socket, json!({"type":"response.steer.failed","sequence_number":2,"steer":steer,"error":{"type":"invalid_request_error","code":"invalid_input","message":"not applied"}})).await;
+            accepted(&mut socket, "s1", "r1").await;
+            text(&mut socket, "original survives").await;
+            done(&mut socket, "r1", true, json!([])).await;
+            created(&mut socket, "r2").await;
+            done(&mut socket, "r2", false, json!([])).await;
+        });
+        let mut session = client()
+            .steerable_responses(&model, request())
+            .await
+            .unwrap();
+        until_started(&mut session).await;
+        session.control().steer("keep".into()).await.unwrap();
+        session.control().steer("reject".into()).await.unwrap();
+        let mut finished = 0;
+        while let Some(event) = next(&mut session).await {
+            if matches!(
+                event.unwrap(),
+                SteeringEvent::Response {
+                    event: StreamEvent::Finished(_),
+                    ..
+                }
+            ) {
+                finished += 1;
+            }
+        }
+        assert_eq!(finished, 2);
+        let updates = session.steering_updates();
+        assert_eq!(
+            updates[0].state,
+            SteeringState::Applied {
+                response_id: "r2".into()
+            }
+        );
+        assert_eq!(
+            updates[1].state,
+            SteeringState::Failed {
+                code: Some("invalid_input".into())
+            }
+        );
+        assert_eq!(updates[1].steer_id, None);
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn steering_rejection_can_echo_the_largest_admitted_escaped_input() {
+    let (listener, model) = listener().await;
+    let server = tokio::spawn(async move {
+        let mut socket = accept_async(listener.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        recv(&mut socket).await;
+        created(&mut socket, "r1").await;
+        let steer = recv(&mut socket).await;
+        assert_eq!(steer["input"].as_str().unwrap().len(), 65536);
+        send(&mut socket, json!({"type":"response.steer.failed","steer":{"previous_response_id":"r1","input":steer["input"]},"error":{"code":"invalid_input"}})).await;
+        done(&mut socket, "r1", false, json!([])).await;
+    });
+    let mut session = client()
+        .steerable_responses(&model, request())
+        .await
+        .unwrap();
+    until_started(&mut session).await;
+    session
+        .control()
+        .steer("\u{0001}".repeat(65536))
+        .await
+        .unwrap();
+    while let Some(event) = next(&mut session).await {
+        event.unwrap();
+    }
+    assert_eq!(
+        session.steering_updates()[0].state,
+        SteeringState::Failed {
+            code: Some("invalid_input".into())
+        }
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn steering_rejects_automatic_compaction_before_dispatch() {
+    let (listener, model) = listener().await;
+    let client = client().track_request_dispatch();
+    let mut req = request();
+    req.responses = Some(ResponsesOptions {
+        context_management: Some(json!([{"type":"compaction","compact_threshold":1000}])),
+        ..Default::default()
+    });
+    assert!(matches!(
+        client.steerable_responses(&model, req).await,
+        Err(AiError::Config(_))
+    ));
+    assert!(!client.request_may_have_been_sent());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn steering_unknown_pending_reason_does_not_authorize_explicit_continuation() {
+    let (listener, model) = listener().await;
+    let (resume, waiting) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut socket = accept_async(listener.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        recv(&mut socket).await;
+        created(&mut socket, "r1").await;
+        recv(&mut socket).await;
+        accepted(&mut socket, "s1", "r1").await;
+        done(&mut socket, "r1", false, json!([])).await;
+        send(&mut socket, json!({"type":"response.steer.pending","steer":{"id":"s1","previous_response_id":"r1"},"reason":"future_pending_reason","required_input":[]})).await;
+        waiting.await.unwrap();
+        created(&mut socket, "r2").await;
+        done(&mut socket, "r2", false, json!([])).await;
+    });
+    let mut session = client()
+        .steerable_responses(&model, request())
+        .await
+        .unwrap();
+    until_started(&mut session).await;
+    let control = session.control();
+    control.steer("keep queued".into()).await.unwrap();
+    loop {
+        if matches!(
+            next(&mut session).await.unwrap().unwrap(),
+            SteeringEvent::Steer(SteeringUpdate {
+                state: SteeringState::Pending { .. },
+                ..
+            })
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(
+        control.continue_with(request()).await,
+        Err(AiError::Config(_))
+    ));
+    resume.send(()).unwrap();
+    while let Some(event) = next(&mut session).await {
+        event.unwrap();
+    }
+    assert_eq!(
+        session.steering_updates()[0].state,
+        SteeringState::Applied {
+            response_id: "r2".into()
+        }
+    );
     server.await.unwrap();
 }
 

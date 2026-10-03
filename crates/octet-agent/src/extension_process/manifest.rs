@@ -280,6 +280,16 @@ impl ExtensionManifest {
                 "cache_warming_decision requires extension API 0.4".into(),
             ));
         }
+        if self
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::ProviderContext)
+            && self.api_version != EXTENSION_API_VERSION_0_4
+        {
+            return Err(ExtensionRuntimeError::InvalidManifest(
+                "provider_context requires extension API 0.4".into(),
+            ));
+        }
         if self.api_version == EXTENSION_API_VERSION_0_1 && self.contributes.providers {
             return Err(ExtensionRuntimeError::InvalidManifest(
                 "provider catalogs require extension API 0.2 or later".into(),
@@ -493,6 +503,9 @@ pub struct ManifestContributions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionHook {
+    /// Prepares canonical model-visible context with a run-owned private append
+    /// consumer; requires API 0.4 and negotiated session_entries.
+    ProviderContext,
     /// Runs immediately before prompt composition.
     BeforePrompt,
     /// Runs after a complete assistant response.

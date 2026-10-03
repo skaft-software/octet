@@ -1438,6 +1438,8 @@ class GnomeHelperTests(unittest.TestCase):
         self.assertEqual(metadata["uuid"], gnome_helper.UUID)
         self.assertEqual(metadata["version"], 8)
         self.assertIn('<method name="SetThemeColor">', source)
+        self.assertIn('<method name="GetThemeColor">', source)
+        self.assertIn("GetThemeColor() {", source)
         self.assertIn("if (this._themeColor) return;", source)
 
     def test_install_writes_the_bundle_and_enables_it(self):
@@ -1472,6 +1474,16 @@ class GnomeHelperTests(unittest.TestCase):
         self.assertIn(["gsettings", "set", "org.gnome.shell", "enabled-extensions",
                        "['user-theme@gnome-shell-extensions.gcampax.github.com', 'winrects@cua']"],
                       calls)
+
+    def test_status_probes_theme_pin_without_mutating_it(self):
+        from unittest import mock
+        from octet_computer_use import gnome_helper
+
+        with mock.patch.object(gnome_helper, "extension_directory", return_value=Path("/fake")), \
+                mock.patch.object(gnome_helper, "active_version", return_value=8), \
+                mock.patch.object(gnome_helper, "_gdbus", return_value="('#a9634c',)") as call:
+            self.assertEqual(gnome_helper.status(), {"gnome_helper": "active"})
+        call.assert_called_once_with("GetThemeColor")
 
     def test_theme_color_is_validated_before_reaching_dbus(self):
         from unittest import mock

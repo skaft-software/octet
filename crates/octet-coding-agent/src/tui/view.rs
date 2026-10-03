@@ -5417,6 +5417,17 @@ impl InteractiveShell {
         true
     }
 
+    /// Whether a host-admitted fullscreen extension surface currently owns the
+    /// visible shell. This is a typed mount query, not a component/title guess.
+    pub(crate) fn has_remote_fullscreen_mount(&self) -> bool {
+        self.state
+            .borrow()
+            .extension_ui
+            .remote
+            .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Fullscreen)
+            .is_some()
+    }
+
     /// Approval/picker/search/tool input ownership always takes priority.
     pub(crate) fn remote_ui_input_blocked(&self) -> bool {
         let state = self.state.borrow();

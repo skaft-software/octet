@@ -108,10 +108,9 @@ export class Runtime {
     for (const prefix of ['@earendil-works', '@mariozechner']) {
       for (const [pkg, shim] of [['pi-coding-agent', 'coding-agent'], ['pi-ai', 'ai'], ['pi-tui', 'tui']]) aliases[`${prefix}/${pkg}`] = fileURLToPath(new URL(`../shims/${shim}.mjs`, import.meta.url));
     }
-    aliases.typebox = fileURLToPath(new URL('../node_modules/@sinclair/typebox/build/esm/index.mjs', import.meta.url));
-    // @sinclair/typebox imports in arbitrary external factories also resolve to
-    // the bridge's exact pinned copy, without modifying their source or packages.
-    aliases['@sinclair/typebox'] = aliases.typebox;
+    // These are different schema libraries, not interchangeable version aliases.
+    aliases.typebox = fileURLToPath(new URL('../node_modules/typebox/build/index.mjs', import.meta.url));
+    aliases['@sinclair/typebox'] = fileURLToPath(new URL('../node_modules/@sinclair/typebox/build/esm/index.mjs', import.meta.url));
     this.jiti = createJiti(import.meta.url, { alias: aliases, moduleCache: true, fsCache: false, tryNative: false });
     for (let factory = 0; factory < extensions.length; factory++) {
       const entry = realpathSync(extensions[factory]);
@@ -296,9 +295,20 @@ export class Runtime {
       // first command/editor mount reads the current composer from the host.
       if (!state?.alive) return;
       if (state.editorRevision !== undefined && p.revision <= state.editorRevision) return;
-      state.editorRevision = p.revision; state.host.composer_text = bounded(p.text, 'editor text', 262144);
-      for (const surface of this.ui.surfaces.values()) if (surface.placement === 'editor' && surface.store.state === state) {
-        if (surface.component?.getText?.() !== p.text) surface.component?.setText?.(p.text);
+      state.editorRevision = p.revision;
+      const text = bounded(p.text, 'editor text', 262144);
+      const editors = [...this.ui.surfaces.values()].filter(surface => surface.placement === 'editor' && surface.store.state === state);
+      // An echo acknowledges an earlier host checkpoint, not input that is still
+      // in flight. Replacing a newer local draft here drops characters and
+      // causes setText/onChange to send an echo back to the host.
+      if (editors.some(surface => surface.editor?.pending)) return;
+      state.host.composer_text = text;
+      for (const surface of editors) {
+        const editor = surface.editor;
+        if (editor) editor.applyingHost = true;
+        try {
+          if (surface.component?.getText?.() !== text) surface.component?.setText?.(text);
+        } finally { if (editor) editor.applyingHost = false; }
         surface.requestRender();
       }
       return;

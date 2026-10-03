@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct ProtocolReadState {
     pub(super) pending: PendingRequests,
     pub(super) issued_resource_owners: IssuedResourceOwners,
+    pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
     pub(super) pending_changed: Arc<Notify>,
     pub(super) closed: Arc<AtomicBool>,
@@ -662,6 +663,7 @@ pub(super) async fn read_protocol_stdout<R>(
     mut stdout: R,
     pending: PendingRequests,
     issued_resource_owners: IssuedResourceOwners,
+    session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     remote_ui: Arc<RemoteUiMailbox>,
     pending_changed: Arc<Notify>,
     closed: Arc<AtomicBool>,
@@ -702,6 +704,7 @@ pub(super) async fn read_protocol_stdout<R>(
     let state = ProtocolReadState {
         pending,
         issued_resource_owners,
+        session_leaf,
         remote_ui,
         pending_changed,
         closed,
@@ -806,6 +809,7 @@ pub(super) async fn read_protocol_stdout<R>(
     };
 
     state.closed.store(true, Ordering::Release);
+    state.session_leaf.clear();
     state.remote_ui.clear();
     lock_std_mutex(&state.issued_resource_owners).clear();
     lock_std_mutex(&state.child_requests).clear();

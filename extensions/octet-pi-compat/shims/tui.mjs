@@ -14,7 +14,7 @@ export { CancellableLoader } from '../node_modules/@earendil-works/pi-tui/dist/c
 export { fuzzyFilter, fuzzyMatch } from '../node_modules/@earendil-works/pi-tui/dist/fuzzy.js';
 export { Key, matchesKey, parseKey, isKeyRelease, isKeyRepeat, decodeKittyPrintable, isKittyProtocolActive, setKittyProtocolActive } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 export { KeybindingsManager, getKeybindings, setKeybindings, TUI_KEYBINDINGS } from '../node_modules/@earendil-works/pi-tui/dist/keybindings.js';
-export { visibleWidth, truncateToWidth, sliceByColumn, wrapTextWithAnsi } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
+export { visibleWidth, truncateToWidth, sliceByColumn, stripTerminalSequences, wrapTextWithAnsi } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 // These component-only exports do not start or instantiate the Pi terminal.
 export { Container, CURSOR_MARKER, isFocusable } from '../node_modules/@earendil-works/pi-tui/dist/tui.js';
 import { unsupported } from '../lib/errors.mjs';

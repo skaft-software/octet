@@ -225,6 +225,51 @@ impl AgentModelResolver for AlternateModelResolver {
 }
 
 #[tokio::test]
+async fn finite_child_ceilings_refuse_spawn_and_continuation_before_provider_dispatch() {
+    for token_ceiling in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let team = directory.path().join("team-finiteceilings");
+        std::fs::create_dir(&team).unwrap();
+        let server = continuation_test_server().await;
+        let manager = continuation_test_manager(&team, &server);
+        let binding = manager.root_binding();
+        let service = binding
+            .extension_service("ceiling-fixture", "session", "owner")
+            .unwrap();
+        let mut request = test_extension_spawn("bounded", None, None, "work", "bounded-key");
+        request.policy.max_tokens = token_ceiling.then_some(64_000);
+        request.policy.max_cost_microdollars =
+            (!token_ceiling).then_some(MAX_EXTENSION_COST_MICRODOLLARS);
+        let requested_policy = request.policy.clone();
+        let spawned = service.spawn("owner", request).unwrap();
+        let id = spawned["agent_id"].as_str().unwrap();
+        let failed = DelegatedAgentStatus::Failed {
+            error: AgentError::InputLimitUnavailable.to_string(),
+        };
+        wait_for_worker_status(&manager, id, failed.clone()).await;
+        service
+            .follow_up("owner", id, "continue with pinned limits".into())
+            .await
+            .unwrap();
+        wait_for_worker_status(&manager, id, failed).await;
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let state = manager.state.lock().unwrap();
+        let record = &state.records[id];
+        let policy = record.extension_policy.as_ref().unwrap();
+        assert_eq!(policy.max_tokens, requested_policy.max_tokens);
+        assert_eq!(
+            policy.max_cost_microdollars,
+            requested_policy.max_cost_microdollars
+        );
+        let child = Session::open_read_only(&record.session_path).unwrap();
+        assert!(child.usage_records().is_empty());
+        assert!(!child.has_uncertain_usage());
+        drop(state);
+        binding.request_shutdown();
+    }
+}
+
+#[tokio::test]
 async fn configured_model_routes_spawn_and_continuation_and_pins_durable_policy() {
     let directory = tempfile::tempdir().unwrap();
     let team = directory.path().join("team-multimodel");
@@ -258,6 +303,10 @@ async fn configured_model_routes_spawn_and_continuation_and_pins_durable_policy(
     let request = || {
         let mut request =
             test_extension_spawn("routing", None, None, "use alternate", "routing-key");
+        // Routing/continuation is exercised independently of unsupported hard
+        // input ceilings; the finite-ceiling denial contract has its own test.
+        request.policy.max_tokens = None;
+        request.policy.max_cost_microdollars = None;
         request.policy.model_selection = Some(AgentModelSelection {
             model: "fixture-alternate".into(),
             ..Default::default()
@@ -442,6 +491,8 @@ async fn configured_route_survives_fleet_reconstruction_with_a_different_parent(
             },
         );
         let mut policy = test_extension_policy();
+        policy.max_tokens = None;
+        policy.max_cost_microdollars = None;
         policy.model_selection = Some(AgentModelSelection {
             model: "saved-alternate".into(),
             ..Default::default()
@@ -1935,7 +1986,11 @@ async fn terminal_worker_continuation(terminal: DelegatedAgentStatus) {
         session_path.clone(),
         DelegatedAgentStatus::Detached,
     );
-    let policy = test_extension_policy();
+    // Lifecycle recovery preserves wall/turn/tool policy without pretending a
+    // finite input ceiling can dispatch on this route.
+    let mut policy = test_extension_policy();
+    policy.max_tokens = None;
+    policy.max_cost_microdollars = None;
     let expired = terminal == DelegatedAgentStatus::TimedOut;
     let original_deadline = if expired {
         1
@@ -2064,7 +2119,33 @@ async fn restart_reattaches_the_durable_worker_with_its_accounting_and_lifecycle
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let session_path = root.join("reattach-child.jsonl");
-    Session::create(&session_path).unwrap();
+    let mut child_session = Session::create(&session_path).unwrap();
+    let model = test_template(&root).model;
+    child_session
+        .record_compaction_usage(
+            model.endpoint.id.clone(),
+            model.spec.id.clone(),
+            Usage {
+                input_tokens: 11,
+                output_tokens: 5,
+                total_tokens: 16,
+                ..Usage::default()
+            },
+            Some(Cost {
+                total: 42,
+                input: 42,
+                ..Cost::default()
+            }),
+        )
+        .unwrap();
+    child_session
+        .record_usage_uncertainty(
+            model.endpoint.id.clone(),
+            model.spec.id.clone(),
+            "interrupted_child",
+        )
+        .unwrap();
+    drop(child_session);
     let old_claim = DurableFleetClaim {
         generation: 1,
         instance: "old-owner".into(),
@@ -2122,7 +2203,12 @@ async fn restart_reattaches_the_durable_worker_with_its_accounting_and_lifecycle
         assert_eq!(record.usage.input_tokens, 11);
         assert_eq!(record.usage.total_tokens, 16);
         assert!(record.usage_uncertain);
-        assert_eq!(record.cost_microdollars, Some(42));
+        assert_eq!(record.cost.unwrap().total, 42);
+        assert_eq!(
+            record.cost_microdollars, None,
+            "known cost is only a subtotal"
+        );
+        assert!(record.usage_exposure.is_none());
         assert_eq!(record.turn_limit, Some(9));
         assert_eq!(record.deadline_at_ms, Some(1));
     }
@@ -3545,6 +3631,36 @@ async fn extension_service_enforces_concurrency_depth_deadline_and_list_provenan
         )
         .unwrap()
         .is_none());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let session_path = manager.state.lock().unwrap().records[first_id]
+            .session_path
+            .clone();
+        let saved = session_path.with_extension("saved");
+        std::fs::rename(&session_path, &saved).unwrap();
+        symlink(&saved, &session_path).unwrap();
+        assert!(
+            binding
+                .open_session_reference("extension-policy", reference)
+                .is_err(),
+            "an authorized opaque reference must not follow a replaced ledger symlink"
+        );
+        std::fs::remove_file(&session_path).unwrap();
+        std::fs::rename(&saved, &session_path).unwrap();
+        std::fs::set_permissions(&session_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            binding
+                .open_session_reference("extension-policy", reference)
+                .is_err(),
+            "an authorized reference must not disclose a non-private child ledger"
+        );
+        std::fs::set_permissions(&session_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(binding
+            .open_session_reference("extension-policy", reference)
+            .unwrap()
+            .is_some());
+    }
 
     let journal = std::fs::read_to_string(manager.team_directory.join("provenance.jsonl")).unwrap();
     let persisted = journal
@@ -4624,6 +4740,83 @@ async fn initial_startup_retry_count_and_dead_letter_survive_real_fleet_restarts
         .restored_tasks("agent-1")
         .iter()
         .all(|task| !matches!(task, QueuedTask::Initial(_))));
+}
+
+#[test]
+fn restart_recovers_usage_and_uncertainty_from_child_ledger_not_stale_roster() {
+    for authority in ["known", "uncertain", "missing"] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let session_path = root.join("child.jsonl");
+        let mut child = Session::create(&session_path).unwrap();
+        {
+            let manager = writable_manager(root);
+            let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Idle);
+            let mut state = manager.state.lock().unwrap();
+            let record = state.records.get_mut(&identity.id).unwrap();
+            record.usage = Usage::default();
+            record.cost = Some(Cost::default());
+            record.cost_microdollars = Some(0);
+            record.usage_uncertain = false;
+            manager.persist_durable_fleet_locked(&mut state);
+        }
+        // This synced child commit deliberately occurs after the roster write.
+        let model = test_template(root).model;
+        let usage = Usage {
+            input_tokens: 29,
+            output_tokens: 4,
+            total_tokens: 33,
+            ..Default::default()
+        };
+        let cost = Cost {
+            input: 2,
+            output: 3,
+            total: 5,
+            total_picodollars_remainder: 44,
+            ..Default::default()
+        };
+        child
+            .record_compaction_usage(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                usage,
+                Some(cost),
+            )
+            .unwrap();
+        if authority == "uncertain" {
+            child
+                .record_usage_uncertainty(
+                    model.endpoint.id.clone(),
+                    model.spec.id.clone(),
+                    "late_interruption",
+                )
+                .unwrap();
+        }
+        drop(child);
+        if authority == "missing" {
+            std::fs::remove_file(&session_path).unwrap();
+        }
+        let manager = writable_manager(root);
+        manager.restore_durable_fleet();
+        let state = manager.state.lock().unwrap();
+        let record = &state.records["agent-1"];
+        if authority == "missing" {
+            assert!(record.usage_uncertain);
+            assert!(record.usage_exposure.is_none());
+            assert!(record.cost.is_none());
+            assert!(record.cost_microdollars.is_none());
+            assert_eq!(record.status, DelegatedAgentStatus::Detached);
+        } else {
+            assert_eq!(record.usage, usage);
+            assert_eq!(record.cost, Some(cost));
+            assert_eq!(record.usage_uncertain, authority == "uncertain");
+            assert!(record.usage_exposure.is_none());
+            assert_eq!(
+                record.cost_microdollars,
+                (authority == "known").then_some(cost.total)
+            );
+        }
+    }
 }
 
 #[test]

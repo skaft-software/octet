@@ -585,6 +585,23 @@ impl Agent {
                     break 'run FinishReason::Aborted;
                 }
 
+                // A finished observation belongs in the next request, not one
+                // response later. Give spawned immediate reads a scheduling
+                // opportunity; never await an unfinished job at this boundary.
+                if !background_tools.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                while background_tools.front_ready() {
+                    if abort.is_set() { break 'run FinishReason::Aborted; }
+                    match background_tools.settle_one(session, &model, &sandbox,
+                        &stream_context, &mut run_usage, &mut terminal_gate_evidence).await {
+                        Ok(events) => for event in events { notify_observers(&observers, &event); yield event; },
+                        Err(error) => break 'run FinishReason::Failed(error),
+                    }
+                    context_capacity.invalidate();
+                }
+                if abort.is_set() { break 'run FinishReason::Aborted; }
+
                 if let Some(selection) = if native.connection.is_none() { pending_reasoning.take() } else { None } {
                     if let Err(error) = persist_reasoning_selection(session, &model, &selection) {
                         break 'run FinishReason::Failed(error);
@@ -722,11 +739,19 @@ impl Agent {
                         capacity: &mut context_capacity,
                         telemetry: turn_context.clone(),
                     };
+                    let preparation = ProviderContextPreparation {
+                        hooks: &extension_host.provider_context_hooks,
+                        tool_choice: if answer_only { ToolChoice::None } else { ToolChoice::Auto },
+                        output_modalities: output_modalities.clone(),
+                        service_tier,
+                        replay_mode: auto_compaction_mode,
+                    };
                     let operation = compaction.ensure_capacity(
                         &system,
                         &request_tool_defs,
                         compaction_reserve_tokens,
                         provider_output_ceiling,
+                        (!preparation.hooks.is_empty()).then_some(&preparation),
                     );
                     tokio::pin!(operation);
                     let result = loop {
@@ -805,7 +830,9 @@ impl Agent {
                         }
                     };
 
-                let request = Request {
+                let request = match capacity.effective_request {
+                    Some(request) => request,
+                    None => Request {
                     system: if active_system.is_empty() { None } else { Some(active_system.clone()) },
                     messages,
                     tools: request_tool_defs.clone(),
@@ -833,6 +860,7 @@ impl Agent {
                     compatibility: CompatibilityMode::Strict,
                     cache_retention,
                     session_id: Some(session_id.clone()),
+                    },
                 };
                 let prepared = PreparedTurn::new(
                     session.head(),
@@ -892,7 +920,7 @@ impl Agent {
 
                 let attempt_bound = request_uncertainty_bound(
                     &model,
-                    input_tokens,
+                    None,
                     request_max_output_tokens,
                     request.responses.as_ref().and_then(|options| options.service_tier),
                     request.cache_retention,
@@ -915,17 +943,6 @@ impl Agent {
                 let ev = AgentEvent::TurnStarted;
                 notify_observers(&observers, &ev);
                 yield ev;
-                if let Some((warm_client, warm_model, warm_request)) = responses_prewarm.take() {
-                    let timeout = warm_model.endpoint.timeout.min(Duration::from_secs(30));
-                    // This is connection/context setup, not another generation
-                    // attempt. Include it in first-turn timing, but not usage,
-                    // retry budgets, or the durable assistant/tool ledger.
-                    tokio::select! {
-                        biased;
-                        _ = abort.wait() => break 'run FinishReason::Aborted,
-                        _ = tokio::time::timeout(timeout, warm_client.prewarm_responses(&warm_model, warm_request)) => {},
-                    }
-                }
                 let qualified = !native_enabled && qualified_inference_replacement(&model, &request);
                 // A continuation needs the same settings, but not a clone of
                 // the full history: required_input_request replaces messages
@@ -960,6 +977,11 @@ impl Agent {
                             Ok(Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
                         } else if native_enabled {
                             opening_client.steerable_responses(&model, request).await.map(|connection| Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
+                        } else if let Some((_, _, warm_request)) = responses_prewarm.take() {
+                            // Erase the optional setup future: its credential /
+                            // transport state must not inflate every run's stack.
+                            Box::pin(opening_client.stream_with_responses_prewarm(&model, request, warm_request))
+                                .await.map(|stream| Some(native_steering::ProviderStream::Ordinary(stream)))
                         } else {
                             open_provider_stream(&opening_client, &model, request, &abort).await.map(|stream| stream.map(native_steering::ProviderStream::Ordinary))
                         }

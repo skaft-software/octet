@@ -416,6 +416,7 @@ pub(super) fn insert_child_request(
         changed: Notify::new(),
         cancel_on_response_abort: StdMutex::new(None),
         composition_cancellation: StdMutex::new(None),
+        session_leaf_cancel: StdMutex::new(None),
     });
     match children.entry(id) {
         std::collections::hash_map::Entry::Vacant(entry) => {
@@ -591,6 +592,12 @@ pub(super) fn cancel_active_children(
         .collect::<Vec<_>>();
     let mut settled = Vec::new();
     for (id, response_state) in matching {
+        if let Some(cancel) = lock_std_mutex(&response_state.session_leaf_cancel).as_ref() {
+            // The leaf receipt owns the definitive terminal response, including
+            // when cancellation loses to the actual session commit claim.
+            cancel.cancel();
+            continue;
+        }
         match response_state.state.load(Ordering::Acquire) {
             CHILD_ACTIVE
                 if response_state

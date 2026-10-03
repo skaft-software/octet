@@ -114,7 +114,33 @@ in use as it was.
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256
 `404d33ff898888b1e4a1074770f207c87210e050e32151687fae255dd4dda6b6`.
-Relative to the preceding PR head, the four outputs contain:
+That closeout's review below describes the `404d33...` snapshot, not the newer
+combined RC snapshot. At RC source `10c53b7154b9339200b23415a8f686e4af3f6545`,
+`models-dev-source.json` instead records SHA-256
+`25c0f9abe330fff43d8829e8dc9dd1fc352692908680b7b0c335996059c99b00`, with 916
+pricing routes, 406 names, and 939 capability routes. Compared with the
+`404d33...` committed outputs, the key-level projection deltas are:
+
+| Snapshot | Current records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 916 | 2 | 7 | 21 |
+| Canonical names | 406 | 6 | 2 | 0 |
+| Capability routes | 939 | 3 | 7 | 10 |
+
+These counts are computed from the committed JSON projections. The matching raw
+`api.json` for `25c0f9...` is not retained in this checkout, so these diffs do
+not explain or independently validate the changed upstream values. This audit
+did not run the live `--check`. The candidate verification manifest records a
+metadata-freshness pass with source tree `a78080e...` (the same product tree as
+RC assembly commit `0c5b86a...`) and names a log SHA, but that log is not included
+in this checkout for independent inspection. Treat that as inherited reported
+evidence, not a fresh run here; rerun the gate at the settled integration SHA.
+If refreshing, retain and review the complete source matching its digest and
+update all three projections plus the receipt together. Do not describe the older
+review examples as a review of this newer snapshot.
+
+The following historical closeout details apply only to the `404d33...` source.
+Relative to its preceding PR head, those outputs contain:
 
 | Snapshot | Records | Added | Removed | Changed |
 | --- | ---: | ---: | ---: | ---: |

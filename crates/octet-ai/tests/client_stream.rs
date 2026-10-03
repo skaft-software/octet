@@ -1172,6 +1172,74 @@ async fn responses_websocket_prewarm_body_timeout_is_not_a_connection_failure() 
 }
 
 #[tokio::test]
+async fn prewarm_and_inference_settle_dynamic_credentials_once_and_preserve_auth_failures() {
+    struct Resolver {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+    #[async_trait::async_trait]
+    impl octet_ai::CredentialResolver for Resolver {
+        async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                // Longer than the optional socket timeout: credential exchange
+                // is not an ignorable warmup and must not be re-entered.
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                return Err(octet_ai::AuthError::Resolve);
+            }
+            Ok(octet_ai::ResolvedCredential {
+                scheme: octet_ai::CredentialScheme::Bearer,
+                value: octet_ai::Secret::from("request-group-credential"),
+                extra_headers: http::HeaderMap::new(),
+            })
+        }
+    }
+    for fail in [false, true] {
+        let server =
+            TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body())
+                .await;
+        let resolver = Arc::new(Resolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail,
+        });
+        let mut model = websocket_test_model(&server.base_url);
+        Arc::make_mut(&mut model.endpoint).auth = Auth::Dynamic(resolver.clone());
+        if fail {
+            Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(10);
+        }
+        let request = responses_request(
+            vec![user_message("warm"), user_message("inference")],
+            Some("settled-auth"),
+        );
+        let warm = responses_request(vec![user_message("warm")], Some("settled-auth"));
+        let opened = AiClient::new()
+            .stream_with_responses_prewarm(&model, request, warm)
+            .await;
+        if fail {
+            assert!(matches!(
+                opened,
+                Err(AiError::Auth(octet_ai::AuthError::Resolve))
+            ));
+            assert!(server.requests().await.is_empty());
+        } else {
+            let mut stream = opened.unwrap();
+            let mut completed = false;
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), StreamEvent::Finished(_)) {
+                    completed = true;
+                }
+            }
+            assert!(completed);
+            let requests = server.requests().await;
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["generate"], false);
+            assert!(requests[1].get("generate").is_none());
+        }
+        assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
 async fn responses_credential_resolution_failure_never_opens_a_transport() {
     struct FailedResolver;
     #[async_trait::async_trait]

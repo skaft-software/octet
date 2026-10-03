@@ -150,11 +150,14 @@ def build_runtime(
 
     def apply(config: BridgeConfig, context: Mapping[str, Any]) -> None:
         if any(server.transport == "streamable-http" for server in config.servers):
-            # A menu action is owner-bound; remote servers connect for it.
-            manager.bind_owner(context)
+            # Owner binding is an admission check, not a best-effort hint. Never
+            # persist an edit that this host owner cannot apply.
+            if not manager.bind_owner(context):
+                raise ValueError("Remote MCP owner mismatch; configuration was not changed.")
         manager.apply_config(config, credential_provider=static_credential_provider(config))
 
     def edit(arguments: list[str], context: Mapping[str, Any]) -> str:
+        manager.assert_lifecycle_mutation_allowed()
         action = arguments[0]
         if manager.config_error is not None:
             return (
@@ -162,6 +165,12 @@ def build_runtime(
                 f"{editor.path}, then reload extensions."
             )
         ask = extension.request_input
+        has_remote = any(
+            server.transport == "streamable-http" for server in manager.config.servers
+        )
+        adding_remote = action == "add" and arguments[1:] == ["http"]
+        if (has_remote or adding_remote) and not manager.bind_owner(context):
+            return "Remote MCP owner mismatch; no prompt or configuration change was made."
         if action == "add" and arguments[1:] in (["stdio"], ["http"]):
             remote = arguments[1] == "http"
             if remote and not experimental_streamable_http_mcp:

@@ -166,6 +166,7 @@ pub(super) async fn spawn_connection(
 
     let pending = Arc::new(StdMutex::new(HashMap::new()));
     let issued_resource_owners = Arc::new(StdMutex::new(HashSet::new()));
+    let session_leaf = Arc::new(session_leaf::SessionLeafMailbox::default());
     let remote_ui = Arc::new(RemoteUiMailbox::new(
         (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4)
             .then(|| config.remote_ui.clone())
@@ -242,6 +243,7 @@ pub(super) async fn spawn_connection(
         stdout,
         Arc::clone(&pending),
         Arc::clone(&issued_resource_owners),
+        Arc::clone(&session_leaf),
         Arc::clone(&remote_ui),
         Arc::clone(&pending_changed),
         Arc::clone(&closed),
@@ -301,6 +303,7 @@ pub(super) async fn spawn_connection(
         child,
         pending,
         issued_resource_owners,
+        session_leaf,
         remote_ui,
         pending_changed,
         child_requests,
@@ -717,31 +720,86 @@ pub(super) fn resolve_entrypoint_command(
         });
     }
 
-    let local = directory.join(&configured);
-    if let Some(staged) = stage_entrypoint(&local)? {
-        return Ok(staged);
+    #[cfg(not(windows))]
+    let names = vec![configured.clone()];
+    // CreateProcess appends .exe for executable-name entrypoints. Resolve that
+    // spelling ourselves so inspection/staging sees the actual executable,
+    // rather than falling through to an uninspected Command PATH search.
+    #[cfg(windows)]
+    let names = if configured.extension().is_none() {
+        vec![configured.clone(), configured.with_extension("exe")]
+    } else {
+        vec![configured.clone()]
+    };
+    for name in &names {
+        if let Some(staged) = stage_entrypoint(&directory.join(name))? {
+            return Ok(staged);
+        }
     }
 
     if configured.components().count() == 1 {
         if let Some(path) = std::env::var_os("PATH") {
             for directory in std::env::split_paths(&path) {
-                let candidate = directory.join(&configured);
-                let resolved = match candidate.canonicalize() {
-                    Ok(resolved) => resolved,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error),
-                };
-                if let Some(staged) = stage_entrypoint(&resolved)? {
-                    return Ok(staged);
+                #[cfg(windows)]
+                if !directory.is_absolute() {
+                    continue;
+                }
+                for name in &names {
+                    let candidate = directory.join(name);
+                    let resolved = match candidate.canonicalize() {
+                        Ok(resolved) => resolved,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if let Some(staged) = stage_entrypoint(&resolved)? {
+                        return Ok(staged);
+                    }
                 }
             }
         }
     }
 
+    #[cfg(windows)]
+    return Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "extension entrypoint is missing",
+    ));
+    #[cfg(not(windows))]
     Ok(ResolvedEntrypoint {
         command: configured,
         _staging: None,
     })
+}
+
+#[cfg(all(test, windows))]
+mod windows_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn executable_names_resolve_exe_spelling_before_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["python", "node", "py"] {
+            let executable = directory.path().join(format!("{name}.exe"));
+            std::fs::write(&executable, b"MZ-inspected-executable-fixture").unwrap();
+            let entrypoint = ExtensionEntrypoint {
+                command: name.into(),
+                ..Default::default()
+            };
+            let resolved = resolve_entrypoint_command(directory.path(), &entrypoint).unwrap();
+            assert_ne!(resolved.command, executable);
+            assert_eq!(resolved.command.extension().unwrap(), "exe");
+            std::fs::write(&executable, b"changed after inspection").unwrap();
+            assert_eq!(
+                std::fs::read(&resolved.command).unwrap(),
+                b"MZ-inspected-executable-fixture"
+            );
+        }
+        let missing = ExtensionEntrypoint {
+            command: "missing-entrypoint-v082-sentinel".into(),
+            ..Default::default()
+        };
+        assert!(resolve_entrypoint_command(directory.path(), &missing).is_err());
+    }
 }
 
 pub(super) fn api_v03_host_offer_for_services(

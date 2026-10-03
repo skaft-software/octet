@@ -62,8 +62,8 @@ and aren't offered as one-field API-key setup, so use their documented
 configuration below.
 
 See [Getting started](getting-started.md#3-choose-one-provider-lane) and the
-[CLI alternatives](cli.md#provider-setup). This menu is included in octet 0.8.0,
-and older installs may not have it.
+[CLI alternatives](cli.md#provider-setup). This setup flow is part of the current
+0.8.2 source candidate; availability in older published versions differs.
 
 ## Cloud setup
 
@@ -317,13 +317,20 @@ immediately exchanges it for a short-lived Model API key. The identity token is
 what makes the exchange repeatable; when Meta rejects it, the session is over and
 octet asks you to sign in again rather than retrying. OpenRouter is the opposite:
 its login mints a durable API key with no refresh token, so octet never renews it
-and `--logout` only deletes the local copy.
+and `--logout` only deletes the local copy. Its authorization URL is printed even
+when browser launch fails or an opener fails to settle promptly. Opener children
+are bounded and reaped; waiting for a pasted redirect is cancellable without
+leaving a background stdin reader behind.
 
 Credentials are refreshed automatically. A refresh is serialized both within one
 octet process and across octet processes, and the credential file is re-read
 after the cross-process lock is taken, so two concurrent launches cannot spend
-the same single-use refresh token and leave you signed out. A provider that
-rotates its refresh token but does not return a new one is treated as a failure
+the same single-use refresh token and leave you signed out. Once refresh work
+starts, it owns the exchange, both locks and persistence independently of the
+request waiting for it: cancelling that wait does not abandon an issued rotated
+token. This does not promise recovery from process termination, runtime shutdown
+or an indeterminate provider response. A provider that rotates its refresh token
+but does not return a new one is treated as a failure
 and the existing credential is left untouched, because that provider has already
 revoked it.
 

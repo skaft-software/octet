@@ -278,7 +278,7 @@ impl TerminalGateContext<'_> {
                         || self.max_session_cost_microdollars.is_some(),
                     exposure: request_uncertainty_bound(
                         self.model,
-                        input_tokens,
+                        None,
                         reserved_output_tokens,
                         None,
                         request.cache_retention,

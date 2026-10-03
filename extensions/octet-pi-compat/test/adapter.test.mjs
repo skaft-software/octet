@@ -159,7 +159,7 @@ test('remote overlay composition has real focus, hide/unfocus and component iden
 
 test('production imports and pinned dependency graph never include the Pi coding-agent runtime', async () => {
   const lock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
-  assert.deepEqual(Object.keys(lock.packages).sort(), ['', 'node_modules/@earendil-works/pi-tui', 'node_modules/@sinclair/typebox', 'node_modules/get-east-asian-width', 'node_modules/jiti', 'node_modules/marked'].sort());
+  assert.deepEqual(Object.keys(lock.packages).sort(), ['', 'node_modules/@earendil-works/pi-tui', 'node_modules/@sinclair/typebox', 'node_modules/get-east-asian-width', 'node_modules/jiti', 'node_modules/marked', 'node_modules/typebox'].sort());
   for (const dir of ['lib', 'shims']) for (const file of await readdir(join(root, dir))) {
     if (!file.endsWith('.mjs')) continue;
     const code = await readFile(join(root, dir, file), 'utf8');

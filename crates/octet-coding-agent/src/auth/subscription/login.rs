@@ -8,8 +8,10 @@
 //! terminal itself. A secret is never echoed back and no provider response text
 //! is quoted to the user.
 
-use std::io::{BufRead as _, Read as _};
+use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -77,7 +79,94 @@ pub(crate) fn open_browser(url: &str) {
     } else {
         "xdg-open"
     };
-    let _ = std::process::Command::new(opener).arg(url).spawn();
+    let _ = spawn_browser(
+        std::process::Command::new(opener)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+}
+
+const MAX_BROWSER_OPENERS: usize = 2;
+const BROWSER_OPENER_TIMEOUT: Duration = Duration::from_secs(5);
+static ACTIVE_BROWSER_OPENERS: AtomicUsize = AtomicUsize::new(0);
+
+fn spawn_browser(command: &mut std::process::Command) -> bool {
+    spawn_browser_with(command, BROWSER_OPENER_TIMEOUT, MAX_BROWSER_OPENERS)
+}
+
+fn spawn_browser_with(
+    command: &mut std::process::Command,
+    timeout: Duration,
+    limit: usize,
+) -> bool {
+    if !reserve_browser_opener(limit) {
+        return false;
+    }
+    let (send_child, receive_child) = std::sync::mpsc::sync_channel(1);
+    if std::thread::Builder::new()
+        .name("octet-browser-opener".to_owned())
+        .spawn(move || {
+            if let Ok(Some(mut child)) = receive_child.recv() {
+                supervise_browser_opener(&mut child, timeout);
+            } else {
+                ACTIVE_BROWSER_OPENERS.fetch_sub(1, Ordering::AcqRel);
+            }
+        })
+        .is_err()
+    {
+        ACTIVE_BROWSER_OPENERS.fetch_sub(1, Ordering::AcqRel);
+        return false;
+    }
+    // The owner exists before any child can be spawned, so every successful
+    // spawn has an owner even if subsequent local work is cancelled.
+    match command.spawn() {
+        Ok(child) => {
+            let _ = send_child.send(Some(child));
+            true
+        }
+        Err(_) => {
+            let _ = send_child.send(None);
+            false
+        }
+    }
+}
+
+fn reserve_browser_opener(limit: usize) -> bool {
+    let mut active = ACTIVE_BROWSER_OPENERS.load(Ordering::Acquire);
+    loop {
+        if active >= limit {
+            return false;
+        }
+        match ACTIVE_BROWSER_OPENERS.compare_exchange_weak(
+            active,
+            active + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(current) => active = current,
+        }
+    }
+}
+
+fn supervise_browser_opener(child: &mut Child, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+        }
+    }
+    ACTIVE_BROWSER_OPENERS.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// Prompt for the authorization code a user pasted back from the browser.
@@ -85,16 +174,15 @@ pub(crate) fn open_browser(url: &str) {
 /// Reads a single line from stdin, bounded so a pasted redirect URL or an
 /// oversized paste cannot grow without limit, and refuses control characters so
 /// a crafted paste cannot rewrite the terminal.
-pub(crate) fn read_pasted_redirect(prompt: &str, expected_state: &str) -> Result<(String, String)> {
+pub(crate) async fn read_pasted_redirect(
+    prompt: &str,
+    expected_state: &str,
+) -> Result<(String, String)> {
     crate::output::stdout_multiline(prompt.to_owned());
-    let mut line = String::new();
-    // `BufRead::take` caps how much of stdin is consumed, so a runaway paste
-    // cannot grow `line` without limit.
-    let mut limited = std::io::stdin().lock().take(MAX_PASTE_BYTES);
-    let read = limited
-        .read_line(&mut line)
+    let line = pasted_input::read_line(MAX_PASTE_BYTES as usize)
+        .await
         .context("reading the pasted authorization redirect failed")?;
-    if read == 0 {
+    if line.is_empty() {
         bail!("no authorization redirect was pasted; sign in again");
     }
     if line.len() as u64 >= MAX_PASTE_BYTES && !line.ends_with('\n') {
@@ -115,6 +203,8 @@ pub(crate) fn read_pasted_redirect(prompt: &str, expected_state: &str) -> Result
 
 /// Longest single-line paste octet accepts for a browser redirect.
 const MAX_PASTE_BYTES: u64 = 16 * 1024;
+
+mod pasted_input;
 
 #[cfg(test)]
 mod tests {
@@ -188,6 +278,68 @@ mod tests {
             "Stub Provider",
         );
         (Arc::new(StubFlow { outcome }), store, guard)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_browser_opener_is_killed_reaped_and_admission_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let mut command = std::process::Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf '%s' \"$$\" > \"$1\"; exec sleep 30",
+                "fixture-opener",
+            ])
+            .arg(&pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        assert!(spawn_browser_with(
+            &mut command,
+            Duration::from_millis(150),
+            1
+        ));
+        assert!(!spawn_browser_with(
+            std::process::Command::new("sh").arg("-c").arg("exit 0"),
+            Duration::from_millis(150),
+            1
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let pid = loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = pid.parse::<libc::pid_t>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            loop {
+                // SAFETY: signal zero only inspects process existence. Zombies
+                // still exist, so ESRCH proves the owner reaped the opener.
+                if unsafe { libc::kill(pid, 0) } < 0 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::ESRCH)
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while ACTIVE_BROWSER_OPENERS.load(Ordering::Acquire) != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!spawn_browser(&mut std::process::Command::new(
+            directory.path().join("missing-opener")
+        )));
     }
 
     #[tokio::test]

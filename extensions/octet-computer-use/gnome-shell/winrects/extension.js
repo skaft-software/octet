@@ -11,6 +11,7 @@ Gio._promisify(Shell.Screenshot.prototype, 'screenshot');
 
 const IFACE = `<node><interface name="org.cua.WinRects">
 <method name="GetVersion"><arg type="u" direction="out" name="version"/></method>
+<method name="GetThemeColor"><arg type="s" direction="out" name="fill_color"/></method>
 <method name="GetRects"><arg type="s" direction="out" name="json"/></method>
 <method name="Capture"><arg type="s" direction="out" name="png_base64"/></method>
 <method name="Activate"><arg type="u" direction="in" name="id"/><arg type="b" direction="out" name="activated"/></method>
@@ -854,6 +855,9 @@ export default class WinRectsExtension extends Extension {
   }
   GetVersion() {
     return 8;
+  }
+  GetThemeColor() {
+    return this._themeColor ?? '';
   }
   GetRects() {
     const actors = global.get_window_actors();

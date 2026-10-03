@@ -202,6 +202,28 @@ pub fn validate_tool_arguments(
     json_repair::validate_tool_arguments(tool_name, arguments, tools)
 }
 
+/// Validates an effective canonical request without transforming or repairing it.
+///
+/// Hosts preparing context projections use this before exposing a replacement
+/// to another hook. This performs no credential resolution or provider I/O;
+/// codec-specific encoding checks still run at ordinary dispatch.
+pub fn validate_provider_request(
+    model: &Model,
+    request: &Request,
+) -> Result<Vec<Diagnostic>, AiError> {
+    let mut capabilities = model.spec.capabilities.clone();
+    capabilities.responses_features = model.responses_features();
+    json_repair::validate_tool_definitions(&request.tools)?;
+    validate::validate_request(
+        request,
+        &capabilities,
+        &model.spec.limits,
+        model.spec.protocol,
+        &model.spec.id,
+        CompatibilityMode::Strict,
+    )
+}
+
 /// Strictness for cross-protocol / capability degradation.
 ///
 /// Before either mode is validated, [`transform_messages`] derives a

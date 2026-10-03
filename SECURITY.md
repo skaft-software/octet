@@ -10,10 +10,10 @@ privately through the GitHub organization.
 
 ## Supported versions
 
-octet is pre-1.0 software. This checkout has distribution version 0.8.0. The
-[release record](docs/releases/v0.8.0.md) has the publication and public-install
-evidence. Reports against a published release or the current source are welcome.
-Include the version and commit, because behavior may change.
+octet is pre-1.0 software. Report issues against a published release or the
+current source; include the version and commit, because behavior may change.
+Candidate builds are not published releases. See the versioned release record
+for availability and qualification status.
 
 ## Permissions
 

@@ -36,9 +36,15 @@ proof: some follow-up implementations were carried by patches/cherry-picks.
 Integration repaired split-module ports, initializers, metrics labels in native
 completion UI, executable launcher mode, public/embedded notes and documentation
 inventory/installer whitelist. The missing historical wire-plan link was removed
-rather than inventing or importing an unrelated plan. All four models.dev
-projections/receipt were refreshed together and their live freshness gate passed.
-Sixteen test-module CRLF files were normalized to pass the whitespace gate.
+rather than inventing or importing an unrelated plan. The 0.8.2 candidate's
+current models.dev receipt is
+`25c0f9abe330fff43d8829e8dc9dd1fc352692908680b7b0c335996059c99b00`; its
+verification manifest reports the live freshness gate passing on source tree
+`a78080e39d6e17a68afd879cff43850f33ed15b5`. The named log is not bundled in this
+checkout, so that pass is inherited manifest evidence rather than independently
+inspectable output here. The older detailed pricing/capability review in
+`crates/octet-ai/models/SOURCES.md` refers to the prior `404d33...` snapshot,
+not these newer projections. Sixteen test-module CRLF files were normalized to pass the whitespace gate.
 Two moved raw-string Python fixtures were restored exactly from #500 after the
 first test run revealed lost indentation; API lifecycle assertion wording now
 matches the combined 0.3/0.4 guard. These are test repairs, not suppressed errors.
@@ -51,7 +57,7 @@ matches the combined 0.3/0.4 guard. These are test repairs, not suppressed error
 | Isolated-HOME binary version/help and protocol-1 host hello | PASS — `native-smoke.exit`, `host-hello.log`; no provider calls |
 | Workspace/all-target/all-feature compile | PASS — `workspace-check.log` |
 | Format and release whitespace gate | PASS — `fmt-final.log`, `diff-check-final.log` |
-| Live models.dev freshness | PASS — `metadata-freshness-final.log`; unverified DeepSeek schedule pricing intentionally omitted |
+| Live models.dev freshness | Reported PASS — `verification-results.json` records source tree `a78080e...` and log SHA; named log is not bundled in this checkout. Verify again on the final integrated source. |
 | Packaged docs/inventory/link/negative-boundary tests | PASS — 391 public files, 57 extra references; `packaged-docs-final.log` |
 | Release shell syntax | PASS — `release-syntax.exit` |
 | Binary installer fixtures | PASS — `binary-installer-final.log`; synthetic signed assets, not public RC installation |

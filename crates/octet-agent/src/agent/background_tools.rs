@@ -40,6 +40,13 @@ impl BackgroundTools {
         self.jobs.is_empty()
     }
 
+    /// Only the next original-order result can cross a request boundary.
+    pub(super) fn front_ready(&self) -> bool {
+        self.jobs.front().is_some_and(|job| {
+            job.completed.is_some() || job.task.as_ref().is_some_and(|task| task.is_finished())
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn start(
         &mut self,

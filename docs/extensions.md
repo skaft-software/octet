@@ -42,6 +42,10 @@ shape). The rules are under [CLI flags](#api-04-cli-flags).
 
 ## Bounded authoring path
 
+Start with the [build, install and maintenance quickstart](extensions/QUICKSTART.md)
+for single-file Python/JS/TS tools, narrow Rust/C/C++ helpers, reviewed local
+packages, explicit activation, lifecycle tests and whole-closure upgrades.
+
 Use the [Python API `0.4` process
 recipe](../sdk/python/README.md#minimal-api-04-tool) for a local tool. The SDK
 handles framing, negotiated scheduling, cancellation and shutdown, so implement

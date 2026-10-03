@@ -106,6 +106,50 @@ async fn an_unknown_provider_lists_the_supported_ones() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn openrouter_always_prints_recovery_url_without_a_browser_or_pasted_code() {
+    for headless in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let empty_path = home.join("no-browser-executables");
+        std::fs::create_dir(&empty_path).unwrap();
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_octet"));
+        command.args(["--login", "openrouter"]);
+        if headless {
+            command.arg("--headless");
+        }
+        // There is no provider I/O before a pasted code. Empty stdin stops the
+        // flow; an empty PATH prevents any real browser/desktop action.
+        let output = tokio::time::timeout(
+            Duration::from_secs(20),
+            command
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", &empty_path)
+                .current_dir(&home)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("Open this URL to authorize:"), "{stdout}");
+        assert!(stdout.contains("https://openrouter.ai/auth?"), "{stdout}");
+        assert!(stdout.contains("code_challenge_method=S256"), "{stdout}");
+        assert!(
+            stdout.find("https://openrouter.ai/auth?").unwrap()
+                < stdout.find("Paste redirect URL:").unwrap()
+        );
+        assert!(!home.join(".octet/credentials/openrouter.json").exists());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("no authorization redirect was pasted"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn logout_removes_only_the_selected_credential() {
     for selector in advertised_logins() {
         let temp = tempfile::tempdir().unwrap();

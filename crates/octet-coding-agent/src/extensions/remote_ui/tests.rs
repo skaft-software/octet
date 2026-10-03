@@ -147,6 +147,8 @@ struct Frontend {
     shell: InteractiveShell,
     events: VecDeque<Event>,
     frames: Vec<Vec<String>>,
+    fullscreen_before: bool,
+    fullscreen_admitted: bool,
 }
 
 impl Frontend {
@@ -156,16 +158,22 @@ impl Frontend {
         let (mut shell, _) =
             crate::tui::view::tests::emulated_shell(crate::tui::theme::test_theme(), 120, 40);
         shell.prefill_editor("untouched draft".into());
+        let fullscreen_before = shell.has_remote_fullscreen_mount();
         Self {
             shell,
             events: events.into_iter().collect(),
             frames: Vec::new(),
+            fullscreen_before,
+            fullscreen_admitted: false,
         }
     }
 }
 
 impl ExtensionConfirmationHandler for Frontend {
     fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
+        if !self.fullscreen_before && self.shell.has_remote_fullscreen_mount() {
+            self.fullscreen_admitted = true;
+        }
         Some(&mut self.shell)
     }
 
@@ -188,7 +196,27 @@ impl ExtensionConfirmationHandler for Frontend {
     }
 
     fn command_event(&mut self, event: Event) -> bool {
-        panic!("focused component input leaked into host command handling: {event:?}")
+        if matches!(event, Event::Key(key)
+            if key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat))
+        {
+            true
+        } else {
+            panic!("focused component input leaked into host command handling: {event:?}")
+        }
+    }
+
+    fn command_cancellation_event(&mut self, event: &Event) -> bool {
+        matches!(event, Event::Key(key)
+            if key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat))
+    }
+
+    fn should_yield_to_fullscreen(&self) -> bool {
+        self.fullscreen_admitted
+            || (!self.fullscreen_before && self.shell.has_remote_fullscreen_mount())
     }
 
     fn confirm<'a>(
@@ -328,6 +356,98 @@ async fn remote_ui_command_services_live_frames_keys_and_mouse_until_close() {
         !messages.iter().any(|m| m["method"] == "ui/closed"),
         "extension close uses its normal acknowledgement"
     );
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn attended_menu_command_lends_shell_and_yields_to_fullscreen_then_restores_native_shell() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, log) = fixture(&temp).await;
+    let mut frontend = Frontend::new([key(
+        KeyCode::Char('q'),
+        KeyEventKind::Press,
+        KeyModifiers::NONE,
+    )]);
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        extensions.execute_menu_action_with_confirmation(
+            "remote-ui-fixture",
+            "Launch game",
+            "Options",
+            "mount",
+            vec!["fullscreen".into(), "hold".into()],
+            false,
+            &mut frontend,
+        ),
+    )
+    .await
+    .expect("menu command services same-shell remote UI")
+    .unwrap();
+    assert!(output.trim().is_empty());
+    assert!(frontend.should_yield_to_fullscreen());
+    assert!(extensions.remote_ui.is_empty());
+    assert!(frontend
+        .frames
+        .iter()
+        .any(|frame| frame.iter().any(|line| line.contains("REMOTE FRAME"))));
+    assert!(!frontend.shell.has_overlay());
+    assert_eq!(
+        frontend.shell.extension_editor_snapshot().text,
+        "untouched draft"
+    );
+    let native_frame = frontend.shell.dump_rendered_frame().await.unwrap();
+    assert!(!native_frame
+        .iter()
+        .any(|line| line.contains("REMOTE FRAME")));
+    assert!(native_frame
+        .iter()
+        .any(|line| line.contains("untouched draft")));
+    let messages = wire(&log);
+    assert!(messages
+        .iter()
+        .any(|message| message["method"] == "ui/key" && message["params"]["key"] == "q"));
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_attended_menu_command_restores_native_shell_and_draft() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = fixture(&temp).await;
+    let mut frontend = Frontend::new([key(
+        KeyCode::Char('c'),
+        KeyEventKind::Press,
+        KeyModifiers::CONTROL,
+    )]);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        extensions.execute_menu_action_with_confirmation(
+            "remote-ui-fixture",
+            "Launch game",
+            "Options",
+            "mount",
+            vec!["fullscreen".into(), "hold".into()],
+            false,
+            &mut frontend,
+        ),
+    )
+    .await
+    .expect("cancel reaches the attended command")
+    .unwrap_err();
+    assert!(result.to_string().contains("cancelled"), "{result:#}");
+    extensions.drain_events_for_shell(&mut frontend.shell);
+    assert!(extensions.remote_ui.is_empty());
+    assert!(!frontend.shell.has_overlay());
+    assert_eq!(
+        frontend.shell.extension_editor_snapshot().text,
+        "untouched draft"
+    );
+    let native_frame = frontend.shell.dump_rendered_frame().await.unwrap();
+    assert!(!native_frame
+        .iter()
+        .any(|line| line.contains("REMOTE FRAME")));
+    assert!(native_frame
+        .iter()
+        .any(|line| line.contains("untouched draft")));
     extensions.shutdown().await;
 }
 

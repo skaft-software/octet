@@ -537,13 +537,9 @@ impl Agent {
         }
     }
 
-    /// One sticky exposure record for an accepted deferred attempt whose usage
-    /// cannot be known. Never invents usage or cost, and never clears earlier
-    /// exposure.
+    /// Each accepted deferred attempt has independent unknown exposure. An
+    /// earlier (possibly bounded) record is not authority to suppress this one.
     pub(super) fn record_deferred_exposure(&mut self) -> Result<(), AgentError> {
-        if self.session.has_uncertain_usage() {
-            return Ok(());
-        }
         self.session.record_usage_uncertainty(
             self.model.endpoint.id.clone(),
             self.model.spec.id.clone(),

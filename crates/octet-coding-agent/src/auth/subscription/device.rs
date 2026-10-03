@@ -50,13 +50,24 @@ where
     Poll: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<PollOutcome<T>>>,
 {
-    let deadline = expires_in_seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let now = Instant::now();
+    let deadline = expires_in_seconds
+        .map(|seconds| {
+            now.checked_add(Duration::from_secs(seconds))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{provider_label} returned an invalid device-code lifetime")
+                })
+        })
+        .transpose()?;
     let mut interval = interval_seconds
         .map(Duration::from_secs)
         .filter(|interval| *interval >= MINIMUM_INTERVAL)
         .unwrap_or(DEFAULT_INTERVAL);
     let mut slow_down_responses = 0_u64;
 
+    if now.checked_add(interval).is_none() {
+        bail!("{provider_label} returned an invalid device-code interval");
+    }
     if wait_before_first_poll {
         sleep_capped(interval, deadline).await;
     }
@@ -69,14 +80,17 @@ where
             PollOutcome::Pending => {}
             PollOutcome::SlowDown { interval_seconds } => {
                 slow_down_responses += 1;
-                // Prefer the server's own minimum when it sends one; trusting
-                // only a client-tracked value risks polling early forever under
-                // a drifting clock.
-                interval = interval_seconds
-                    .map(Duration::from_secs)
-                    .filter(|interval| *interval >= MINIMUM_INTERVAL)
-                    .unwrap_or_else(|| interval.saturating_add(SLOW_DOWN_INCREMENT));
+                // RFC 8628 requires an increment on every slow_down, even
+                // when the server supplies a smaller (or unchanged) minimum.
+                interval = interval.saturating_add(SLOW_DOWN_INCREMENT).max(
+                    interval_seconds
+                        .map(Duration::from_secs)
+                        .unwrap_or_default(),
+                );
             }
+        }
+        if Instant::now().checked_add(interval).is_none() {
+            bail!("{provider_label} returned an invalid device-code interval");
         }
         sleep_capped(interval, deadline).await;
     }
@@ -97,6 +111,8 @@ async fn sleep_capped(interval: Duration, deadline: Option<Instant>) {
         None => interval,
     };
     if !sleep_for.is_zero() {
+        // Reject unrepresentable server cadences instead of panicking inside
+        // Tokio's timer constructor. The caller validates the same boundary.
         tokio::time::sleep(sleep_for).await;
     }
 }
@@ -141,7 +157,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_server_supplied_interval_wins_over_the_local_increment() {
+    async fn a_smaller_server_supplied_interval_cannot_reduce_the_rfc_increment() {
+        let started = Instant::now();
         let polls = Arc::new(AtomicU64::new(0));
         let counter = Arc::clone(&polls);
         let outcome =
@@ -159,6 +176,20 @@ mod tests {
             })
             .await;
         assert_eq!(outcome.unwrap(), 1);
+        assert_eq!(Instant::now() - started, Duration::from_secs(605));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_server_times_fail_without_polling_or_panicking() {
+        for (interval, expiry) in [(Some(1), Some(u64::MAX)), (Some(u64::MAX), None)] {
+            let error =
+                poll_device_authorization::<(), _, _>("test", interval, expiry, false, || async {
+                    panic!("an invalid time must be rejected before polling")
+                })
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("invalid device-code"));
+        }
     }
 
     #[tokio::test(start_paused = true)]

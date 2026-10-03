@@ -81,22 +81,12 @@ const APPEND_ACCESS: u32 = FILE_READ_DATA
     | FILE_WRITE_ATTRIBUTES
     | READ_CONTROL
     | SYNCHRONIZE;
-// A pinned replacement target is opened with DELETE (so this handle can
-// rename it) while denying delete sharing: no other opener can rename,
-// delete, or replace the verified object while it is held. Write sharing
-// is allowed so a file octet itself holds open (session and journal
-// descriptors, which share everything) or that a cooperative holder
-// keeps open (editors, `tempfile` handles) does not make every
-// replacement fail with a sharing violation. The residual race is the
-// same as the Unix one: bytes written through such a handle after the
-// check below lose to the staged replacement. The hard guarantees are
-// unaffected: the pin still verifies identity and bytes, no step
-// overwrites a name it did not vacate itself, and a name recreated in
-// the displacement window still wins with the original kept under
-// `.octet-old-*`. Holders that do not share delete access still report
-// the file as in use.
+// A pin denies both write and delete sharing. Existing writable handles,
+// even cooperative ones, must close before replacement: otherwise they could
+// write after the final comparison and silently lose their update. The pin
+// retains the verified object through displacement and publication.
 const PIN_ACCESS: u32 = FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE | SYNCHRONIZE;
-const PIN_SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+const PIN_SHARE: u32 = FILE_SHARE_READ;
 // Scanners and sync clients briefly hold files open; retry a pin that
 // meets one for up to about 200 ms before reporting the file as in use.
 const PIN_SHARING_ATTEMPTS: u32 = 10;

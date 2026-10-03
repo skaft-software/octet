@@ -687,7 +687,7 @@ fn fetch_provider_inventory(
 ) -> anyhow::Result<ProviderInventoryResponse> {
     let response = blocking_discovery_client(DISCOVERY_TIMEOUT)?
         .get(inventory_url)
-        .headers(headers)
+        .headers(headers.clone())
         .send()
         .map_err(|_| anyhow::anyhow!("model discovery request failed"))?;
     let etag = inventory_etag(
@@ -707,7 +707,7 @@ fn fetch_provider_inventory(
             let _ = response
                 .take(MAX_REJECTION_BODY_BYTES as u64)
                 .read_to_end(&mut body);
-            anyhow::bail!("{}", discovery_rejection(status, &body))
+            anyhow::bail!("{}", discovery_rejection(status, &body, &headers))
         }
     }
 }
@@ -722,19 +722,51 @@ const MAX_REJECTION_DETAIL_CHARS: usize = 240;
 /// `anthropic-workspace-id` says so instead of a bare "rejected". Only a JSON
 /// message field is repeated, never a raw body, and it is bounded, stripped of
 /// control characters and masked for credential-shaped tokens.
-fn discovery_rejection(status: http::StatusCode, body: &[u8]) -> String {
+fn discovery_rejection(status: http::StatusCode, body: &[u8], headers: &http::HeaderMap) -> String {
     let summary = format!("model discovery request was rejected (HTTP {status})");
-    match rejection_detail(body) {
+    match rejection_detail(body, headers) {
         Some(detail) => format!("{summary}: {detail}"),
         None => summary,
     }
 }
 
-fn rejection_detail(body: &[u8]) -> Option<String> {
+fn rejection_detail(body: &[u8], headers: &http::HeaderMap) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let message = ["/error/message", "/message", "/detail", "/error"]
         .into_iter()
         .find_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))?;
+    // Redact exact supplied values before heuristics, normalization or
+    // truncation. Credentials need not look like sk-* or contain digits.
+    // Custom header names do not reliably identify their values as secrets.
+    let mut supplied = Vec::new();
+    for value in headers.values() {
+        // HeaderValue permits opaque bytes that aren't UTF-8. If a supplied
+        // value cannot be matched against the JSON string, don't echo any
+        // provider-controlled detail that might reflect it.
+        let Ok(value) = std::str::from_utf8(value.as_bytes()) else {
+            return None;
+        };
+        if !value.is_empty() {
+            supplied.push(value);
+        }
+    }
+    if let Some(value) = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+    {
+        if let Some((_, token)) = value.split_once(' ') {
+            if !token.is_empty() {
+                supplied.push(token);
+            }
+        }
+    }
+    let mut supplied = supplied;
+    supplied.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    supplied.dedup();
+    let mut message = message.to_owned();
+    for secret in supplied {
+        message = message.replace(secret, "[redacted]");
+    }
     let words = message
         .split(|character: char| character.is_whitespace() || character.is_control())
         .filter(|word| !word.is_empty())

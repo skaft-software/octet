@@ -92,6 +92,7 @@ pub mod input;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod session;
+pub mod session_leaf;
 mod session_writer;
 mod shell_safety;
 /// The generic skill substrate containing descriptors, load errors, trust levels, and the registry trait.
@@ -151,9 +152,11 @@ pub use extension::{
     AssistantPersistenceContext, CompactionStrategy, EventObserver, Extension, ExtensionHost,
     PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
     PostMutationDisposition, PostMutationKind, PostMutationRescan, PostMutationState,
-    ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, ToolCallHook,
-    MAX_POST_MUTATION_AFFECTED_RESOURCES, MAX_POST_MUTATION_ID_BYTES,
-    MAX_POST_MUTATION_RESOURCE_ID_BYTES, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+    ProviderContextHook, ProviderContextProjection, ProviderContextProjectionContext,
+    ProviderContextSessionWait, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
+    ProviderRetryKind, ToolCallHook, MAX_POST_MUTATION_AFFECTED_RESOURCES,
+    MAX_POST_MUTATION_ID_BYTES, MAX_POST_MUTATION_RESOURCE_ID_BYTES,
+    MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
 };
 pub use extension_menu::{
     ExtensionMenu, ExtensionMenuItem, MAX_EXTENSION_MENU_ARGUMENTS,

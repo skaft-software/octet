@@ -100,6 +100,7 @@ mod error;
 mod images;
 mod live_output;
 mod parallel_reads;
+mod provider_context;
 mod recovery;
 mod run_handle;
 mod terminal_gate;
@@ -129,6 +130,7 @@ use self::images::*;
 pub use self::live_output::PartialOutputCheckpointStats;
 use self::live_output::*;
 use self::parallel_reads::*;
+use self::provider_context::*;
 use self::recovery::*;
 pub use self::run_handle::RequestContextEstimate;
 pub use self::run_handle::Run;
@@ -564,8 +566,6 @@ impl PreparedTurn {
         self.durable_head == session.head()
             && self.active_system == active_system
             && self.tool_generation == tool_generation
-            && self.request.system.as_deref()
-                == (!active_system.is_empty()).then_some(active_system)
     }
 }
 
@@ -688,7 +688,16 @@ impl Agent {
         {
             return Ok(None);
         }
-        if self.session.has_unsettled_native_steering() {
+        // Optional setup has neither independently reserved exposure nor the
+        // dedicated native-steering connection's failure isolation.
+        if self.session.has_unsettled_native_steering()
+            || self.max_session_tokens.is_some()
+            || self.max_session_cost_microdollars.is_some()
+            || self.model.responses_features().steering
+            // This synchronous optional setup cannot await context preparation.
+            // Real inference and its exact cache refresh remain hook-driven.
+            || !self.extensions.provider_context_hooks.is_empty()
+        {
             return Ok(None);
         }
         let system = self.model_visible_system(true);

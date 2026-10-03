@@ -226,6 +226,16 @@ impl Extension for ExtensionProcess {
         self.register_dynamic_tool_catalog(host);
         host.observe(self.clone());
         if self.api_version() == EXTENSION_API_VERSION_0_4
+            && self.supports_feature(EXTENSION_FEATURE_SESSION_ENTRIES)
+            && self
+                .inner
+                .contributions
+                .hooks
+                .contains(&ExtensionHook::ProviderContext)
+        {
+            host.provider_context_hook(self.clone());
+        }
+        if self.api_version() == EXTENSION_API_VERSION_0_4
             && self.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY)
             && self
                 .inner

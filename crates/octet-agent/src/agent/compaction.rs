@@ -72,6 +72,7 @@ pub(super) struct CapacityEstimate {
     pub(super) input_tokens: u64,
     pub(super) max_output_tokens: u64,
     pub(super) active_system: String,
+    pub(super) effective_request: Option<Request>,
 }
 
 /// Total-only context accounting used by the pre-request capacity gate.
@@ -399,7 +400,7 @@ impl CompactionContext<'_> {
                     || self.max_session_cost_microdollars.is_some(),
                 exposure: request_uncertainty_bound(
                     self.compaction_model,
-                    input_tokens,
+                    None,
                     reserved_output_tokens,
                     None,
                     request.cache_retention,
@@ -973,6 +974,7 @@ impl CompactionContext<'_> {
         tools: &[ToolDef],
         compaction_reserve_tokens: u64,
         provider_output_ceiling: u64,
+        preparation: Option<&ProviderContextPreparation<'_>>,
     ) -> Result<CapacityEstimate, AgentError> {
         if !self
             .model
@@ -988,32 +990,76 @@ impl CompactionContext<'_> {
         let context_window = self.model.spec.limits.context_window;
         let budget = context_window.saturating_sub(compaction_reserve_tokens);
         let threshold = ((context_window as f64) * self.threshold_fraction).floor() as u64;
-        let resolve = |input_tokens, active_system| CapacityEstimate {
-            input_tokens,
-            max_output_tokens: resolve_request_max_output_tokens(
+        let resolve = |input_tokens, active_system, mut effective_request: Option<Request>| {
+            let max_output_tokens = resolve_request_max_output_tokens(
                 context_window,
                 input_tokens,
                 provider_output_ceiling,
-            ),
-            active_system,
+            );
+            if let Some(request) = effective_request.as_mut() {
+                request.max_output_tokens = Some(max_output_tokens);
+            }
+            CapacityEstimate {
+                input_tokens,
+                max_output_tokens,
+                active_system,
+                effective_request,
+            }
         };
         let mut native_attempted = false;
         loop {
             let active_system = system.to_owned();
-            let estimate = self
-                .capacity
-                .estimate(
-                    self.session,
-                    self.model,
-                    &active_system,
-                    tools,
-                    self.tool_generation,
-                )?
-                .input_tokens;
+            // Hook preparation precedes every estimate, including after a
+            // compaction changes the durable head. The cache's canonical prefix
+            // must never size a projected request.
+            let effective_request = match preparation {
+                Some(preparation) => {
+                    let request = self.canonical_provider_request(
+                        &active_system,
+                        tools,
+                        provider_output_ceiling,
+                        preparation,
+                    )?;
+                    let context = crate::extension::ProviderContextProjectionContext {
+                        resource_owner: self.resource_owner.to_owned(),
+                        session_id: self.session_id.to_owned(),
+                        head: self.session.head(),
+                        tool_generation: self.tool_generation,
+                    };
+                    // The hook future owns its effective snapshot, independent
+                    // of Session. This owning driver services private append
+                    // leaves while it waits, then freezes against the post-hook
+                    // head without rerunning a mutating hook after its append.
+                    let projection = project_provider_context(
+                        request,
+                        preparation.hooks,
+                        &context,
+                        self.model,
+                        self.abort,
+                        self.session,
+                    );
+                    Some(Box::pin(projection).await?)
+                }
+                None => None,
+            };
+            let estimate = match effective_request.as_ref() {
+                Some(request) => effective_request_estimate(request),
+                None => {
+                    self.capacity
+                        .estimate(
+                            self.session,
+                            self.model,
+                            &active_system,
+                            tools,
+                            self.tool_generation,
+                        )?
+                        .input_tokens
+                }
+            };
             let over_capacity = estimate > budget;
             let over_threshold = estimate.saturating_add(compaction_reserve_tokens) > threshold;
             if !over_capacity && (self.mode == AgentCompactionMode::Disabled || !over_threshold) {
-                return Ok(resolve(estimate, active_system));
+                return Ok(resolve(estimate, active_system, effective_request));
             }
             if self.mode == AgentCompactionMode::Disabled {
                 return Err(AgentError::ContextExceeded { estimate, budget });
@@ -1031,7 +1077,7 @@ impl CompactionContext<'_> {
                     if over_capacity {
                         return Err(AgentError::ContextExceeded { estimate, budget });
                     }
-                    return Ok(resolve(estimate, active_system));
+                    return Ok(resolve(estimate, active_system, effective_request));
                 }
                 self.compact_native_responses(&active_system, tools, reason)
                     .await?;
@@ -1050,7 +1096,7 @@ impl CompactionContext<'_> {
                 continue;
             }
             if estimate <= budget {
-                return Ok(resolve(estimate, active_system));
+                return Ok(resolve(estimate, active_system, effective_request));
             }
             return Err(AgentError::ContextExceeded { estimate, budget });
         }

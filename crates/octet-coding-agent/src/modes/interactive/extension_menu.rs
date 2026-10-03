@@ -4,6 +4,7 @@
 //! shows live progress and the extension's confirm and input dialogs.
 
 use super::*;
+use crate::extensions::ExtensionConfirmationHandler;
 
 /// Most recent progress lines kept in the running-action view.
 const ACTION_LOG_LINES: usize = 12;
@@ -20,6 +21,8 @@ struct ExtensionActionConsole<'a> {
     lines: Vec<String>,
     open: bool,
     frame: usize,
+    fullscreen_before: bool,
+    fullscreen_admitted: bool,
 }
 
 impl<'a> ExtensionActionConsole<'a> {
@@ -29,6 +32,7 @@ impl<'a> ExtensionActionConsole<'a> {
         dialogs: &'a crate::extensions::ExtensionLifecycleSnapshot,
         title: String,
     ) -> Self {
+        let fullscreen_before = shell.has_remote_fullscreen_mount();
         Self {
             shell,
             input,
@@ -38,6 +42,14 @@ impl<'a> ExtensionActionConsole<'a> {
             lines: Vec::new(),
             open: false,
             frame: 0,
+            fullscreen_before,
+            fullscreen_admitted: false,
+        }
+    }
+
+    fn observe_fullscreen_mount(&mut self) {
+        if !self.fullscreen_before && self.shell.has_remote_fullscreen_mount() {
+            self.fullscreen_admitted = true;
         }
     }
 
@@ -62,6 +74,11 @@ impl<'a> ExtensionActionConsole<'a> {
     }
 
     fn show(&mut self) {
+        self.observe_fullscreen_mount();
+        if self.shell.has_remote_fullscreen_mount() {
+            self.close();
+            return;
+        }
         let text = crate::tui::view::sanitize_for_terminal(&self.document());
         if self.open {
             self.shell.update_read_only_document(text);
@@ -99,6 +116,56 @@ impl<'a> ExtensionActionConsole<'a> {
 }
 
 impl crate::extensions::ExtensionConfirmationHandler for ExtensionActionConsole<'_> {
+    fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
+        self.observe_fullscreen_mount();
+        Some(self.shell)
+    }
+
+    fn wait_for_command_event<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => Ok(None),
+                event = self.input.next() => match event {
+                    Some(Ok(event)) => Ok(Some(event)),
+                    Some(Err(error)) => Err(error.into()),
+                    None => Ok(None),
+                },
+            }
+        })
+    }
+
+    fn command_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Key(key) if keymap::is_close_key(&key) => {
+                self.shell.request_close();
+                true
+            }
+            Event::Key(key) if is_ctrl_c(&key) => true,
+            Event::Resize(columns, rows) => {
+                self.shell.set_size(columns, rows);
+                self.shell.render();
+                false
+            }
+            event => {
+                let _ = handle_cancellable_wait_input(self.shell, event);
+                self.shell.render();
+                false
+            }
+        }
+    }
+
+    fn command_cancellation_event(&mut self, event: &Event) -> bool {
+        matches!(event, Event::Key(key) if is_ctrl_c(key))
+    }
+
+    fn should_yield_to_fullscreen(&self) -> bool {
+        self.fullscreen_admitted
+            || (!self.fullscreen_before && self.shell.has_remote_fullscreen_mount())
+    }
+
     fn wait_for_cancel<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -208,9 +275,16 @@ impl crate::extensions::ExtensionConfirmationHandler for ExtensionActionConsole<
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ExtensionMenuOutcome {
     Back,
+    ReturnToIdle,
     Disable,
     GrantHostAuthority,
     RevokeHostAuthority,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtensionMenuActionDisposition {
+    Continue,
+    ReturnToIdle,
 }
 
 enum MenuEntry {
@@ -394,7 +468,7 @@ pub(super) async fn extension_options_menu(
             path.push(item.id);
             continue;
         }
-        run_extension_menu_action(
+        if run_extension_menu_action(
             app,
             shell,
             input,
@@ -403,7 +477,11 @@ pub(super) async fn extension_options_menu(
             &item,
             options.generated,
         )
-        .await?;
+        .await?
+            == ExtensionMenuActionDisposition::ReturnToIdle
+        {
+            return Ok(ExtensionMenuOutcome::ReturnToIdle);
+        }
         if shell.close_requested() {
             return Ok(ExtensionMenuOutcome::Back);
         }
@@ -453,9 +531,9 @@ async fn run_extension_menu_action(
     place: &str,
     item: &octet_agent::ExtensionMenuItem,
     generated: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExtensionMenuActionDisposition> {
     let Some(command) = item.command.clone() else {
-        return Ok(());
+        return Ok(ExtensionMenuActionDisposition::Continue);
     };
     let mut arguments = item.arguments.clone();
     if generated {
@@ -467,12 +545,12 @@ async fn run_extension_menu_action(
             secret: false,
         };
         let Some(text) = extension_input_picker(shell, input, &request).await? else {
-            return Ok(());
+            return Ok(ExtensionMenuActionDisposition::Continue);
         };
         arguments.extend(text.split_whitespace().map(str::to_owned));
     }
     let dialogs = app.executable_extensions.lifecycle_snapshot();
-    let result = {
+    let (result, ui_yield) = {
         let mut console = ExtensionActionConsole::new(shell, input, &dialogs, item.label.clone());
         let result = app
             .executable_extensions
@@ -486,10 +564,18 @@ async fn run_extension_menu_action(
                 &mut console,
             )
             .await;
+        let ui_yield = if console.should_yield_to_fullscreen() {
+            ExtensionMenuActionDisposition::ReturnToIdle
+        } else {
+            ExtensionMenuActionDisposition::Continue
+        };
         console.close();
-        result
+        (result, ui_yield)
     };
     request_extension_ui(shell, app);
+    if ui_yield == ExtensionMenuActionDisposition::ReturnToIdle {
+        return Ok(ui_yield);
+    }
     match result {
         Ok(output) if output.trim().is_empty() => {
             shell.notice(format!("{} finished", item.label));
@@ -497,7 +583,7 @@ async fn run_extension_menu_action(
         Ok(output) => read_only_document(shell, input, item.label.clone(), output).await?,
         Err(error) => shell.error(format!("{}: {error:#}", item.label)),
     }
-    Ok(())
+    Ok(ui_yield)
 }
 
 async fn confirm_host_authority(

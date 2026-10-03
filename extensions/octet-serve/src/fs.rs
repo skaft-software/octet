@@ -449,18 +449,39 @@ impl ProjectFileSystem {
         let deadline = std::time::Instant::now() + MAX_PROJECT_FILE_SEARCH_DURATION;
 
         'directories: while let Some((relative_directory, depth)) = stack.pop() {
+            if std::time::Instant::now() >= deadline {
+                truncated = true;
+                break;
+            }
             #[cfg(test)]
             FILE_SYSTEM_WORK.with(|work| work.borrow_mut().search_directories += 1);
             let directory = resolve_directory(&root, &relative_directory)?;
+            if std::time::Instant::now() >= deadline {
+                truncated = true;
+                break;
+            }
             let (entries, directory_truncated) =
-                bounded_directory_entries(&directory, &mut scanned_directory_entries)?;
+                bounded_directory_entries(&directory, &mut scanned_directory_entries, deadline)?;
             truncated |= directory_truncated;
             for name in entries {
+                if std::time::Instant::now() >= deadline {
+                    truncated = true;
+                    break 'directories;
+                }
                 let relative_path = relative_directory.join(&name);
                 let Some(display_path) = display_relative_path(&relative_path) else {
                     continue;
                 };
-                let Some((kind, metadata)) = open_entry_metadata(&directory, &name)? else {
+                if std::time::Instant::now() >= deadline {
+                    truncated = true;
+                    break 'directories;
+                }
+                let entry = open_entry_metadata(&directory, &name);
+                if std::time::Instant::now() >= deadline {
+                    truncated = true;
+                    break 'directories;
+                }
+                let Some((kind, metadata)) = entry? else {
                     continue;
                 };
                 if matches!(kind, ProjectFileEntryKind::Directory) {
@@ -877,9 +898,11 @@ fn tree_directory_names(
 fn bounded_directory_entries(
     directory: &OpenedDirectory,
     scanned_entries: &mut usize,
+    deadline: std::time::Instant,
 ) -> Result<(Vec<String>, bool), ProjectFileSystemError> {
-    let mut names = Vec::new();
-    let mut truncated = false;
+    if std::time::Instant::now() >= deadline {
+        return Ok((Vec::new(), true));
+    }
 
     #[cfg(unix)]
     let entries = rustix::fs::Dir::read_from(&directory.file)
@@ -898,7 +921,31 @@ fn bounded_directory_entries(
                 .map(|entry| entry.file_name().to_string_lossy().as_bytes().to_vec())
         });
 
-    for entry in entries {
+    bounded_directory_entry_names(entries, scanned_entries, deadline)
+}
+
+fn bounded_directory_entry_names(
+    mut entries: impl Iterator<Item = Result<Vec<u8>, ProjectFileSystemError>>,
+    scanned_entries: &mut usize,
+    deadline: std::time::Instant,
+) -> Result<(Vec<String>, bool), ProjectFileSystemError> {
+    let mut names = Vec::new();
+    let mut truncated = false;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            truncated = true;
+            break;
+        }
+        let Some(entry) = entries.next() else {
+            break;
+        };
+        // Advancing a filesystem iterator may itself take time. Do not retain or
+        // process the yielded entry if that wait consumed the search budget.
+        if std::time::Instant::now() >= deadline {
+            truncated = true;
+            break;
+        }
         let bytes = entry?;
         if bytes == b"." || bytes == b".." {
             continue;
@@ -918,6 +965,7 @@ fn bounded_directory_entries(
         }
     }
     names.sort();
+    truncated |= std::time::Instant::now() >= deadline;
     Ok((names, truncated))
 }
 
@@ -1755,5 +1803,33 @@ mod git_status_tests {
         );
         assert_eq!(entries.len(), MAX_PROJECT_FILE_TREE_ENTRIES);
         assert!(!truncated, "exactly the shared cap is not an overflow");
+    }
+}
+
+#[cfg(test)]
+mod search_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn expired_deadline_truncates_listing_without_consuming_or_counting_entries() {
+        let consumed = std::cell::Cell::new(0usize);
+        let entries = std::iter::from_fn(|| {
+            consumed.set(consumed.get() + 1);
+            Some(Ok(b"file.txt".to_vec()))
+        });
+        let mut scanned_entries = 7;
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+        let (names, truncated) =
+            bounded_directory_entry_names(entries, &mut scanned_entries, deadline).unwrap();
+
+        assert!(truncated);
+        assert!(names.is_empty());
+        assert_eq!(
+            consumed.get(),
+            0,
+            "expired searches must not advance the iterator"
+        );
+        assert_eq!(scanned_entries, 7, "expired entries are not counted");
     }
 }

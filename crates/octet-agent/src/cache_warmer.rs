@@ -551,6 +551,10 @@ impl CacheWarmer {
             match &mut self.work {
                 Work::Waiting => {
                     tokio::time::sleep_until(run.next_at).await;
+                    // A ready receive-side reader may publish cancellation on
+                    // its own task. Yield before admitting optional work, not
+                    // after writing a Started record or dispatching a refresh.
+                    tokio::task::yield_now().await;
                     CacheWarmStep::Due
                 }
                 Work::Deciding(future) => CacheWarmStep::Decided(future.await),
@@ -721,7 +725,7 @@ impl CacheWarmer {
                 let input_tokens = run.input_tokens.max(prompt_tokens(host.session));
                 let bound = request_uncertainty_bound(
                     &run.model,
-                    input_tokens,
+                    None,
                     1,
                     None,
                     run.request.cache_retention,

@@ -394,6 +394,68 @@ const PNG: &[u8] = &[
 ];
 
 #[test]
+fn captured_command_images_are_not_transported_before_disclosure() {
+    use super::super::{summarize_tool, ToolPanel};
+    use crate::hydrate::ToolResultImage;
+    use octet_ai::ToolCallId;
+    use sexy_tui_rs::images::TerminalImage;
+
+    for name in ["bash", "exec"] {
+        for (finished, is_error) in [(false, false), (true, false), (true, true)] {
+            let (shell, mut surface, output) = setup(16);
+            let args = json!({"command": "capture private image"});
+            let mut panel = ToolPanel::new(
+                ToolCallId("command-image".into()),
+                name.into(),
+                args.to_string(),
+                summarize_tool(name, &args),
+                "captured private output".into(),
+                finished,
+                is_error,
+                None,
+                None,
+            );
+            panel.images = vec![ToolResultImage::Ready {
+                image: Arc::new(TerminalImage::from_slice(PNG).unwrap()),
+                id: None,
+            }];
+            panel.image_rendering.enabled = true;
+            shell.state.borrow_mut().update_image_rendering(
+                true,
+                sexy_tui_rs::images::ImageCapabilities::forced(None, None),
+            );
+            let index = shell
+                .state
+                .borrow_mut()
+                .push_block(TranscriptBlock::Tool(Box::new(panel)));
+            let identity = shell.state.borrow().transcript_commit_ids[index];
+            let image_id = format!("t{identity}.image0");
+
+            surface.flush(&shell.state).unwrap();
+            assert!(find_node(&surface.sent.main, &image_id).is_none());
+            assert!(
+                output.blobs().is_empty(),
+                "{name} output must not be uploaded, including first and failure frames"
+            );
+
+            shell.state.borrow_mut().verbose_tools = true;
+            surface.flush(&shell.state).unwrap();
+            assert_eq!(
+                find_node(&surface.sent.main, &image_id).unwrap().k,
+                Kind::Image
+            );
+            assert_eq!(output.blobs().len(), 1);
+
+            shell.state.borrow_mut().verbose_tools = false;
+            surface.flush(&shell.state).unwrap();
+            assert!(find_node(&surface.sent.main, &image_id).is_none());
+            assert!(surface.images.node(&image_id).is_none());
+            assert_eq!(output.blobs().len(), 1);
+        }
+    }
+}
+
+#[test]
 fn validated_images_upload_once_with_payload_free_nodes_and_policy_fallbacks() {
     use super::super::{summarize_tool, ToolPanel};
     use crate::hydrate::ToolResultImage;

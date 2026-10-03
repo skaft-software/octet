@@ -513,7 +513,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     .ok_or_else(|| "cancel request requires id".to_owned())?;
                 let request_id: ExtensionRequestId = serde_json::from_value(id)
                     .map_err(|error| format!("invalid cancel request id: {error}"))?;
-                if !cancel_composition_request(state, &request_id)? {
+                if !session_leaf::cancel_leaf_child(state, &request_id)
+                    && !cancel_composition_request(state, &request_id)?
+                {
                     settle_child_request(&state.child_requests, &request_id);
                 }
             }
@@ -1016,6 +1018,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 })?;
             }
             methods::SESSION_APPEND_ENTRY => {
+                if session_leaf::dispatch_append_request(state, object, params.clone())? {
+                    return Ok(());
+                }
                 let Some((request, admitted)) = admit_host_request::<SessionAppendEntryRequest>(
                     state,
                     object,

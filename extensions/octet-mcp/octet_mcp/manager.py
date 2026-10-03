@@ -57,6 +57,12 @@ class _ServerState:
     timer: Optional[threading.Timer] = None
     refresh_queued: bool = False
     operation_lock: threading.RLock = field(default_factory=threading.RLock)
+    lifecycle_condition: threading.Condition = field(default_factory=threading.Condition)
+    active_lifecycle_operations: int = 0
+    active_effects: int = 0
+    active_effect_threads: dict[int, int] = field(default_factory=dict)
+    retirement_pending: bool = False
+    retired: bool = False
 
 
 class BridgeManager:
@@ -101,6 +107,7 @@ class BridgeManager:
         self._lock = threading.RLock()
         self._catalog_lock = threading.Lock()
         self._presentation_publish_lock = threading.Lock()
+        self._active_lifecycle_effect_threads: dict[int, int] = {}
         self._calls = threading.BoundedSemaphore(config.limits.max_concurrent_calls)
         # Do not construct workers for inert or rejected configuration. In
         # particular, the denied remote transport must fail before any worker
@@ -135,6 +142,107 @@ class BridgeManager:
                 return owner == self._remote_owner
             self._remote_owner = owner
         return True
+
+    def assert_lifecycle_mutation_allowed(self) -> None:
+        """Reject reentrant manager-wide mutations before they alter state."""
+
+        with self._lock:
+            if self._active_lifecycle_effect_threads.get(threading.get_ident(), 0):
+                raise RuntimeError("MCP lifecycle mutation is not allowed reentrantly from a callback")
+
+    def _begin_cleanup_callback(self) -> None:
+        thread_id = threading.get_ident()
+        with self._lock:
+            self._active_lifecycle_effect_threads[thread_id] = (
+                self._active_lifecycle_effect_threads.get(thread_id, 0) + 1
+            )
+
+    def _finish_cleanup_callback(self) -> None:
+        thread_id = threading.get_ident()
+        with self._lock:
+            remaining = self._active_lifecycle_effect_threads[thread_id] - 1
+            if remaining:
+                self._active_lifecycle_effect_threads[thread_id] = remaining
+            else:
+                del self._active_lifecycle_effect_threads[thread_id]
+
+    def _lifecycle_lease(self, state: _ServerState) -> bool:
+        with self._lock:
+            if self._shutting_down or self._servers.get(state.config.id) is not state:
+                return False
+        with state.lifecycle_condition:
+            if state.retirement_pending or state.retired:
+                return False
+            state.active_lifecycle_operations += 1
+            return True
+
+    def _begin_lifecycle_effect(self, state: _ServerState) -> bool:
+        """Linearize a start/catalog side effect against state retirement.
+
+        The token is acquired under the per-state condition, but the external
+        callback runs after that lock is released. Retirement first closes
+        admission, then waits for already-admitted effects before publishing the
+        retired state.
+        """
+
+        thread_id = threading.get_ident()
+        with self._lock:
+            if self._shutting_down or self._servers.get(state.config.id) is not state:
+                return False
+            with state.lifecycle_condition:
+                if state.retirement_pending or state.retired:
+                    return False
+                state.active_effects += 1
+                state.active_effect_threads[thread_id] = state.active_effect_threads.get(thread_id, 0) + 1
+            self._active_lifecycle_effect_threads[thread_id] = (
+                self._active_lifecycle_effect_threads.get(thread_id, 0) + 1
+            )
+            return True
+
+    def _finish_lifecycle_effect(self, state: _ServerState) -> None:
+        thread_id = threading.get_ident()
+        with state.lifecycle_condition:
+            state.active_effects -= 1
+            remaining = state.active_effect_threads[thread_id] - 1
+            if remaining:
+                state.active_effect_threads[thread_id] = remaining
+            else:
+                del state.active_effect_threads[thread_id]
+            if state.active_effects == 0:
+                state.lifecycle_condition.notify_all()
+
+        with self._lock:
+            remaining_global = self._active_lifecycle_effect_threads[thread_id] - 1
+            if remaining_global:
+                self._active_lifecycle_effect_threads[thread_id] = remaining_global
+            else:
+                del self._active_lifecycle_effect_threads[thread_id]
+
+    @staticmethod
+    def _release_lifecycle_lease(state: _ServerState) -> None:
+        with state.lifecycle_condition:
+            state.active_lifecycle_operations -= 1
+            if state.active_lifecycle_operations == 0:
+                state.lifecycle_condition.notify_all()
+
+    def _retire_state(self, state: _ServerState) -> None:
+        thread_id = threading.get_ident()
+        with state.lifecycle_condition:
+            if state.active_effect_threads.get(thread_id, 0):
+                raise RuntimeError("MCP state cannot be retired reentrantly from its active effect")
+            state.retirement_pending = True
+            while state.active_effects:
+                state.lifecycle_condition.wait()
+            state.retired = True
+            while state.active_lifecycle_operations:
+                state.lifecycle_condition.wait()
+
+    def _server_is_live(self, state: _ServerState) -> bool:
+        with self._lock:
+            if self._shutting_down or self._servers.get(state.config.id) is not state:
+                return False
+        with state.lifecycle_condition:
+            return not state.retirement_pending and not state.retired
 
     def _executor_for_work(self) -> ThreadPoolExecutor:
         with self._lock:
@@ -187,6 +295,7 @@ class BridgeManager:
     def start(self) -> None:
         """Start explicitly configured servers in bounded parallel workers."""
 
+        self.assert_lifecycle_mutation_allowed()
         with self._lock:
             if self._started or self._shutting_down:
                 return
@@ -203,12 +312,13 @@ class BridgeManager:
                     continue
                 states.append(state)
         for state in states:
-            self._submit(self._start_server, state.config.id, False)
+            self._submit(self._start_server_for_state, state, False)
         self._presentation_changed()
 
     def shutdown(self) -> None:
         """Stop admission, timers, and every owned server root within bounds."""
 
+        self.assert_lifecycle_mutation_allowed()
         with self._lock:
             if self._shutting_down:
                 return
@@ -221,6 +331,8 @@ class BridgeManager:
                     state.timer.cancel()
                     state.timer = None
                 state.next_retry_at_ms = None
+        for state in states:
+            self._retire_state(state)
         clients: list[Any] = []
         for state in states:
             with state.operation_lock:
@@ -254,6 +366,7 @@ class BridgeManager:
         now on.
         """
 
+        self.assert_lifecycle_mutation_allowed()
         with self._lock:
             if self._shutting_down:
                 raise RuntimeError("MCP manager is shutting down")
@@ -265,6 +378,9 @@ class BridgeManager:
                 for server_id in set(wanted) & set(self._servers)
                 if self._servers[server_id].config != wanted[server_id]
             )
+            retiring_states = [self._servers[server_id] for server_id in removed + changed]
+        for state in retiring_states:
+            self._retire_state(state)
         for server_id in removed + changed:
             self.stop_server(server_id)
         with self._lock:
@@ -281,12 +397,12 @@ class BridgeManager:
                     state="configured" if server.enabled else "stopped",
                 )
             start = [
-                server_id
+                self._servers[server_id]
                 for server_id in added + changed
                 if self._started and wanted[server_id].enabled
             ]
-        for server_id in start:
-            self._submit(self._start_server, server_id, False)
+        for state in start:
+            self._submit(self._start_server_for_state, state, False)
         self._presentation_changed()
         return {"added": added, "changed": changed, "removed": removed}
 
@@ -322,9 +438,14 @@ class BridgeManager:
             "stop": self.stop_server,
         }[action]
         assert server_id is not None
+        if action == "restart":
+            with self._lock:
+                admitted_state = self._servers[server_id]
+            return self._submit(self._restart_server_state, admitted_state)
         return self._submit(callback, server_id)
 
     def refresh_server(self, server_id: str) -> bool:
+        self.assert_lifecycle_mutation_allowed()
         state = self._server(server_id)
         with state.operation_lock:
             with self._lock:
@@ -362,8 +483,22 @@ class BridgeManager:
             return True
 
     def restart_server(self, server_id: str) -> bool:
-        state = self._server(server_id)
+        return self._restart_server_state(self._server(server_id))
+
+    def _restart_server_state(self, state: _ServerState) -> bool:
+        self.assert_lifecycle_mutation_allowed()
+        if not self._lifecycle_lease(state):
+            return False
+        try:
+            return self._restart_server_admitted(state)
+        finally:
+            self._release_lifecycle_lease(state)
+
+    def _restart_server_admitted(self, state: _ServerState) -> bool:
+        server_id = state.config.id
         with state.operation_lock:
+            if not self._server_is_live(state):
+                return False
             with self._lock:
                 if self._shutting_down:
                     return False
@@ -377,9 +512,10 @@ class BridgeManager:
             self._remove_server_tools(state)
             if client is not None:
                 client.close()
-            return self._start_server(server_id, True)
+            return self._start_server_with_state(state, True)
 
     def stop_server(self, server_id: str) -> bool:
+        self.assert_lifecycle_mutation_allowed()
         state = self._server(server_id)
         with state.operation_lock:
             with self._lock:
@@ -486,7 +622,18 @@ class BridgeManager:
         )
 
     def _start_server(self, server_id: str, manual: bool) -> bool:
-        state = self._server(server_id)
+        return self._start_server_for_state(self._server(server_id), manual)
+
+    def _start_server_for_state(self, state: _ServerState, manual: bool) -> bool:
+        if not self._lifecycle_lease(state):
+            return False
+        try:
+            return self._start_server_with_state(state, manual)
+        finally:
+            self._release_lifecycle_lease(state)
+
+    def _start_server_with_state(self, state: _ServerState, manual: bool) -> bool:
+        server_id = state.config.id
         with state.operation_lock:
             if not self._streamable_http_allowed(state.config):
                 with self._lock:
@@ -495,8 +642,10 @@ class BridgeManager:
                     self._remote_transport_error(state)
                 self._presentation_changed()
                 return False
+            if not self._server_is_live(state):
+                return False
             with self._lock:
-                if self._shutting_down:
+                if self._shutting_down or state.retired or self._servers.get(server_id) is not state:
                     return False
                 if state.config.transport == "streamable-http" and self._remote_owner is None:
                     self._owner_required(state)
@@ -517,10 +666,28 @@ class BridgeManager:
                 lambda failed, error: self._on_client_failure(server_id, failed, error),
                 lambda changed: self._on_tools_changed(server_id, changed),
             )
+            live = self._server_is_live(state)
             with self._lock:
-                state.client = client
+                retired = (
+                    not live
+                    or self._shutting_down
+                    or self._servers.get(server_id) is not state
+                )
+                if not retired:
+                    state.client = client
+            if retired or not self._server_is_live(state):
+                with self._lock:
+                    if state.client is client:
+                        state.client = None
+                client.close()
+                return False
             try:
-                client.start()
+                if not self._begin_lifecycle_effect(state):
+                    raise McpTransportError("stale_connection", "MCP connection was retired")
+                try:
+                    client.start()
+                finally:
+                    self._finish_lifecycle_effect(state)
                 raw_tools = client.list_tools()
                 self._publish_catalog(state, client, raw_tools)
             except McpError as error:
@@ -572,7 +739,7 @@ class BridgeManager:
 
     def _schedule_after_failure(self, state: _ServerState, error: McpError) -> None:
         with self._lock:
-            if self._shutting_down or state.state == "stopped":
+            if self._shutting_down or state.retired or state.state == "stopped":
                 return
             self._set_error(state, error.code, error.safe_summary)
             if error.permanent or state.restart_attempt >= state.config.max_restarts:
@@ -597,27 +764,25 @@ class BridgeManager:
             state.next_retry_at_ms = int(time.time() * 1000) + delay_ms
             timer = threading.Timer(
                 delay_ms / 1000,
-                lambda: self._submit_restart_after_backoff(state.config.id),
+                lambda: self._submit_restart_after_backoff(state),
             )
             timer.daemon = True
             state.timer = timer
             timer.start()
         self._presentation_changed()
 
-    def _submit_restart_after_backoff(self, server_id: str) -> None:
+    def _submit_restart_after_backoff(self, state: _ServerState) -> None:
         with self._lock:
-            if self._shutting_down:
+            if self._shutting_down or self._servers.get(state.config.id) is not state:
                 return
-            state = self._servers.get(server_id)
             if (
-                state is None
-                or state.state != "backoff"
+                state.state != "backoff"
                 or not self._streamable_http_allowed(state.config)
             ):
                 return
             state.timer = None
         try:
-            self._submit(self._start_server, server_id, False)
+            self._submit(self._start_server_for_state, state, False)
         except RuntimeError:
             return
 
@@ -659,6 +824,32 @@ class BridgeManager:
         client: Any,
         raw_tools: list[dict[str, Any]],
     ) -> None:
+        if not self._lifecycle_lease(state):
+            raise McpTransportError("stale_connection", "MCP connection was replaced")
+        try:
+            self._publish_catalog_with_lease(state, client, raw_tools)
+        finally:
+            self._release_lifecycle_lease(state)
+
+    def _publish_catalog_with_lease(
+        self,
+        state: _ServerState,
+        client: Any,
+        raw_tools: list[dict[str, Any]],
+    ) -> None:
+        if not self._begin_lifecycle_effect(state):
+            raise McpTransportError("stale_connection", "MCP connection was retired")
+        try:
+            self._publish_catalog_effect(state, client, raw_tools)
+        finally:
+            self._finish_lifecycle_effect(state)
+
+    def _publish_catalog_effect(
+        self,
+        state: _ServerState,
+        client: Any,
+        raw_tools: list[dict[str, Any]],
+    ) -> None:
         next_revision = state.catalog_revision + 1
         desired: dict[str, ToolBinding] = {}
         for raw in raw_tools:
@@ -682,7 +873,8 @@ class BridgeManager:
 
         with self._catalog_lock:
             with self._lock:
-                if state.client is not client or self._shutting_down:
+                if (state.client is not client or self._shutting_down or state.retired
+                        or self._servers.get(state.config.id) is not state):
                     raise McpTransportError("stale_connection", "MCP connection was replaced")
                 previous = dict(state.tools)
             unchanged = (
@@ -751,7 +943,11 @@ class BridgeManager:
             if not names:
                 return
             try:
-                response = self.extension.unregister_tools(*names)
+                self._begin_cleanup_callback()
+                try:
+                    response = self.extension.unregister_tools(*names)
+                finally:
+                    self._finish_cleanup_callback()
                 accepted = self._accept_catalog_response(response)
             except Exception:
                 with self._lock:

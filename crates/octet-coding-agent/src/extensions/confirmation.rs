@@ -40,6 +40,18 @@ pub trait ExtensionConfirmationHandler {
         false
     }
 
+    /// Host-owned command cancellation keys are checked before focused remote UI
+    /// input, so a long attended command remains cancellable while mounted.
+    fn command_cancellation_event(&mut self, _event: &Event) -> bool {
+        false
+    }
+
+    /// The current attended command admitted a fullscreen mount that owns the
+    /// interactive shell instead of its parent command menu.
+    fn should_yield_to_fullscreen(&self) -> bool {
+        false
+    }
+
     /// Receive one bounded, request-scoped extension command progress event.
     ///
     /// Implementations must treat this as transient presentation only; it is
@@ -89,6 +101,13 @@ where
     }
     fn command_event(&mut self, event: Event) -> bool {
         self.inner.command_event(event)
+    }
+    fn command_cancellation_event(&mut self, event: &Event) -> bool {
+        self.inner.command_cancellation_event(event)
+    }
+
+    fn should_yield_to_fullscreen(&self) -> bool {
+        self.inner.should_yield_to_fullscreen()
     }
 
     fn progress(&mut self, extension: &str, progress: &ToolProgress) {

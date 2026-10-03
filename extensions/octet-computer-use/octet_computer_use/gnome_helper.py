@@ -172,7 +172,7 @@ def install() -> Dict[str, Any]:
         return {"gnome_helper": "failed", "gnome_helper_detail": str(error)[:300]}
     enabled = _enable()
     version = active_version()
-    pinned = version is not None and not changed and _gdbus("SetThemeColor", "") is not None
+    pinned = version is not None and not changed and _gdbus("GetThemeColor") is not None
     if pinned:
         state, detail = "active", "the GNOME Shell helper is active"
     elif not enabled:
@@ -195,7 +195,7 @@ def status() -> Dict[str, Any]:
     version = active_version()
     if version is None:
         state = "restart-required" if installed else "missing"
-    elif _gdbus("SetThemeColor", "") is None:
+    elif _gdbus("GetThemeColor") is None:
         # An upstream helper without the theme pin is loaded; the bundled one
         # takes over at the next login.
         state = "restart-required" if installed else "upstream"

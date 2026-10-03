@@ -62,6 +62,25 @@ use self::transport::{
 use self::websocket::{
     responses_websocket_key, responses_websocket_stream, steering_event_stream, ResponsesResume,
 };
+// Request-group scoped only: never installed back into the catalog or agent.
+struct SettledCredential(crate::auth::ResolvedCredential);
+
+#[async_trait::async_trait]
+impl crate::auth::CredentialResolver for SettledCredential {
+    async fn resolve(&self) -> Result<crate::auth::ResolvedCredential, crate::AuthError> {
+        Ok(crate::auth::ResolvedCredential {
+            scheme: match &self.0.scheme {
+                crate::auth::CredentialScheme::Bearer => crate::auth::CredentialScheme::Bearer,
+                crate::auth::CredentialScheme::Header(name) => {
+                    crate::auth::CredentialScheme::Header(name.clone())
+                }
+            },
+            value: self.0.value.clone(),
+            extra_headers: self.0.extra_headers.clone(),
+        })
+    }
+}
+
 /// A native compact response whose HTTP headers have actually arrived.
 ///
 /// Both successful and non-success statuses reach this boundary before body or
@@ -558,6 +577,7 @@ impl AiClient {
         mut req: Request,
     ) -> Result<crate::steering::SteeringSession, AiError> {
         use crate::steering::{SteeringControl, SteeringSession};
+        crate::steering::validate_request(&req)?;
         let started_at = Instant::now();
         let mut prepared = model.clone();
         crate::declarations::azure::apply(&mut prepared, None, &Default::default())?;
@@ -692,6 +712,33 @@ impl AiClient {
                 started_at,
             ),
         })
+    }
+
+    /// Open one inference after optional Responses setup, resolving a dynamic
+    /// credential exactly once for both operations. Credential failures are
+    /// inference opening failures, not ignorable setup failures. The optional
+    /// socket timeout starts only after credential settlement.
+    pub async fn stream_with_responses_prewarm(
+        &self,
+        model: &Model,
+        request: Request,
+        warm_request: Request,
+    ) -> Result<ResponseStream, AiError> {
+        let mut prepared = model.clone();
+        crate::catalog::validate_endpoint(&prepared.endpoint)?;
+        crate::catalog::validate_model_spec(&prepared.spec)?;
+        // Validate before a potentially rotating credential exchange.
+        crate::protocol::openai_responses::build_request(&prepared, &request)?;
+        crate::protocol::openai_responses::build_request(&prepared, &warm_request)?;
+        if let crate::Auth::Dynamic(resolver) = &prepared.endpoint.auth {
+            let credential = resolver.resolve().await.map_err(AiError::Auth)?;
+            Arc::make_mut(&mut prepared.endpoint).auth =
+                crate::Auth::Dynamic(Arc::new(SettledCredential(credential)));
+        }
+        let timeout = prepared.endpoint.timeout.min(Duration::from_secs(30));
+        let _ =
+            tokio::time::timeout(timeout, self.prewarm_responses(&prepared, warm_request)).await;
+        self.stream(&prepared, request).await
     }
 
     /// Best-effort prewarms a cached OpenAI Responses WebSocket.

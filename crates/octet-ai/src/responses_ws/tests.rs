@@ -18,6 +18,94 @@ use tokio_tungstenite::{accept_async, MaybeTlsStream, WebSocketStream};
 type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type ServerSocket = WebSocketStream<TcpStream>;
 
+#[tokio::test]
+async fn expired_connection_is_replaced_without_replaying_a_generation() {
+    let pool = ResponsesWsPool::default();
+    let (sender, mut old_commands) = mpsc::channel(1);
+    let old = Connection {
+        sender,
+        alive: Arc::new(AtomicBool::new(true)),
+        opened_at: tokio::time::Instant::now() - MAX_CONNECTION_LIFETIME,
+    };
+    pool.state
+        .lock()
+        .await
+        .sessions
+        .insert("aged".into(), old.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        accept_async(stream).await.unwrap()
+    });
+    let fresh = pool
+        .connect(Some("aged"), url, http::HeaderMap::new())
+        .await
+        .unwrap();
+    let mut socket = peer.await.unwrap();
+    assert!(fresh.reusable());
+    assert!(!fresh.sender.same_channel(&old.sender));
+    assert!(
+        old_commands.try_recv().is_err(),
+        "no old generation command is replayed"
+    );
+    assert!(!pool.state.lock().await.disabled.contains("aged"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), socket.next())
+            .await
+            .is_err(),
+        "renewing a socket does not create a provider generation"
+    );
+    drop(fresh);
+    drop(pool);
+}
+
+#[tokio::test]
+async fn expired_actor_drops_queued_command_before_send_and_does_not_disable_key() {
+    let (socket, mut peer) = websocket_pair().await;
+    let (sender, commands) = mpsc::channel(1);
+    let (reply, _events) = event_channel(64);
+    let (started, start_result) = oneshot::channel();
+    sender
+        .send(RequestCommand {
+            body: json!({"model": "fixture", "input": []}),
+            reply,
+            started: Some(started),
+            liveness: ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
+            resumer: None,
+            steering: None,
+        })
+        .await
+        .unwrap();
+    let state = Arc::new(Mutex::new(PoolState::default()));
+    let alive = Arc::new(AtomicBool::new(true));
+    let actor = tokio::spawn(run_connection(
+        socket,
+        commands,
+        alive.clone(),
+        Some("expired".into()),
+        Arc::downgrade(&state),
+        CONNECTION_IDLE_TIMEOUT,
+        tokio::time::Instant::now() - MAX_CONNECTION_LIFETIME,
+        unreachable_dialer(),
+    ));
+    let message = tokio::time::timeout(Duration::from_secs(1), peer.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(message, Message::Close(_)),
+        "generation sent on expired socket: {message:?}"
+    );
+    // Reading Close already handles the peer acknowledgement; flushing after
+    // the actor has closed can correctly return SendAfterClosing.
+    actor.await.unwrap();
+    assert!(start_result.await.is_err());
+    assert!(!alive.load(Ordering::Acquire));
+    assert!(state.lock().await.disabled.is_empty());
+}
+
 #[test]
 fn websocket_byte_admission_precedes_json_decoding() {
     assert_eq!(
@@ -190,6 +278,7 @@ where
     let connection = Connection {
         sender,
         alive: Arc::clone(&alive),
+        opened_at: tokio::time::Instant::now(),
     };
     state
         .lock()
@@ -203,6 +292,7 @@ where
         Some(key.to_owned()),
         Arc::downgrade(state),
         idle_timeout,
+        connection.opened_at,
         dialer,
     ));
     (connection, actor)
@@ -329,6 +419,7 @@ async fn actor_exit_before_start_is_a_replay_safe_open_failure() {
     let connection = Connection {
         sender,
         alive: Arc::new(AtomicBool::new(true)),
+        opened_at: tokio::time::Instant::now(),
     };
     pool.state
         .lock()
@@ -385,6 +476,7 @@ async fn queued_request_deadline_closes_receiver_without_replaying() {
         Connection {
             sender,
             alive: Arc::new(AtomicBool::new(true)),
+            opened_at: tokio::time::Instant::now(),
         },
     );
     let error = pool

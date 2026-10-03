@@ -59,12 +59,51 @@ class JobTests(unittest.TestCase):
 
     def test_shutdown_and_session_end_cancel(self):
         identifier = self.start_blocked()
-        self.manager.session_settled({'session_id': 'one'})
+        self.manager.session_end({'binding': CONTEXT['resource_owner']})
         self.assertTrue(self.manager.jobs[identifier].token.cancelled)
         self.manager.jobs[identifier].thread.join(1)
         self.assertTrue(self.manager.handle('setup', {}, CONTEXT)['is_error'])
         self.manager.shutdown()
         self.assertTrue(self.manager.handle('setup', {}, OTHER)['is_error'])
+
+    def test_settlement_requires_complete_matching_owner(self):
+        identifier = self.start_blocked()
+        same_session_other_instance = {'session_id': 'one', 'extension_instance_id': 'other', 'process_generation': 1}
+        self.manager.session_end({'binding': same_session_other_instance})
+        self.assertFalse(self.manager.jobs[identifier].token.cancelled)
+        self.manager.session_end({'binding': CONTEXT['resource_owner']},
+                                 {'resource_owner': {**CONTEXT['resource_owner'], 'process_generation': 2}})
+        self.assertFalse(self.manager.jobs[identifier].token.cancelled)
+        self.manager.session_end({'binding': CONTEXT['resource_owner']})
+        self.assertTrue(self.manager.jobs[identifier].token.cancelled)
+
+    def test_manifest_negotiated_sdk_session_end_hook_cancels_owner_job(self):
+        import tomllib
+        from pathlib import Path
+        from octet_extension import Extension
+
+        manifest_path = Path(__file__).resolve().parents[1] / 'extension.toml'
+        manifest = tomllib.loads(manifest_path.read_text(encoding='utf-8'))
+        declared_hooks = manifest['contributes']['hooks']
+        self.assertEqual(declared_hooks, ['session_end'])
+
+        identifier = self.start_blocked()
+        sdk = Extension(api_version='0.4')
+        sdk.hook('session_end')(self.manager.session_end)
+        initialized = sdk._initialize({
+            'api_version': '0.4',
+            'contributes': {'hooks': declared_hooks, 'tools': [], 'commands': []},
+            'protocol': {'version': '0.4', 'required_features': [], 'optional_features': [],
+                         'limits': {'max_concurrent_requests': 1}},
+        })
+        self.assertEqual(initialized['protocol']['version'], '0.4')
+        self.assertEqual(sdk._dispatch('hook/run', {
+            'hook': 'session_end',
+            'payload': {'binding': CONTEXT['resource_owner'], 'outcome': 'completed',
+                        'reason': 'session_ended', 'duration_ms': 1},
+        })['disposition']['action'], 'continue')
+        self.assertTrue(self.manager.jobs[identifier].token.cancelled)
+        self.manager.jobs[identifier].thread.join(1)
 
     def test_setup_denial_never_starts_job(self):
         self.extension.confirm.return_value = False

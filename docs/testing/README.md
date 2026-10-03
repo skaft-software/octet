@@ -40,12 +40,20 @@ PYTHONPATH='.' python3 -m unittest discover -s tests -t .
 | `quality` | ubuntu-24.04 | fmt, clippy, doc tests, model-metadata gate, release tooling, packaging determinism |
 | `test (ubuntu-24.04)`, `test (macos-15)` | matrix | `cargo test --workspace --all-targets --all-features --profile ci-test`, then a `--no-default-features` check |
 | `windows (x86_64-pc-windows-gnu)` | windows-2025 | native Windows build, binary smoke, terminal frontend, ConPTY, renderer, extension launch, Python SDK and computer-use |
-| `first-party-extension-tests` | ubuntu-24.04 | the shared Python SDK and every official extension adapter in `extensions/release-catalog.txt` |
+| `first-party-extension-tests` | ubuntu-24.04 | the shared Python SDK, release-catalog adapters, and source-only extensions in `extensions/source-catalog.txt` |
 | `extension-api-v03` | ubuntu-24.04 | generated API 0.3 artifacts and language conformance |
 | `msrv` | ubuntu-24.04 | the workspace still checks on Rust 1.88 (`rust-version` in `Cargo.toml`) |
 | `web` | ubuntu-24.04 | `apps/web` lint, typecheck, tests, fonts, build, and `npm audit --audit-level=high` |
 | `smoke-install` | ubuntu-24.04 | a real `cargo install` of the CLI, then `--version`, `--help`, and the installed native host |
 | `dependency-review` | ubuntu-24.04 | no newly introduced vulnerable or disallowed dependency |
+
+The required-check contract is stricter than this list of CI job definitions:
+branch protection additionally requires CodeQL and the named Ubuntu/macOS test
+matrix contexts. This checkout defines the `test` matrix in `ci.yml`, but contains
+no CodeQL workflow definition under `.github/workflows`; CodeQL must therefore be
+verified from the hosted required-check configuration and a successful run on
+the exact candidate SHA. Do not infer that deleting or renaming a job changes
+branch protection, and do not waive a missing required context.
 
 `quality` is the widest gate and the one most likely to fail for a reason that
 has nothing to do with your change. It runs, in order: the offline models.dev

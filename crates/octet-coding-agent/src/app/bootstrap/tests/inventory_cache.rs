@@ -174,19 +174,83 @@ fn failed_provider_refresh_never_overwrites_last_good_inventory() {
     ));
 }
 
+#[test]
+fn supplied_discovery_secrets_are_masked_before_truncation_regardless_of_shape() {
+    for secret in [
+        "alphabeticcredentialwithnodigit",
+        "sk-test-quotedsecret",
+        "short-key",
+        "sëcret-秘密-without-digits",
+    ] {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
+        );
+        for reflected in [
+            format!("key='{secret}' rejected"),
+            format!("prefix:{secret}:suffix"),
+            format!("{}{}", "x".repeat(MAX_REJECTION_DETAIL_CHARS - 2), secret),
+        ] {
+            let body = serde_json::json!({"error": {"message": reflected}}).to_string();
+            let message =
+                discovery_rejection(http::StatusCode::UNAUTHORIZED, body.as_bytes(), &headers);
+            assert!(!message.contains(secret), "{message}");
+            // A truncation boundary must not disclose the credential's prefix.
+            let prefix: String = secret.chars().take(2).collect();
+            assert!(!message.contains(&prefix), "{message}");
+        }
+    }
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        "x-custom-secret",
+        http::HeaderValue::from_static("customalphabeticcredential"),
+    );
+    let message = discovery_rejection(
+        http::StatusCode::FORBIDDEN,
+        br#"{"message":"quoted='customalphabeticcredential'"}"#,
+        &headers,
+    );
+    assert!(!message.contains("customalphabeticcredential"));
+    assert!(message.contains("[redacted]"));
+
+    let mut invalid = http::HeaderMap::new();
+    invalid.insert(
+        "x-custom-secret",
+        http::HeaderValue::from_bytes(b"opaque-\xff-secret").unwrap(),
+    );
+    let message = discovery_rejection(
+        http::StatusCode::FORBIDDEN,
+        br#"{"message":"opaque secret reflected"}"#,
+        &invalid,
+    );
+    assert_eq!(
+        message,
+        "model discovery request was rejected (HTTP 403 Forbidden)"
+    );
+}
+
 /// Issue #454: an actionable provider rejection (Anthropic's 400 asking for
 /// `anthropic-workspace-id`) must reach the user, bounded and redacted.
 #[test]
 fn rejected_discovery_reports_status_and_a_redacted_provider_message() {
     let anthropic = br#"{"type":"error","error":{"type":"invalid_request_error","message":"anthropic-workspace-id header is required for this API key"}}"#;
     assert_eq!(
-        discovery_rejection(http::StatusCode::BAD_REQUEST, anthropic),
+        discovery_rejection(
+            http::StatusCode::BAD_REQUEST,
+            anthropic,
+            &http::HeaderMap::new()
+        ),
         "model discovery request was rejected (HTTP 400 Bad Request): \
          anthropic-workspace-id header is required for this API key"
     );
 
     let leaked = br#"{"error":{"message":"Invalid key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789\n\tsent"}}"#;
-    let message = discovery_rejection(http::StatusCode::UNAUTHORIZED, leaked);
+    let message = discovery_rejection(
+        http::StatusCode::UNAUTHORIZED,
+        leaked,
+        &http::HeaderMap::new(),
+    );
     assert!(message.starts_with("model discovery request was rejected (HTTP 401 Unauthorized): "));
     assert!(
         message.ends_with("Invalid key [redacted] sent"),
@@ -200,16 +264,25 @@ fn rejected_discovery_reports_status_and_a_redacted_provider_message() {
         serde_json::json!({"detail": format!("token {opaque} expired")})
             .to_string()
             .as_bytes(),
+        &http::HeaderMap::new(),
     );
     assert!(message.ends_with("token [redacted] expired"), "{message}");
 
     // Raw bodies never pass through, and long messages are cut.
     assert_eq!(
-        discovery_rejection(http::StatusCode::FORBIDDEN, b"<html>denied</html>"),
+        discovery_rejection(
+            http::StatusCode::FORBIDDEN,
+            b"<html>denied</html>",
+            &http::HeaderMap::new()
+        ),
         "model discovery request was rejected (HTTP 403 Forbidden)"
     );
     let long = serde_json::json!({"message": "word ".repeat(200)}).to_string();
-    let message = discovery_rejection(http::StatusCode::BAD_REQUEST, long.as_bytes());
+    let message = discovery_rejection(
+        http::StatusCode::BAD_REQUEST,
+        long.as_bytes(),
+        &http::HeaderMap::new(),
+    );
     assert!(message.ends_with('…'));
     let prefix = "model discovery request was rejected (HTTP 400 Bad Request): ";
     assert_eq!(

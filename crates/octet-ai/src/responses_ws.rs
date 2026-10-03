@@ -513,6 +513,17 @@ struct RequestCommand {
 struct Connection {
     sender: mpsc::Sender<RequestCommand>,
     alive: Arc<AtomicBool>,
+    opened_at: tokio::time::Instant,
+}
+
+// Retire before the provider's reported sixty-minute socket limit. This is
+// physical connection maintenance, never authority to replay a generation.
+const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(55 * 60);
+
+impl Connection {
+    fn reusable(&self) -> bool {
+        self.alive.load(Ordering::Acquire) && self.opened_at.elapsed() < MAX_CONNECTION_LIFETIME
+    }
 }
 
 #[derive(Default)]
@@ -554,7 +565,7 @@ impl ResponsesWsPool {
                 ));
             }
             if let Some(connection) = state.sessions.get(key) {
-                if connection.alive.load(Ordering::Acquire) {
+                if connection.reusable() {
                     return Ok(connection.clone());
                 }
             }
@@ -574,7 +585,7 @@ impl ResponsesWsPool {
                     if let Some(key) = key {
                         let mut state = self.state.lock().await;
                         if let Some(connection) = state.sessions.get(key) {
-                            if connection.alive.load(Ordering::Acquire) {
+                            if connection.reusable() {
                                 return Ok(connection.clone());
                             }
                         }
@@ -590,6 +601,7 @@ impl ResponsesWsPool {
         let connection = Connection {
             sender,
             alive: Arc::clone(&alive),
+            opened_at: tokio::time::Instant::now(),
         };
 
         if let Some(key) = key {
@@ -606,7 +618,7 @@ impl ResponsesWsPool {
                 } else if let Some(existing) = state
                     .sessions
                     .get(key)
-                    .filter(|existing| existing.alive.load(Ordering::Acquire))
+                    .filter(|existing| existing.reusable())
                 {
                     Registration::Existing(existing.clone())
                 } else {
@@ -625,6 +637,7 @@ impl ResponsesWsPool {
                         Some(key.to_owned()),
                         Arc::downgrade(&self.state),
                         CONNECTION_IDLE_TIMEOUT,
+                        connection.opened_at,
                         production_dialer(),
                     ));
                     Ok(connection)
@@ -656,6 +669,7 @@ impl ResponsesWsPool {
                 None,
                 Arc::downgrade(&self.state),
                 CONNECTION_IDLE_TIMEOUT,
+                connection.opened_at,
                 production_dialer(),
             ));
             Ok(connection)
@@ -830,10 +844,7 @@ impl ResponsesWsPool {
         {
             let state = self.state.lock().await;
             if state.disabled.contains(key)
-                || state
-                    .sessions
-                    .get(key)
-                    .is_some_and(|connection| connection.alive.load(Ordering::Acquire))
+                || state.sessions.get(key).is_some_and(Connection::reusable)
             {
                 return Ok(());
             }
@@ -1510,6 +1521,7 @@ async fn run_connection<S>(
     key: Option<String>,
     state: Weak<Mutex<PoolState>>,
     idle_timeout: Duration,
+    opened_at: tokio::time::Instant,
     _dialer: SocketDialer<S>,
 ) where
     S: futures_core::Stream<Item = Result<Message, tungstenite::Error>>
@@ -1517,6 +1529,7 @@ async fn run_connection<S>(
         + Unpin,
 {
     let mut continuation = None;
+    let expires_at = opened_at + MAX_CONNECTION_LIFETIME;
     // Fatal transport failures must mark the actor dead and disable its key
     // before publishing an error (including the request-start acknowledgement).
     // The consumer can immediately request a replacement on another task;
@@ -1525,7 +1538,8 @@ async fn run_connection<S>(
         // Poll the socket even without an active request so peer closes and
         // control frames are handled promptly. Control traffic does not extend
         // the request-idle lifetime.
-        let idle = tokio::time::sleep(idle_timeout);
+        let idle =
+            tokio::time::sleep_until((tokio::time::Instant::now() + idle_timeout).min(expires_at));
         tokio::pin!(idle);
         let mut command = loop {
             if idle.is_elapsed() {
@@ -1568,6 +1582,12 @@ async fn run_connection<S>(
                 _ = &mut idle => break 'actor,
             }
         };
+
+        if tokio::time::Instant::now() >= expires_at {
+            // A queued request has not crossed the send boundary. Dropping its
+            // start acknowledgement preserves the safe pre-send fallback.
+            break 'actor;
+        }
 
         // A request future can be cancelled while this command waits behind an
         // active turn. Do not send an orphaned generation after its receiver is

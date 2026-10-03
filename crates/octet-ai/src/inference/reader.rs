@@ -19,14 +19,20 @@ const QUEUE_BYTES: u32 = 16 * 1024 * 1024;
 type EventStream<T> = Pin<Box<dyn Stream<Item = Result<T, AiError>> + Send>>;
 
 struct Reader<T> {
-    task: Option<tokio::task::JoinHandle<EventStream<T>>>,
-    _ready_stream: Option<EventStream<T>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    // The handle, not the task, owns the source's cancellation lifetime.
+    // A task abort alone only drops its future on a later scheduler turn.
+    source: Arc<Mutex<Option<EventStream<T>>>>,
 }
 impl<T> Drop for Reader<T> {
     fn drop(&mut self) {
         if let Some(task) = &self.task {
             task.abort();
         }
+        self.source
+            .lock()
+            .expect("reader source is not poisoned")
+            .take();
     }
 }
 
@@ -105,15 +111,23 @@ pub(crate) fn independent_stream<T: Send + 'static>(
                 None => break,
             }
         }
+        let source = Arc::new(Mutex::new(Some(stream)));
         let reader = if ended {
             drop(tx);
-            Reader { task: None, _ready_stream: Some(stream) }
+            Reader { task: None, source }
         } else {
-            Reader { _ready_stream: None, task: Some(tokio::spawn(async move {
+            let task_source = source.clone();
+            Reader { source, task: Some(tokio::spawn(async move {
             let mut blocked = false;
             while let Some(mut item) = match pending.take() {
                 Some(item) => Some(item),
-                None => stream.next().await,
+                None => futures_util::future::poll_fn(|cx| {
+                    let mut source = task_source.lock().expect("reader source is not poisoned");
+                    match source.as_mut() {
+                        Some(stream) => stream.as_mut().poll_next(cx),
+                        None => std::task::Poll::Ready(None),
+                    }
+                }).await,
             } {
                 let terminal = item.as_mut().is_ok_and(|event| feedback(event, blocked));
                 let units = item.as_ref().map_or(256, weight);
@@ -137,7 +151,6 @@ pub(crate) fn independent_stream<T: Send + 'static>(
                 }
                 if terminal { blocked = false; }
             }
-            stream
             })) }
         };
         *owner.lock().expect("reader owner is not poisoned") = Some(reader);
@@ -280,6 +293,33 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), cancelled.notified())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_polled_and_unpolled_readers_releases_source_synchronously() {
+        struct Dropped(Arc<AtomicUsize>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        for poll in [false, true] {
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let guard = Dropped(dropped.clone());
+            let source = Box::pin(async_stream::stream! {
+                let _guard = guard;
+                yield Ok(1_u32);
+                std::future::pending::<()>().await;
+            });
+            let mut stream = independent_stream(source, |_, _| false, |_| 256);
+            if poll {
+                assert_eq!(stream.next().await.unwrap().unwrap(), 1);
+            }
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            drop(stream);
+            // No scheduler turn or timeout is required for source teardown.
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[tokio::test]

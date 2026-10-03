@@ -268,13 +268,19 @@ fn durable_uncertainty_blocks_later_token_and_cost_ceilings() {
 }
 
 #[test]
-fn bounded_attempts_charge_ceiling_and_unpriced_cost_still_fails_closed() {
+fn historical_bounded_exposure_accounts_exactly_but_cannot_authorize_a_new_request() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("bounded.jsonl");
     let mut model = model();
     Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
         octet_ai::ResponsesRuntimeProfile::Default;
-    let bound = request_uncertainty_bound(&model, 100, 300, None, CacheRetention::Short).unwrap();
+    // This fixture exercises the durable ledger's existing bounded-record
+    // arithmetic, not a provider route with a trusted input cap.
+    assert!(request_uncertainty_bound(&model, None, 300, None, CacheRetention::Short).is_none());
+    let bound = UsageUncertaintyBound {
+        tokens: 400,
+        cost_microdollars: Some(worst_case_request_cost(&model, 100, 300, None).unwrap()),
+    };
     let cost = bound.cost_microdollars.unwrap();
     let next_cost = worst_case_request_cost(&model, 20, 10, None).unwrap();
     let mut session = Session::create(&path).unwrap();
@@ -288,9 +294,10 @@ fn bounded_attempts_charge_ceiling_and_unpriced_cost_still_fails_closed() {
         .unwrap();
     drop(session);
     let session = Session::open(&path).unwrap();
-    assert!(
-        require_enforceable_output_cap(&session, Some(10), Some(u64::MAX), Some(u64::MAX)).is_ok()
-    );
+    assert!(matches!(
+        require_enforceable_output_cap(&session, Some(10), Some(u64::MAX), Some(u64::MAX)),
+        Err(AgentError::InputLimitUnavailable)
+    ));
     assert!(reserve_request_tokens(&session, 20, 10, Some(bound.tokens + 30)).is_ok());
     assert!(
         matches!(reserve_request_tokens(&session, 20, 10, Some(bound.tokens + 29)),
@@ -404,15 +411,13 @@ impl ProviderRetryHook for StopRecovery {
 }
 
 #[tokio::test]
-async fn hard_token_ceiling_without_room_and_hook_veto_stop_interrupted_inference_before_replacement(
+async fn unsupported_input_caps_refuse_before_dispatch_and_uncapped_hook_veto_still_stops_replacement(
 ) {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-    // A ceiling with room charges each interrupted attempt its admitted
-    // bound and replays as usual. Once that charge leaves no room, the
-    // replacement is refused before dispatch, as it is by a hook veto.
-    let mut attempt_bound = None;
-    for case in ["roomy_ceiling", "tight_ceiling", "hook_veto"] {
+    // Output-capped routes still lack an authoritative input bound. Both
+    // finite ceiling kinds must refuse even when the nominal budget is roomy.
+    for case in ["token_ceiling", "cost_ceiling", "hook_veto"] {
         let hard_token_limit = case != "hook_veto";
         let server = MockServer::start().await;
         Mock::given(method("POST")).and(path("responses"))
@@ -423,8 +428,7 @@ async fn hard_token_ceiling_without_room_and_hook_veto_stop_interrupted_inferenc
         let mut model = model();
         Arc::make_mut(&mut model.endpoint).transport = octet_ai::EndpointTransport::Http;
         if hard_token_limit {
-            // HTTP uncertainty coverage needs a genuinely capped route;
-            // uncapped Codex hard ceilings now refuse before dispatch.
+            // Enforced output caps alone cannot guarantee total-token bounds.
             Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
                 octet_ai::ResponsesRuntimeProfile::Default;
         }
@@ -451,47 +455,25 @@ async fn hard_token_ceiling_without_room_and_hook_veto_stop_interrupted_inferenc
         })
         .unwrap();
         match case {
-            "roomy_ceiling" => agent.set_max_session_tokens(Some(u64::MAX)),
-            "tight_ceiling" => agent.set_max_session_tokens(attempt_bound),
+            "token_ceiling" => agent.set_max_session_tokens(Some(u64::MAX)),
+            "cost_ceiling" => agent.set_max_session_cost_microdollars(Some(u64::MAX)),
             _ => {}
         }
         let error = agent.complete("finish").await.unwrap_err();
         let requests = server.received_requests().await.unwrap();
-        match case {
-            "roomy_ceiling" => {
-                assert!(
-                    matches!(
-                        error,
-                        AgentError::ProviderRecovery {
-                            usage_unknown: true,
-                            ..
-                        }
-                    ),
-                    "{error:?}"
-                );
-                assert!(requests.len() > 1);
-                let records = agent.session.usage_uncertainty_records().len();
-                assert_eq!(records, requests.len());
-                let exposure = agent
-                    .session
-                    .usage_uncertainty_exposure()
-                    .expect("capped attempts are bounded");
-                assert_eq!(exposure.tokens % records as u64, 0);
-                attempt_bound = Some(exposure.tokens / records as u64);
-            }
-            "tight_ceiling" => {
-                let bound = attempt_bound.unwrap();
-                assert!(
-                    matches!(
-                        error,
-                        AgentError::TokenLimit { current, limit, .. }
-                            if current == bound && limit == bound
-                    ),
-                    "{error:?}"
-                );
-                assert_eq!(requests.len(), 1);
-            }
-            _ => assert_eq!(requests.len(), 1),
+        if hard_token_limit {
+            assert!(
+                matches!(error, AgentError::InputLimitUnavailable),
+                "{error:?}"
+            );
+            assert!(requests.is_empty());
+            assert!(agent.session.usage_records().is_empty());
+            assert!(agent.session.usage_uncertainty_records().is_empty());
+        } else {
+            assert_eq!(requests.len(), 1);
+            assert!(matches!(error, AgentError::Ai(_)), "{error:?}");
+            assert_eq!(agent.session.usage_uncertainty_records().len(), 1);
+            assert!(agent.session.usage_uncertainty_exposure().is_none());
         }
     }
 }

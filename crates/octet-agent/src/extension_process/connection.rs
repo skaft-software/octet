@@ -58,6 +58,7 @@ pub(super) struct ProcessConnection {
     pub(super) child: Arc<Mutex<Child>>,
     pub(super) pending: PendingRequests,
     pub(super) issued_resource_owners: IssuedResourceOwners,
+    pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
     pub(super) pending_changed: Arc<Notify>,
     pub(super) child_requests: ChildRequests,
@@ -174,6 +175,7 @@ pub(super) struct ChildResponseState {
     pub(super) changed: Notify,
     pub(super) cancel_on_response_abort: StdMutex<Option<String>>,
     pub(super) composition_cancellation: StdMutex<Option<CancellationToken>>,
+    pub(super) session_leaf_cancel: StdMutex<Option<crate::session_leaf::SessionLeafCancelHandle>>,
 }
 
 pub(super) struct ChildResponseClaim {
@@ -1405,6 +1407,7 @@ impl ProcessConnection {
             return false;
         }
         read_std_lock(&self.slots).close();
+        self.session_leaf.clear();
         self.remote_ui.clear();
         update_health(&self.health, ExtensionHealthState::Draining, None);
         true
@@ -1554,6 +1557,7 @@ impl ProcessConnection {
 
     pub(super) async fn terminate(&self) {
         self.draining.store(true, Ordering::Release);
+        self.session_leaf.clear();
         self.remote_ui.clear();
         lock_std_mutex(&self.child_requests).clear();
         self.cancel_all_provider_streams("terminated");
@@ -1581,6 +1585,7 @@ impl ProcessConnection {
 
 impl Drop for ProcessConnection {
     fn drop(&mut self) {
+        self.session_leaf.clear();
         self.remote_ui.clear();
         lock_std_mutex(&self.child_requests).clear();
         self.remove_provider_owner();

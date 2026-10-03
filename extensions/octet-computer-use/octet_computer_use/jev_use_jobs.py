@@ -51,7 +51,7 @@ class Jobs:
         self.lock = threading.Lock()
         self.jobs: dict[str, Job] = {}
         self.closed = False
-        self.ended_sessions: set[str] = set()
+        self.ended_sessions: set[tuple] = set()
 
     def _report(self, job):
         if job.result is not None:
@@ -109,7 +109,7 @@ class Jobs:
                 return tool_result(text_content('Denied: jev-use setup was not confirmed.'), is_error=True)
         token.raise_if_cancelled()
         with self.lock:
-            if self.closed or owner[0] in self.ended_sessions:
+            if self.closed or owner in self.ended_sessions:
                 return tool_result(text_content('jev-use is shutting down.'), is_error=True)
             # One active recipe prevents concurrent setup/source mutation and
             # competing fixtures. Finished evidence is bounded but never deleted.
@@ -142,16 +142,31 @@ class Jobs:
                 job.token.event.set()
             return self._report(job)
 
-    def session_settled(self, values, context=None):
-        session_id = values.get('session_id') if isinstance(values, Mapping) else None
-        if not isinstance(session_id, str):
+    def session_end(self, payload, context=None):
+        """Cancel jobs on the host's owner-bound API session_end hook."""
+        binding = payload.get('binding') if isinstance(payload, Mapping) else None
+        if not isinstance(binding, Mapping):
             return
+        try:
+            owner = _owner({'resource_owner': binding})
+        except ValueError:
+            return
+        # When the SDK supplies request context too, require it to agree with
+        # the v0.3 SessionEnd binding rather than relying on either identifier
+        # independently.
+        context_owner = context.get('resource_owner') if isinstance(context, Mapping) else None
+        if context_owner is not None:
+            try:
+                if _owner({'resource_owner': context_owner}) != owner:
+                    return
+            except ValueError:
+                return
         with self.lock:
             if len(self.ended_sessions) >= 1024:
                 self.closed = True
-            self.ended_sessions.add(session_id)
+            self.ended_sessions.add(owner)
             for job in self.jobs.values():
-                if job.owner[0] == session_id:
+                if job.owner == owner:
                     job.token.event.set()
 
     def shutdown(self):

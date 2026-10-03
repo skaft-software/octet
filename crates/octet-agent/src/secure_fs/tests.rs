@@ -469,15 +469,11 @@ fn windows_pinned_target_cannot_be_changed_after_the_final_check() {
                 // sharing, so the verified name cannot move.
                 assert!(std::fs::rename(&path, &displaced).is_err());
                 assert!(std::fs::remove_file(&path).is_err());
-                // A cooperative writer is no longer locked out: its open
-                // succeeds (the residual content race matches Unix, where
-                // the staged replacement still wins the name).
-                std::fs::write(&path, "competing replacement").unwrap();
+                // No writer, including one that shares delete access, may
+                // change the bytes after the final comparison.
+                assert!(std::fs::write(&path, "competing replacement").is_err());
                 // Readers that share deletion still read through the pin.
-                assert_eq!(
-                    std::fs::read_to_string(&path).unwrap(),
-                    "competing replacement"
-                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), "prepared version");
             }
             false
         })
@@ -528,18 +524,20 @@ fn windows_target_created_after_displacement_is_not_overwritten() {
 #[test]
 fn windows_file_held_open_by_another_writer_is_reported_in_use() {
     use std::os::windows::fs::OpenOptionsExt as _;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
 
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let path = root.join("target.txt");
     std::fs::write(&path, "prepared version").unwrap();
     let prepared = PreparedMutation::prepare(&path, false, 1024).unwrap();
-    // Another program holds the file open for writing without sharing
-    // write or delete access.
+    // Even a cooperative holder that shares read/write/delete must block
+    // replacement: its writes cannot safely be discarded after comparison.
     let holder = std::fs::OpenOptions::new()
         .write(true)
-        .share_mode(FILE_SHARE_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .open(&path)
         .unwrap();
 

@@ -19,7 +19,11 @@ async fn changelog_startup_and_idle_skip_responses_context_prewarm() {
     let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
     let mut server = tokio::task::JoinSet::new();
     server.spawn(async move {
+        let mut peers = tokio::task::JoinSet::new();
+        loop {
         let (mut socket, _) = listener.accept().await.unwrap();
+        let requests = requests.clone();
+        peers.spawn(async move {
         let mut head = Vec::new();
         while !head.ends_with(b"\r\n\r\n") {
             head.push(socket.read_u8().await.unwrap());
@@ -37,7 +41,8 @@ async fn changelog_startup_and_idle_skip_responses_context_prewarm() {
         let accept = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
         socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
         loop {
-            let opcode = socket.read_u8().await.unwrap();
+            let Ok(opcode) = socket.read_u8().await else { break; };
+            if opcode == 0x88 { break; } // Client teardown may send Close.
             assert_eq!(opcode, 0x81, "fixture expects one complete JSON text frame");
             let flags = socket.read_u8().await.unwrap();
             assert_ne!(flags & 0x80, 0, "client frames must be masked");
@@ -59,6 +64,8 @@ async fn changelog_startup_and_idle_skip_responses_context_prewarm() {
             socket.write_all(&[0x81, completed.len() as u8]).await.unwrap();
             socket.write_all(completed).await.unwrap();
             requests.send(body).unwrap();
+        }
+        });
         }
     });
     let mut model = scripted_model(&uri);
@@ -96,6 +103,20 @@ async fn changelog_startup_and_idle_skip_responses_context_prewarm() {
         received.try_recv().is_err(),
         "idle release notes sent context"
     );
+    // A live pooled connection intentionally does not receive another warm.
+    schedule_idle_responses_prewarm(&app, &Command::Status);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        received.try_recv().is_err(),
+        "live pool repeated optional setup"
+    );
+    // Positive controls need fresh clients/session affinities, not a timeout
+    // waiting for a deliberately skipped frame on the already warm socket.
+    let mut cold_workspaces = Vec::new();
+    let (cold_workspace, cold_agent) =
+        scripted_agent_for_route(app.model.clone(), octet_ai::AiClient::new());
+    cold_workspaces.push(cold_workspace);
+    app.agent = cold_agent;
     schedule_idle_responses_prewarm(&app, &Command::Status);
     tokio::time::timeout(Duration::from_secs(3), received.recv())
         .await
@@ -110,6 +131,10 @@ async fn changelog_startup_and_idle_skip_responses_context_prewarm() {
         (Some("fixture"), "/changelog"),
         (Some("fixture"), "Expanded template argument: /changelog"),
     ] {
+        let (cold_workspace, cold_agent) =
+            scripted_agent_for_route(app.model.clone(), octet_ai::AiClient::new());
+        cold_workspaces.push(cold_workspace);
+        app.agent = cold_agent;
         app.config.prompt_template = template.map(str::to_owned);
         let input = prepare_startup_input(&app, &mut shell, Some(prompt.into())).unwrap();
         assert_eq!(input.display_text, prompt);

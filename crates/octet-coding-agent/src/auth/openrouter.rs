@@ -77,10 +77,11 @@ impl SubscriptionFlow for OpenRouterFlow {
     async fn authorize(&self, http: &reqwest::Client, headless: bool) -> Result<StoredCredential> {
         let pkce = super::subscription::pkce::generate()?;
         let url = authorize_url(&pkce.challenge)?;
+        // Always publish recovery instructions before the optional opener.
+        // A missing browser must not leave the user with only a paste prompt.
+        crate::output::stdout_multiline(format!("Open this URL to authorize:\n\n  {url}\n"));
         if !headless {
             super::subscription::login::open_browser(url.as_str());
-        } else {
-            crate::output::stdout_multiline(format!("Open this URL to authorize:\n\n  {url}\n"));
         }
         let (code, _) = super::subscription::login::read_pasted_redirect(
             "Approve access in your browser, then paste the URL your browser was redirected to.\n\
@@ -90,7 +91,8 @@ impl SubscriptionFlow for OpenRouterFlow {
             // compare against. The PKCE verifier below is what binds the code to
             // this login attempt.
             "",
-        )?;
+        )
+        .await?;
         self.exchange(http, &code, &pkce.verifier).await
     }
 

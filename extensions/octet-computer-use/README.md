@@ -328,6 +328,10 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   driver actions share one driver session; ending it clears the binding so a
   subsequent action must establish a new session. Each reopened transport gets
   a fresh session identity, including **Set up again** within the same process.
+  Ending a session is not read-only: the driver runs its registered cleanup
+  hooks (which may undo session-owned effects), and the extension clears its
+  binding even if cleanup reports an error. Do not classify `end_session` as a
+  passive observation.
 - **Bounded outputs.** Text and structured driver output are bounded below
   Octet's 256 KiB structured-content limit while preserving window IDs, snapshot
   IDs, element tokens, and coordinates. Screenshots are published as artifacts,

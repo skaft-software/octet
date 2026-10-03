@@ -1021,7 +1021,12 @@ fn persist_extension_host_authority_to_path(
     if allowed {
         grants.push(grant);
     } else {
-        grants.retain(|value| value != &grant);
+        let selected_source = extension_grant_source(&grant, path);
+        grants.retain(|value| {
+            value != &grant
+                && (selected_source.is_none()
+                    || extension_grant_source(value, path) != selected_source)
+        });
     }
     grants.sort();
     grants.dedup();
@@ -1032,6 +1037,28 @@ fn persist_extension_host_authority_to_path(
     document["trusted_extensions"] = toml_edit::value(values);
     write_config_atomically(path, &document.to_string(), original.as_deref())?;
     Ok(grants)
+}
+
+/// Resolve grants using the same parent-only canonicalization as startup's
+/// normalize_trusted_manifest_path: the manifest itself is not followed.
+/// Bare grants identify only the global source, never every source of a name.
+fn extension_grant_source(grant: &str, config_path: &Path) -> Option<(String, PathBuf)> {
+    let (name, manifest) = match grant.split_once('@') {
+        Some((name, path)) => (name, PathBuf::from(path)),
+        None => (
+            grant,
+            config_path
+                .parent()?
+                .join("extensions")
+                .join(grant)
+                .join("extension.toml"),
+        ),
+    };
+    if !manifest.is_absolute() || manifest.file_name()? != "extension.toml" {
+        return None;
+    }
+    let parent = manifest.parent()?.canonicalize().ok()?;
+    Some((name.to_owned(), parent.join("extension.toml")))
 }
 
 fn config_update_lock(path: &std::path::Path) -> anyhow::Result<std::fs::File> {

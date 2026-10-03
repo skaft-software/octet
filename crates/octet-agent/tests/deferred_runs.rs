@@ -659,6 +659,19 @@ async fn cancelling_an_effect_pending_leaf_records_exposure_once_without_repolli
     let (mut agent, _client, _workspace) = parked_agent(model.clone(), transport.clone());
 
     let (operation_id, _, _) = drive_park(&mut agent).await;
+    agent
+        .session_mut()
+        .record_usage_uncertainty_with_bound(
+            model.endpoint.id.clone(),
+            model.spec.id.clone(),
+            "earlier_bounded_attempt",
+            Some(octet_agent::session::UsageUncertaintyBound {
+                tokens: 7,
+                cost_microdollars: Some(3),
+            }),
+        )
+        .unwrap();
+    assert!(agent.session().usage_uncertainty_exposure().is_some());
 
     // Admit the poll directly through the session store, then cancel the
     // unknown-outcome leaf. The cancelled attempt must not be re-polled and its
@@ -673,6 +686,31 @@ async fn cancelling_an_effect_pending_leaf_records_exposure_once_without_repolli
         .expect("the current generation can be cancelled");
     assert!(cancelled.abandoned_unknown_poll());
     assert!(agent.session().has_uncertain_usage());
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 2);
+    assert!(
+        agent.session().usage_uncertainty_exposure().is_none(),
+        "an unrelated bounded exposure must not suppress a fresh unknown poll"
+    );
+    let second_operation = "independent-deferred-cancel";
+    suspend_in_store(
+        &store,
+        &identity_for(&model),
+        &model,
+        second_operation,
+        "second-source",
+    );
+    store
+        .begin_pass(
+            second_operation,
+            "second-pass",
+            DeferredResumeIntent::Poll,
+            0,
+        )
+        .unwrap();
+    agent.cancel_deferred_run(second_operation, 1).unwrap();
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 3);
+    assert!(agent.cancel_deferred_run(second_operation, 2).is_err());
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 3);
 
     let source = ScriptedPollSource::new(Vec::new());
     let outcome = agent

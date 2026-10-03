@@ -564,7 +564,7 @@ async fn idle_horizon_branch_tool_generation_and_mode_changes_stop_warming() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn dropping_idle_poll_keeps_post_but_explicit_cancel_records_bounded_uncertainty() {
+async fn dropping_idle_poll_keeps_post_but_explicit_cancel_records_unbounded_uncertainty() {
     let mut f = Fixture::new(CacheWarmMode::Idle, 500_000);
     f.client.register_host_stream_transport(
         f.model.endpoint.id.clone(),
@@ -582,19 +582,14 @@ async fn dropping_idle_poll_keeps_post_but_explicit_cancel_records_bounded_uncer
     assert_eq!(f.captures.lock().unwrap().len(), 1);
     f.warmer.cancel(&mut f.session, "new prompt").unwrap();
     assert!(f.session.has_uncertain_usage());
-    assert_eq!(
-        f.session.usage_uncertainty_exposure().unwrap().tokens,
-        500_001
-    );
+    assert!(f.session.usage_uncertainty_exposure().is_none());
     assert_eq!(
         f.session.cache_warm_records().last().unwrap().state,
         CacheWarmState::Failed
     );
     let reopened = Session::open(f.session.path()).unwrap();
-    assert_eq!(
-        reopened.usage_uncertainty_exposure().unwrap().tokens,
-        500_001
-    );
+    assert!(reopened.has_uncertain_usage());
+    assert!(reopened.usage_uncertainty_exposure().is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -812,7 +807,7 @@ async fn watched_off_cancels_dispatched_refresh_and_publishes_uncertainty() {
     ));
     assert_eq!(diagnostics.borrow().state, CacheWarmingState::Inactive);
     assert_eq!(f.session.usage_uncertainty_records().len(), 1);
-    assert!(f.session.usage_uncertainty_exposure().is_some());
+    assert!(f.session.usage_uncertainty_exposure().is_none());
     assert_eq!(
         f.session.cache_warm_records().last().unwrap().state,
         CacheWarmState::Failed

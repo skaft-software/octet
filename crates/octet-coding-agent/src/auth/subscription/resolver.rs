@@ -22,6 +22,7 @@ use super::flow::{RefreshMode, SubscriptionFlow};
 use super::store::{OAuthStore, RefreshLock, StoredCredential};
 
 /// A credential resolver bound to one provider's flow and credential file.
+#[derive(Clone)]
 pub(crate) struct SubscriptionResolver {
     flow: Arc<dyn SubscriptionFlow>,
     store: OAuthStore,
@@ -29,10 +30,21 @@ pub(crate) struct SubscriptionResolver {
     /// Serializes refreshes inside this process so concurrent requests do not
     /// stampede the token endpoint. Combined with the cross-process lock below
     /// this is a proper double-checked lock.
-    refresh_lock: Mutex<()>,
+    refresh_lock: Arc<Mutex<()>>,
+    /// Shared terminal state lets a later caller wait for an orphaned refresh
+    /// and observe its secret-free failure instead of racing storage or replay.
+    refresh_state: Arc<tokio::sync::watch::Sender<RefreshTerminal>>,
     /// Bound on the cross-process wait, kept as a field so tests can inject a
     /// short deadline instead of depending on the production one.
     refresh_lock_wait: Duration,
+}
+
+#[derive(Clone)]
+enum RefreshTerminal {
+    Idle,
+    Running,
+    Succeeded,
+    Failed(String),
 }
 
 impl std::fmt::Debug for SubscriptionResolver {
@@ -51,7 +63,8 @@ impl SubscriptionResolver {
             flow,
             store,
             http: super::wire::http_client(),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Arc::new(Mutex::new(())),
+            refresh_state: Arc::new(tokio::sync::watch::channel(RefreshTerminal::Idle).0),
             refresh_lock_wait: super::store::REFRESH_LOCK_WAIT,
         }
     }
@@ -73,8 +86,26 @@ impl SubscriptionResolver {
         format!("octet --login {}", self.flow.login())
     }
 
+    async fn await_previous_refresh(&self) -> Result<()> {
+        let mut state = self.refresh_state.subscribe();
+        loop {
+            let terminal = state.borrow().clone();
+            match terminal {
+                RefreshTerminal::Idle | RefreshTerminal::Succeeded => return Ok(()),
+                RefreshTerminal::Failed(message) => bail!("{message}"),
+                RefreshTerminal::Running => {
+                    state
+                        .changed()
+                        .await
+                        .context("credential-refresh result channel closed")?;
+                }
+            }
+        }
+    }
+
     /// Load a non-expired credential, refreshing it if necessary.
     pub(crate) async fn load_valid(&self) -> Result<StoredCredential> {
+        self.await_previous_refresh().await?;
         let stored = self.store.load()?.ok_or_else(|| {
             anyhow!(
                 "not signed in to {}; run `{}`",
@@ -97,15 +128,49 @@ impl SubscriptionResolver {
         // indefinitely blocked lock worker behind. A timed-out acquisition holds
         // nothing and rotates nothing, so the credential file is left exactly as
         // its other owner had it.
-        let _task_guard = self.refresh_lock.lock().await;
+        // Waiting for admission stays cancellable: a cancelled waiter must not
+        // leave an orphan refresh queued behind the current owner.
+        let task_guard = Arc::clone(&self.refresh_lock).lock_owned().await;
+        // Another caller may have finished after our initial state check but
+        // before admission. Never overwrite its indeterminate failure with a
+        // fresh Running state and replay a potentially consumed refresh token.
+        self.await_previous_refresh().await?;
         let lock_store = self.store.clone();
         let refresh_lock_wait = self.refresh_lock_wait;
         let process_guard =
             tokio::task::spawn_blocking(move || lock_store.lock_refresh_within(refresh_lock_wait))
                 .await
                 .context("refresh-lock worker failed")??;
-        let refreshed = self.refresh_while_locked(&process_guard).await;
-        process_guard.finish_with(refreshed)
+        // From admission through persistence, the task owns both guards.
+        // Dropping the caller's wait cannot strand a single-use rotated token.
+        self.refresh_state.send_replace(RefreshTerminal::Running);
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let _task_guard = task_guard;
+            let refreshed = owner.refresh_while_locked(&process_guard).await;
+            let refreshed = process_guard.finish_with(refreshed);
+            let terminal = match &refreshed {
+                Ok(_) => RefreshTerminal::Succeeded,
+                // Only a positively pre-send failure permits another attempt.
+                // Body/response and persistence failures stay nonreplayable.
+                Err(error) if matches!(classification(error), AuthError::Unavailable) => {
+                    RefreshTerminal::Idle
+                }
+                Err(_) => {
+                    // Never retain provider-controlled error text: responses
+                    // may echo either the old or rotated secret.
+                    RefreshTerminal::Failed(format!(
+                        "{} credential refresh failed; run `{}`",
+                        owner.flow.label(),
+                        owner.login_command()
+                    ))
+                }
+            };
+            owner.refresh_state.send_replace(terminal);
+            refreshed
+        })
+        .await
+        .context("credential-refresh worker failed")?
     }
 
     async fn refresh_while_locked(&self, lock: &RefreshLock) -> Result<StoredCredential> {
@@ -573,6 +638,278 @@ mod tests {
             1,
             "a rotated refresh token must only be spent once"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiter_before_admission_leaves_no_refresh_owner() {
+        let fixture = fixture(RefreshMode::Rotating, 0);
+        fixture.store.save(&credential(-10)).unwrap();
+        let resolver = resolver(&fixture);
+        let guard = Arc::clone(&resolver.refresh_lock).lock_owned().await;
+        assert_eq!(Arc::strong_count(&resolver.refresh_lock), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), resolver.load_valid())
+                .await
+                .is_err()
+        );
+        // A queued detached task would retain another resolver/mutex owner.
+        assert_eq!(Arc::strong_count(&resolver.refresh_lock), 2);
+        drop(guard);
+        assert_eq!(Arc::strong_count(&resolver.refresh_lock), 1);
+        assert_eq!(
+            fixture.store.load().unwrap().unwrap().refresh_token,
+            REFRESH
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_rotation_waiter_still_persists_once_before_peer_resolution() {
+        let server = wiremock::MockServer::start().await;
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::clone(&dispatched);
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(move |_request: &wiremock::Request| {
+                observed.notify_one();
+                wiremock::ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(serde_json::json!({
+                        "access_token": ROTATED_ACCESS, "refresh_token": ROTATED_REFRESH,
+                        "expires_in": 3600
+                    }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let fixture = fixture_with(&format!("{}/token", server.uri()), RefreshMode::Rotating, 0);
+        fixture.store.save(&credential(-10)).unwrap();
+        let first = Arc::new(resolver(&fixture));
+        let waiter = tokio::spawn({
+            let first = Arc::clone(&first);
+            async move { first.load_valid().await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), dispatched.notified())
+            .await
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(first);
+        // An independently constructed resolver models a restarted caller.
+        // It must wait on the committed rotation, not spend the stale token.
+        let peer = resolver(&fixture);
+        let credential = tokio::time::timeout(Duration::from_secs(2), peer.load_valid())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(credential.refresh_token, ROTATED_REFRESH);
+        assert_eq!(
+            fixture.store.load().unwrap().unwrap().refresh_token,
+            ROTATED_REFRESH
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_failure_is_retained_secret_safely_without_replay() {
+        let server = wiremock::MockServer::start().await;
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::clone(&dispatched);
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(move |_request: &wiremock::Request| {
+                observed.notify_one();
+                wiremock::ResponseTemplate::new(500)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(
+                        serde_json::json!({"error":"refresh failed", "error_code":REFRESH}),
+                    )
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let fixture = fixture_with(&format!("{}/token", server.uri()), RefreshMode::Rotating, 0);
+        fixture.store.save(&credential(-10)).unwrap();
+        let resolver = Arc::new(resolver(&fixture));
+        let waiter = tokio::spawn({
+            let resolver = Arc::clone(&resolver);
+            async move { resolver.load_valid().await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), dispatched.notified())
+            .await
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+
+        let error = resolver.load_valid().await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Test Provider credential refresh failed"),
+            "{message}"
+        );
+        assert!(message.contains("octet --login test-provider"), "{message}");
+        assert!(!message.contains(REFRESH), "{message}");
+        assert_eq!(
+            fixture.store.load().unwrap().unwrap().refresh_token,
+            REFRESH
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn queued_callers_cannot_replay_an_indeterminate_cancelled_refresh() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+
+        let server = wiremock::MockServer::start().await;
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::clone(&dispatched);
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(move |_request: &wiremock::Request| {
+                observed.notify_one();
+                // The exchange returned a new access token but not its rotated
+                // refresh token: the old token may already have been consumed.
+                wiremock::ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(serde_json::json!({
+                        "access_token": ROTATED_ACCESS, "expires_in": 3600
+                    }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let fixture = fixture_with(&format!("{}/token", server.uri()), RefreshMode::Rotating, 0);
+        fixture.store.save(&credential(-10)).unwrap();
+        let resolver = resolver(&fixture);
+        let admission = Arc::clone(&resolver.refresh_lock).lock_owned().await;
+        let mut first = Box::pin(resolver.load_valid());
+        let mut second = Box::pin(resolver.load_valid());
+        // Both callers pass the initial Idle check and queue on admission.
+        // Poll explicitly rather than depending on sleep/scheduler timing.
+        poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(admission);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                biased;
+                _ = dispatched.notified() => {}
+                _ = &mut first => panic!("refresh returned before dispatch was observed"),
+            }
+        })
+        .await
+        .unwrap();
+        drop(first); // Cancel its waiter, not the exchange/persistence owner.
+        let error = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "a queued caller must not repeat an indeterminate refresh"
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("credential refresh failed"), "{message}");
+        assert!(message.contains("octet --login test-provider"), "{message}");
+        assert!(
+            !message.contains(ACCESS) && !message.contains(REFRESH),
+            "{message}"
+        );
+        assert!(matches!(resolver.resolve().await, Err(AuthError::Resolve)));
+        assert_eq!(
+            fixture.store.load().unwrap().unwrap().refresh_token,
+            REFRESH
+        );
+        server.verify().await; // Exactly one exchange, including the later caller.
+    }
+
+    #[tokio::test]
+    async fn repeated_presend_connection_refusals_allow_recovery_without_login() {
+        // Reserve an ephemeral loopback address, then leave it without a
+        // listener so refusal is positively pre-send (not an HTTP/body error).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let fixture = fixture_with(&format!("http://{address}/token"), RefreshMode::Rotating, 0);
+        fixture.store.save(&credential(-10)).unwrap();
+        let resolver = resolver(&fixture);
+        for _ in 0..2 {
+            assert!(matches!(
+                resolver.resolve().await,
+                Err(AuthError::Unavailable)
+            ));
+            let stored = fixture.store.load().unwrap().unwrap();
+            assert_eq!(stored.access_token, ACCESS);
+            assert_eq!(stored.refresh_token, REFRESH);
+        }
+        let server = wiremock::MockServer::builder()
+            .listener(std::net::TcpListener::bind(address).unwrap())
+            .start()
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": ROTATED_ACCESS, "refresh_token": ROTATED_REFRESH,
+                    "expires_in": 3600
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(bearer(&resolver).await, format!("Bearer {ROTATED_ACCESS}"));
+        assert_eq!(
+            fixture.store.load().unwrap().unwrap().refresh_token,
+            ROTATED_REFRESH
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_persistence_failure_is_retained_and_not_replayed() {
+        let server = wiremock::MockServer::start().await;
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::clone(&dispatched);
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(move |_request: &wiremock::Request| {
+                observed.notify_one();
+                wiremock::ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(150))
+                    .set_body_json(serde_json::json!({
+                        "access_token": ROTATED_ACCESS, "refresh_token": ROTATED_REFRESH,
+                        "expires_in": 3600
+                    }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let fixture = fixture_with(&format!("{}/token", server.uri()), RefreshMode::Rotating, 0);
+        fixture.store.save(&credential(-10)).unwrap();
+        let resolver = Arc::new(resolver(&fixture));
+        let waiter = tokio::spawn({
+            let resolver = Arc::clone(&resolver);
+            async move { resolver.load_valid().await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), dispatched.notified())
+            .await
+            .unwrap();
+        // Make publication fail after the exchange has been issued without
+        // changing the lock directory or introducing permission assumptions.
+        std::fs::remove_file(fixture.store.path()).unwrap();
+        std::fs::create_dir(fixture.store.path()).unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+
+        let error = resolver.load_valid().await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Test Provider credential refresh failed"),
+            "{message}"
+        );
+        assert!(message.contains("octet --login test-provider"), "{message}");
+        assert!(!message.contains(ROTATED_REFRESH), "{message}");
+        assert!(fixture.store.path().is_dir());
+        server.verify().await;
     }
 
     #[tokio::test]

@@ -43,6 +43,7 @@ pub(super) fn protocol_read_state_for_test(
         ProtocolReadState {
             pending: Arc::new(StdMutex::new(HashMap::new())),
             issued_resource_owners: Arc::new(StdMutex::new(HashSet::new())),
+            session_leaf: Arc::new(session_leaf::SessionLeafMailbox::default()),
             remote_ui: Arc::new(RemoteUiMailbox::new(None)),
             pending_changed: Arc::new(Notify::new()),
             closed: Arc::new(AtomicBool::new(false)),
@@ -2239,6 +2240,7 @@ fn child_request(parent_request_id: u64, state: u8) -> ChildRequest {
             changed: Notify::new(),
             cancel_on_response_abort: StdMutex::new(None),
             composition_cancellation: StdMutex::new(None),
+            session_leaf_cancel: StdMutex::new(None),
         }),
         policy_intent: None,
     }

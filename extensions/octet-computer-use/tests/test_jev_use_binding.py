@@ -10,7 +10,7 @@ from octet_computer_use import entrypoint, jev_use_binding as binding
 class BindingTests(unittest.TestCase):
     def setUp(self):
         self.extension = SimpleNamespace(cancellation=mock.Mock(), confirm=mock.Mock(return_value=True))
-        self.computer = SimpleNamespace(_paths=object())
+        self.computer = SimpleNamespace(_paths=object(), status=mock.Mock())
 
     def call(self, operation, arguments=None, gated=False):
         return binding.dispatch(operation, arguments or {}, computer=self.computer,
@@ -18,6 +18,8 @@ class BindingTests(unittest.TestCase):
 
     def test_registered_tools_have_schemas_and_manifest_entries(self):
         extension, _ = entrypoint.create_extension()
+        self.assertIn('session_end', extension._hooks)
+        self.assertEqual(extension._hooks['session_end'].__self__.__class__.__name__, 'Jobs')
         manifest = (Path(__file__).parents[1] / 'extension.toml').read_text()
         for operation in binding.TOOLS:
             name = binding.PREFIX + operation
@@ -31,11 +33,11 @@ class BindingTests(unittest.TestCase):
         self.extension.confirm.assert_not_called()
 
     def test_gated_run_never_starts_runner_or_probes_driver(self):
-        with mock.patch.object(binding.jev_use, 'run') as run, mock.patch.object(binding.driver, 'health') as health:
+        with mock.patch.object(binding.jev_use, 'run') as run, mock.patch.object(self.computer, 'status') as status:
             result = self.call('run', gated=True)
         self.assertTrue(result['is_error'])
         run.assert_not_called()
-        health.assert_not_called()
+        status.assert_not_called()
 
     def test_setup_denial_and_unavailable_confirmation_fail_closed(self):
         for answer in (False, None):
@@ -57,13 +59,15 @@ class BindingTests(unittest.TestCase):
                 run.assert_not_called()
 
     def test_missing_key_stops_before_browser_preflight(self):
-        with mock.patch.object(binding, 'resolve_key', return_value=None), mock.patch.object(binding.driver, 'health') as health:
+        with mock.patch.object(binding, 'resolve_key', return_value=None):
             self.assertTrue(self.call('run', {'live': True})['is_error'])
-            health.assert_not_called()
+            self.computer.status.assert_not_called()
 
     def test_run_preserves_selected_runtime_and_reports_incomplete_as_error(self):
-        health = SimpleNamespace(as_dict=lambda: {'runtime': 'desktop-host', 'runtime_binary': '/selected/cua-driver', 'permissions': 'granted'})
-        with mock.patch.object(binding.driver, 'health', return_value=health), mock.patch.object(binding.jev_use, 'run', return_value={'complete': False, 'status': 'unknown'}) as run:
+        health = {'runtime': 'desktop-host', 'runtime_binary': '/selected/cua-driver',
+                  'permissions': 'granted', 'permission_detail': 'permissions ready', 'doctor_ok': True, 'platform': 'darwin'}
+        self.computer.status = mock.Mock(return_value=health)
+        with mock.patch.object(binding.jev_use, 'run', return_value={'complete': False, 'status': 'unknown'}) as run:
             result = self.call('run', {'max_steps': 3})
         self.assertTrue(result['is_error'])
         self.assertEqual(run.call_args.kwargs['driver_binary'], Path('/selected/cua-driver'))
@@ -71,10 +75,50 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['max_steps'], 3)
 
     def test_unavailable_host_does_not_fall_back(self):
-        health = SimpleNamespace(as_dict=lambda: {'runtime': 'unavailable', 'permissions': 'granted'})
-        with mock.patch.object(binding.driver, 'health', return_value=health), mock.patch.object(binding.jev_use, 'run') as run:
+        health = {'runtime': 'unavailable', 'permissions': 'granted', 'permission_detail': 'permissions ready', 'doctor_ok': True, 'platform': 'darwin'}
+        self.computer.status = mock.Mock(return_value=health)
+        with mock.patch.object(binding.jev_use, 'run') as run:
             self.assertTrue(self.call('run')['is_error'])
             run.assert_not_called()
+
+    def test_unknown_permission_on_non_darwin_uses_runtime_readiness(self):
+        for platform_name in ('linux', 'windows'):
+            with self.subTest(platform=platform_name):
+                health = {'runtime': 'direct', 'runtime_binary': '/selected/cua-driver',
+                          'permissions': 'granted' if platform_name == 'linux' else 'unknown',
+                          'permission_detail': 'display reachable' if platform_name == 'linux' else 'probe responded; permission state unknown',
+                          'doctor_ok': True, 'platform': platform_name}
+                self.computer.status = mock.Mock(return_value=health)
+                with mock.patch.object(binding.jev_use, 'run', return_value={'ok': True}) as run:
+                    self.call('run')
+                run.assert_called_once()
+
+    def test_denied_permission_still_blocks_recipe(self):
+        health = {'runtime': 'direct', 'runtime_binary': '/selected/cua-driver',
+                  'permissions': 'denied', 'permission_detail': 'no display session', 'doctor_ok': True, 'platform': 'linux'}
+        self.computer.status = mock.Mock(return_value=health)
+        with mock.patch.object(binding.jev_use, 'run') as run:
+            self.assertTrue(self.call('run')['is_error'])
+        run.assert_not_called()
+
+    def test_live_linux_denial_from_status_prevents_recipe_dispatch(self):
+        from octet_computer_use import driver
+
+        extension, computer = entrypoint.create_extension(home=Path('/test-home'))
+        computer.client = lambda: object()
+        base_health = SimpleNamespace(as_dict=lambda: {
+            'installed': True, 'runtime': 'direct', 'runtime_binary': '/selected/cua-driver',
+            'permissions': 'unknown', 'doctor_ok': True, 'platform': 'linux'})
+        with mock.patch.object(driver, 'health', return_value=base_health), \
+                mock.patch.object(driver, 'permission_state', return_value={
+                    'permissions': 'denied', 'detail': 'no display session'}), \
+                mock.patch.object(binding.jev_use, 'run') as run:
+            status = computer.status()
+            self.assertEqual(status['permissions'], 'denied')
+            result = binding.dispatch('run', {}, computer=computer, extension=extension,
+                                      home=Path('/test-home'))
+        self.assertTrue(result['is_error'])
+        run.assert_not_called()
 
     def test_mock_chooser_does_not_load_key(self):
         request = {'schema': 'cua.jev_choice_request_v1'}

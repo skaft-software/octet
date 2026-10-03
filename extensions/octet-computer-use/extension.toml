@@ -78,5 +78,6 @@ tools = [
 ]
 commands = ["computer-use"]
 ui = ["status"]
+hooks = ["session_end"]
 confirmations = true
 menu = true

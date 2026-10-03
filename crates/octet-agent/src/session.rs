@@ -335,7 +335,7 @@ fn valid_extension_entry_payload(entry: &ExtensionEntry) -> Option<usize> {
     }
     let value = entry.to_value();
     let mut nodes = 0usize;
-    if !valid_extension_metadata_value(&value, 0, &mut nodes) {
+    if !valid_extension_metadata_value(&value, 0, &mut nodes, true) {
         return None;
     }
     let encoded = serde_json::to_vec(&value).ok()?;
@@ -391,7 +391,7 @@ impl ExtensionEntryMetadata {
             return None;
         }
         let mut nodes = 0usize;
-        if !valid_extension_metadata_value(&self.value, 0, &mut nodes) {
+        if !valid_extension_metadata_value(&self.value, 0, &mut nodes, !self.public) {
             return None;
         }
         let encoded = serde_json::to_vec(&self.value).ok()?;
@@ -423,6 +423,7 @@ fn valid_extension_metadata_value(
     value: &serde_json::Value,
     depth: usize,
     nodes: &mut usize,
+    private: bool,
 ) -> bool {
     if depth > MAX_EXTENSION_ENTRY_METADATA_DEPTH || *nodes >= MAX_EXTENSION_ENTRY_METADATA_NODES {
         return false;
@@ -432,15 +433,17 @@ fn valid_extension_metadata_value(
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
         serde_json::Value::String(value) => {
             value.len() <= MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES
-                && !value.chars().any(char::is_control)
+                && !value.chars().any(|character| {
+                    character.is_control() && !(private && matches!(character, '\n' | '\r' | '\t'))
+                })
         }
-        serde_json::Value::Array(values) => values
-            .iter()
-            .all(|value| valid_extension_metadata_value(value, depth.saturating_add(1), nodes)),
+        serde_json::Value::Array(values) => values.iter().all(|value| {
+            valid_extension_metadata_value(value, depth.saturating_add(1), nodes, private)
+        }),
         serde_json::Value::Object(values) => values.iter().all(|(key, value)| {
             key.len() <= MAX_EXTENSION_ENTRY_METADATA_KEY_BYTES
                 && !key.chars().any(char::is_control)
-                && valid_extension_metadata_value(value, depth.saturating_add(1), nodes)
+                && valid_extension_metadata_value(value, depth.saturating_add(1), nodes, private)
         }),
     }
 }
