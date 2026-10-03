@@ -183,9 +183,13 @@ def _run(
     env: Optional[Mapping[str, str]] = None,
     timeout: int = PROBE_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess:
+    from octet_extension import current_cancellation
+
+    cancellation = current_cancellation()
+    if cancellation is not None:
+        cancellation.raise_if_cancelled()
     try:
-        return subprocess.run(
-            list(argv),
+        options = dict(
             cwd=str(cwd) if cwd is not None else None,
             env=dict(env) if env is not None else None,
             # Never inherit stdin. Inside octet it is the extension's JSON-RPC
@@ -204,15 +208,59 @@ def _run(
             # `OSError` and would escape uncaught below.
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
-            check=False,
         )
+        if cancellation is None:
+            return subprocess.run(list(argv), **options, timeout=timeout, check=False)
+        return _run_cancellable(list(argv), cancellation, timeout=timeout, **options)
     except subprocess.TimeoutExpired as error:
         raise ProvisionError(
             f"command timed out after {timeout}s: {argv[0]} {argv[1] if len(argv) > 1 else ''}"
         ) from error
     except OSError as error:
         raise ProvisionError(f"failed to run {argv[0]}: {error}") from error
+
+
+def _run_cancellable(
+    argv: List[str], cancellation: Any, *, timeout: float, **options: Any,
+) -> subprocess.CompletedProcess:
+    """A request cancellation must stop pip/venv, not only hide its UI result."""
+
+    # Reuse the bundle's existing owned-tree supervision. Windows starts
+    # suspended and joins a kill-on-close job before any child can escape.
+    from octet_computer_use.jev_use import _kill_tree, _windows_job, RuntimeFailure
+
+    options.update({"creationflags": 4} if os.name == "nt" else {"start_new_session": True})
+    with subprocess.Popen(argv, **options) as process:
+        job = None
+        try:
+            if os.name == "nt":
+                try:
+                    job = _windows_job(process)
+                except RuntimeFailure as error:
+                    raise ProvisionError(f"cannot supervise setup process: {error}") from error
+            deadline = time.monotonic() + timeout
+            while True:
+                cancellation.raise_if_cancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                cancellation.raise_if_cancelled()
+                return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+        finally:
+            if job is not None:
+                job()
+                process.wait(timeout=5)
+            elif os.name == "nt":
+                # Job assignment failed while the process was still suspended;
+                # it has not spawned children and can be reaped directly.
+                process.kill()
+                process.wait(timeout=5)
+            else:
+                _kill_tree(process)
 
 
 def _ensure_directories(paths: DriverPaths) -> None:
@@ -1129,17 +1177,15 @@ def desktop_app_usable(binary: Optional[Path] = None) -> bool:
 
 
 def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
-    """Report the host's real TCC state over the selected live MCP channel.
+    """Report readiness over the selected live MCP channel.
 
-    ``cua-driver permissions status`` only answers from a CuaDriver *daemon*, so
-    on the pip-provisioned direct path it reports ``unknown`` even when both
-    grants are present. ``check_permissions`` over the already-running selected
-    session reports the responsible host's real state instead. Pass
-    ``prompt=True`` only from an explicit, user-initiated setup: the driver never
-    prompts in host-inherit mode, so the macOS dialog is raised by this call on
-    the host's behalf.
+    Windows reports UI Automation and window-message input, Linux reports its
+    display session, and macOS reports the responsible host's TCC grants. Only
+    explicit macOS setup may prompt; the other platforms have no such grant.
     """
 
+    if host_platform() == "windows":
+        return _windows_session_state(client)
     if host_platform() == "linux":
         return _linux_session_state(client)
     arguments: Dict[str, Any] = {"prompt": bool(prompt)}
@@ -1180,6 +1226,39 @@ def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
         "screen_recording": screen_recording,
         "detail": detail,
     }
+
+
+def _windows_session_state(client: Any) -> Dict[str, Any]:
+    """Windows needs available automation interfaces, not a macOS grant.
+
+    The probe says nothing about a particular target's elevation or the secure
+    desktop. Those restrictions remain enforced by the driver's action path.
+    An unreadable integrity token is not evidence that either interface failed.
+    """
+
+    try:
+        # Windows check_permissions accepts no macOS prompt/probe arguments.
+        result = client.call("check_permissions", {})
+    except Exception:
+        return {"permissions": "unknown", "detail": "the driver did not answer a Windows desktop probe"}
+    if result.get("isError"):
+        return {"permissions": "unknown", "detail": "the driver refused the Windows desktop probe"}
+    structured = result.get("structuredContent") or {}
+    if not isinstance(structured, Mapping):
+        structured = {}
+    uia = structured.get("uia")
+    post_message = structured.get("post_message")
+    if uia is True and post_message is True:
+        return {"permissions": "granted", "detail":
+                "Windows UI Automation and window-message input are available; no separate OS grant is needed"}
+    missing = []
+    if uia is False:
+        missing.append("UI Automation")
+    if post_message is False:
+        missing.append("window-message input")
+    if missing:
+        return {"permissions": "denied", "detail": "Windows automation unavailable: " + " and ".join(missing)}
+    return {"permissions": "unknown", "detail": "Windows desktop automation state is unknown"}
 
 
 def _linux_session_state(client: Any) -> Dict[str, Any]:

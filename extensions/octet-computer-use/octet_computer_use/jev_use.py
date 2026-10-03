@@ -231,7 +231,8 @@ def _kill_tree(process):
 def _windows_job(process):
     """Assign a suspended process before it can spawn; resume inside an owned job.
 
-    Unexercised on real Windows; only the mocked lifecycle unit test covers it.
+    Native Windows setup cancellation/timeout tests exercise this helper.
+    The Windows Jev recipe itself still needs separate live qualification.
     """
     import ctypes
     from ctypes import wintypes as w
