@@ -10,7 +10,10 @@ application rather than a terminal program.
 `crates/octet-tern` is a TSP client for octet: wire types, APC framing, a tty
 session with flow control, an octet-theme → Tern palette projector, and scene
 builders for octet's coding surfaces. This document records the protocol as
-observed and the mapping octet uses.
+observed and the RAIL mapping octet uses. RAIL implementation is authorized;
+complete native parity and release qualification are not established. The
+[S01–S37 qualification ledger](design/tern-rail-qualification.md) keeps every
+existing octet surface family in scope, including the remaining gaps.
 
 ## Wire format
 
@@ -45,6 +48,12 @@ ESC _ tsp ; <verb> [; k=v]* ; <body> ESC \
 `add(id,parent,before,node)`, `set(id,props)`, `text(id,mode,text)`,
 `splice(id,at,del,text)`, `move(id,parent,before)`, `del(id)`, `settle(id)`,
 `focus(id|null)`, `reveal(id,where)`, `suspend`, `resume`.
+
+Optional `scroll(id,by)` requires an actual `hello.features` advertisement of
+`scroll`. Its directions are `line-up`, `line-down`, `page-up`, `page-down`,
+`start` and `end`. No advertisement means no scroll op, not an optimistic
+assumption. This bridge does not establish semantic search, selection, prompt
+jumps, pointer geometry or reader-position parity.
 
 ### Node
 
@@ -116,7 +125,8 @@ The rendered session shows a reasoning-free transcript with typeset markdown
 (code, `$t_r = 1.5$s`, a table, a quote), an `Edit` tool card with a native
 split diff (`+9 −4`), a `Bash` card with output, the turn usage row, the clocked
 working row (`8.6s 38.6 tok/s`), the composer with a model chip, effort glyph
-and context meter, and the todo HUD in the dock.
+and context meter, and a demo todo HUD. This historical scene is a fixture,
+not the production RAIL layout or evidence of current input-route qualification.
 
 ## Integration
 
@@ -132,21 +142,26 @@ move the preceding history.
 - `dock` owns working status and the composer.
 - `layer` owns native autocomplete, picker sheets and report overlays.
 
-The composer uses Tern's observed `omp.editor` layout with octet's native
-editor, model and effort controls, context meter, session cost, and Send/Stop.
-The welcome uploads octet's byte mark as immutable, content-addressed SVG;
-unsupported images retain the textual byte mark. Its transparent column and
-wrapping row use octet-owned `octet.welcome.*` roles and explicit spacing, not
-OMP's private welcome hooks, which can override logo dimensions and animation
-when Tern updates. The image requests 128×64 logical pixels and retains the
-brand's eight contiguous, baseline-aligned bars and 2:1 proportions, accounting
-for the taller cells in the ANSI mark. Model/theme-aware colours are unchanged.
-Assistant prose and thinking still use the observed `omp.assistant` /
-`omp.thinking` layout hooks. Those `omp.*` roles are Tern implementation details,
-not portable TSP guarantees or omp branding. Transcript, welcome, composer and subagent
-chrome share a responsive `144ch` maximum width; the neutral native dock column
-keeps the roster aligned rather than spanning the pane. The character-relative
-bound scales with Tern's font and shrinks in narrow panes.
+RAIL uses one responsive `96ch` reading measure for transcript, welcome and
+live composer chrome. The character-relative bound scales with Tern's font
+and shrinks in narrow panes. The composer is an integrated, borderless `col`
+with a separating `rule`, native editor, model and effort controls, context
+meter, session cost and Send/Stop; it is not an `omp.editor` card.
+
+The welcome is a compact conversation-local wrapping row. It uploads immutable,
+content-addressed PNG bytes from the canonical byte-mark rasterizer and requests
+40×20 logical pixels. The eight contiguous, baseline-aligned bars keep the
+`01101111` silhouette (positions 1 and 4 half-height) and 2:1 proportions;
+model/theme-aware colours remain supported. Unsupported images retain the
+textual byte mark. Octet-owned `octet.welcome.*` roles avoid OMP's private
+welcome sizing and animation hooks.
+
+Assistant replies are unboxed `col` reader prose with a direct, stable `md`
+leaf, not a labelled assistant card. User prompts use `omp.user` native cards
+for Tern's right-aligned bubble treatment. Assistant prose and thinking retain
+the observed `omp.assistant` / `omp.thinking` hooks; composer controls retain
+their observed hooks. Those `omp.*` roles are Tern implementation details,
+not portable TSP guarantees or omp branding.
 
 Tern still owns typography and its focus ring. Increase **Font size** in Tern's
 settings (or use Cmd+= / Cmd+- on macOS) for a larger interface. TSP v1 has no
@@ -160,7 +175,8 @@ native ownership. Slash activation follows the resolved selection-confirm
 binding, and cursor-only edits preserve navigation and popup dismissal. Their
 gestures are fenced by the draft revision. Model, theme,
 thinking, session, fork and subagent pickers reuse the host's catalogues and
-filtering, with panel-epoch-fenced gestures. The model picker has real provider
+filtering, with panel-epoch and source/catalogue-content-fenced gesture IDs.
+A refreshed ordinal cannot silently authorize a different session or worker. The model picker has real provider
 scopes, context/price columns, a current-model indicator, and a public-facts
 preview (limits, input modalities, cache pricing and supported capabilities).
 Provider marks use seeded initials, the protocol's supported text mark rather
@@ -171,43 +187,69 @@ search, rename and delete actions; the selected session previews its saved
 metadata. Scope and filter chips wrap separately from the primary actions.
 Narrow layouts request a below-list preview; Tern may hide that preview at its
 smallest widths, but Resume remains visible. Rename and delete confirmation
-still use the existing host-owned modal flow. Settings/help reports are native
+still use the existing host-owned ANSI-content modal flow; native session
+rename is a remaining adapter gap. Settings/help reports are native
 modal content rather than migration `rows` nodes. Internally styled documents
 and approval labels may use native `ansi` content; this never runs or repaints
-an ANSI TUI. A user prompt is a native `card` (tone `user`, Markdown body)
-that Tern lays out against its own column, filled with the projected
-`userMessageBg`. A follow-up assistant message is the same shape with the model
-name as its `head`, so replies draw over the projected `customMessageBg` /
-`customMessageText` / `customMessageLabel` palette rather than as bare Markdown
-in Tern's default prose look; streaming still lives on the single `md` leaf, so
-a growing reply patches one node. An ANSI wash padded to octet's PTY width came out ragged
-wherever Tern's column was narrower. Markdown reports (`/changelog`,
+an ANSI TUI. A user bubble is filled with the projected `userMessageBg` and carries
+Markdown source. Assistant Markdown has no model-name card heading or enclosing
+fill; streaming patches the same retained leaf. Blank-line tightening preserves
+code-fence contents and does not change the authoritative source/copy text. Markdown reports (`/changelog`,
 `/hotkeys`) carry their source, so Tern typesets their headings, tables and
 code rather than showing flattened text. `/hotkeys` groups bound actions by
 area as key/description tables and lists unbound ids last. Native pickers publish the
 catalogue total, the search caret, program-computed match ranges and keyed
-footer actions, so the query reads as hits in the list. Approval consent is published only after the exact native frame
-is acknowledged, and is rejected after an unpainted selection or panel change.
+footer actions, so the query reads as hits in the list. Ordinary choices use compact sheets with filter, count, full selected
+label/detail and owned controls. Consent is excluded from these sheets and
+native positive pointer routing: its existing `lg` modal keeps one bounded ANSI
+body without duplicated titles or controls. The host's source-action receipt is
+published only after the exact frame acknowledgement, and is rejected after an
+unpainted selection or panel change. This acknowledgement does **not** establish
+native geometric visibility; consent visibility remains unqualified.
 
 The frontend remains the sole stdin owner. It reassembles and routes TSP
 replies, credit, appearance, disclosure, picker and editor gestures. Editor
 gesture offsets are checked UTF-16 boundaries before conversion to UTF-8;
-stale lengths and invalid ranges are rejected and the draft is re-synchronized.
+stale lengths and invalid ranges are rejected. The wire has no independent
+source edit revision: same-length stale edits remain a qualification gap, not
+something request epochs or length checks prove safe.
 Pointer controls use resolved keybindings, including disabled bindings.
 Identified protocol fragments, malformed messages and oversized assemblies
 are consumed rather than replayed into a draft. Only an ambiguous opening
 Escape prefix has a short input-latency timeout. Genuine bracketed paste and
-Enter/Escape keys remain frontend input.
+Enter/Escape keys remain frontend input. Native text Edit events do not carry
+paste intent and must not be treated as attachment/upload consent.
 
-Bash/exec tools and local `!` commands show their full, wrapping command input
-from the first frame, with no captured output mounted or sent until Ctrl+O
-requests verbose output. Their native cards stay expanded and non-collapsible
-so Tern does not ellipsize the command; output disclosure is a separate host-owned
-projection, not a native preview that paints and then clamps. This also applies
-to failures: status, duration and failure reason/exit code remain in the summary.
-Captured output is retained unchanged for Ctrl+O. Verbose Bash/exec output patches one stable native
-text leaf as chunks arrive, including partial lines, without a streaming cursor
-or switching to a diff widget when command output resembles a diff.
+Ordinary tool/extension input owns an epoch-fenced temporary native editor, shared
+with raw-key editing and bounded to 4096 UTF-8 bytes. Range replacements are
+atomic and UTF-16-checked; overflow is explicit. Submit/cancel return through the
+existing host owner without editing the parent's draft, caret or attachment
+ledger. Sequential requests cannot reuse a previous request's controls.
+
+Secrets remain **HOST-PRIVATE**: the native sheet contains the prompt and host
+input instructions, never an editor, answer value, masked value, copy source or
+native confirm route. Secret typing, host Enter submission and raw Esc cancellation
+bypass ordinary selection-key normalization, including remapped/disabled picker
+bindings. Native cancellation is request-fenced and returns raw Esc to that private
+owner. No unsupported password property is invented. While temporary
+input, a panel or remote UI owns focus, ordinary composer edits/actions are
+readonly or suppressed. Remote editor/fullscreen placements project their
+validated native ANSI content rather than leaving an active ordinary composer.
+
+Bash/exec tools and local `!` commands show the FULL command immediately in
+wrapping `code` rails, without line numbers or a collapsible command target.
+Captured output is absent from the native tree and transport until global Ctrl+O
+requests verbose output; this gate includes command-image preparation, hashing
+and blob upload, not just image nodes. Second Ctrl+O removes the output projection
+without discarding captured source. A per-tool disclosure cannot bypass this gate.
+`!!` retains its existing excluded-history semantics.
+
+The command rail retains truthful lifecycle status, available duration and local
+exit code; captured failure output also requires disclosure. Verbose Bash/exec
+output patches one stable native text leaf as chunks arrive, including partial
+lines, without a streaming cursor or changing to a diff widget for diff-like
+command output. Non-command tools preserve deterministic display labels,
+progress, file/diff projections and grouped-child disclosure.
 
 Tool images respect the existing opt-in image preference. Validated bounded
 payloads are hashed and uploaded once per content address; retained frames
@@ -216,10 +258,22 @@ image kinds and rejected/disabled payloads retain text placeholders.
 
 `/context` uses its captured semantic quantities for a stacked meter and a
 token/percentage table, falling back to native key/value rows if tables are
-unsupported. Subagent telemetry uses native `agent` nodes with authoritative
-tools, tokens, priced cost, current tool, and terminal-clocked age; unsupported
-agent kinds keep the existing compact activity text. No retry, context, or
-request statistics are invented when the host does not supply them.
+unsupported. Reasoning uses real semantic Markdown headings and the host's global/per-trace
+expansion state. Empty activity does not create a Thinking trace; Working remains
+until real reasoning exists. Unknown reasoning duration is absent, not zero;
+a settled trace does not prove a successful run. Compaction follows its own
+expansion/global disclosure state. Working projects actual provider
+queued/loading/ready, waiting and retry/backoff labels; retries omit run-elapsed
+metadata and derive countdowns only from observed backoff.
+
+Subagents occupy one conversation-local, commit-scoped mutable block, not a
+pinned dock roster. It shows state counts and up to four host-supplied live
+`↑input ↓output` token lines (provisional output marked `~`) plus overflow and
+the existing stop-all hint. Settlement removes child rows in the same block;
+hydrated activity without telemetry remains neutral evidence, not completed
+workers. Detailed models, costs, tools, prompts, reasons and read-only child
+transcripts stay in the inspector. No retry, context, request statistics,
+percentages or measurements are invented when the host does not supply them.
 
 A hidden pane suspends presentation without failing the renderer: credit
 starvation and rejected background frames while hidden are not timeouts, and
@@ -258,9 +312,13 @@ The PTY lane uses the real octet binary and input parser, a synthetic TSP
 terminal, isolated HOME/workspace, and an inert loopback-only provider record.
 It exercises paste, Unicode, fragmented replies, Escape, slash completion,
 settings and theme selection without GUI automation or live provider calls.
-Protocol/tree tests cover retained streaming, credit, eviction, appearance,
-prompt provenance and acknowledgement-gated approval consent. These tests do
-not establish the pixel appearance of a particular Tern version.
+Protocol/tree fixtures cover retained streaming, credit, eviction, appearance,
+prompt provenance, command-output/blob disclosure and acknowledgement-gated
+approval consent. Test commands are qualification entrypoints, not a claim that
+they passed on this changing candidate. Fixtures are not actual provider,
+authentication, consent or worker executions; synthetic PTY checks do not
+establish a particular Tern version's pixels or complete interactions. See the
+[qualification ledger](design/tern-rail-qualification.md) for remaining gates.
 
 ## Limits
 
@@ -276,6 +334,13 @@ palette's user tint; the stored per-turn prompt colour still paints prompts in
 the ANSI renderer. This is distinct from
 running an ANSI TUI. Extension-defined styled rows also remain native ANSI
 content until those extension contracts provide semantic nodes.
+
+All 37 existing octet native surface families remain required, but native auth
+instructions still lack an equivalent while authentication suspends the surface;
+session rename is legacy ANSI content; native paste intent, revision-complete
+edits, semantic navigation/search/selection and pointer geometry remain gaps.
+Tern 0.3.1 is untested. This is an independent RAIL implementation deliverable,
+not full-parity or release-ready qualification.
 
 The native renderer does not claim omp's whole product surface: octet's current
 settings command is a read-only report, not editable `prefs`; extension-owned
