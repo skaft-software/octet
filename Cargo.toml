@@ -6,16 +6,17 @@ members = [
     "crates/octet-agent",
     "crates/octet-coding-agent",
     "crates/octet-migrate-types",
+    "crates/octet-tern",
 ]
 exclude = ["extensions/octet-serve"]
 
 [workspace.package]
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 authors = ["Skaft Software"]
 repository = "https://github.com/skaft-software/octet"
 homepage = "https://octet.skaft.org/"
-rust-version = "1.86"
+rust-version = "1.88"
 license = "MIT"
 
 [workspace.lints.rust]
@@ -25,6 +26,10 @@ missing_docs = "warn"
 # Money must be exact integers; no floating-point arithmetic in pricing.
 # (Enforced per-module where relevant; kept off the workspace default to avoid
 # false positives on legitimate f32 sampling knobs like `temperature`.)
+# Clippy 1.88 (the MSRV since octet 0.8.2) warns on positional format
+# arguments by default; the code base uses them consistently, so inlining
+# them is left to a separate style change.
+uninlined_format_args = "allow"
 
 [profile.dev]
 # Keep Cargo's parallel dev-codegen shape explicit. A single codegen unit made
@@ -58,8 +63,9 @@ debug = "full"
 lto = "off"
 strip = "none"
 
-# Keep the audited lopdf 0.42.0 parser compatible with the Rust 1.86 MSRV.
-# Upstream 0.42.0 declares 1.85 but uses let-chain syntax stabilized later;
-# this local patch only rewrites that syntax and does not change parser logic.
+# Keep the audited lopdf 0.42.0 parser. Upstream 0.42.0 declares Rust 1.85 but
+# uses let-chain syntax that only stabilized in 1.88 (the workspace MSRV since
+# octet 0.8.2); this local patch only rewrites that syntax and does not change
+# parser logic.
 [patch.crates-io]
 lopdf = { path = "extensions/octet-serve/vendor/lopdf" }

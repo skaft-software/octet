@@ -33,6 +33,8 @@ pub mod deferred;
 pub mod durability;
 pub mod summarization;
 
+#[cfg(windows)]
+pub use bash::resolve_windows_shell;
 pub use bash::{
     BashCheckpointPublisher, BashCheckpointStats, BashTool, CheckpointedBashTool,
     BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES, MIN_BASH_CHECKPOINT_INTERVAL,
@@ -245,6 +247,36 @@ fn truncate_utf8(value: &mut String, max_bytes: usize) {
     value.truncate(keep);
 }
 
+/// Keep presentation diffs within the serialized metadata budget, including
+/// JSON escaping. Raw UTF-8 size alone does not bound control-character diffs.
+pub(crate) fn bounded_diff_metadata(mut diff: String) -> serde_json::Value {
+    let escaped_len = |ch: char| match ch {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{0008}' | '\u{000c}' => 2,
+        ch if ch <= '\u{001f}' => 6,
+        ch => ch.len_utf8(),
+    };
+    let envelope = r#"{"diff":""}"#.len();
+    let budget = crate::tool::MAX_TOOL_METADATA_BYTES - envelope;
+    if diff.chars().map(escaped_len).sum::<usize>() > budget {
+        let content_budget = budget
+            - UNIFIED_DIFF_TRUNCATION_MARKER
+                .chars()
+                .map(escaped_len)
+                .sum::<usize>();
+        let mut used = 0;
+        let keep = diff
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                used += escaped_len(ch);
+                (used > content_budget).then_some(offset)
+            })
+            .expect("oversized diff exceeds the smaller content budget");
+        diff.truncate(keep);
+        diff.push_str(UNIFIED_DIFF_TRUNCATION_MARKER);
+    }
+    serde_json::json!({ "diff": diff })
+}
+
 /// Build a minimal, bounded unified diff showing the replacement with
 /// surrounding context lines so the rendered output is scannable at a glance.
 /// Hunk counts always describe the complete replacement, even when the body is
@@ -359,60 +391,4 @@ pub(crate) fn clip_line(line: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
-mod unified_diff_tests {
-    use super::*;
-
-    #[test]
-    fn workspace_confinement_failures_have_a_policy_code() {
-        for path in ["/private/secret", "../secret", "~/secret"] {
-            let error = validate_effect_path(path, false).unwrap_err();
-            assert_eq!(
-                error.policy_denial_code(),
-                Some(ToolPolicyDenialCode::WorkspaceConfinement),
-                "{path}"
-            );
-        }
-    }
-
-    #[test]
-    fn small_unified_diff_output_is_unchanged() {
-        let diff = format_unified_diff("file.txt", "old", "new", "before\nold\nafter\n");
-        assert_eq!(
-            diff,
-            "--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n before\n-old\n+new\n after\n"
-        );
-    }
-
-    #[test]
-    fn small_creation_diff_output_is_unchanged() {
-        let content = (1..=11)
-            .map(|line| format!("line-{line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let diff = format_unified_creation_diff("file.txt", &content);
-        assert_eq!(
-            diff,
-            "--- /dev/null\n+++ b/file.txt\n@@ -0,0 +1,11 @@\n+line-1\n+line-2\n+line-3\n+line-4\n+line-5\n+line-6\n+line-7\n+line-8\n+line-9\n+line-10\n… 1 more line\n"
-        );
-    }
-
-    #[test]
-    fn multi_megabyte_single_line_diffs_are_bounded_and_utf8_safe() {
-        let old = "🙂".repeat(600_000);
-        let new = "界".repeat(800_000);
-
-        let replacement = format_unified_diff("large.txt", &old, &new, &old);
-        let creation = format_unified_creation_diff("large.txt", &new);
-        assert!(replacement.contains("@@ -1,1 +1,1 @@"), "{replacement}");
-        assert!(creation.contains("@@ -0,0 +1,1 @@"), "{creation}");
-
-        for diff in [replacement, creation] {
-            assert!(diff.len() <= MAX_UNIFIED_DIFF_BYTES, "{}", diff.len());
-            assert!(std::str::from_utf8(diff.as_bytes()).is_ok());
-            assert!(
-                diff.contains(UNIFIED_DIFF_TRUNCATION_MARKER.trim()),
-                "{diff}"
-            );
-        }
-    }
-}
+mod unified_diff_tests;

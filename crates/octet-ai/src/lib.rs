@@ -45,6 +45,7 @@ pub mod error;
 pub mod faux;
 pub mod host_transport;
 pub mod images;
+pub mod inference;
 mod json_repair;
 pub mod media;
 pub mod model_metadata;
@@ -59,6 +60,9 @@ pub mod types;
 mod validate;
 
 pub(crate) mod protocol;
+
+#[cfg(test)]
+mod test_fixtures;
 
 pub use assistant_frame::{
     reduce_assistant_message_frames, AssistantMessageFrame, AssistantMessageFrameEncoder,
@@ -100,6 +104,12 @@ pub use faux::{
     FauxToolCall,
 };
 pub use host_transport::{HostStreamModel, HostStreamTransport};
+pub use inference::{
+    ClientInferenceMetrics, ClientTimingScope, DecodeEstimate, DecodeEstimateUnavailable,
+    InferenceMetrics, ReportedTimingUnit, ServerGenerationMetrics, ServerTimingSource,
+    ServerTimingUnavailable,
+};
+
 pub use images::{
     GeneratedImage, ImageApi, ImageCancellation, ImageGenerationOptions, ImageGenerationRequest,
     ImageGenerationResponse, ImageInput, ImageModality, ImageModel, ImageModelCatalog,
@@ -139,8 +149,8 @@ pub use types::{
     ConstrainedSamplingStrict, Endpoint, EndpointId, EndpointTransport, GrammarVariants,
     ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message, Modality, ModalitySet,
     ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode, OpenAiChatRuntimeProfile,
-    OutputFormat, OutputModalities, Protocol, ProviderMediaRef, ProviderPartMetadata,
-    ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
+    OutputFormat, OutputModalities, PromptCacheLifetimes, Protocol, ProviderMediaRef,
+    ProviderPartMetadata, ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
     ReasoningEffortBudgets, ReasoningMode, ReasoningPart, ReasoningState, ReasoningStateKind,
     Request, RequestBodyEncoding, RequestRuntime, Response, ResponsesFeatures,
     ResponsesRuntimeProfile, ServiceTier, SessionAffinityFormat, StopReason,
@@ -190,6 +200,28 @@ pub fn validate_tool_arguments(
     tools: &[ToolDef],
 ) -> Result<ToolArgumentValidation, DecodeError> {
     json_repair::validate_tool_arguments(tool_name, arguments, tools)
+}
+
+/// Validates an effective canonical request without transforming or repairing it.
+///
+/// Hosts preparing context projections use this before exposing a replacement
+/// to another hook. This performs no credential resolution or provider I/O;
+/// codec-specific encoding checks still run at ordinary dispatch.
+pub fn validate_provider_request(
+    model: &Model,
+    request: &Request,
+) -> Result<Vec<Diagnostic>, AiError> {
+    let mut capabilities = model.spec.capabilities.clone();
+    capabilities.responses_features = model.responses_features();
+    json_repair::validate_tool_definitions(&request.tools)?;
+    validate::validate_request(
+        request,
+        &capabilities,
+        &model.spec.limits,
+        model.spec.protocol,
+        &model.spec.id,
+        CompatibilityMode::Strict,
+    )
 }
 
 /// Strictness for cross-protocol / capability degradation.

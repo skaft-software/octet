@@ -31,6 +31,10 @@ pub struct WriteTool;
 
 #[async_trait::async_trait]
 impl Tool for WriteTool {
+    fn composition_is_unmetered(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             async_execution: false,
@@ -192,267 +196,35 @@ fn create_or_replace(
     }
 
     // Generate a diff for every content-changing write. Creation previews are
-    // bounded, but still carry a real hunk header so the TUI recognizes and
-    // renders them through the same diff path as replacements.
+    // bounded, but still carry a real hunk header so presentation recognizes
+    // and renders them through the same diff path as replacements.
     let detail = if let Some(ref current) = old_content {
         let old_text = String::from_utf8_lossy(current).into_owned();
-        if old_text == content {
-            String::from("(no change)")
-        } else {
-            format_unified_diff(path, &old_text, content, &old_text)
-        }
+        (old_text != content).then(|| format_unified_diff(path, &old_text, content, &old_text))
     } else {
-        format_unified_creation_diff(path, content)
+        Some(format_unified_creation_diff(path, content))
     };
 
+    let verb = if exists { "replaced" } else { "created" };
+    let hash = content_hash(content.as_bytes());
+    let output = ToolOutput::new(format!("ok\n{display_path}  {verb} hash={hash}"));
+    // The diff stays presentation-only. The model already produced the full
+    // content, so replaying it back as text only spends context tokens.
+    let diff = detail;
+    // Metadata is durable/presentation-only; the model-visible text stays
+    // concise. The exact-match result plus content hash guard the mutation.
+    let output = match diff {
+        Some(diff) => output
+            .try_with_metadata(super::bounded_diff_metadata(diff))
+            .map_err(|error| ToolError::new(format!("error internal\n{error}")))?,
+        None => output,
+    };
+    // All fallible output validation happens before the atomic mutation.
     prepared
         .commit_if(content.as_bytes(), || cancellation.is_cancelled())
         .map_err(|error| file_error(display_path, error))?;
-    let verb = if exists { "replaced" } else { "created" };
-    let hash = content_hash(content.as_bytes());
-    Ok(ToolOutput::new(format!(
-        "ok\n{display_path}  {verb} hash={hash}\n{detail}"
-    )))
+    Ok(output)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sandbox::SandboxConfig;
-    use crate::ToolProgressSink;
-    use serde_json::json;
-    use std::path::PathBuf;
-
-    struct Fixture {
-        _dir: tempfile::TempDir,
-        workspace: PathBuf,
-        sandbox: SandboxConfig,
-    }
-
-    fn fixture() -> Fixture {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path().canonicalize().unwrap();
-        let mut sandbox = SandboxConfig::new(&workspace);
-        sandbox.allow_write = true;
-        Fixture {
-            _dir: dir,
-            workspace,
-            sandbox,
-        }
-    }
-
-    impl Fixture {
-        fn ctx(&self) -> ToolContext<'_> {
-            ToolContext {
-                workspace: &self.workspace,
-                sandbox: &self.sandbox,
-                execution_scope: "write-test",
-                resource_owner: "write-test",
-                active_skills: &[],
-                registered_tools: &[],
-                progress: ToolProgressSink::null(),
-                cancellation: Default::default(),
-            }
-        }
-    }
-
-    #[test]
-    fn effect_uses_ambient_path_authority_without_resolving_the_target() {
-        let mut fixture = fixture();
-        assert_eq!(
-            WriteTool
-                .effect(
-                    &json!({"path": "missing.txt", "content": "content"}),
-                    &fixture.ctx(),
-                )
-                .unwrap(),
-            ToolEffect::WorkspaceMutation
-        );
-        fixture.sandbox.allow_external_paths = true;
-        for path in ["missing.txt", "/definitely/not/a/real/octet-effect-path"] {
-            assert_eq!(
-                WriteTool
-                    .effect(&json!({"path": path, "content": "content"}), &fixture.ctx(),)
-                    .unwrap(),
-                ToolEffect::HostMutation
-            );
-        }
-
-        fixture.sandbox.allow_write = false;
-        assert!(WriteTool
-            .effect(
-                &json!({"path": "missing.txt", "content": "content"}),
-                &fixture.ctx(),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("allow_write=false"));
-    }
-
-    #[tokio::test]
-    async fn creates_file_and_parent_dirs() {
-        let f = fixture();
-        let out = WriteTool
-            .execute(
-                json!({"path": "src/new/mod.rs", "content": "pub fn x() {}\n"}),
-                &f.ctx(),
-            )
-            .await
-            .unwrap();
-        let expected_hash = content_hash(b"pub fn x() {}\n");
-        assert!(
-            out.text.starts_with(&format!(
-                "ok\nsrc/new/mod.rs  created hash={expected_hash}\n"
-            )),
-            "{}",
-            out.text
-        );
-        assert!(
-            out.text.contains("--- /dev/null"),
-            "missing diff header: {}",
-            out.text
-        );
-        assert!(
-            out.text.contains("@@ -0,0 +1,1 @@"),
-            "missing diff hunk: {}",
-            out.text
-        );
-        assert!(
-            out.text.contains("+pub fn x() {}"),
-            "missing preview line: {}",
-            out.text
-        );
-        assert_eq!(
-            std::fs::read_to_string(f.workspace.join("src/new/mod.rs")).unwrap(),
-            "pub fn x() {}\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn overwrite_existing_gated_by_expected_hash() {
-        let f = fixture();
-        std::fs::write(f.workspace.join("a.txt"), "old content").unwrap();
-        let good = content_hash(b"old content");
-
-        // Wrong hash: rejected, file preserved.
-        let err = WriteTool
-            .execute(
-                json!({"path": "a.txt", "content": "new", "expected_hash": "0".repeat(64)}),
-                &f.ctx(),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.message.contains("stale_file"), "{err}");
-        assert_eq!(
-            std::fs::read_to_string(f.workspace.join("a.txt")).unwrap(),
-            "old content"
-        );
-
-        // Matching hash: replacement proceeds.
-        let out = WriteTool
-            .execute(
-                json!({"path": "a.txt", "content": "new", "expected_hash": good}),
-                &f.ctx(),
-            )
-            .await
-            .unwrap();
-        assert!(out.text.contains("replaced"), "{}", out.text);
-
-        // No hash at all: last-write-wins overwrite.
-        let out = WriteTool
-            .execute(json!({"path": "a.txt", "content": "newest"}), &f.ctx())
-            .await
-            .unwrap();
-        assert!(out.text.contains("replaced"), "{}", out.text);
-        assert_eq!(
-            std::fs::read_to_string(f.workspace.join("a.txt")).unwrap(),
-            "newest"
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_content_creates_empty_file_not_deletes() {
-        let f = fixture();
-        let out = WriteTool
-            .execute(json!({"path": "empty.txt", "content": ""}), &f.ctx())
-            .await
-            .unwrap();
-        assert!(out.text.contains("created"), "{}", out.text);
-        assert!(f.workspace.join("empty.txt").exists());
-        assert_eq!(
-            std::fs::read_to_string(f.workspace.join("empty.txt")).unwrap(),
-            ""
-        );
-    }
-
-    #[tokio::test]
-    async fn requires_allow_write() {
-        let f = fixture();
-        let mut sandbox = f.sandbox.clone();
-        sandbox.allow_write = false;
-        let ctx = ToolContext {
-            workspace: &f.workspace,
-            sandbox: &sandbox,
-            execution_scope: "write-test",
-            resource_owner: "write-test",
-            active_skills: &[],
-            registered_tools: &[],
-            progress: ToolProgressSink::null(),
-            cancellation: Default::default(),
-        };
-        let err = WriteTool
-            .execute(json!({"path": "x.txt", "content": "x"}), &ctx)
-            .await
-            .unwrap_err();
-        assert!(err.message.contains("not_permitted"), "{err}");
-        assert_eq!(
-            err.policy_denial_code(),
-            Some(ToolPolicyDenialCode::WriteDisabled)
-        );
-        assert!(!f.workspace.join("x.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn cancellation_prevents_the_rename_commit() {
-        let f = fixture();
-        let cancellation = crate::CancellationToken::default();
-        cancellation.cancel();
-        let ctx = ToolContext {
-            workspace: &f.workspace,
-            sandbox: &f.sandbox,
-            execution_scope: "write-cancel-test",
-            resource_owner: "write-cancel-test",
-            active_skills: &[],
-            registered_tools: &[],
-            progress: ToolProgressSink::null(),
-            cancellation,
-        };
-        let error = WriteTool
-            .execute(
-                json!({"path": "cancelled.txt", "content": "must not commit"}),
-                &ctx,
-            )
-            .await
-            .unwrap_err();
-        assert!(error.message.contains("cancelled"), "{error}");
-        assert!(!f.workspace.join("cancelled.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn rejects_directory_and_escaping_paths() {
-        let f = fixture();
-        std::fs::create_dir(f.workspace.join("sub")).unwrap();
-
-        let err = WriteTool
-            .execute(json!({"path": "sub", "content": "x"}), &f.ctx())
-            .await
-            .unwrap_err();
-        assert!(err.message.contains("is_directory"), "{err}");
-
-        let err = WriteTool
-            .execute(json!({"path": "../evil.txt", "content": "x"}), &f.ctx())
-            .await
-            .unwrap_err();
-        assert!(err.message.contains(".."), "{err}");
-    }
-}
+mod tests;

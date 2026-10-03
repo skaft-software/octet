@@ -2,13 +2,15 @@
 
 [Documentation](README.md) · [Extensions](extensions.md) · [Serve](experimental/octet-serve/README.md)
 
-octet installs five executable bundles—Browse, computer use, MCP, subagents,
-and web search—and the separate Serve application through `octet extension`. See
+octet installs six executable bundles—Browse, codemode, computer use, MCP,
+subagents and web search—and the separate Serve application through `octet extension`. See
 [executable bundle setup](installation.md#optional-packages) for the tool
 integrations. The application-package format on this page is specifically for
 `octet-serve`; Serve is not an executable-extension activation target.
-The [0.8.1 release record](releases/v0.8.1.md) records matching signed packages
-and public-install verification.
+The [0.8.2 candidate record](releases/v0.8.2.md) lists planned distribution and
+remaining qualification. Matching 0.8.2 packages are not published; catalog
+installation requires approved publication. Use reviewed source extensions or
+locally built, version-matched archives for candidate testing.
 
 ## Commands
 
@@ -46,8 +48,8 @@ An archive declares a closed manifest (`deny_unknown_fields`):
 ```toml
 schema_version = 1
 id = "octet-serve"
-version = "0.8.1"
-requires_octet = "=0.8.1"
+version = "0.8.2"
+requires_octet = "=0.8.2"
 target = "aarch64-apple-darwin"
 
 [entrypoint]
@@ -61,7 +63,7 @@ process = true
 filesystem = "workspace"
 ```
 
-Validation rules (`crates/octet-coding-agent/src/extension_package.rs:901`):
+Validation rules (`validate_manifest` in `crates/octet-coding-agent/src/extension_package.rs`):
 
 - `schema_version` must be `1`.
 - `target` must equal this binary's target triple.
@@ -73,7 +75,7 @@ Validation rules (`crates/octet-coding-agent/src/extension_package.rs:901`):
 ## Source extensions vs. executable bundles
 
 Independent source extensions are a manifest plus a script or module, discovered
-through normal resource roots and enabled/trusted explicitly. Unlike the five
+through normal resource roots and enabled/trusted explicitly. Unlike the six
 official executable bundles (including `octet-computer-use`), they are not
 installed by `octet extension` or distributed as release archives.
 [Extension authoring](extensions.md) owns the manifest and API contract; the

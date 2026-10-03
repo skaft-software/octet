@@ -1,7 +1,7 @@
 name = "octet-subagents"
-version = "0.8.1"
+version = "0.8.2"
 api_version = "0.4"
-requires_octet = "=0.8.1"
+requires_octet = "=0.8.2"
 description = "Claude Code-like background workers over host-owned octet agent sessions, with per-spawn mutation grants and continue/resume"
 
 [entrypoint]
@@ -21,3 +21,4 @@ tools = ["subagent_models", "subagent_spawn", "subagent_status", "subagent_wait"
 commands = ["subagents"]
 ui = ["status"]
 presentation = true
+menu = true

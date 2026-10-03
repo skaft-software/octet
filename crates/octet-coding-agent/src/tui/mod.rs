@@ -3,8 +3,7 @@
 pub mod composer;
 pub mod composer_surface;
 pub(crate) mod context;
-// Reference projection model; the frontend uses semantic presentation.
-#[cfg(test)]
+// Host-owned cache used by negotiated API 0.4 remote components.
 pub(crate) mod extension_components;
 pub(crate) mod fuzzy;
 pub mod keymap;

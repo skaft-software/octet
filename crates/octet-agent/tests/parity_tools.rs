@@ -12,14 +12,16 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
 use std::time::Duration;
 
+// Only the non-Windows branch of the PowerShell opt-in test classifies the tool.
+#[cfg(not(windows))]
 use octet_agent::effect::ToolEffect;
 use octet_agent::sandbox::SandboxConfig;
-use octet_agent::tool::{
-    PartialOutputCheckpointSink, Tool, ToolContext, ToolError, ToolProgressSink,
-};
+use octet_agent::tool::{Tool, ToolContext, ToolProgressSink};
 use octet_agent::tools::{
     deferred::{
         prepare_deferred_poll, suspend_deferred_response, DeferredHandle, DeferredHandleRejection,
@@ -29,18 +31,23 @@ use octet_agent::tools::{
         INVALID_DEFERRED_HANDLE_DIAGNOSTIC,
     },
     durability::{
-        DurableInvocationStore, InvocationError, InvocationHandle, InvocationOutcome,
-        InvocationScope, InvocationState, MemoLookup, StoreLimits,
-        INTERRUPTED_OUTCOME_UNKNOWN_MARKER,
+        DurableInvocationStore, InvocationError, InvocationOutcome, InvocationScope,
+        InvocationState, MemoLookup, StoreLimits, INTERRUPTED_OUTCOME_UNKNOWN_MARKER,
     },
     summarization::{
         run_summarization_with_retry, CompactionFailureKind, CompactionStepOutcome,
         SummarizationAttempt, SummarizationDiagnostic, SummarizationFailure,
         SummarizationFailureKind, SummarizationOutcome, SummarizationRetryPolicy,
     },
-    BashCheckpointPublisher, BashTool, CheckpointedBashTool, EditTool, PowerShellTool, ReadTool,
-    SearchTool, ShellSessionEnvironment, WriteTool, BASH_CHECKPOINT_MAX_BYTES,
+    BashCheckpointPublisher, BashTool, EditTool, PowerShellTool, ReadTool, SearchTool,
+    ShellSessionEnvironment, WriteTool, BASH_CHECKPOINT_MAX_BYTES,
 };
+// The durable checkpoint sink types below are only exercised by the Unix
+// subprocess cases that drive a real checkpointed bash run.
+#[cfg(unix)]
+use octet_agent::tool::{PartialOutputCheckpointSink, ToolError};
+#[cfg(unix)]
+use octet_agent::tools::{CheckpointedBashTool, InvocationHandle};
 use serde_json::json;
 
 struct Fixture {
@@ -79,6 +86,9 @@ impl Fixture {
         }
     }
 
+    /// The multi-edit and legacy-normalization rows are Unix-only subprocess
+    /// cases, so their fixture helpers are too.
+    #[cfg(unix)]
     fn write(&self, relative: &str, contents: &str) {
         let path = self.workspace.join(relative);
         if let Some(parent) = path.parent() {
@@ -87,6 +97,7 @@ impl Fixture {
         std::fs::write(path, contents).unwrap();
     }
 
+    #[cfg(unix)]
     fn read(&self, relative: &str) -> String {
         std::fs::read_to_string(self.workspace.join(relative)).unwrap()
     }
@@ -94,6 +105,7 @@ impl Fixture {
 
 /// Serializes tests that spawn `PATH`-resolved children. `make_serial` in one
 /// test mutates the process `PATH`, which every other such test must observe.
+#[cfg(unix)]
 async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     LOCK.lock().await
@@ -813,10 +825,12 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
 // ── 4.7 interval durable partial bash output checkpoints ─────────────────
 
 /// Counts and retains every checkpoint a bash run asks the host to persist.
+#[cfg(unix)]
 struct RecordingCheckpointSink {
     snapshots: Mutex<Vec<String>>,
 }
 
+#[cfg(unix)]
 impl RecordingCheckpointSink {
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -829,6 +843,7 @@ impl RecordingCheckpointSink {
     }
 }
 
+#[cfg(unix)]
 impl PartialOutputCheckpointSink for RecordingCheckpointSink {
     fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError> {
         assert!(
@@ -842,6 +857,7 @@ impl PartialOutputCheckpointSink for RecordingCheckpointSink {
 }
 
 /// The bounded `stdout: N bytes seen` marker a checkpoint snapshot carries.
+#[cfg(unix)]
 fn checkpoint_seen_bytes(snapshot: &str) -> usize {
     snapshot
         .lines()
@@ -1042,11 +1058,13 @@ async fn bash_checkpoints_land_at_interval_boundaries_and_final_output_is_comple
 }
 
 /// The invocation store's implementation of the checkpoint sink.
+#[cfg(unix)]
 struct DurableCheckpointSink {
     handle: InvocationHandle,
     recorder: Arc<RecordingCheckpointSink>,
 }
 
+#[cfg(unix)]
 impl PartialOutputCheckpointSink for DurableCheckpointSink {
     fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError> {
         self.recorder.checkpoint_partial_output(snapshot)?;

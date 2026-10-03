@@ -113,7 +113,11 @@ async fn test_client_stream_sse_openai_chat() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     assert!(events.len() >= 4);
@@ -393,7 +397,11 @@ async fn test_client_stream_non_streaming_chat_audio() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     // Started, TextStart, TextDelta, TextEnd, MediaCompleted, Usage, Finished
@@ -511,6 +519,24 @@ async fn test_client_stream_google_generate_content() {
         response.message.content.as_slice(),
         [octet_ai::AssistantPart::Text(text)] if text == "hello"
     ));
+}
+
+fn assert_request_inference(response: &octet_ai::Response) {
+    let metrics = response
+        .inference
+        .as_ref()
+        .expect("client always measures a completed request");
+    let client = metrics.client.as_ref().unwrap();
+    assert_eq!(
+        client.scope,
+        Some(octet_ai::inference::ClientTimingScope::Request)
+    );
+    assert_eq!(client.reported_output_tokens, response.usage.output_tokens);
+    assert!(client.elapsed_ns >= client.first_event_ns.unwrap());
+    assert_eq!(
+        metrics.server_unavailable,
+        Some(octet_ai::inference::ServerTimingUnavailable::NotReported)
+    );
 }
 
 fn text_request() -> Request {
@@ -1026,6 +1052,7 @@ async fn request_local_codex_transport_controls_sse_and_cached_context() {
             )
             .await
             .unwrap();
+        assert_request_inference(&response);
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);
         match selection {
@@ -1142,6 +1169,74 @@ async fn responses_websocket_prewarm_body_timeout_is_not_a_connection_failure() 
     let requests = server.requests().await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["generate"], false);
+}
+
+#[tokio::test]
+async fn prewarm_and_inference_settle_dynamic_credentials_once_and_preserve_auth_failures() {
+    struct Resolver {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+    #[async_trait::async_trait]
+    impl octet_ai::CredentialResolver for Resolver {
+        async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                // Longer than the optional socket timeout: credential exchange
+                // is not an ignorable warmup and must not be re-entered.
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                return Err(octet_ai::AuthError::Resolve);
+            }
+            Ok(octet_ai::ResolvedCredential {
+                scheme: octet_ai::CredentialScheme::Bearer,
+                value: octet_ai::Secret::from("request-group-credential"),
+                extra_headers: http::HeaderMap::new(),
+            })
+        }
+    }
+    for fail in [false, true] {
+        let server =
+            TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body())
+                .await;
+        let resolver = Arc::new(Resolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail,
+        });
+        let mut model = websocket_test_model(&server.base_url);
+        Arc::make_mut(&mut model.endpoint).auth = Auth::Dynamic(resolver.clone());
+        if fail {
+            Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(10);
+        }
+        let request = responses_request(
+            vec![user_message("warm"), user_message("inference")],
+            Some("settled-auth"),
+        );
+        let warm = responses_request(vec![user_message("warm")], Some("settled-auth"));
+        let opened = AiClient::new()
+            .stream_with_responses_prewarm(&model, request, warm)
+            .await;
+        if fail {
+            assert!(matches!(
+                opened,
+                Err(AiError::Auth(octet_ai::AuthError::Resolve))
+            ));
+            assert!(server.requests().await.is_empty());
+        } else {
+            let mut stream = opened.unwrap();
+            let mut completed = false;
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), StreamEvent::Finished(_)) {
+                    completed = true;
+                }
+            }
+            assert!(completed);
+            let requests = server.requests().await;
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["generate"], false);
+            assert!(requests[1].get("generate").is_none());
+        }
+        assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test]
@@ -2057,7 +2152,11 @@ async fn test_client_custom_gateway_prefix_preserved() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     assert!(events
@@ -2255,4 +2354,39 @@ async fn dispatch_tracking_distinguishes_credentials_from_pending_http_headers()
         .request_may_have_been_sent());
     assert!(!credential_attempt.request_may_have_been_sent());
     assert!(!client.request_may_have_been_sent());
+}
+
+#[tokio::test]
+async fn native_server_generation_survives_the_public_http_client_boundary() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"id\":\"native-metrics\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"id\":\"native-metrics\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":150},\"timings\":{\"predicted_n\":100,\"predicted_ms\":500}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let response = AiClient::new()
+        .complete(
+            &make_test_model(&server.uri(), Protocol::OpenAiChat, false),
+            text_request(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.usage.output_tokens, 150);
+    let metrics = response.inference.unwrap();
+    let client = metrics.client.unwrap();
+    assert_eq!(client.reported_output_tokens, 150);
+    assert_eq!(client.output_events, 1);
+    assert_eq!(client.output_interval_ns(), Some(0));
+    let server = metrics.server.unwrap();
+    assert_eq!(server.tokens, 100);
+    assert_eq!(server.tokens_per_second(), Some(200.0));
+    assert_eq!(metrics.server_unavailable, None);
 }

@@ -214,6 +214,7 @@ class ProtocolTests(unittest.TestCase):
                         "ui": ["status"],
                         "confirmations": True,
                         "presentation": True,
+                        "menu": True,
                     },
                     "host": {},
                     "protocol": {
@@ -248,7 +249,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual([command["name"] for command in self.initialize["commands"]], ["browse"])
         self.assertEqual(
             set(self.initialize["protocol"]["features"]),
-            {"request_cancellation", "content_parts", "artifacts"},
+            {"request_cancellation", "content_parts", "artifacts", "request_progress"},
         )
         schemas = {tool["name"]: tool["parameters"] for tool in self.initialize["tools"]}
         self.assertFalse(schemas["browser_click"]["additionalProperties"])

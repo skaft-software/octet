@@ -26,8 +26,8 @@ use sexy_tui_rs::{
 use crate::config::Config;
 use crate::hydrate::{
     hydrate_transcript_at_with_image_budget, hydrate_transcript_tail_with_image_budget,
-    project_tool_output_images, tool_image_limits, ToolImageBudget, ToolImagePlaceholder,
-    ToolResultImage,
+    presentation_diff_metadata, project_tool_output_images, tool_image_limits, ToolImageBudget,
+    ToolImagePlaceholder, ToolResultImage,
 };
 #[cfg(test)]
 use crate::presentation::summarize_tool;
@@ -177,15 +177,15 @@ struct CompactionBlock {
 #[derive(Clone, Debug)]
 struct OutcomeBlock {
     outcome: RunOutcome,
-    /// Final provider-reported output rate captured when the run settles.
-    tokens_per_second: Option<f64>,
+    /// Frozen native timing or robust estimate, never the E2E average.
+    inference: Option<Box<octet_ai::InferenceMetrics>>,
 }
 
 impl OutcomeBlock {
-    fn new(outcome: RunOutcome, tokens_per_second: Option<f64>) -> Self {
+    fn new(outcome: RunOutcome, inference: Option<octet_ai::InferenceMetrics>) -> Self {
         Self {
             outcome,
-            tokens_per_second,
+            inference: inference.map(Box::new),
         }
     }
 }
@@ -439,6 +439,30 @@ fn activity_group_label(
             group.edited_files,
             if group.edited_files == 1 { "" } else { "s" }
         ),
+        crate::hydrate::ToolActivityKind::WebSearch => format!(
+            "Searched web · {} quer{}",
+            group.web_searches,
+            if group.web_searches == 1 { "y" } else { "ies" }
+        ),
+        crate::hydrate::ToolActivityKind::WebFetch => format!(
+            "Fetched {} page{}",
+            group.web_fetches,
+            if group.web_fetches == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::Mcp => format!(
+            "Used MCP · {} call{}",
+            group.mcp_calls,
+            if group.mcp_calls == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::ComputerUse => format!(
+            "Used computer · {} action{}",
+            group.computer_use_actions,
+            if group.computer_use_actions == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ),
     };
     if group.read_files > 0 && group.searches > 0 {
         label.push_str(&format!(
@@ -474,6 +498,9 @@ struct ToolPanel {
     /// Validated opaque image media, kept separate from text/copy output.
     images: Vec<ToolResultImage>,
     image_rendering: ToolImageRendering,
+    /// Durable presentation diff from the result's `ToolOutputDetails`
+    /// metadata. Never model-visible and never session-replay text.
+    diff: Option<String>,
     /// Child of a compact exploration summary; Ctrl+O reveals the ordinary row.
     grouped_child: bool,
     finished: bool,
@@ -524,6 +551,7 @@ impl ToolPanel {
             output,
             images: Vec::new(),
             image_rendering: ToolImageRendering::default(),
+            diff: None,
             grouped_child: false,
             finished,
             is_error,
@@ -635,9 +663,14 @@ enum ShellOverlay {
 /// only explicit, internally styled content may retain trusted theme ANSI.
 #[derive(Clone, Debug)]
 enum ReportBody {
-    Text { text: Arc<str>, styled: bool },
+    Text {
+        text: Arc<str>,
+        styled: bool,
+    },
     Context(Arc<crate::tui::context::ContextReport>),
-    Markdown(Arc<sexy_tui_rs::Document>),
+    /// The parsed document for the ANSI renderer, plus its source for
+    /// renderers that typeset Markdown themselves (Tern).
+    Markdown(Arc<sexy_tui_rs::Document>, Arc<str>),
 }
 
 /// Mutable presentation state for a report over the transcript viewport.
@@ -944,6 +977,8 @@ pub(crate) enum PanelAction {
     SelectGroupedModel {
         models: Vec<ModelId>,
         providers: Vec<String>,
+        details: Vec<crate::tui::pickers::ModelPickerDetail>,
+        scope: Option<String>,
     },
     /// Select a session by path.
     SelectSession(Vec<std::path::PathBuf>),
@@ -1134,6 +1169,9 @@ pub struct ShellExtensionUi {
     pub footer: Vec<ShellExtensionUiLine>,
     pub working: Option<ShellExtensionWorking>,
     pub hidden_thinking_label: Option<String>,
+    /// Validated cached components are UI-only, separate from semantic text.
+    pub(crate) remote: crate::extensions::remote_ui::Projection,
+    pub(crate) remote_fullscreen_overlay: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1204,6 +1242,7 @@ pub(crate) struct ShellState {
     pub(crate) theme: OctetTheme,
     /// Whether this session uses explicit approval gates instead of full host access.
     pub(crate) safe_mode: bool,
+    pub(crate) show_cache_miss_notices: bool,
     /// Opt-in terminal-image mode and conservative terminal capability state.
     image_rendering: ToolImageRendering,
     /// Monotonic image IDs and the private backend payload map stay separate
@@ -1347,6 +1386,8 @@ pub(crate) struct ShellState {
     extension_ui: ShellExtensionUi,
     /// One bounded extension autocomplete result awaiting explicit host accept.
     extension_autocomplete: Option<ShellAutocompleteOverlay>,
+    /// Native selection, fenced to the same draft revision as the overlay.
+    extension_autocomplete_selection: Option<(u64, usize)>,
     status_detail: String,
     pub(crate) error: Option<String>,
     overlay: Option<ShellOverlay>,
@@ -1387,12 +1428,10 @@ pub(crate) struct ShellState {
     copy_buffer: Option<String>,
     pub(crate) context_estimate: Option<(u64, u64)>,
     pub(crate) last_turn_usage: Option<Usage>,
-    /// Measured output-generation rate for the most recently completed model
-    /// turn. This deliberately excludes provider wait time and tool execution.
+    /// Client-observed output tokens per second from request start to accepted
+    /// completion for the latest model attempt, including wait/hidden reasoning.
     pub(crate) last_turn_tokens_per_second: Option<f64>,
-    /// Measured generation duration and output-token delta backing the final
-    /// throughput value. Kept for the detailed `/status` provenance view.
-    pub(crate) last_turn_generation_elapsed: Option<Duration>,
+    /// Provider-reported output tokens backing the final throughput value.
     pub(crate) last_turn_generated_tokens: Option<u64>,
     /// Start of the visible model-generation portion of the current turn.
     pub(crate) turn_generation_started_at: Option<Instant>,
@@ -1403,9 +1442,10 @@ pub(crate) struct ShellState {
     /// First-token latency of the most recently completed provider
     /// response: request opened until the first generated token.
     pub(crate) last_turn_first_token: Option<Duration>,
-    /// Total provider time of the most recently completed provider
-    /// response: request opened until the response was fully generated.
+    /// Client elapsed time for the latest measured response, not server time.
+    /// Legacy event producers use request-to-TurnFinished, including settlement.
     pub(crate) last_turn_provider_elapsed: Option<Duration>,
+    pub(crate) last_turn_inference: Option<octet_ai::inference::InferenceMetrics>,
     /// (tool name, wall time) of recently completed tool calls, most
     /// recent last. Session-scoped and bounded; powers the `/status`
     /// tool wall-time line.
@@ -1468,6 +1508,9 @@ pub(crate) struct ShellState {
     /// Global transcript disclosure mode. Ctrl+O and `/verbose` toggle this.
     pub(crate) verbose_tools: bool,
     pub(crate) size: (u16, u16),
+    /// A resize away and back still invalidates the physical grid, even when
+    /// coalescing observes the same final dimensions as the previous frame.
+    resize_epoch: u64,
     /// Until launch selection, workspace and appearance are resolved, render
     /// only the startup input owner, never provisional branded chrome/history.
     /// Kept in shared state so renderer resumes obey the same readiness gate.
@@ -1503,6 +1546,7 @@ fn is_provider_lifecycle_status(heading: &str) -> bool {
 
 fn invalidate_editor_autocomplete(state: &mut ShellState) {
     state.extension_autocomplete = None;
+    state.extension_autocomplete_selection = None;
     state.path_selection = 0;
 }
 
@@ -2006,12 +2050,12 @@ impl ShellState {
     fn clear_turn_telemetry(&mut self) {
         self.last_turn_usage = None;
         self.last_turn_tokens_per_second = None;
-        self.last_turn_generation_elapsed = None;
         self.last_turn_generated_tokens = None;
         self.turn_generation_started_at = None;
         self.turn_requested_at = None;
         self.last_turn_first_token = None;
         self.last_turn_provider_elapsed = None;
+        self.last_turn_inference = None;
         self.turn_streamed_output_bytes = 0;
         self.turn_output_tokens_before_generation = 0;
         self.run_cost_microdollars = 0;
@@ -2112,10 +2156,13 @@ impl ShellState {
         }
         let cache = self.transcript_cache.get_mut();
         cache.dirty = true;
-        // A render is coalesced, so a hot streaming block can be touched many
-        // times before the next frame. Record it once rather than making each
-        // frame linearly scan the complete transcript for revision changes.
-        if !cache.dirty_blocks.contains(&index) {
+        // New blocks and invalidated widths are rendered with their latest
+        // revision without a dirty entry. Only deduplicate replacements for
+        // already cached rows, not every block in an unpainted hydration batch.
+        if cache.width.is_some()
+            && index < cache.block_revisions.len()
+            && !cache.dirty_blocks.contains(&index)
+        {
             cache.dirty_blocks.push(index);
         }
     }
@@ -2205,7 +2252,8 @@ impl ShellState {
         let index = self.push_block(TranscriptBlock::NoticeStatus {
             text: activity_group_label(&group, &[], kind),
             tone: NoticeTone::ToolActive,
-            reserved_rows: 1,
+            // The separate trailing Working row now owns the live height.
+            reserved_rows: 0,
         });
         self.register_active_event(index);
         self.activity_groups.push(ActivityGroupView {
@@ -2235,16 +2283,8 @@ impl ShellState {
     fn extend_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
         if let Some(position) = self.activity_groups.iter().rposition(|view| view.open) {
             if self.activity_groups[position].kind == group.kind() {
-                let had_settled = !self.activity_groups[position].settled.is_empty();
                 self.activity_groups[position].group.merge(group);
                 let index = self.activity_groups[position].index;
-                if had_settled {
-                    if let Some(TranscriptBlock::NoticeStatus { reserved_rows, .. }) =
-                        self.transcript.get_mut(index)
-                    {
-                        *reserved_rows = 3;
-                    }
-                }
                 self.register_active_event(index);
                 self.refresh_activity_group(position);
                 return;
@@ -2261,20 +2301,11 @@ impl ShellState {
             self.seal_activity_group();
             return false;
         }
-        if let Some(view) = self
+        if self
             .activity_groups
             .iter()
-            .find(|view| view.group.member_ids.contains(id))
+            .any(|view| view.group.member_ids.contains(id))
         {
-            let index = view.index;
-            if !view.settled.is_empty() && !view.settled.contains(id) {
-                if let Some(TranscriptBlock::NoticeStatus { reserved_rows, .. }) =
-                    self.transcript.get_mut(index)
-                {
-                    *reserved_rows = 3;
-                }
-                self.touch_block(index);
-            }
             return true;
         }
         let group = if let Some(position) = self
@@ -3236,6 +3267,21 @@ pub(super) fn poll_file_index_scan(state: &mut ShellState) -> bool {
     true
 }
 
+// Application-owned history can prepend later. Size its first-paint tail to
+// the actual viewport; native terminal scrollback still requires full history.
+fn hydration_entry_budget(height: u16) -> usize {
+    usize::from(height).saturating_mul(4).clamp(32, 512)
+}
+
+#[cfg(test)]
+#[test]
+fn application_history_budget_scales_with_viewport() {
+    assert_eq!(hydration_entry_budget(8), 32);
+    assert_eq!(hydration_entry_budget(24), 96);
+    assert_eq!(hydration_entry_budget(120), 480);
+    assert_eq!(hydration_entry_budget(u16::MAX), 512);
+}
+
 /// Full-screen terminal shell. It owns all terminal I/O and no Agent state.
 pub struct InteractiveShell {
     input_dispatch: input_dispatch::InputDispatch,
@@ -3248,6 +3294,8 @@ pub struct InteractiveShell {
     render_tx: Arc<Mutex<Option<SyncSender<RenderCommand>>>>,
     render_thread: Option<JoinHandle<()>>,
     capture_mouse: bool,
+    remote_mouse_capture: bool,
+    remote_keyboard_events: bool,
     /// Shared with the one input stream: while set, the host reads no raw bytes
     /// because an extension grant owns the terminal.
     terminal_ceded: Arc<AtomicBool>,
@@ -3313,6 +3361,8 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(Some(render_tx))),
             render_thread: Some(render_thread),
             capture_mouse,
+            remote_mouse_capture: false,
+            remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             herdr: crate::herdr::PaneReporter::detect(),
         })
@@ -3370,6 +3420,8 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: false,
+            remote_mouse_capture: false,
+            remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             // Renderer tests must never report to a real Herdr pane, even when
             // the test process inherits one.
@@ -3382,6 +3434,20 @@ impl InteractiveShell {
     pub(crate) fn test_run_active_probe(&self) -> impl Fn() -> bool {
         let state = self.state.clone();
         move || state.borrow().run.is_active()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_subagent_panel_probe(&self) -> impl Fn() -> bool {
+        let state = self.state.clone();
+        move || {
+            matches!(
+                &state.borrow().panel,
+                Some(Panel::SelectList {
+                    action: PanelAction::SelectSubagent(_),
+                    ..
+                })
+            )
+        }
     }
 
     /// Real renderer thread with a deterministic layout gate. The caller must
@@ -3569,9 +3635,13 @@ impl InteractiveShell {
         // (measured against Herdr 0.9.0). That is the workspace-teardown case
         // where the pane record must survive so `octet herdr restore` can hand
         // the pane back after Herdr restores the layout; every other exit is
-        // deliberate and drops the record.
+        // deliberate and drops the record. Windows has no SIGHUP; its Herdr
+        // wrapper reports through the CLI and every exit there is deliberate.
+        #[cfg(unix)]
         let keep_for_restore = crate::tui::terminal::received_shutdown_signal()
             .is_some_and(|signal| signal == signal_hook::consts::signal::SIGHUP);
+        #[cfg(not(unix))]
+        let keep_for_restore = false;
         self.herdr.finish(keep_for_restore);
         self.stop_renderer();
         force_restore();
@@ -3633,7 +3703,23 @@ impl InteractiveShell {
             let _ = render_tx.try_send(RenderCommand::Render);
         } else if let Some(tui) = self.tui.as_mut() {
             tui.request_render();
+            self.state.frame_written_at(tui.rendered_viewport_top());
         }
+    }
+
+    /// Record an OS-level keyboard-focus return for the native Tern surface.
+    ///
+    /// Crossterm `FocusGained` reaches the frontend even when Tern sends no
+    /// TSP `Visible(true)` (another app or overlay was in front). Bumping this
+    /// counter makes the next native `present()` force a frame and re-assert
+    /// `composer.editor` focus instead of early-returning on an unchanged key.
+    /// The bump is unconditional: it is only consumed by the native renderer.
+    pub(crate) fn request_tern_focus_resync(&self) {
+        self.state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .focus_resync += 1;
     }
 
     /// Begin a presentation run as soon as input is accepted. This precedes
@@ -3724,13 +3810,8 @@ impl InteractiveShell {
                 .saturating_add(run.elapsed_at(Instant::now()));
         }
         state.close_streaming_blocks();
-        let tokens_per_second = state
-            .last_turn_tokens_per_second
-            .filter(|rate| rate.is_finite() && *rate > 0.0);
-        state.push_block(TranscriptBlock::Outcome(OutcomeBlock::new(
-            outcome,
-            tokens_per_second,
-        )));
+        let block = OutcomeBlock::new(outcome, state.last_turn_inference.clone());
+        state.push_block(TranscriptBlock::Outcome(block));
         if !state.selected_model_owns_telemetry() {
             state.clear_turn_telemetry();
         }
@@ -3769,7 +3850,33 @@ impl InteractiveShell {
         self.on_run_event(id, event);
     }
 
+    /// Session-scoped cache maintenance must never create an assistant run or
+    /// change its timing, context size, token counters, or cache effectiveness.
+    /// The owner separately refreshes exact cumulative accounting from Session.
+    pub fn on_cache_warming_event(&mut self, event: &AgentEvent) {
+        let mut state = self.state.borrow_mut();
+        match event {
+            AgentEvent::CacheWarmed {
+                cost,
+                extension_override,
+                ..
+            } => {
+                state.usage_uncertain |= cost.is_none();
+                if state.show_cache_miss_notices {
+                    state.push_block(TranscriptBlock::Notice(
+                        crate::commands::cache_warmed_notice(*cost, *extension_override),
+                    ));
+                }
+            }
+            AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
+            _ => {}
+        }
+    }
+
     pub fn on_run_event(&mut self, id: RunId, event: &AgentEvent) {
+        if matches!(event, AgentEvent::CacheWarmed { .. }) {
+            self.on_cache_warming_event(event);
+        }
         // A renderer may retain the immutable pending queue. Preparing the
         // delivered transcript text must not clone a large paste under the
         // semantic lock; queue removal and transcript insertion remain atomic.
@@ -3826,6 +3933,7 @@ impl InteractiveShell {
             }
         }
         match event {
+            AgentEvent::CacheWarmed { .. } => {}
             AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
             AgentEvent::RecoveredOutput { channel, text } => {
                 state.push_block(TranscriptBlock::Notice(format!(
@@ -3836,11 +3944,10 @@ impl InteractiveShell {
                 if *channel == OutputChannel::Text && !text.is_empty() {
                     state.seal_activity_group();
                 }
-                if state.turn_generation_started_at.is_none() {
+                if !text.is_empty() && state.turn_generation_started_at.is_none() {
                     state.turn_generation_started_at = Some(Instant::now());
                     state.turn_streamed_output_bytes = 0;
                     state.last_turn_tokens_per_second = None;
-                    state.last_turn_generation_elapsed = None;
                     state.last_turn_generated_tokens = None;
                     // Live output belongs only to this provider request. The
                     // prior turn remains in the prompt/context, not in this
@@ -3856,6 +3963,9 @@ impl InteractiveShell {
                 // Generated media is binary and may still be invalidated by a
                 // provider retry. TurnFinished carries the durable assembled
                 // message; embedded callers receive the payload here directly.
+            }
+            AgentEvent::ProviderInference { metrics } => {
+                state.last_turn_inference = Some(metrics.clone());
             }
             AgentEvent::ProviderLifecycle { lifecycle } => {
                 // The run tracker accepts the event but deliberately refuses a
@@ -3877,6 +3987,10 @@ impl InteractiveShell {
                 }
             }
             AgentEvent::ProviderRetry { .. } | AgentEvent::CandidateRejected { .. } => {
+                state.last_turn_inference = None;
+                state.last_turn_tokens_per_second = None;
+                state.last_turn_generated_tokens = None;
+                state.last_turn_provider_elapsed = None;
                 state.discard_streaming_blocks();
                 state.open_working_status();
                 if let AgentEvent::ProviderRetry {
@@ -4033,6 +4147,13 @@ impl InteractiveShell {
                 // the request is opened immediately after this event, so
                 // this moment anchors the attempt's first-token latency.
                 state.turn_requested_at = Some(Instant::now());
+                state.turn_generation_started_at = None;
+                state.turn_streamed_output_bytes = 0;
+                state.last_turn_tokens_per_second = None;
+                state.last_turn_generated_tokens = None;
+                state.last_turn_provider_elapsed = None;
+                state.last_turn_inference = None;
+                state.last_turn_first_token = None;
             }
             AgentEvent::ToolStarted { id, name, args } => {
                 state.close_streaming_blocks();
@@ -4062,6 +4183,10 @@ impl InteractiveShell {
                     state.tool_panels.insert(id.clone(), index);
                     state.register_active_event(index);
                 }
+                // Tool activity is not the run's liveness indicator: compact
+                // summaries can hide the active command altogether. Keep the
+                // animated status at the tail until the run actually settles.
+                state.open_working_status();
             }
             // The tool panel retains the model-facing failure text; detailed
             // policy diagnostics are intentionally available through telemetry
@@ -4113,7 +4238,8 @@ impl InteractiveShell {
                                 );
                             }
                         }
-                        ToolProgress::SessionEvent(..) => {}
+                        ToolProgress::SessionEvent(..) | ToolProgress::SessionMetadataEvent(..) => {
+                        }
                     }
                 }
                 if state.verbose_tools || refreshes_compact_tail {
@@ -4141,6 +4267,10 @@ impl InteractiveShell {
                     Vec::new()
                 };
                 let completed_images = state.register_tool_images(completed_images);
+                let completed_diff = match result {
+                    Ok(output) => presentation_diff_metadata(output),
+                    Err(_) => None,
+                };
                 let estimated_result_tokens = match result {
                     Ok(output) => output.media().iter().fold(
                         crate::compaction::estimate_text_tokens(&output.text),
@@ -4159,12 +4289,14 @@ impl InteractiveShell {
                     panel.is_error = tool_result_is_failure(&panel.name, result);
                     panel.failure_reason = tool_failure_reason(&panel.name, result);
                     panel.images = completed_images;
+                    panel.diff = completed_diff;
                     panel.progress_decoration = None;
                     match result {
                         Ok(output) => {
                             panel.display.mark_media_read(output.media_kinds());
                             panel.output.clear();
                             panel.output.push_str(&output.text);
+                            panel.diff = presentation_diff_metadata(output);
                         }
                         Err(error) => {
                             panel.output.clear();
@@ -4226,18 +4358,35 @@ impl InteractiveShell {
                 } else {
                     Vec::new()
                 };
-                let requested_at = state.turn_requested_at;
-                if let Some(started_at) = state.turn_generation_started_at.take() {
-                    let elapsed = started_at.elapsed();
-                    state.last_turn_tokens_per_second =
-                        output_tokens_per_second(turn_usage.output_tokens, elapsed);
-                    state.last_turn_generation_elapsed = Some(elapsed);
-                    state.last_turn_generated_tokens = Some(turn_usage.output_tokens);
-                    state.last_turn_first_token = requested_at
-                        .map(|requested| started_at.saturating_duration_since(requested));
+                // Usage includes hidden reasoning and buffered output produced
+                // before the first delta. Never divide it by visible streaming
+                // time: use the matching request-to-completion interval instead.
+                let finished_at = Instant::now();
+                let requested_at = state.turn_requested_at.take();
+                state.last_turn_first_token = state
+                    .turn_generation_started_at
+                    .take()
+                    .zip(requested_at)
+                    .map(|(first, requested)| first.saturating_duration_since(requested));
+                state.last_turn_provider_elapsed =
+                    requested_at.map(|requested| finished_at.saturating_duration_since(requested));
+                state.last_turn_tokens_per_second =
+                    state.last_turn_provider_elapsed.and_then(|elapsed| {
+                        output_tokens_per_second(turn_usage.output_tokens, elapsed)
+                    });
+                state.last_turn_generated_tokens = Some(turn_usage.output_tokens);
+                if let Some(metrics) = state.last_turn_inference.clone() {
+                    state.last_turn_tokens_per_second = metrics
+                        .client
+                        .as_ref()
+                        .and_then(|c| c.end_to_end_tokens_per_second());
+                    state.last_turn_provider_elapsed = metrics
+                        .client
+                        .as_ref()
+                        .map(|c| Duration::from_nanos(c.elapsed_ns));
+                    state.last_turn_generated_tokens =
+                        metrics.client.as_ref().map(|c| c.reported_output_tokens);
                 }
-                state.last_turn_provider_elapsed = requested_at
-                    .map(|requested| Instant::now().saturating_duration_since(requested));
                 // Provider usage is authoritative at this boundary. Prompt
                 // cache buckets all occupy context, while reasoning is already
                 // a subset of output, so canonical total_tokens is exactly the
@@ -4310,19 +4459,8 @@ impl InteractiveShell {
         }
     }
 
-    /// Refresh durable session instruments outside the render loop. These
-    /// values change only at run boundaries, keeping the footer stable.
-    pub fn set_session_telemetry(
-        &mut self,
-        session: &Session,
-        cache_hit_rate_basis_points: Option<u16>,
-    ) {
-        let telemetry_model = session
-            .latest_active_checkpoint()
-            .and_then(|checkpoint| session.entry(&checkpoint.prompt))
-            .and_then(|entry| entry.metadata.as_ref())
-            .and_then(|metadata| metadata.prompt_model.as_ref())
-            .map(|model| model.0.clone());
+    /// Refresh cumulative accounting without changing assistant-turn metrics.
+    pub fn set_session_accounting(&mut self, session: &Session) {
         let session_cost_microdollars = session
             .usage_records()
             .iter()
@@ -4332,6 +4470,23 @@ impl InteractiveShell {
         state.session_cost_microdollars = session_cost_microdollars;
         state.refresh_subagent_committed_costs(session);
         state.usage_uncertain |= session.has_uncertain_usage() || session.has_unpriced_usage();
+    }
+
+    /// Refresh durable session instruments outside the render loop. These
+    /// values change only at run boundaries, keeping the footer stable.
+    pub fn set_session_telemetry(
+        &mut self,
+        session: &Session,
+        cache_hit_rate_basis_points: Option<u16>,
+    ) {
+        self.set_session_accounting(session);
+        let telemetry_model = session
+            .latest_active_checkpoint()
+            .and_then(|checkpoint| session.entry(&checkpoint.prompt))
+            .and_then(|entry| entry.metadata.as_ref())
+            .and_then(|metadata| metadata.prompt_model.as_ref())
+            .map(|model| model.0.clone());
+        let mut state = self.state.borrow_mut();
         state.telemetry_model = telemetry_model;
         state.cache_hit_rate_basis_points = state
             .selected_model_owns_telemetry()
@@ -4747,6 +4902,12 @@ impl InteractiveShell {
     /// a heavyweight modal panel. A selected command returns `true` for the
     /// ordinary dispatcher; navigation and dismissal return `false`.
     pub fn slash_menu(&mut self, action: SlashMenuAction) -> bool {
+        let native_input = self
+            .state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .accepting_input;
         let mut state = self.state.borrow_mut();
         let suggestions = input_slash_suggestions(&state);
         if suggestions.is_empty() {
@@ -4754,14 +4915,19 @@ impl InteractiveShell {
         }
         let last = suggestions.len().saturating_sub(1);
         state.slash_selection = state.slash_selection.min(last);
-        // Use the actual rendered popup viewport (excluding its one footer
-        // row), so Page Up/Down remain correct after resize, wrapped errors, or
-        // composer growth rather than relying on a stale terminal-height guess.
-        let page = shell_chrome(&state, state.size.0, Instant::now())
-            .suggestions
-            .len()
-            .saturating_sub(1)
-            .max(1);
+        // Page through the active renderer's viewport, not the configured
+        // backend policy: native ownership can hand back to ANSI after failure.
+        let page = if native_input {
+            tern_completion::MAX_LINES
+        } else {
+            // Exclude the ANSI popup's footer and account for resize, wrapped
+            // errors, and composer growth.
+            shell_chrome(&state, state.size.0, Instant::now())
+                .suggestions
+                .len()
+                .saturating_sub(1)
+                .max(1)
+        };
         match action {
             SlashMenuAction::Previous => {
                 state.slash_selection = state.slash_selection.saturating_sub(1)
@@ -4866,16 +5032,17 @@ impl InteractiveShell {
         state.slash_scroll = 0;
     }
 
-    pub fn set_extension_commands(&mut self, commands: Arc<[(String, String)]>) {
+    /// Replace live runtime-command discovery without resetting unchanged
+    /// popup selection on each background tick.
+    pub fn set_extension_commands(&mut self, commands: Arc<[(String, String)]>) -> bool {
         let mut state = self.state.borrow_mut();
-        // Background extension polling republishes this snapshot on every tick;
-        // an equivalent catalog must not reset the live popup cursor.
         if state.extension_commands.as_ref() == commands.as_ref() {
-            return;
+            return false;
         }
         state.extension_commands = commands;
         state.slash_selection = 0;
         state.slash_scroll = 0;
+        true
     }
 
     #[allow(dead_code)]
@@ -5123,17 +5290,27 @@ impl InteractiveShell {
     }
 
     pub fn set_size(&mut self, columns: u16, rows: u16) {
-        *self.size.lock().expect("terminal size mutex poisoned") = (columns, rows);
+        let dimensions = (columns, rows);
+        let mut size = self.size.lock().expect("terminal size mutex poisoned");
+        if *size == dimensions {
+            return;
+        }
+        *size = dimensions;
+        drop(size);
         let mut state = self.state.borrow_mut();
-        state.size = (columns, rows);
+        if !state.render_threaded {
+            viewport::upgrade_viewport_anchor(&state);
+        }
+        let width_changed = state.size.0 != columns;
+        state.size = dimensions;
+        state.resize_epoch = state.resize_epoch.wrapping_add(1);
         state.reset_transcript_navigation_pointer();
-        // Deferred session history remains semantic and lazy. Resize reflows
-        // only the materialized branch tail; PageUp/select-all loads older
-        // blocks if and when the user asks for them.
-        // Reflow belongs exclusively to `octet-tui-render`. Computing the scroll
-        // maximum here used to rebuild a long transcript on the input thread,
-        // immediately discard that layout, and rebuild it again for paint.
-        state.invalidate_transcript_layout();
+        // Height changes affect bounded chrome/welcome budgeting, not block
+        // wrapping. Let the cache update that prefix without reparsing history.
+        // Width reflow remains exclusively on the renderer thread.
+        if width_changed {
+            state.invalidate_transcript_layout();
+        }
     }
 
     pub fn theme(&self) -> OctetTheme {
@@ -5153,6 +5330,7 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         state.safe_mode = config.effect_policy != octet_agent::EffectPolicy::UnsafeHost;
         state.max_session_cost_microdollars = config.max_cost_microdollars;
+        state.show_cache_miss_notices = config.show_cache_miss_notices;
         drop(state);
         self.set_show_images(show_images);
     }
@@ -5169,13 +5347,95 @@ impl InteractiveShell {
     /// Replace the complete host-projected semantic extension UI. The caller
     /// owns stale-generation filtering; this shell only retains data and keeps
     /// all terminal rendering/theme decisions host-side.
-    pub fn set_extension_ui(&mut self, ui: ShellExtensionUi) -> bool {
+    pub fn set_extension_ui(&mut self, mut ui: ShellExtensionUi) -> bool {
         let mut state = self.state.borrow_mut();
+        ui.remote = state.extension_ui.remote.clone();
+        ui.remote_fullscreen_overlay = state.extension_ui.remote_fullscreen_overlay;
         if state.extension_ui == ui {
             return false;
         }
         state.extension_ui = ui;
         true
+    }
+
+    /// Install one immutable cached remote UI projection. No extension callback
+    /// runs on the renderer; fullscreen rows use the existing transient overlay.
+    pub(crate) fn set_remote_ui(
+        &mut self,
+        projection: crate::extensions::remote_ui::Projection,
+    ) -> bool {
+        use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
+        let mut state = self.state.borrow_mut();
+        if state.extension_ui.remote == projection {
+            return false;
+        }
+        let had_fullscreen = state
+            .extension_ui
+            .remote
+            .mount(Placement::Fullscreen)
+            .is_some();
+        let header_changed = state.extension_ui.remote.mount(Placement::Header)
+            != projection.mount(Placement::Header)
+            || (projection.mount(Placement::Header).is_some()
+                && state.extension_ui.remote.components != projection.components);
+        state.extension_ui.remote = projection;
+        let fullscreen = state.extension_ui.remote.mount(Placement::Fullscreen);
+        let has_fullscreen = fullscreen.is_some();
+        let capture = fullscreen.is_some_and(|mount| mount.mouse_capture);
+        let keyboard_events =
+            has_fullscreen || state.extension_ui.remote.mount(Placement::Editor).is_some();
+        if had_fullscreen && !has_fullscreen && state.extension_ui.remote_fullscreen_overlay {
+            state.overlay = None;
+        }
+        if !had_fullscreen || !has_fullscreen {
+            state.extension_ui.remote_fullscreen_overlay = has_fullscreen;
+        }
+        remote_ui::refresh_fullscreen_overlay(&mut state);
+        if header_changed {
+            state.invalidate_transcript();
+        }
+        drop(state);
+        if self.remote_keyboard_events != keyboard_events {
+            if self.render_thread.is_some() {
+                if let Err(error) = OctetTerminal::set_remote_ui_keyboard_events(keyboard_events) {
+                    self.state.borrow_mut().error =
+                        Some(format!("remote keyboard event reporting failed: {error}"));
+                }
+            }
+            self.remote_keyboard_events = keyboard_events;
+        }
+        if self.remote_mouse_capture != capture {
+            if self.render_thread.is_some() {
+                if let Err(error) = OctetTerminal::set_mouse_capture(self.capture_mouse || capture)
+                {
+                    self.state.borrow_mut().error =
+                        Some(format!("remote mouse capture failed: {error}"));
+                }
+            }
+            self.remote_mouse_capture = capture;
+        }
+        true
+    }
+
+    /// Whether a host-admitted fullscreen extension surface currently owns the
+    /// visible shell. This is a typed mount query, not a component/title guess.
+    pub(crate) fn has_remote_fullscreen_mount(&self) -> bool {
+        self.state
+            .borrow()
+            .extension_ui
+            .remote
+            .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Fullscreen)
+            .is_some()
+    }
+
+    /// Approval/picker/search/tool input ownership always takes priority.
+    pub(crate) fn remote_ui_input_blocked(&self) -> bool {
+        let state = self.state.borrow();
+        state.startup_pending
+            || state.panel.is_some()
+            || state.tool_input_prompt.is_some()
+            || state.transcript_search_active()
+            || (state.overlay.is_some() && !state.extension_ui.remote_fullscreen_overlay)
     }
 
     /// Snapshot the normal host editor for a bounded extension handoff.
@@ -5247,6 +5507,7 @@ impl InteractiveShell {
         if !current || items.is_empty() {
             return false;
         }
+        state.extension_autocomplete_selection = None;
         state.extension_autocomplete = Some(ShellAutocompleteOverlay {
             text: snapshot.text.clone(),
             cursor: snapshot.cursor,
@@ -5257,8 +5518,8 @@ impl InteractiveShell {
         true
     }
 
-    /// Accept the first extension autocomplete choice through a normal host
-    /// editor mutation. Selection/navigation remains host-owned for now.
+    /// Accept the current extension choice through a normal host editor mutation.
+    /// Without a native selection, retain the first-choice keyboard default.
     pub fn accept_extension_autocomplete(&mut self) -> bool {
         let mut state = self.state.borrow_mut();
         let Some(overlay) = state.extension_autocomplete.clone() else {
@@ -5277,7 +5538,11 @@ impl InteractiveShell {
             state.extension_autocomplete = None;
             return false;
         }
-        let Some(item) = overlay.items.first() else {
+        let selected = state
+            .extension_autocomplete_selection
+            .filter(|(revision, _)| *revision == overlay.revision)
+            .map_or(0, |(_, index)| index);
+        let Some(item) = overlay.items.get(selected) else {
             state.extension_autocomplete = None;
             return false;
         };
@@ -5677,29 +5942,41 @@ impl InteractiveShell {
         self.state.borrow_mut().selection_dragging = false;
     }
 
-    /// Best-effort OSC 52 clipboard transport. The semantic fallback is
-    /// retained separately in `copy_buffer`, so redirected output loses no data.
+    /// Best-effort native helper plus OSC 52 clipboard transport. The semantic
+    /// fallback is retained separately in `copy_buffer`, so redirected output
+    /// loses no data.
     ///
-    /// `pbcopy`'s stdin write plus child wait block the caller, and this runs
+    /// A helper's stdin write plus child wait block the caller, and this runs
     /// from the interactive event loop, so the process handoff happens on a
     /// detached thread. A detached thread (rather than `tokio::spawn`) keeps
     /// this method callable from the synchronous view API and its runtime-less
     /// unit tests. Errors stay ignored: `copy_buffer` remains authoritative.
     fn set_clipboard(text: &str) {
-        #[cfg(target_os = "macos")]
-        {
+        let writers = native_clipboard_writers(|name| std::env::var_os(name).is_some());
+        if !writers.is_empty() {
             let text = text.to_owned();
             let _ = std::thread::Builder::new()
-                .name("clipboard-pbcopy".to_owned())
+                .name("clipboard-write".to_owned())
                 .spawn(move || {
-                    if let Ok(mut child) = std::process::Command::new("pbcopy")
-                        .stdin(std::process::Stdio::piped())
-                        .spawn()
-                    {
+                    // The first helper that accepts the text owns the write.
+                    // `wl-copy` and `xclip` fork to keep serving the selection,
+                    // so their output is discarded rather than held on a pipe.
+                    for (program, args) in writers {
+                        let Ok(mut child) = std::process::Command::new(program)
+                            .args(args)
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                        else {
+                            continue;
+                        };
                         if let Some(mut stdin) = child.stdin.take() {
                             let _ = stdin.write_all(text.as_bytes());
                         }
-                        let _ = child.wait();
+                        if child.wait().is_ok_and(|status| status.success()) {
+                            break;
+                        }
                     }
                 });
         }
@@ -5770,6 +6047,26 @@ impl InteractiveShell {
     /// Return clean text for the logical selection and retain it as an
     /// explicit fallback copy buffer. A future/native clipboard transport can
     /// consume this value without ever scraping padded terminal cells.
+    /// The worker node selected in an open live subagent list.
+    pub(crate) fn selected_subagent_node(&self) -> Option<String> {
+        let state = self.state.borrow();
+        let Some(Panel::SelectList {
+            items,
+            descriptions,
+            selected,
+            filter,
+            action,
+            ..
+        }) = state.panel.as_ref()
+        else {
+            return None;
+        };
+        let panel = action.subagent_panel()?;
+        let index =
+            *filtered_indices_for_action(items, descriptions, action, filter).get(*selected)?;
+        panel.node_ids.get(index).cloned()
+    }
+
     pub fn selected_plain_text(&self) -> Option<String> {
         semantic_selected_text(&self.state.borrow())
     }
@@ -5792,13 +6089,17 @@ impl InteractiveShell {
         self.close_transcript_navigation();
         self.reset_input_interaction();
         let text = Arc::from(sanitize_for_terminal(&text));
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text));
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Text(text));
     }
 
     fn show_report(&mut self, surface: OrdinarySurfaceMetadata, body: ReportBody) {
         self.close_transcript_navigation();
         self.reset_input_interaction();
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Report(ReportOverlay {
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Report(ReportOverlay {
             surface,
             body,
             scroll_from_top: 0,
@@ -5830,7 +6131,25 @@ impl InteractiveShell {
                 format!("Changelog v{}", env!("CARGO_PKG_VERSION")),
                 "Bundled release notes for this version",
             ),
-            ReportBody::Markdown(Arc::new(parse_markdown(crate::commands::CURRENT_CHANGELOG))),
+            ReportBody::Markdown(
+                Arc::new(parse_markdown(crate::commands::CURRENT_CHANGELOG)),
+                crate::commands::CURRENT_CHANGELOG.into(),
+            ),
+        );
+    }
+
+    /// Show a read-only Markdown report. The source is sanitised once and
+    /// kept beside the parsed document so a native renderer can typeset it.
+    pub fn show_report_markdown(
+        &mut self,
+        title: impl Into<String>,
+        purpose: impl Into<String>,
+        source: &str,
+    ) {
+        let source: Arc<str> = sanitize_for_terminal(source).into();
+        self.show_report(
+            OrdinarySurfaceMetadata::with_purpose(title, purpose),
+            ReportBody::Markdown(Arc::new(parse_markdown(&source)), source),
         );
     }
 
@@ -5853,11 +6172,12 @@ impl InteractiveShell {
 
     /// Extension slash-command output, framed with heading chrome. The body
     /// is sanitized; only trusted theme styling added here survives.
-    pub fn show_extension_output(&mut self, command: &str, text: String) {
+    pub fn show_extension_output(&mut self, title: &str, text: String) {
         self.close_transcript_navigation();
         let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
         state.overlay = Some(ShellOverlay::Text(
-            styled_extension_output(&state.theme, command, &text).into(),
+            styled_extension_output(&state.theme, title, &text).into(),
         ));
     }
 
@@ -5895,7 +6215,9 @@ impl InteractiveShell {
     /// Show picker output that already contains octet-generated foreground SGR.
     #[allow(dead_code)]
     pub fn show_styled_overlay_text(&mut self, text: String) {
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text.into()));
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Text(text.into()));
     }
 
     pub fn show_status_text_with_telemetry(&mut self, text: String) {
@@ -5912,7 +6234,14 @@ impl InteractiveShell {
     }
 
     pub fn close_overlay(&mut self) {
-        self.state.borrow_mut().overlay = None;
+        let mut state = self.state.borrow_mut();
+        state.overlay = None;
+        state.extension_ui.remote_fullscreen_overlay = state
+            .extension_ui
+            .remote
+            .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Fullscreen)
+            .is_some();
+        remote_ui::refresh_fullscreen_overlay(&mut state);
     }
 
     pub fn has_overlay(&self) -> bool {
@@ -5938,7 +6267,8 @@ impl InteractiveShell {
             {
                 return OverlayInputResult::Consumed;
             }
-            state.overlay = None;
+            drop(state);
+            self.close_overlay();
             return OverlayInputResult::Closed;
         }
         let (maximum, page_rows) = if state.render_threaded {
@@ -5998,7 +6328,8 @@ impl InteractiveShell {
             close = true;
         }
         if close {
-            state.overlay = None;
+            drop(state);
+            self.close_overlay();
             OverlayInputResult::Closed
         } else {
             OverlayInputResult::Consumed
@@ -6066,6 +6397,7 @@ impl InteractiveShell {
         descriptions: Vec<Option<String>>,
         ids: Vec<ModelId>,
         providers: Vec<String>,
+        details: Vec<crate::tui::pickers::ModelPickerDetail>,
     ) -> bool {
         let mut state = self.state.borrow_mut();
         let Some(Panel::SelectList {
@@ -6092,9 +6424,17 @@ impl InteractiveShell {
                 .cloned();
         *current_items = items;
         *current_descriptions = descriptions;
+        let scope = match action {
+            PanelAction::SelectGroupedModel { scope, .. } => scope
+                .clone()
+                .filter(|provider| providers.contains(provider)),
+            _ => None,
+        };
         *action = PanelAction::SelectGroupedModel {
             models: ids,
             providers,
+            details,
+            scope,
         };
         let filtered =
             filtered_indices_for_action(current_items, current_descriptions, action, filter);
@@ -7148,9 +7488,7 @@ impl InteractiveShell {
 
     /// Rebuild the visible transcript from the session's active branch.
     pub fn hydrate(&mut self, session: &Session) -> Result<()> {
-        let entry_budget = usize::from(self.state.borrow().size.1)
-            .saturating_mul(4)
-            .clamp(64, 256);
+        let entry_budget = hydration_entry_budget(self.state.borrow().size.1);
         let (items, history_deferred, image_budget) = if self.capture_mouse {
             // Explicit application-owned mode can hydrate older rows when its
             // semantic viewport reaches the bounded first-paint tail.
@@ -7167,6 +7505,10 @@ impl InteractiveShell {
                 None => (Vec::new(), false, ToolImageBudget::default()),
             }
         };
+        crate::app::bootstrap::startup_count("history.tail_budget", entry_budget);
+        crate::app::bootstrap::startup_count("history.items", items.len());
+        crate::app::bootstrap::startup_count("history.total_records", session.entries().len());
+        crate::app::bootstrap::startup_count("history.deferred", usize::from(history_deferred));
         let deferred_snapshot = history_deferred.then(|| DeferredSessionHistory {
             path: session.path().to_owned(),
             head: session
@@ -7234,8 +7576,8 @@ impl InteractiveShell {
         state.close_streaming_blocks();
         state.jump_to_tail();
         state.last_turn_usage = checkpoint_usage;
+        state.last_turn_inference = None;
         state.last_turn_tokens_per_second = None;
-        state.last_turn_generation_elapsed = None;
         state.last_turn_generated_tokens = None;
         state.turn_generation_started_at = None;
         state.turn_streamed_output_bytes = 0;
@@ -7390,8 +7732,39 @@ impl sexy_tui_rs::Terminal for TestTerminal {
     fn clear_screen(&mut self) {}
 }
 
+/// Native clipboard writers in preference order, mirroring the text reader in
+/// `modes/interactive.rs`. OSC 52 still runs after them, but it is dropped by
+/// tmux without `set-clipboard` and by terminals that disable it, so Linux
+/// desktops (Wayland compositors such as Hyprland, and X11) get their own
+/// helper the way macOS gets `pbcopy`. An environment that declares no display
+/// gets no helper at all.
+fn native_clipboard_writers(
+    has_env: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, &'static [&'static str])> {
+    if cfg!(target_os = "macos") {
+        return vec![("pbcopy", &[])];
+    }
+    if cfg!(windows) {
+        return Vec::new();
+    }
+    let mut writers: Vec<(&'static str, &'static [&'static str])> = Vec::new();
+    if has_env("TERMUX_VERSION") {
+        writers.push(("termux-clipboard-set", &[]));
+    }
+    if has_env("WAYLAND_DISPLAY") {
+        writers.push(("wl-copy", &["--type", "text/plain;charset=utf-8"]));
+    }
+    if has_env("DISPLAY") {
+        writers.push(("xclip", &["-selection", "clipboard", "-in"]));
+        writers.push(("xsel", &["--clipboard", "--input"]));
+    }
+    writers
+}
+
 mod assistant_block;
 mod bash_render;
+#[path = "view/shell_chrome.rs"]
+mod builtin_shell_chrome;
 mod input_dispatch;
 mod input_overlays;
 mod native_scrollback;
@@ -7400,27 +7773,107 @@ mod outcome_render;
 mod output_window;
 mod panel_render;
 mod reasoning_render;
+mod remote_ui;
 mod renderer_geometry;
 mod renderer_model;
 mod renderer_runtime;
-mod shell_chrome;
+// Keep the built-in implementation unchanged; compose cached remote regions at
+// the existing shell chrome seam rather than introducing another renderer.
+mod shell_chrome {
+    #[cfg(test)]
+    pub(super) use super::builtin_shell_chrome::responsive_identity;
+    pub(super) use super::builtin_shell_chrome::{
+        append_chrome, append_viewport_chrome, render_startup_surface, shell_chrome_rows,
+        ShellChrome,
+    };
+    pub(super) use super::remote_ui::shell_chrome;
+}
 mod startup_update;
 mod status_telemetry;
 mod surface_frame;
 mod surface_layout;
 mod terminal_text;
+pub(crate) mod tern;
+mod tern_agents;
+mod tern_completion;
+mod tern_images;
+pub(crate) mod tern_input;
+mod tern_picker;
+mod tern_sessions;
+mod tern_theme;
+mod tern_welcome;
 mod tool_render;
 mod transcript_cache;
 mod transcript_navigation;
 
+#[path = "view/viewport.rs"]
+mod builtin_viewport;
 mod transcript_commit;
 mod transcript_document;
 mod transcript_history;
 mod transcript_hydration;
 mod transcript_render;
 mod transcript_selection;
-mod viewport;
-mod welcome_card;
+mod viewport {
+    pub(super) use super::builtin_viewport::*;
+    use super::{remote_ui, renderer_runtime::ShellFrameState, ShellState};
+    use sexy_tui_rs::FrameUpdate;
+    use std::time::Instant;
+
+    fn remote_rows(state: &ShellState, width: u16) -> Option<Vec<String>> {
+        if !state.extension_ui.remote_fullscreen_overlay
+            || state.panel.is_some()
+            || state.tool_input_prompt.is_some()
+        {
+            return None;
+        }
+        remote_ui::fullscreen_overlay(&state.extension_ui.remote, width, state.size.1)
+            .map(|text| text.split('\n').map(str::to_owned).collect())
+    }
+    pub(super) fn overlay_lines(state: &ShellState, width: u16, max_rows: usize) -> Vec<String> {
+        remote_rows(state, width)
+            .unwrap_or_else(|| super::builtin_viewport::overlay_lines(state, width, max_rows))
+    }
+    pub(super) fn render_shell_viewport_at(
+        state: &ShellState,
+        width: u16,
+        now: Instant,
+    ) -> Vec<String> {
+        remote_rows(state, width)
+            .unwrap_or_else(|| super::builtin_viewport::render_shell_viewport_at(state, width, now))
+    }
+    pub(super) fn render_shell_viewport_update(
+        state: &ShellState,
+        width: u16,
+        now: Instant,
+        frame: &mut ShellFrameState,
+    ) -> FrameUpdate {
+        if let Some(replacement) = remote_rows(state, width) {
+            let reanchor_viewport =
+                !frame.overlay_active || frame.width != width || frame.height != state.size.1;
+            frame.overlay_active = true;
+            frame.width = width;
+            frame.height = state.size.1;
+            return FrameUpdate {
+                stable_prefix: 0,
+                replacement,
+                pinned: None,
+                resize_replay: None,
+                reanchor_viewport,
+                rebuild_scrollback: false,
+            };
+        }
+        super::builtin_viewport::render_shell_viewport_update(state, width, now, frame)
+    }
+}
+#[path = "view/welcome_card.rs"]
+mod builtin_welcome_card;
+mod welcome_card {
+    pub(super) use super::builtin_welcome_card::{
+        restart_welcome_animation, welcome_placeholder_rows, welcome_row_budget,
+    };
+    pub(super) use super::remote_ui::render_welcome_card;
+}
 
 #[cfg(test)]
 mod changelog_tests;
@@ -7429,12 +7882,14 @@ mod ordinary_surface_contract_tests;
 #[cfg(test)]
 mod path_completion_tests;
 #[cfg(test)]
+mod resume_bookkeeping_tests;
+#[cfg(test)]
 mod startup_readiness_tests;
 #[cfg(test)]
 #[path = "view/subagent_stability_tests.rs"]
 mod subagent_stability_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod extension_handoff_tests {

@@ -9,12 +9,13 @@
 //! are composed by the endpoint, the request codec's session affinity, and the
 //! resolver's dynamic account routing.
 
+mod browser;
 mod login;
 mod oauth;
 mod resolver;
 mod store;
 
-pub use login::{login, logout};
+pub use login::{login, login_without_prompt, logout};
 pub(crate) use oauth::{ChatGptPlan, SubscriptionClaims};
 pub use resolver::CodexResolver;
 pub(crate) use store::REFRESH_LOCK_WAIT;
@@ -22,8 +23,13 @@ pub use store::{default_path, CredentialStore};
 
 /// Public OAuth client id of the Codex CLI (not a secret).
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-/// Token endpoint (device-code exchange + refresh).
+/// Token endpoint (device code, browser code exchange + refresh).
 pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+/// Registered loopback callback ports for browser sign-in, in preference order.
+/// The OAuth client registers exactly these; the Codex CLI uses the same pair.
+pub const BROWSER_CALLBACK_PORTS: [u16; 2] = [1455, 1457];
+/// The same originator value sent to the Codex backend in declarations.json.
+pub const ORIGINATOR: &str = "octet";
 /// OAuth device authorization start endpoint.
 pub const DEVICE_USER_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 /// OAuth device authorization polling endpoint.
@@ -43,7 +49,10 @@ pub const ENDPOINT_ID: &str = "openai-codex";
 /// reached. The authenticated `/models` response is authoritative at runtime,
 /// so account-specific and newly released models are not gated on this list.
 pub const MODELS: &[&str] = &[
+    "gpt-6.1-sol",
     "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",

@@ -429,6 +429,11 @@ impl RunTracker {
                 }
                 run.transition(RunPhase::StreamingResponse, now);
             }
+            AgentEvent::ProviderInference { metrics } => {
+                if let Some(client) = &metrics.client {
+                    run.request.observe_client(client, now);
+                }
+            }
             AgentEvent::ProviderLifecycle { lifecycle } => {
                 if run.request.active().is_some() {
                     run.request.provider_event_at(now);
@@ -453,7 +458,7 @@ impl RunTracker {
             }
             // Auxiliary recovery belongs to the operation already in progress;
             // it must not reset the main answer or its compaction phase.
-            AgentEvent::ProviderOperationRetry { .. } => {}
+            AgentEvent::ProviderOperationRetry { .. } | AgentEvent::CacheWarmed { .. } => {}
             AgentEvent::ProviderUsageUncertain => {
                 if !run.usage_uncertain {
                     run.usage_uncertain = true;
@@ -496,21 +501,13 @@ impl RunTracker {
                 ..
             } => {
                 run.pending_tools.clear();
-                let mut has_tool_arguments = false;
                 for part in &message.content {
                     if let AssistantPart::ToolCall(call) = part {
-                        has_tool_arguments = true;
                         run.pending_tools.insert(call.id.0.clone());
                     }
                 }
-                // Raw tool-argument deltas are not exposed as events. The
-                // assembled ToolCall is the authoritative representable marker.
-                if has_tool_arguments && run.request.active().is_some() {
-                    // Assembled tool arguments are generation activity when a
-                    // request origin was supplied by the provider owner.
-                    run.request.provider_event_at(now);
-                    run.request.generated_at(now);
-                }
+                // Assembled calls arrive after provider completion; never count
+                // admission/persistence as fresh generation activity.
                 let _ = run.request.finish_at(turn_usage.output_tokens, now);
                 // TurnFinished follows the durable assistant/usage write. Keep
                 // commit accounting separate even when both observations share

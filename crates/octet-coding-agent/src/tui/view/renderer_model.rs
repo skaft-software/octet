@@ -13,6 +13,19 @@ enum Node<T> {
     Leaf(T),
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static SHARED_SEQUENCE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl<T> Node<T> {
+    fn shared(self) -> Arc<Self> {
+        #[cfg(test)]
+        SHARED_SEQUENCE_NODES.with(|nodes| nodes.set(nodes.get() + 1));
+        Arc::new(self)
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct SharedSequence<T> {
     root: Option<Arc<Node<T>>>,
@@ -39,12 +52,44 @@ impl<T> Default for SharedSequence<T> {
     }
 }
 impl<T> SharedSequence<T> {
+    /// Construct the same sparse, power-of-two tree as repeated pushes, without
+    /// path-copying its growing prefix. Subsequent mutations remain persistent.
+    fn from_exact_iter(mut values: impl ExactSizeIterator<Item = T>) -> Self {
+        fn build<T>(
+            values: &mut impl Iterator<Item = T>,
+            count: usize,
+            size: usize,
+        ) -> Option<Arc<Node<T>>> {
+            if count == 0 {
+                return None;
+            }
+            if size == 1 {
+                return Some(Node::Leaf(values.next().expect("exact sequence length")).shared());
+            }
+            let left_count = count.min(size / 2);
+            Some(
+                Node::Branch(
+                    build(values, left_count, size / 2),
+                    build(values, count - left_count, size / 2),
+                )
+                .shared(),
+            )
+        }
+        let len = values.len();
+        let capacity = len.max(1).next_power_of_two();
+        Self {
+            root: build(&mut values, len, capacity),
+            capacity,
+            len,
+        }
+    }
+
     pub(super) fn len(&self) -> usize {
         self.len
     }
     pub(super) fn push(&mut self, value: T) {
         if self.len == self.capacity {
-            self.root = Some(Arc::new(Node::Branch(self.root.take(), None)));
+            self.root = Some(Node::Branch(self.root.take(), None).shared());
             self.capacity *= 2;
         }
         self.set(self.len, value);
@@ -64,10 +109,13 @@ impl<T> SharedSequence<T> {
                 return node.cloned();
             }
             match node.map(Arc::as_ref) {
-                Some(Node::Branch(left, right)) => Some(Arc::new(Node::Branch(
-                    prune(left.as_ref(), size / 2, offset, len),
-                    prune(right.as_ref(), size / 2, offset + size / 2, len),
-                ))),
+                Some(Node::Branch(left, right)) => Some(
+                    Node::Branch(
+                        prune(left.as_ref(), size / 2, offset, len),
+                        prune(right.as_ref(), size / 2, offset + size / 2, len),
+                    )
+                    .shared(),
+                ),
                 _ => node.cloned(),
             }
         }
@@ -85,13 +133,13 @@ impl<T> SharedSequence<T> {
             value: T,
         ) -> Arc<Node<T>> {
             if size == 1 {
-                return Arc::new(Node::Leaf(value));
+                return Node::Leaf(value).shared();
             }
             let (left, right) = match node.map(Arc::as_ref) {
                 Some(Node::Branch(left, right)) => (left.clone(), right.clone()),
                 _ => (None, None),
             };
-            Arc::new(if index < size / 2 {
+            (if index < size / 2 {
                 Node::Branch(Some(replace(left.as_ref(), size / 2, index, value)), right)
             } else {
                 Node::Branch(
@@ -99,6 +147,7 @@ impl<T> SharedSequence<T> {
                     Some(replace(right.as_ref(), size / 2, index - size / 2, value)),
                 )
             })
+            .shared()
         }
         self.root = Some(replace(self.root.as_ref(), self.capacity, index, value));
     }
@@ -158,7 +207,7 @@ impl<T> SharedSequence<T> {
         }
         let mut old = previous.clone();
         while old.capacity < self.capacity {
-            old.root = Some(Arc::new(Node::Branch(old.root.take(), None)));
+            old.root = Some(Node::Branch(old.root.take(), None).shared());
             old.capacity *= 2;
         }
         walk(
@@ -204,6 +253,7 @@ impl PublishedBlock {
                     output: panel.output.clone(),
                     images: panel.images.clone(),
                     image_rendering: panel.image_rendering,
+                    diff: panel.diff.clone(),
                     grouped_child: panel.grouped_child,
                     finished: panel.finished,
                     is_error: panel.is_error,
@@ -281,14 +331,18 @@ impl RenderModel {
     pub(super) fn capture(state: &mut ShellState) -> Self {
         let mut publication = std::mem::take(&mut state.render_publication);
         let reset = publication.reset || publication.root.len() > state.transcript.len();
-        if reset {
-            publication.root = SharedSequence::default();
-        }
-        let appended_from = publication.root.len();
-        for index in appended_from..state.transcript.len() {
-            publication
-                .root
-                .push(Arc::new(PublishedBlock::capture(state, index)));
+        let appended_from = if reset { 0 } else { publication.root.len() };
+        if reset || (appended_from == 0 && publication.root.capacity == 1) {
+            publication.root = SharedSequence::from_exact_iter(
+                (0..state.transcript.len())
+                    .map(|index| Arc::new(PublishedBlock::capture(state, index))),
+            );
+        } else {
+            for index in appended_from..state.transcript.len() {
+                publication
+                    .root
+                    .push(Arc::new(PublishedBlock::capture(state, index)));
+            }
         }
         for index in publication.dirty.drain() {
             if index < appended_from {
@@ -324,7 +378,18 @@ impl RenderOwner {
         let state = &mut self.state;
         let structural = model.reset || state.transcript_epoch != model.chrome.transcript_epoch;
         let theme_changed = state.theme_epoch != model.chrome.theme_epoch;
-        let size_changed = state.size != model.chrome.size;
+        let width_changed = state.size.0 != model.chrome.size.0;
+        // Input captures only bounded visual geometry. Promote that receipt
+        // against the old renderer-owned source/layout before accepting a
+        // resize, hydration prepend, or streaming mutation.
+        state
+            .viewport_anchor
+            .set(model.chrome.viewport_anchor.get());
+        super::viewport::upgrade_viewport_anchor(state);
+        model
+            .chrome
+            .viewport_anchor
+            .set(state.viewport_anchor.get());
         copy_presentation(&model.chrome, state);
         if structural {
             state.transcript.clear();
@@ -368,7 +433,10 @@ impl RenderOwner {
                 state.transcript[index] = next;
                 state.transcript_commit_ids[index] = block.id;
                 state.block_revisions[index] = block.revision;
-                state.transcript_cache.get_mut().dirty_blocks.push(index);
+                let cache = state.transcript_cache.get_mut();
+                if cache.width.is_some() && index < cache.block_revisions.len() {
+                    cache.dirty_blocks.push(index);
+                }
             }
             state.transcript_cache.get_mut().dirty = true;
         });
@@ -378,7 +446,7 @@ impl RenderOwner {
         if theme_changed {
             state.invalidate_rich_text();
         }
-        if size_changed {
+        if width_changed {
             state.invalidate_transcript_layout();
         }
         self.root = model.root;
@@ -442,7 +510,6 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         tool_input_prompt,
         prompt_templates,
         skill_commands,
-        extension_commands,
         subagent_activity,
         subagent_committed_costs,
         slash_selection,
@@ -450,6 +517,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         slash_popup_dismissed,
         extension_ui,
         extension_autocomplete,
+        extension_autocomplete_selection,
         status_detail,
         error,
         overlay,
@@ -464,7 +532,6 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         context_estimate,
         last_turn_usage,
         last_turn_tokens_per_second,
-        last_turn_generation_elapsed,
         last_turn_generated_tokens,
         turn_generation_started_at,
         turn_requested_at,
@@ -498,6 +565,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         run_label,
         verbose_tools,
         size,
+        resize_epoch,
         startup_pending,
         startup_card_started_at,
     );
@@ -508,6 +576,10 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
     *target.transcript_navigation.get_mut() =
         source.transcript_navigation.borrow().render_snapshot();
 }
+
+#[cfg(test)]
+#[path = "renderer_model/resume_tests.rs"]
+mod resume_tests;
 
 #[cfg(test)]
 mod tests {

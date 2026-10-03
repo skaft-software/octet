@@ -42,8 +42,9 @@ explicit `CatalogConfig` or provider-specific override supplies rates. This is
 fail-closed for subagent cost ceilings: unknown pricing cannot silently be
 borrowed from another provider. Refresh the pricing snapshot only as a reviewed
 maintainer operation with
-`scripts/refresh-models-dev-pricing.py`; do not add network access to `build.rs`
-or runtime.
+`scripts/refresh-models-dev-pricing.py`; do not add network access to `build.rs`.
+At runtime the snapshot is the baseline for the checked live records described
+under [Live metadata](#live-metadata-v082).
 
 - Protocol request/response capabilities are constrained by the repository API docs under `docs/research/apidocs/`.
 - `gpt-4o-mini` text pricing uses $0.15/M input, $0.60/M output, and $0.075/M cached input, represented as 150,000 / 600,000 / 75,000 microdollars per million tokens.
@@ -63,6 +64,106 @@ provider/model keys never borrow names or prices by leaf ID. Configured catalogs
 and custom metadata keep precedence; Codex account inventory never inherits this
 supplement. A model name does not select a protocol or reasoning encoding, and
 native Messages/budget contracts are not inferred from a generic reasoning boolean.
+
+## Live metadata (v0.8.2)
+
+An interactive session refreshes these records from
+`https://models.dev/api.json` in the background, off the startup path, at most
+every six hours. The request revalidates with the cached ETag, has a 10-second
+deadline, follows no redirects and accepts at most 16 MiB. Like the startup
+update check, it sends no credentials and ignores environment proxies, so
+behind a mandatory proxy the snapshot stays in use. `--offline`
+(`OCTET_OFFLINE=true`) skips it. Other modes use a cache an interactive session
+wrote, but never fetch.
+
+The refresh applies the same extraction as
+`scripts/refresh-models-dev-pricing.py`: its provider table, exclusions,
+allowlists, text-only corrections and unverified-pricing providers, mirrored in
+`src/model_metadata/live.rs`. The script's own outputs for a shared fixture,
+`tests/fixtures/models-dev/`, are checked in, and a Rust parity test must
+reproduce them, so the two extractions cannot drift apart.
+
+Each record is then checked against the compiled snapshot. A record that fails
+keeps the built-in data for that model only, and the cache lists it under
+`rejected` with the reason:
+
+- a rate above $100,000 per million tokens, or a limit above 100M tokens, is
+  malformed;
+- a positive input, output, cache-read or cache-write price the snapshot
+  publishes may not become zero or fall more than tenfold; effective reasoning
+  rates receive the same check, including their output-price fallback. A cache
+  bucket already published as zero stays valid, so this does not invent charges
+  for free or unpublished cache rates;
+- a route the snapshot does not price needs non-zero input and output rates;
+  and
+- a catalog that is not an object, or that yields no usable record, is ignored
+  altogether.
+
+Accepted records are cached with private permissions at
+`~/.octet/cache/models-dev/metadata.json`, with the fetch time, ETag and source
+SHA-256. Each launch installs that cache before building its first model
+catalog, and a refresh installs its result for later catalog builds. A cache
+written by another octet version is ignored, because its records were checked
+against a different snapshot. Lookups consult live records first and fall back
+to this snapshot per model, so a route that disappears upstream keeps its
+built-in data. Live records are consumed exactly like snapshot records: the
+precedence rules above are unchanged, and a failed refresh leaves the metadata
+in use as it was.
+
+## Reviewed metadata refresh (v0.8.2)
+
+The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256
+`404d33ff898888b1e4a1074770f207c87210e050e32151687fae255dd4dda6b6`.
+That closeout's review below describes the `404d33...` snapshot, not the newer
+combined RC snapshot. At RC source `10c53b7154b9339200b23415a8f686e4af3f6545`,
+`models-dev-source.json` instead records SHA-256
+`25c0f9abe330fff43d8829e8dc9dd1fc352692908680b7b0c335996059c99b00`, with 916
+pricing routes, 406 names, and 939 capability routes. Compared with the
+`404d33...` committed outputs, the key-level projection deltas are:
+
+| Snapshot | Current records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 916 | 2 | 7 | 21 |
+| Canonical names | 406 | 6 | 2 | 0 |
+| Capability routes | 939 | 3 | 7 | 10 |
+
+These counts are computed from the committed JSON projections. The matching raw
+`api.json` for `25c0f9...` is not retained in this checkout, so these diffs do
+not explain or independently validate the changed upstream values. This audit
+did not run the live `--check`. The candidate verification manifest records a
+metadata-freshness pass with source tree `a78080e...` (the same product tree as
+RC assembly commit `0c5b86a...`) and names a log SHA, but that log is not included
+in this checkout for independent inspection. Treat that as inherited reported
+evidence, not a fresh run here; rerun the gate at the settled integration SHA.
+If refreshing, retain and review the complete source matching its digest and
+update all three projections plus the receipt together. Do not describe the older
+review examples as a review of this newer snapshot.
+
+The following historical closeout details apply only to the `404d33...` source.
+Relative to its preceding PR head, those outputs contain:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 921 | 6 | 0 | 22 |
+| Canonical names | 402 | 3 | 0 | 0 |
+| Capability routes | 943 | 6 | 0 | 10 |
+
+The 22 changed prices cover 20 OpenRouter routes and two Fireworks routes.
+OpenRouter DeepSeek V4 Pro now quotes $0.2088/$0.4176/$0.0174 per million
+input/output/cache-read tokens; its exact integer-rate regression follows that
+quote. Fireworks V4.1 Flash and its latest router now quote $0.30/$1.20/$0.006.
+Kimi K2 Thinking loses its published cache-read quote, while Qwen3.8 27B's
+OpenRouter input quote increases from $0.0249 to $0.42. These are reviewed
+aggregator-route records, never direct-provider tariffs or availability claims.
+
+Capability review includes lower OpenRouter output limits for DeepSeek V4 Flash
+(131,072) and Qwen3.8 27B (131,072), higher limits for Kimi K2 Thinking (235,929)
+and Nemotron 3.5 Lightning (131,072), removal of Inkling's audio input and
+MiniMax-M2.7's structured-output assertion, and removal of Kimi K3's toggle
+assertion. Existing endpoint precedence, subscription allowlists and extraction
+exclusions remain unchanged. Direct DeepSeek schedule pricing stays unverified
+and excluded. The live pre-release comparison passed after this refresh; it must
+be rerun before freezing a later source revision.
 
 ## GPT-6 contract review (2026-09-23)
 
@@ -96,6 +197,40 @@ observed OAuth effort choices do not include public API `none`. Async tools and
 native steering are not enabled on Codex solely by GPT-6 names. See the
 [provider guide](../../../docs/providers.md) and
 [wire foundations](../docs/responses-controls.md).
+
+## GPT-6.1 Sol contract review (2026-09-29)
+
+The public [GPT-6.1 Sol model page](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+qualifies the exact direct OpenAI ID `gpt-6.1-sol`: Responses is required for
+**tools** (Chat Completions is tool-free only), text/image input, 1,050,000
+context, 128,000 max output, and a 2026-04-30 knowledge cutoff. Its exact
+reasoning choices are `low`, `medium` (default), `high`, `xhigh`, `max`: unlike
+6-Sol, neither `none` nor `minimal` is supported.
+
+Public standard input/output/cache-read/cache-write rates are $2/$10/$0.10/$2.50
+per million tokens (2,000,000/10,000,000/100,000/2,500,000 microdollars per
+million). **Above 272K input** the whole request uses $4/$15/$0.20/$5 (4,000,000/
+15,000,000/200,000/5,000,000 microdollars per million), not just tokens over the
+threshold. In particular 6-Sol's $0.20 base cache read is not 6.1 Sol's $0.10.
+These are public API prices, **not** subscription prices; Codex 6.1 Sol remains
+unpriced until a reviewed subscription quote exists.
+
+The bundled [Codex model catalog at rust-v0.159.1](https://github.com/openai/codex/blob/rust-v0.159.1/codex-rs/models-manager/models.json)
+lists slug `gpt-6.1-sol`, display name `GPT-6.1-Sol`, and priority 1 (the
+Codex default). It advertises a 272K default / 872K maximum window, low default
+reasoning with `low`/`medium`/`high`/`xhigh`/`max`/`ultra`, Responses Lite,
+V2 multi-agent delegation with `xhigh` delegation effort, parallel tool calls,
+WebSocket preference, text/image input, and minimum client 0.153.0. The live
+backend nevertheless withheld 6.1 Sol from compatibility version 0.156.1, while
+Codex 0.159.2 listed it for the same account (manual QA, 2026-09-30). octet
+therefore sends 0.159.2, and cache schema 10 refreshes inventories fetched as
+0.156.1. As for Astra, **online account inventory** establishes Lite/V2;
+Ultra maps to `max` wire effort only alongside V2 delegation, while an offline
+or unreachable inventory keeps the conservative low-through-max fallback. The
+working 272K limit and optional Pro/ProLite 872K entitlement remain distinct.
+The model-only test fixture
+`crates/octet-coding-agent/fixtures/providers/gpt-6.1-sol.json` is a
+bundled-catalog projection, not a live OAuth inference result.
 
 ## Reasoning contract supplement (2026-09-05)
 
@@ -191,8 +326,8 @@ policy; no flat direct DeepSeek quote or schedule accounting is inferred.
 
 Six offline metadata-tooling tests and 13 release-gate tests passed. Reproduce
 or validate using the saved-source commands below with a response matching the
-new digest. Normal builds and runtime consume checked-in metadata without
-fetching models.dev. This is reviewed public metadata, not live inference
+new digest. Normal builds consume checked-in metadata without fetching
+models.dev. This is reviewed public metadata, not live inference
 acceptance; endpoint assertions and explicit configured pricing retain precedence.
 
 ## Rich metadata refresh (v0.7.6)

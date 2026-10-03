@@ -66,6 +66,17 @@ async fn faux_deferred_pending_ready_and_permit_consumption() {
         .expect("deferred submission");
     let parked = finished(&mut stream).await;
     assert_eq!(parked.stop_reason, StopReason::Deferred);
+    assert_eq!(
+        parked
+            .inference
+            .as_ref()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .scope,
+        Some(octet_ai::inference::ClientTimingScope::DeferredSubmit)
+    );
     let handle = parked.deferred.clone().expect("deferred handle");
     assert_eq!(handle.provider, "faux");
     assert_eq!(handle.model_id, "faux-1");
@@ -108,6 +119,14 @@ async fn faux_deferred_pending_ready_and_permit_consumption() {
         .expect("ready poll");
     let settled = finished(&mut stream).await;
     assert_eq!(settled.stop_reason, StopReason::EndTurn);
+    let metrics = settled.inference.as_ref().unwrap();
+    let timing = metrics.client.as_ref().unwrap();
+    assert_eq!(
+        timing.scope,
+        Some(octet_ai::inference::ClientTimingScope::DeferredPoll)
+    );
+    assert_eq!(timing.end_to_end_tokens_per_second(), None);
+    assert!(timing.first_text_ns.is_some());
     assert!(settled.deferred.is_none());
     assert!(matches!(
         settled.message.content.as_slice(),

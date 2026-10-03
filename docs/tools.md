@@ -2,114 +2,144 @@
 
 [Documentation](README.md) · [Security](../SECURITY.md) · [CLI](cli.md#tools-and-limits)
 
-Choose a narrow tool surface for a review:
+The narrowest setup, for reviewing code:
 
 ```sh
 octet --safe-mode --tools read,search --no-context-files --offline
 ```
 
-This enables read/search only, skips context files and optional discovery, and
-keeps approval policy controlled. It is not a network sandbox: inference still
-contacts the selected provider. Use OS isolation for untrusted work.
+This allows read and search only, skips context files and optional discovery,
+and keeps approvals on. It isn't a network sandbox: inference still contacts
+your provider. Use OS isolation for untrusted work.
 
 ## Built-in tools
 
-| Tool | Purpose | Default registration |
+| Tool | What it does | Default |
 | --- | --- | --- |
-| `read` | Bounded text reads with line-oriented output; [supported media](media.md). | On |
-| `edit` | Exact, stale-aware replacements under the workspace policy. | On |
-| `write` | Create or replace complete files under the workspace policy. | On |
-| `bash` | Bash-compatible commands with bounded output, timeout, cancellation, and process-group cleanup. | On |
-| `search` | Ripgrep-backed workspace search. | Opt-in |
+| `read` | Reads text files line by line, within a size limit. Also handles [supported media](media.md). | On |
+| `edit` | Exact replacements that detect stale file content. | On |
+| `write` | Creates or replaces whole files. | On |
+| `bash` | Runs Bash-compatible commands with output limits, a timeout, cancellation and process-group cleanup. | On |
+| `search` | Ripgrep search of the workspace. | Opt-in |
 
-The final allowlist creates both the model-visible schemas and executable
-registry: disabled tools cannot remain advertised. Registration is not approval
-for an effect. Only explicitly parallel-safe pure/workspace-read calls overlap;
-shell and mutation effects stay serialized, even when a model batches tool calls.
+A tool you turn off is never advertised to the model. Having a tool isn't
+permission to use it. Only parallel-safe reads run together. Shell and file
+changes run one at a time, even if the model batches calls.
 
-| Restriction | Launch option |
+| To do this | Use |
 | --- | --- |
-| Explicit allowlist / exclusions | `--tools read,search` / `--exclude-tools bash` |
-| No file mutation | `--no-edit` disables both edit and write. |
-| No complete-file writes | `--no-write` |
-| No commands | `--no-process` or equivalent `--no-shell` |
-| No tools | `--no-tools` |
+| Allow only some tools, or exclude some | `--tools read,search` or `--exclude-tools bash` |
+| Block file changes | `--no-edit` (turns off `edit` and `write`) |
+| Block whole-file writes | `--no-write` |
+| Block commands | `--no-process` or `--no-shell` |
+| Turn off every tool | `--no-tools` |
 
-## Authority profiles
+## Optional JavaScript composition
 
-**Full access is the default.** `unsafe_host` (`UnsafeHost`) admits
-authoritatively classified effects with the octet process's ambient OS authority,
-subject to tool and sandbox gates. It is appropriate only within a separately
-isolated account, container, VM, or platform sandbox—not as containment itself.
-Unknown effects always fail closed.
+[octet-codemode](../extensions/octet-codemode/README.md) batches and chains
+the same enabled tools in Pi's offline QuickJS/WASM guest. Explicit enablement
+and the trusted Node launcher are required; this does not weaken safe mode,
+effect policy, tool exclusions or approvals. `on` retains direct tools; `only`
+advertises composition tools while ordinary tools stay nested-only.
 
-Select `effect_policy`, `OCTET_EFFECT_POLICY`, or `--effect-policy`:
+Nested core `read` returns unnumbered bounded `content` with path/hash/line and
+continuation metadata. `search` returns ordered `matches` with path, line, text,
+context/clipping flags, `total` and `truncated`. `bash` returns independently
+bounded raw `stdout`/`stderr` (up to 1 MiB source bytes each, additionally bounded
+by JSON encoding), exit status, byte counts and completeness/truncation flags.
+Direct tool text stays unchanged. Schema-less tools resolve to text, not
+implicitly parsed JSON, and nested media/raw streams do not automatically enter
+chat. Only explicitly returned output or `text()`/`image()` is published.
 
-| Value | Effect admission |
+The host limits a parent to 256 calls and 30 seconds, with at most four safe
+observations in parallel; mutations remain exclusive. Completed effects survive
+script failure; successful store writes are private branch-scoped metadata.
+Nested model usage cannot bypass session ceilings or be priced at the chat
+model's rate. Tools without host-authoritative usage bounds are refused under
+hard ceilings. See [extension composition](extensions.md#tool-composition).
+
+<a id="authority-profiles"></a>
+
+## Permissions
+
+**Full access is the default.** octet runs with your account's full authority
+(`unsafe_host`, or `UnsafeHost`). That's only appropriate inside an account,
+container, VM or platform sandbox you've isolated separately. Effects octet
+can't classify are always refused.
+
+Pick a policy with `effect_policy`, `OCTET_EFFECT_POLICY` or `--effect-policy`:
+
+| Value | What happens |
 | --- | --- |
-| `unsafe_host` | Default full access for classified effects. |
-| `controlled` | Pure/workspace reads; confirmation for workspace mutation and non-whitelisted bash calls. Conservative known-safe read-only bash calls may be auto-approved; other ambient effects are denied. |
-| `controlled_bash_approval` | Workspace-mutation approval and one-shot approval for **every** bash process call; other ambient effects denied. |
+| `unsafe_host` | The default. Full access for effects octet can classify. |
+| `controlled` | Workspace reads and pure calls run freely. File changes and bash calls not on the safe list ask first. Known-safe read-only bash calls may be auto-approved. Other effects are denied. |
+| `controlled_bash_approval` | File changes ask first, and **every** bash call asks first, once. Other effects are denied. |
 
-Full access implicitly trusts selected executable extensions, but they remain
-**disabled by default** until explicitly enabled. Trust does not bypass process
-gates, source validation, bundle integrity, or protocol checks, and implicit
-trust is never persisted as a grant.
+Full access implicitly grants host authority to the executable extensions you
+select, but they stay **disabled by default** until you enable them. A grant
+doesn't bypass `--no-process` or `--no-shell`, source validation, bundle
+integrity or protocol checks, and implicit authority is never written to your
+user config.
 
-`--safe-mode` selects `ControlledBashApproval`, conflicts with `--effect-policy`,
-and forces `allow_external_paths = false`. It removes implicit extension trust.
-Executable extensions are discovered but never started in safe mode, even with
-explicit trust and process/shell gates enabled: startup still requires
-`unsafe_host`. This does not add an OS sandbox or change the one-shot approval
-required for every bash call. A trusted project may tighten but not relax the
-global authority profile. Approval cannot
-undo an already admitted action. See the [effect contract](design/octet-agent.md#effect-admission-boundary).
+`--safe-mode` picks `controlled_bash_approval` (`ControlledBashApproval`) and
+forces `allow_external_paths = false`. It can't be combined with
+`--effect-policy`. It also removes implicit host authority: an enabled extension
+starts only with a persistent per-source grant, an explicit one-run grant, or a
+selected `--extension-dir`. The broker still governs tool effects, but
+**extension code runs outside the broker with your OS permissions**. Safe mode
+isn't an OS sandbox, and approving a tool call doesn't contain the extension
+process. Every bash call still needs one-shot approval. A trusted project can
+tighten the global policy, never loosen it. Approving can't undo an action that
+already ran. [Effect contract](design/octet-agent.md#effect-admission-boundary).
 
-`--safe` is a hidden compatibility alias. `--yolo` and its configuration and
-environment forms are no longer accepted.
+Full-access launches default to `allow_external_paths = true`. Set it to `false`
+to keep the built-in file tools inside the workspace. That doesn't contain shell
+commands or extension processes. `--safe` is a hidden alias for `--safe-mode`,
+and `--yolo` and its settings and environment forms are no longer accepted.
 
-Full-access CLI launches default to `allow_external_paths = true`. Set it to
-`false` for workspace-local built-in file access; `--safe-mode` forces false.
-File-path restrictions do not contain shell commands or extension processes.
+<a id="shell-selection"></a>
 
-## Shell selection
+## Choose a shell
 
-In full-access mode, bash has the current user's authority. Every complete
-command is passed to one selected shell with `-c`. Unix selection is explicit
-`shell_path`, then `/bin/bash`, `bash` on `PATH`, then `sh`; `$SHELL` is not read.
-`--shell-path PATH` selects a shell; `--allow-shell` does not bypass an independent
-process or effect gate. Policy diagnostics reveal only `configured`,
-`system_bash`, `path_bash`, or `sh_fallback`, never a path or digest.
+In full-access mode, bash runs with your user's authority. Each complete command
+goes to one shell with `-c`. On Unix, octet uses the first of: `shell_path`,
+`/bin/bash`, `bash` on `PATH`, then `sh`. It doesn't read `$SHELL`. Use
+`--shell-path PATH` to choose one. `--allow-shell` doesn't bypass a separate
+process or effect gate. Diagnostics report only `configured`, `system_bash`,
+`path_bash` or `sh_fallback`, never a path.
 
-The documented configuration example uses `bash_timeout_secs = 120` and
-`max_output_bytes = 1048576`; [configuration](configuration.md#settings) records
-these alongside capability controls. Capture limits differ from the TUI's
-collapsible preview: expanding a panel cannot restore discarded bytes.
-Bash spill files retain at most 16 MiB per stream and share a **64 MiB / 32-file
-budget per resource owner**, including active captures. Oldest files expire
-first; paths may expire after a result is returned and are cleaned up when the
-last agent with that owner closes. Pipes continue draining after a limit.
-Quota-limited files use `partial_output_path` and `spill_truncated=true`, never
-`full_output_path`. Storage failures use `spill_error=true`; eviction during
-capture uses `spill_expired=true` without advertising an available path. Bounded
-capture workers handle disk writes and cleanup off the async input/run path.
+The example [settings](configuration.md#settings) use `bash_timeout_secs = 120`
+and `max_output_bytes = 1048576`. Expanding a panel in the TUI can't restore
+output that was discarded at capture.
 
-## Bash output and temporary spills
+<a id="bash-output-and-temporary-spills"></a>
 
-Bash drains stdout and stderr with bounded head/tail previews. A truncated result
-may include `full_output_path` when its entire stream was retained, or
-`partial_output_path` when only a prefix could be saved. `spill_truncated=true`
-reports storage limits; `spill_error=true` reports capture/storage failure.
-Neither a partial path nor an omitted path promises recoverable full output.
+## Bash output and temporary files
 
-Spill storage is private and temporary: at most **16 MiB per stream**, and
-**64 MiB / 32 files per tool instance**, counting active captures. Storage pressure
-evicts the oldest retained files first. Active captures are not evicted; if they
-consume the allowance, further spill bytes are discarded while pipe draining
-continues. Dropping the tool removes its retained files. Paths in old results
-therefore are not durable session artifacts and may already have expired.
+Bash drains stdout and stderr with bounded head and tail previews. A truncated
+result may include `full_output_path` when the whole stream was kept, or
+`partial_output_path` when only a prefix could be saved. Neither a partial path
+nor a missing path promises that full output is recoverable. Saved output is
+private and temporary, so a path in an old result may have expired.
 
-Rust embedders construct the stateful tool with `Default`, not a unit value:
+<details>
+<summary>Spill limits and flags</summary>
+
+- Spill files hold at most **16 MiB per stream** and share a **64 MiB / 32-file
+  budget per tool instance** (the resource owner), counting active captures.
+- Under pressure the oldest files expire first. Active captures aren't evicted.
+  If they use up the allowance, further spill bytes are discarded while the
+  pipes keep draining.
+- `spill_truncated=true` means storage limits were hit (the result has
+  `partial_output_path`, never `full_output_path`). `spill_error=true` means
+  capture or storage failed. `spill_expired=true` means a file was evicted
+  during capture, and no path is advertised.
+- Dropping the tool removes its files, and paths clean up when the last agent
+  with that owner closes. They aren't durable session artifacts.
+- Disk writes and cleanup run in bounded workers, off the async input and run
+  path.
+
+Rust embedders build the stateful tool with `Default`, not a unit value:
 
 ```rust
 use octet_agent::{BashTool, ExtensionHost};
@@ -118,22 +148,61 @@ let mut host = ExtensionHost::new();
 host.tool(BashTool::default()); // The host retains the tool and its spill store.
 ```
 
-Keep the owning tool alive for the intended frontend lifetime rather than
-constructing one per call. The RPC frontend retains an `Arc<BashTool>` across
-commands; its spill limits are shared across those commands, not reset per result.
+Keep the owning tool alive for the frontend's lifetime instead of building one
+per call. The RPC frontend keeps an `Arc<BashTool>` across commands, so its
+spill limits are shared across them, not reset per result.
+
+</details>
 
 ## Recovery and security
 
-- Descriptor-relative no-follow file operations prevent parent-symlink replacement from redirecting built-in reads or mutations. Shell commands and extension processes are not contained by a file-path guard.
-- Provider streams, discovery, config, credentials, context, sessions, local reads, and tool inputs/results have byte/count bounds.
-- Complete session records survive; torn final appends are narrowly repairable. Unresolved mutating calls are indeterminate and never silently replayed.
-- Cancellation covers provider streams, retry waits, compaction, tools, delegated agents, and descendant process/agent groups.
-- Delegation directories/files are owner-private and descriptor-bound. Spawns, status, and interrupts sync before visibility; journal failure cancels the team and rejects new work. [Delegation provenance](design/octet-agent.md#v2-task-delegation).
-- A positively classified pre-send connection failure (including a connect timeout) is different from an ambiguous accepted request. Sending a POST, awaiting headers, or losing its body can leave execution indeterminate. No visible text does **not** make replay safe. Unqualified requests retain the conservative no-body-replay default. Only host-qualified Codex local-function inference may be replaced before assistant commit, with separate finite streamed-inference and HTTP-admission retry budgets and unknown usage guarded under hard cumulative cost/token limits. HTTP 5xx, including gateway 504, is not evidence of zero usage; ambiguous status failures require durable uncertainty before replacement. Unknown exposure is durably recorded separately from known usage and survives success, resume, and checkout; numeric usage/cost then represents known subtotals, not complete totals. Completed local tool effects/results are not replayed. Provisional TUI removal is not replay permission or proof of remote cancellation. See the [agent recovery contract](design/octet-agent.md#in-process-provider-recovery); deterministic regressions do not qualify live recovery or weeks-scale endurance.
-- Credential files are owner-private; headers, debug output, provider diagnostics, and bounded session export redact secrets. Redirects are disabled and terminal controls are neutralized.
+octet never silently replays a mutating call that has no recorded result, and it
+doesn't resend a request that may have been accepted, even if no text was shown.
+Credentials, headers, debug output, provider errors and exports are redacted.
+The policy is in [Security](../SECURITY.md), and the guarantees are in the
+[agent design](design/octet-agent.md#commit-and-cancellation-invariants).
 
-Release checks include protocol/adversarial-stream fixtures, filesystem races,
-VT100/PTY shutdown tests, workspace tests, `cargo audit`, and `cargo deny`
-advisory/license/ban/duplicate/source policy gates. These are required checks,
-not results established by this reference. See [contributing](../CONTRIBUTING.md#tests)
-and the [security policy](../SECURITY.md).
+<details>
+<summary>Provider retries and unknown usage</summary>
+
+A pre-send connection failure that's positively classified (including a connect
+timeout) is different from an ambiguous accepted request. Sending a POST,
+waiting for headers or losing the body can leave execution indeterminate.
+Showing no text doesn't make a replay safe, and requests that aren't qualified
+keep the conservative no-body-replay default.
+
+Only host-qualified Codex local-function inference may be replaced before the
+assistant message is committed, with separate finite retry budgets for streamed
+inference and HTTP admission, and with unknown usage guarded by hard cumulative
+cost and token limits. An HTTP 5xx, including a gateway 504, isn't evidence of
+zero usage, and an ambiguous status failure needs durable uncertainty recorded
+before a replacement. Unknown exposure is recorded separately from known usage
+and survives success, resume and checkout, so the numeric usage and cost are
+known subtotals, not complete totals. Completed local tool effects and results
+aren't replayed. Removing a provisional line from the TUI isn't permission to
+replay and isn't proof of remote cancellation. See the [agent recovery
+contract](design/octet-agent.md#in-process-provider-recovery). Deterministic
+tests don't qualify live recovery or weeks-long endurance.
+
+</details>
+
+<details>
+<summary>More safeguards</summary>
+
+- File tools use no-follow, descriptor-relative operations, so a swapped symlink
+  can't redirect them. Shell commands and extension processes aren't covered.
+- Provider streams, config, credentials, context, sessions, reads and tool
+  results all have size and count limits.
+- Complete session records survive, and a torn final append can be repaired
+  narrowly.
+- Cancel reaches provider streams, retries, compaction, tools, subagents and
+  their child processes.
+- Delegation directories and files are owner-private and descriptor-bound.
+  Spawns, status and interrupts sync before they're visible, and a journal
+  failure cancels the team and rejects new work. [Delegation
+  provenance](design/octet-agent.md#v2-task-delegation).
+- Credential files are owner-private. Redirects are off, and terminal control
+  characters are neutralized.
+- How this is tested: [Contributing](../CONTRIBUTING.md#tests).
+
+</details>

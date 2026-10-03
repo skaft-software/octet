@@ -1,8 +1,8 @@
 [package]
 name = "octet-serve-backend"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.88"
 license = "MIT"
 description = "Optional first-party session host backend for octet graphical clients."
 publish = false
@@ -27,9 +27,9 @@ portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
-octet-agent = { version = "=0.8.1", path = "../../crates/octet-agent" }
+octet-agent = { version = "=0.8.2", path = "../../crates/octet-agent" }
 sha2 = "0.10"
-thiserror = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
@@ -38,6 +38,12 @@ tokio-tungstenite = "0.29"
 
 [lints.rust]
 missing_docs = "warn"
+
+[lints.clippy]
+# Clippy 1.88 (the MSRV since octet 0.8.2) warns on positional format
+# arguments by default; the code base uses them consistently, so inlining
+# them is left to a separate style change.
+uninlined_format_args = "allow"
 
 [profile.ci-test]
 # This independent Cargo workspace uses the same bounded CI artifact policy as
@@ -53,7 +59,7 @@ debug = "full"
 lto = "off"
 strip = "none"
 
-# Keep the audited lopdf 0.42.0 parser compatible with the Rust 1.86 MSRV;
-# see the vendored patch's source note for the one syntax-only change.
+# Keep the audited lopdf 0.42.0 parser; see the vendored patch's source note
+# for the one syntax-only change (let-chains, stable only from Rust 1.88).
 [patch.crates-io]
 lopdf = { path = "vendor/lopdf" }

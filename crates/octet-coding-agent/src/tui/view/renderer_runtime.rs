@@ -16,11 +16,10 @@ use super::native_scrollback::{
 };
 use super::shell_chrome::render_startup_surface;
 use super::viewport::{render_shell_viewport_at, render_shell_viewport_update};
-use super::welcome_card::welcome_animating;
 use super::ShellState;
 use crate::tui::terminal::{OctetTerminal, TerminalSize};
 
-/// Welcome-card motion is short-lived and limited to roughly 60 fps.
+/// Bound semantic stream painting to roughly 60 fps; input/readiness preempt it.
 const RENDER_INTERVAL: Duration = Duration::from_millis(16);
 /// Transcript activity shares one restrained one-second cycle: streaming
 /// response and active tool or shell dots breathe between foreground and muted
@@ -37,6 +36,44 @@ const STATUS_TIMER_INTERVAL: Duration = Duration::from_secs(1);
 /// Resize events are normally delivered by crossterm, but polling while idle
 /// also catches terminal-manager resizes that do not emit an event.
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const RESIZE_SETTLE_INTERVAL: Duration = Duration::from_millis(75);
+const RESIZE_MAX_DELAY: Duration = Duration::from_millis(150);
+
+/// A quiet resize burst needs one reflow, but continuous dragging must not
+/// starve output. Composer edits/readiness bypass this bounded settling window.
+struct ResizeSchedule {
+    epoch: u64,
+    pending: Option<(Instant, Instant)>,
+}
+
+impl ResizeSchedule {
+    fn new(epoch: u64) -> Self {
+        Self {
+            epoch,
+            pending: None,
+        }
+    }
+
+    fn observe(&mut self, epoch: u64, now: Instant) {
+        if epoch != self.epoch {
+            self.epoch = epoch;
+            let (start, _) = self.pending.unwrap_or((now, now));
+            self.pending = Some((start, now));
+        }
+    }
+
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.pending.map(|(start, last)| {
+            (last + RESIZE_SETTLE_INTERVAL)
+                .min(start + RESIZE_MAX_DELAY)
+                .saturating_duration_since(now)
+        })
+    }
+
+    fn painted(&mut self) {
+        self.pending = None;
+    }
+}
 
 /// Thread-safe handle to the mutable shell model. The TUI renderer owns a
 /// clone of this handle and performs all expensive layout work away from the
@@ -48,6 +85,7 @@ pub(super) struct SharedState(
     /// Shared with the shell state so a finished workspace walk is detectable
     /// without taking the state lock on every renderer wake.
     Arc<AtomicBool>,
+    Arc<Mutex<super::tern_input::Mailbox>>,
 );
 
 impl SharedState {
@@ -67,6 +105,7 @@ impl SharedState {
             Arc::new(Mutex::new(state)),
             Arc::new(Mutex::new(None)),
             file_index_ready,
+            Arc::new(Mutex::new(super::tern_input::Mailbox::default())),
         )
     }
 
@@ -76,7 +115,13 @@ impl SharedState {
         self.2.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     fn frame_written(&self) {
+        // Component-only tests have no physical terminal viewport receipt.
+        self.frame_written_at(None);
+    }
+
+    pub(super) fn frame_written_at(&self, native_viewport_top: Option<usize>) {
         let geometry = self.1.lock().expect("geometry receipt poisoned").take();
         let Some(geometry) = geometry else {
             return;
@@ -113,8 +158,24 @@ impl SharedState {
             state.painted_report = Some(report.clone());
         }
         if geometry.is_current(&state) {
+            if let Some(top) = native_viewport_top.filter(|_| !state.application_viewport_requested)
+            {
+                // A historical repair may move the physical seam backwards.
+                // Pre-write layout estimates cannot decide which clocks remain
+                // visible after Pi's differential shrink or complete replay.
+                state.native_animation_viewport_top.set(Some(top));
+                state.rendered_animation_addressability = geometry
+                    .animation_block_starts
+                    .iter()
+                    .map(|(id, start)| (*id, *start >= top))
+                    .collect();
+            }
             state.render_geometry = Some(geometry);
         }
+    }
+
+    pub(super) fn native(&self) -> &Arc<Mutex<super::tern_input::Mailbox>> {
+        &self.3
     }
 
     pub(super) fn borrow(&self) -> MutexGuard<'_, ShellState> {
@@ -158,13 +219,8 @@ pub(super) fn status_timer_active(state: &ShellState) -> bool {
     state.theme.capabilities().interactive && state.has_active_status_timer()
 }
 
-fn render_wake_requires_frame(
-    semantic_command: bool,
-    resized: bool,
-    welcome: bool,
-    animation_due: bool,
-) -> bool {
-    semantic_command || resized || welcome || animation_due
+fn render_wake_requires_frame(semantic_command: bool, resized: bool, animation_due: bool) -> bool {
+    semantic_command || resized || animation_due
 }
 
 fn frame_coalesce_delay(
@@ -263,15 +319,6 @@ impl AnimationSchedule {
             .into_iter()
             .filter_map(|clock| clock.remaining(now))
             .fold(RESIZE_POLL_INTERVAL, Duration::min)
-    }
-
-    fn poll_interval(&self, welcome: bool, now: Instant) -> Duration {
-        let remaining = self.remaining(now);
-        if welcome {
-            remaining.min(RENDER_INTERVAL)
-        } else {
-            remaining
-        }
     }
 
     fn advance(&mut self, state: &mut ShellState, now: Instant) {
@@ -391,8 +438,8 @@ fn sync_window_title(
 
 /// Flush the retained final frame, restore the process terminal, and
 /// acknowledge once. The caller re-enters with a new renderer on resume.
-fn suspend_terminal(tui: &mut TUI<'_>, acknowledged: mpsc::Sender<()>) {
-    tui.request_render();
+fn suspend_terminal(tui: &mut TUI<'_>, acknowledged: mpsc::Sender<()>, force_render: bool) {
+    tui.request_render_force(force_render);
     tui.stop();
     let _ = acknowledged.send(());
 }
@@ -426,16 +473,15 @@ pub(super) fn reconcile_terminal_size(
     }
 
     let mut shell = state.borrow_mut();
+    let width_changed = shell.size.0 != dimensions.0;
     shell.size = dimensions;
+    shell.resize_epoch = shell.resize_epoch.wrapping_add(1);
     shell.reset_transcript_navigation_pointer();
-    // Deferred history remains lazy; only the materialized tail participates
-    // in this resize reflow. Semantic navigation can hydrate older blocks
-    // later without delaying the resize or replaying them through the PTY.
-    // Do not ask for transcript geometry here: that would synchronously reflow
-    // the complete history and then invalidate it, paying the resize cost
-    // twice. Viewport readers clamp the retained scroll offset after the render
-    // thread performs the single required layout pass.
-    shell.invalidate_transcript_layout();
+    // Height-only repair reuses historical block layouts. Do not compute
+    // geometry or invalidate wrapping on the input/polling path.
+    if width_changed {
+        shell.invalidate_transcript_layout();
+    }
     true
 }
 
@@ -488,7 +534,7 @@ pub(super) struct RenderLoopOptions {
 // The same loop is exercised with an in-memory terminal and resize probe in
 // tests, without reading/changing the test runner's physical terminal state.
 pub(super) fn render_loop_with_terminal(
-    terminal: impl sexy_tui_rs::Terminal + 'static,
+    mut terminal: impl sexy_tui_rs::Terminal + 'static,
     state: SharedState,
     size: TerminalSize,
     rx: Receiver<RenderCommand>,
@@ -501,30 +547,47 @@ pub(super) fn render_loop_with_terminal(
         alternate_screen,
     } = options;
     state.borrow_mut().render_threaded = true;
+    if super::tern::enabled() {
+        match render_native_loop(&mut terminal, &state, &size, &rx, &synchronize_size) {
+            Ok(()) => return,
+            Err(error) => {
+                // Fallback is explicit and only follows failed negotiation or
+                // protocol I/O. Resizes never create an ANSI presentation.
+                state
+                    .borrow_mut()
+                    .push_block(super::TranscriptBlock::Notice(format!(
+                        "Native Tern rendering unavailable: {error}. Using terminal rendering."
+                    )));
+                terminal.show_cursor();
+            }
+        }
+    }
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
     // policy in `native_scrollback` (not native history) decides which rows stay
     // mutable, so the same live blocks survive the renderer change.
     tui.set_alternate_screen(alternate_screen);
-    // Removing bounded live activity must not clear saved lines merely because
-    // the frame contracted. Offscreen semantic mutations still use Pi's replay.
+    // Native history must contain the complete transcript after structural
+    // changes. Tail-only repair can discard displaced live rows and output
+    // accepted during resize, so keep Pi's canonical clear/replay policy.
+    // Removing bounded live activity alone must not clear saved lines.
     tui.set_clear_on_shrink(false);
     // octet's composer uses the terminal cursor itself; unlike Pi's editor, it
     // does not paint a separate inverted cursor cell around CURSOR_MARKER.
-    // Restore visibility after panels, resize replays, and renderer resumes.
+    // Restore visibility after panels, resize repairs, and renderer resumes.
     tui.set_show_hardware_cursor(true);
     tui.add_child(Box::new(ShellComponent::isolated(
         state.clone(),
         application_viewport,
     )));
     if clear_on_start {
-        // A resumed renderer has no copy of Pi's physical cursor/viewport
-        // state. Force one authoritative clear-and-replay instead of treating
-        // the retained transcript as a fresh append and duplicating it.
+        // A resumed renderer has no copy of the physical cursor/viewport state.
+        // Clear and replay once rather than append a duplicate transcript.
         tui.request_render_force(true);
     }
+    let mut painted_resize_epoch = state.borrow().resize_epoch;
     tui.start();
-    state.frame_written();
+    state.frame_written_at(tui.rendered_viewport_top());
     // Startup waits for resolved session metadata; a newly resumed renderer
     // writes its title once even if the semantic name has not changed.
     let mut last_title = None;
@@ -534,7 +597,9 @@ pub(super) fn render_loop_with_terminal(
     // Capture before each paint: an edit admitted during a slow terminal write
     // still differs on the next wake, even when that write was not current.
     let mut last_editor_revision = state.borrow().editor.revision();
+    let mut last_startup_pending = state.borrow().startup_pending;
     let mut animations = AnimationSchedule::new();
+    let mut resize_schedule = ResizeSchedule::new(painted_resize_epoch);
     // A suspend is decided by the coalescer but finalized here, where the
     // final frame and the terminal handback belong.
     let mut suspended: Option<mpsc::Sender<()>> = None;
@@ -547,21 +612,21 @@ pub(super) fn render_loop_with_terminal(
             let mut shell = state.borrow_mut();
             super::poll_file_index_scan(&mut shell)
         };
-        let welcome = {
+        {
             let shell = state.borrow();
-            let now = Instant::now();
-            animations.observe(&shell, now);
-            welcome_animating(&shell, now)
-        };
+            animations.observe(&shell, Instant::now());
+        }
         // Sleep only to the next deadline, not for a fresh full interval after
         // every event/layout. Model, tool, input and Stop preempt the timeout.
         let now = Instant::now();
         let scrollbar_deadline = state.borrow().transcript_scrollbar_deadline();
-        let poll = animations.poll_interval(welcome, now).min(
-            scrollbar_deadline
-                .map(|deadline| deadline.saturating_duration_since(now))
-                .unwrap_or(RESIZE_POLL_INTERVAL),
-        );
+        let poll = resize_schedule.remaining(now).unwrap_or_else(|| {
+            animations.remaining(now).min(
+                scrollbar_deadline
+                    .map(|deadline| deadline.saturating_duration_since(now))
+                    .unwrap_or(RESIZE_POLL_INTERVAL),
+            )
+        });
         let command = match rx.recv_timeout(poll) {
             Ok(command) => Some(command),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -572,7 +637,8 @@ pub(super) fn render_loop_with_terminal(
         }
         if let Some(RenderCommand::Suspend(reply)) = command {
             sync_window_title(&mut tui, &state, &mut last_title);
-            suspend_terminal(&mut tui, reply);
+            let resized = state.borrow().resize_epoch != painted_resize_epoch;
+            suspend_terminal(&mut tui, reply, resized);
             return;
         }
         if let Some(RenderCommand::DumpFrame(reply)) = command {
@@ -587,6 +653,23 @@ pub(super) fn render_loop_with_terminal(
         } else {
             false
         };
+        let now = Instant::now();
+        let (resize_epoch, input_changed) = {
+            let shell = state.borrow();
+            (
+                shell.resize_epoch,
+                shell.editor.revision() != last_editor_revision
+                    || shell.startup_pending != last_startup_pending,
+            )
+        };
+        resize_schedule.observe(resize_epoch, now);
+        if !input_changed
+            && resize_schedule
+                .remaining(now)
+                .is_some_and(|delay| !delay.is_zero())
+        {
+            continue;
+        }
         // The idle poll also services diagnostics emitted by lifecycle workers.
         // They enter semantic rows, never the physical terminal stream.
         let semantic_command = index_loaded
@@ -594,8 +677,7 @@ pub(super) fn render_loop_with_terminal(
             || (crate::output::has_tui_diagnostics() && !state.borrow().startup_pending);
         if !render_wake_requires_frame(
             semantic_command,
-            resized,
-            welcome,
+            resized || resize_schedule.pending.is_some(),
             animations.remaining(Instant::now()).is_zero()
                 || scrollbar_deadline.is_some_and(|deadline| deadline <= Instant::now()),
         ) {
@@ -607,41 +689,163 @@ pub(super) fn render_loop_with_terminal(
             last_render,
             &tui,
             &mut suspended,
-            || state.borrow().editor.revision() != last_editor_revision,
+            || {
+                let shell = state.borrow();
+                shell.editor.revision() != last_editor_revision
+                    || shell.startup_pending != last_startup_pending
+            },
             animations.remaining(Instant::now()),
         ) {
             if let Some(reply) = suspended.take() {
                 sync_window_title(&mut tui, &state, &mut last_title);
-                suspend_terminal(&mut tui, reply);
+                let resized = state.borrow().resize_epoch != painted_resize_epoch;
+                suspend_terminal(&mut tui, reply, resized);
                 return;
             }
             break;
         }
+        let now = Instant::now();
+        let shell = state.borrow();
+        resize_schedule.observe(shell.resize_epoch, now);
+        let input_changed = shell.editor.revision() != last_editor_revision
+            || shell.startup_pending != last_startup_pending;
+        drop(shell);
+        if !input_changed
+            && resize_schedule
+                .remaining(now)
+                .is_some_and(|delay| !delay.is_zero())
+        {
+            continue;
+        }
         {
             let mut shell = state.borrow_mut();
             let now = Instant::now();
-            if welcome_animating(&shell, now) {
-                // The animated card is a bounded cache prefix, not a reason to
-                // reflow the complete transcript on every 16 ms tick.
-                shell.invalidate_transcript();
-            }
             animations.advance(&mut shell, now);
             shell.expire_transcript_scrollbar(now);
         }
-        last_editor_revision = state.borrow().editor.revision();
+        {
+            let shell = state.borrow();
+            last_editor_revision = shell.editor.revision();
+            last_startup_pending = shell.startup_pending;
+        }
         sync_window_title(&mut tui, &state, &mut last_title);
-        tui.request_render();
-        state.frame_written();
+        // Dimensions alone miss an away-and-back resize whose final size is
+        // unchanged. Capture before writing so a newer resize during the paint
+        // remains pending instead of being mistaken for the rendered geometry.
+        let resize_epoch = state.borrow().resize_epoch;
+        tui.request_render_force(resize_epoch != painted_resize_epoch);
+        state.frame_written_at(tui.rendered_viewport_top());
+        painted_resize_epoch = resize_epoch;
+        resize_schedule.painted();
         last_render = Some(Instant::now());
     }
 
     // Stop (or channel closure) can overtake a coalesced Render. Publish the
     // latest semantic state before restoring the terminal, not after it.
     sync_window_title(&mut tui, &state, &mut last_title);
-    tui.request_render();
-    state.frame_written();
+    let resized = state.borrow().resize_epoch != painted_resize_epoch;
+    tui.request_render_force(resized);
+    state.frame_written_at(tui.rendered_viewport_top());
     tui.stop();
 }
+
+/// Native presentation has its own scheduler and the same lifecycle command
+/// channel. In particular it never starts TUI, enters the alternate screen,
+/// clears the grid, or paints a shadow transcript behind the native surface.
+fn render_native_loop(
+    terminal: &mut impl sexy_tui_rs::Terminal,
+    state: &SharedState,
+    size: &TerminalSize,
+    rx: &Receiver<RenderCommand>,
+    synchronize_size: &impl Fn(&SharedState, &TerminalSize) -> bool,
+) -> std::io::Result<()> {
+    let surface = super::tern::TernSurface::start()?;
+    render_native_loop_with_surface(terminal, state, size, rx, synchronize_size, surface)
+}
+
+fn render_native_loop_with_surface(
+    terminal: &mut impl sexy_tui_rs::Terminal,
+    state: &SharedState,
+    size: &TerminalSize,
+    rx: &Receiver<RenderCommand>,
+    synchronize_size: &impl Fn(&SharedState, &TerminalSize) -> bool,
+    mut surface: super::tern::TernSurface,
+) -> std::io::Result<()> {
+    struct InputGuard(Arc<Mutex<super::tern_input::Mailbox>>);
+    impl Drop for InputGuard {
+        fn drop(&mut self) {
+            self.0
+                .lock()
+                .expect("native mailbox poisoned")
+                .accepting_input = false;
+        }
+    }
+    let _input_guard = InputGuard(state.native().clone());
+    state
+        .native()
+        .lock()
+        .expect("native mailbox poisoned")
+        .accepting_input = true;
+    terminal.hide_cursor();
+    let mut last_title = None;
+    let mut last_progress = false;
+    let mut last_resize = Instant::now();
+    loop {
+        if state.file_index_ready() {
+            super::poll_file_index_scan(&mut state.borrow_mut());
+        }
+        if last_resize.elapsed() >= RESIZE_POLL_INTERVAL {
+            synchronize_size(state, size);
+            last_resize = Instant::now();
+        }
+        let (startup_pending, name, active) = {
+            let shell = state.borrow();
+            (
+                shell.startup_pending,
+                shell.session_name.clone(),
+                shell.run.is_active(),
+            )
+        };
+        if !startup_pending && last_title.as_ref() != Some(&name) {
+            terminal.set_title(
+                &name
+                    .as_deref()
+                    .map_or_else(|| "octet".into(), |name| format!("octet · {name}")),
+            );
+            last_title = Some(name);
+        }
+        if active != last_progress {
+            terminal.set_progress(active);
+            last_progress = active;
+        }
+        surface.present(state)?;
+        match rx.recv_timeout(RENDER_INTERVAL) {
+            Ok(RenderCommand::Render) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(RenderCommand::DumpFrame(reply)) => {
+                let _ = reply.send(surface.dump());
+            }
+            Ok(RenderCommand::Suspend(reply)) => {
+                surface.flush(state)?;
+                surface.close(false)?;
+                terminal.set_progress(false);
+                terminal.stop();
+                let _ = reply.send(());
+                return Ok(());
+            }
+            Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                surface.flush(state)?;
+                surface.close(true)?;
+                terminal.set_progress(false);
+                terminal.stop();
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "scroll_resize_tests.rs"]
+mod scroll_resize_tests;
 
 #[cfg(test)]
 #[path = "renderer_shutdown_tests.rs"]
@@ -658,15 +862,14 @@ mod scheduler_tests {
 
     #[test]
     fn active_state_without_a_concrete_wake_never_requests_a_frame() {
-        assert!(!render_wake_requires_frame(false, false, false, false));
+        assert!(!render_wake_requires_frame(false, false, false));
     }
 
     #[test]
     fn semantic_work_and_due_visual_transitions_each_request_a_frame() {
-        assert!(render_wake_requires_frame(true, false, false, false));
-        assert!(render_wake_requires_frame(false, true, false, false));
-        assert!(render_wake_requires_frame(false, false, true, false));
-        assert!(render_wake_requires_frame(false, false, false, true));
+        assert!(render_wake_requires_frame(true, false, false));
+        assert!(render_wake_requires_frame(false, true, false));
+        assert!(render_wake_requires_frame(false, false, true));
     }
 
     #[test]
@@ -741,7 +944,7 @@ mod scheduler_tests {
         assert_eq!(state.status_shimmer_frame, 25);
         assert_eq!(state.block_revisions[0], revision + 16);
         assert_eq!(
-            schedule.poll_interval(false, start + Duration::from_millis(2050)),
+            schedule.remaining(start + Duration::from_millis(2050)),
             Duration::from_millis(30)
         );
     }
@@ -767,7 +970,7 @@ mod scheduler_tests {
         schedule.advance(&mut state, start + Duration::from_secs(300));
         assert_eq!(state.block_revisions[1], revisions[1] + 1);
         assert_eq!(
-            schedule.poll_interval(false, start + Duration::from_secs(300)),
+            schedule.remaining(start + Duration::from_secs(300)),
             RESIZE_POLL_INTERVAL
         );
     }
@@ -779,7 +982,7 @@ mod scheduler_tests {
         let start = Instant::now();
         let mut schedule = AnimationSchedule::new();
         schedule.observe(&shell.state.borrow(), start);
-        assert_eq!(schedule.poll_interval(false, start), RESIZE_POLL_INTERVAL);
+        assert_eq!(schedule.remaining(start), RESIZE_POLL_INTERVAL);
         // The status appears after the receiver wakes, before the frame lock.
         shell
             .state
@@ -790,7 +993,7 @@ mod scheduler_tests {
             start + Duration::from_millis(10),
         );
         assert_eq!(
-            schedule.poll_interval(true, start + Duration::from_millis(89)),
+            schedule.remaining(start + Duration::from_millis(89)),
             Duration::from_millis(1)
         );
         schedule.advance(
@@ -801,7 +1004,7 @@ mod scheduler_tests {
         // A semantic frame at 89 ms may coalesce beyond the 90 ms deadline;
         // selecting the due phase uses 95 ms, not a stale pre-coalescing flag.
         assert_eq!(
-            schedule.poll_interval(false, start + Duration::from_millis(95)),
+            schedule.remaining(start + Duration::from_millis(95)),
             Duration::from_millis(75)
         );
         shell.state.borrow_mut().close_activity_status("Working");
@@ -910,7 +1113,7 @@ mod scheduler_tests {
         assert!(schedule.status.last_tick.is_none());
         assert!(schedule.event_dot.last_tick.is_none());
         assert_eq!(
-            schedule.poll_interval(false, start + Duration::from_millis(990)),
+            schedule.remaining(start + Duration::from_millis(990)),
             Duration::from_millis(10)
         );
         let revisions = state.block_revisions.clone();
@@ -1063,7 +1266,7 @@ mod scheduler_tests {
             RESIZE_POLL_INTERVAL,
         ));
         let reply = suspended.take().expect("suspend is handed to the owner");
-        suspend_terminal(&mut renderer, reply);
+        suspend_terminal(&mut renderer, reply, false);
         receive
             .recv_timeout(Duration::from_millis(50))
             .expect("suspend is acknowledged");
@@ -1147,6 +1350,7 @@ pub(super) struct ShellFrameState {
     pub(super) initialized: bool,
     pub(super) width: u16,
     pub(super) height: u16,
+    pub(super) resize_epoch: u64,
     pub(super) theme_epoch: u64,
     pub(super) transcript_epoch: u64,
     pub(super) transcript_generation: u64,
@@ -1288,10 +1492,8 @@ impl Component for ShellComponent {
     fn render(&self, width: u16) -> Vec<String> {
         let state = self.borrow_for_render();
         if state.startup_pending {
-            // TUI::start paints immediately. Keep the renderer/input lifecycle
-            // live for onboarding, but do not cache or publish a provisional
-            // transcript/model frame. The ready frame starts from row zero.
-            return render_startup_surface(&state, width);
+            // Reserve the ready geometry without publishing a provisional model.
+            return render_startup_surface(&state, width, self.uses_application_viewport(&state));
         }
         if self.uses_application_viewport(&state) {
             state.native_animation_viewport_top.set(None);
@@ -1300,6 +1502,7 @@ impl Component for ShellComponent {
             frame.initialized = true;
             frame.width = width;
             frame.height = state.size.1;
+            frame.resize_epoch = state.resize_epoch;
             frame.theme_epoch = state.theme_epoch;
             frame.transcript_epoch = state.transcript_epoch;
             frame.verbose_tools = state.verbose_tools;
@@ -1314,6 +1517,20 @@ impl Component for ShellComponent {
 
     fn render_update(&self, width: u16) -> Option<FrameUpdate> {
         let state = self.borrow_for_render();
+        if state.startup_pending {
+            return Some(FrameUpdate {
+                stable_prefix: 0,
+                replacement: render_startup_surface(
+                    &state,
+                    width,
+                    self.uses_application_viewport(&state),
+                ),
+                pinned: None,
+                resize_replay: None,
+                reanchor_viewport: false,
+                rebuild_scrollback: false,
+            });
+        }
         Some(if self.uses_application_viewport(&state) {
             state.native_animation_viewport_top.set(None);
             render_shell_viewport_update(
@@ -1347,7 +1564,11 @@ impl Component for ShellComponent {
             // the retained TUI diff removes all previous setup rows on release.
             return Some(FrameUpdate {
                 stable_prefix: 0,
-                replacement: render_startup_surface(&state, width),
+                replacement: render_startup_surface(
+                    &state,
+                    width,
+                    self.uses_application_viewport(&state),
+                ),
                 pinned: None,
                 resize_replay: None,
                 reanchor_viewport: false,
@@ -1558,7 +1779,10 @@ mod commit_metadata_tests {
         }
         let resized = check_unpinned_update(&component, &mut retained);
         assert!(resized.reanchor_viewport);
-        assert!(resized.resize_replay.is_some());
+        assert!(
+            resized.resize_replay.is_none(),
+            "Pi repair must not clone an overlay history replay"
+        );
         shell.state.borrow_mut().overlay = None;
         assert!(check_unpinned_update(&component, &mut retained).reanchor_viewport);
     }

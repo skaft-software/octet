@@ -12,6 +12,7 @@ use crossterm::{cursor, event, execute, terminal};
 
 static RAW_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Keep ordinary text in the terminal's normal text path while asking Kitty
 /// protocol terminals to include the layout-resolved alternate character for
@@ -29,6 +30,14 @@ pub(super) fn mark_raw_active() {
 
 pub(super) fn mark_keyboard_enhancement_active() {
     KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+pub(super) fn mark_remote_keyboard_enhancement_active() {
+    REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+pub(super) fn take_remote_keyboard_enhancement_active() -> bool {
+    REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst)
 }
 
 /// Restore the process terminal state. Repeated calls are harmless.
@@ -69,7 +78,8 @@ fn drain_pending_input() {
 fn restore_terminal(advance_line: bool) {
     let raw_active = RAW_ACTIVE.swap(false, Ordering::SeqCst);
     let keyboard_enhancement_active = KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst);
-    if !raw_active && !keyboard_enhancement_active {
+    let remote_keyboard_enhancement_active = take_remote_keyboard_enhancement_active();
+    if !raw_active && !keyboard_enhancement_active && !remote_keyboard_enhancement_active {
         // Even when modes are already clear, pending input (e.g. a Kitty
         // CSI-u repeat/release of the exiting Ctrl+D, tail `00;5u`) may still
         // sit in the kernel buffer and leak into the parent shell. Drain it.
@@ -78,6 +88,9 @@ fn restore_terminal(advance_line: bool) {
     }
 
     let mut out = std::io::stdout();
+    if remote_keyboard_enhancement_active {
+        let _ = execute!(out, event::PopKeyboardEnhancementFlags);
+    }
     if keyboard_enhancement_active {
         let _ = execute!(out, event::PopKeyboardEnhancementFlags);
         // Pop leaves any already-emitted key repeats/releases queued behind
@@ -104,6 +117,13 @@ fn restore_terminal(advance_line: bool) {
         let _ = execute!(out, cursor::MoveToNextLine(1), cursor::MoveToColumn(0));
     }
     let _ = out.flush();
+    // The console output mode changes line-feed and wrapping semantics for
+    // whatever the parent shell writes next, so it is restored only after the
+    // final mode-reset sequences above have reached the console.
+    #[cfg(windows)]
+    if raw_active {
+        super::windows_console::restore();
+    }
     crate::output::end_tui_diagnostics();
 }
 

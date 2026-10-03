@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Exact-version 0.8.1 release tooling. Published assets must match this version.
+# Exact-version 0.8.2 release tooling. Published assets must match this version.
 # See the version-pinned release record for publication and installation evidence.
 repository="skaft-software/octet"
-version="0.8.1"
+version="0.8.2"
 tag="v$version"
 release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
 release_base="https://github.com/$repository/releases/download/$tag"
@@ -356,9 +356,9 @@ manifest_path, bundle_path, cosign_path = sys.argv[1:4]
 identity, repository, source_commit, archive_name = sys.argv[4:8]
 expected_names = {
     "install-octet.sh",
-    "octet-0.8.1-aarch64-apple-darwin.tar.gz",
-    "octet-0.8.1-x86_64-apple-darwin.tar.gz",
-    "octet-0.8.1-x86_64-unknown-linux-gnu.tar.gz",
+    "octet-0.8.2-aarch64-apple-darwin.tar.gz",
+    "octet-0.8.2-x86_64-apple-darwin.tar.gz",
+    "octet-0.8.2-x86_64-unknown-linux-gnu.tar.gz",
 }
 line_pattern = re.compile(r"^([0-9A-Fa-f]{64})  (?:\./)?([A-Za-z0-9_.-]+)$")
 
@@ -483,6 +483,25 @@ evaluation/harbor/README.md
 evaluation/harbor/config.py
 evaluation/harbor/requirements.txt
 extensions/octet-browse/README.md
+extensions/octet-codemode/README.md
+extensions/octet-pi-compat/README.md
+scripts/bench-startup-resume.py
+extensions/octet-codemode/THIRD_PARTY_NOTICES.md
+extensions/octet-codemode/LICENSE
+extensions/octet-codemode/vendor/PROVENANCE.json
+extensions/octet-codemode/vendor/pi-codemode/LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/ada-LICENSE-MIT
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/llvm-LICENSE.TXT
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/mbedtls-LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/quickjs-ng-LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-APACHE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-APACHE-LLVM
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-MIT
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-fts-musl-fts-COPYING
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-libc-bottom-half-cloudlibc-LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-libc-top-half-musl-COPYRIGHT
 extensions/octet-browse/REFERENCE.md
 extensions/octet-browse/CONNECTORS.md
 extensions/octet-browse/QUALIFICATION.md

@@ -15,7 +15,7 @@ use octet_ai::{
 };
 
 use super::auth::{environment_auth, EnvironmentCredential};
-use super::compatibility::cache_compatibility;
+use super::compatibility::cache_compatibility_for_route;
 use super::contract::{valid_public_header, ProviderDeclaration, ProviderRoute};
 use super::models::{static_models, StaticModelPreset};
 use super::pricing::pricing_for;
@@ -207,7 +207,7 @@ fn register_static_model(
         api_name: model.id.into(),
         display_name: Some(
             octet_ai::model_metadata::model_display_name(model.id)
-                .unwrap_or(model.name)
+                .unwrap_or_else(|| model.name.to_owned())
                 .into(),
         ),
         protocol: route.protocol,
@@ -217,7 +217,7 @@ fn register_static_model(
             max_output_tokens: model.max_output_tokens,
         },
         pricing: pricing_for(declaration, model.id),
-        cache: cache_compatibility(declaration.compatibility, model.id, route.protocol),
+        cache: cache_compatibility_for_route(catalog, declaration, model.id, route),
     })?;
     Ok(())
 }
@@ -291,7 +291,7 @@ pub(crate) fn register_discovered_model_at_route(
         capabilities,
         limits,
         pricing: pricing.or_else(|| pricing_for(declaration, api_name)),
-        cache: cache_compatibility(declaration.compatibility, api_name, route.protocol),
+        cache: cache_compatibility_for_route(catalog, declaration, api_name, route),
     })?;
     Ok(())
 }
@@ -459,6 +459,88 @@ mod tests {
     };
 
     #[test]
+    fn discovered_anthropic_cache_lifetimes_are_direct_only_and_preserve_configured_models() {
+        use crate::providers::contract::ANTHROPIC;
+        for (base_url, expected) in [
+            (
+                ANTHROPIC.base_url,
+                octet_ai::PromptCacheLifetimes {
+                    short: Some(300),
+                    long: Some(3600),
+                },
+            ),
+            (
+                "https://gateway.example.test/v1/",
+                octet_ai::PromptCacheLifetimes::default(),
+            ),
+        ] {
+            let mut catalog = ModelCatalog::default();
+            let credential = EnvironmentCredential::for_test("ANTHROPIC_API_KEY", "fixture-key");
+            register_environment_endpoints_at_base_url(
+                &mut catalog,
+                &ANTHROPIC,
+                &credential,
+                &url::Url::parse(base_url).unwrap(),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            let capabilities = Capabilities {
+                input_modalities: ModalitySet::none(),
+                output_modalities: ModalitySet::none(),
+                tools: false,
+                parallel_tool_calls: false,
+                reasoning: None,
+                responses_lite: false,
+                agent_delegation: None,
+                structured_output: false,
+                deferred_tool_loading: false,
+                responses_features: Default::default(),
+            };
+            let limits = ModelLimits {
+                context_window: 128_000,
+                max_output_tokens: 16_000,
+            };
+            register_discovered_model(
+                &mut catalog,
+                &ANTHROPIC,
+                "claude-new-model",
+                None,
+                capabilities.clone(),
+                limits,
+                None,
+            )
+            .unwrap();
+            let id = ModelId("anthropic/claude-new-model".into());
+            let discovered = catalog.resolve(&id).unwrap();
+            assert_eq!(discovered.spec.cache.prompt_cache, expected);
+
+            // A configured model with this exact discovery id remains
+            // authoritative, including its explicitly validated lifetime hints.
+            let mut configured = (*discovered.spec).clone();
+            configured.cache.prompt_cache = octet_ai::PromptCacheLifetimes {
+                short: Some(600),
+                long: Some(7200),
+            };
+            assert!(catalog.remove_model_if_endpoint(&id, &configured.endpoint));
+            catalog.register_model(configured.clone()).unwrap();
+            register_discovered_model(
+                &mut catalog,
+                &ANTHROPIC,
+                "claude-new-model",
+                None,
+                capabilities,
+                limits,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                catalog.resolve(&id).unwrap().spec.cache.prompt_cache,
+                configured.cache.prompt_cache
+            );
+        }
+    }
+
+    #[test]
     fn discovered_gpt6_cache_mode_is_qualified_by_exact_public_route() {
         let mut catalog = ModelCatalog::default();
         let credential = EnvironmentCredential::for_test("OPENAI_API_KEY", "fixture-key");
@@ -470,7 +552,13 @@ mod tests {
                 Duration::from_secs(1),
             )
             .unwrap();
-            for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-unverified"] {
+            for id in [
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6.1-sol",
+                "gpt-6-luna",
+                "gpt-6-unverified",
+            ] {
                 register_discovered_model(
                     &mut catalog,
                     provider,
@@ -914,5 +1002,255 @@ mod tests {
         assert!(public_headers(&[("originator", "octet")]).is_ok());
         assert!(public_headers(&[("x-provider-token", "value")]).is_err());
         assert!(public_headers(&[("bad:header", "value")]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod openrouter_attribution_tests {
+    use octet_ai::{
+        AiClient, AudioFormat, AudioOutputOptions, AudioVoice, Message, Modality, Model,
+        OpenRouterBatchListOptions, OpenRouterBatchRequest, OpenRouterBatchRequestItem,
+        OutputModalities, Request, RequestOverrides, UserMessage, UserPart,
+    };
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::providers::contract::{
+        ALL_PROVIDER_DECLARATIONS as DECLARATIONS, DEEPSEEK, GROQ, MISTRAL, OPENROUTER,
+    };
+
+    const HEADERS: [(&str, &str); 3] = [
+        ("HTTP-Referer", "https://octet.skaft.org"),
+        ("X-OpenRouter-Title", "octet coding agent"),
+        ("X-OpenRouter-Categories", "cli-agent"),
+    ];
+    const AUTHORIZATION: &str = "Bearer attribution-fixture-key";
+
+    fn fixture_client() -> AiClient {
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        AiClient::with_http_client(http)
+    }
+
+    fn model_at_server(decl: &ProviderDeclaration, server: &MockServer, api_name: &str) -> Model {
+        // Only origin/auth are substituted: the REAL declaration supplies headers.
+        let mut base = url::Url::parse(&server.uri()).unwrap();
+        base.set_path(url::Url::parse(decl.base_url).unwrap().path());
+        let mut catalog = ModelCatalog::default();
+        register_private_endpoints_at_base_url(
+            &mut catalog,
+            decl,
+            Auth::bearer("attribution-fixture-key"),
+            &base,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let capabilities = serde_json::from_value(serde_json::json!({
+            "input_modalities": ModalitySet::none(),
+            "output_modalities": if api_name.contains("-audio-") {
+                ModalitySet::none().with(Modality::Audio)
+            } else { ModalitySet::none() },
+            "tools": false, "parallel_tool_calls": false, "structured_output": false
+        }))
+        .unwrap();
+        let limits = ModelLimits {
+            context_window: 16_384,
+            max_output_tokens: 1_024,
+        };
+        register_discovered_model(
+            &mut catalog,
+            decl,
+            api_name,
+            None,
+            capabilities,
+            limits,
+            None,
+        )
+        .unwrap();
+        catalog
+            .resolve(&ModelId(format!("{}/{api_name}", decl.id)))
+            .unwrap()
+    }
+
+    fn chat_fixture(audio: bool) -> (Request, ResponseTemplate) {
+        // Audio selects native stream:false JSON; complete() alone still streams text Chat.
+        let modalities = if audio {
+            OutputModalities::TextAndAudio(AudioOutputOptions {
+                format: AudioFormat::Wav,
+                voice: AudioVoice::Named("alloy".into()),
+            })
+        } else {
+            OutputModalities::Text
+        };
+        let request = serde_json::from_value(serde_json::json!({
+            "messages": [Message::User(UserMessage { content: vec![UserPart::Text("hello".into())] })],
+            "tools": [], "tool_choice": octet_ai::ToolChoice::Auto, "stop": [],
+            "reasoning": octet_ai::ReasoningConfig::Off, "output_modalities": modalities,
+            "compatibility": octet_ai::CompatibilityMode::Strict,
+            "cache_retention": octet_ai::CacheRetention::None
+        })).unwrap();
+        let response = if audio {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-attribution",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                    "role": "assistant", "content": "hello", "audio": {
+                        "id": "audio-attribution", "data": "UklGRm1vY2t3YXZjb250ZW50",
+                        "transcript": "hello", "expires_at": 1_800_000_000
+                    }
+                }}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        } else {
+            ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"id\":\"chatcmpl-attribution\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n",
+                    "data: {\"id\":\"chatcmpl-attribution\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                ))
+        };
+        (request, response)
+    }
+
+    fn assert_headers(headers: &http::HeaderMap, expected: [Option<&str>; 3]) {
+        for ((name, _), value) in HEADERS.into_iter().zip(expected) {
+            let values = headers.get_all(name);
+            let actual: Vec<_> = values.iter().map(|v| v.to_str().unwrap()).collect();
+            // Exact multiplicity catches duplicate defaults on case-insensitive overrides.
+            assert_eq!(actual, value.into_iter().collect::<Vec<_>>(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn openrouter_attribution_chat_headers_overrides_and_isolation() {
+        for decl in DECLARATIONS.iter().filter(|d| d.id != OPENROUTER.id) {
+            assert_headers(&public_headers(decl.extra_headers).unwrap(), [None; 3]);
+        }
+        let client = fixture_client();
+        let values = ["https://host.test", "host app", "custom-cli"];
+        let explicit = serde_json::json!({
+            "hTtP-rEfErEr": values[0],
+            "X-oPeNrOuTeR-TiTlE": values[1],
+            "x-openrouter-CATEGORIES": values[2]
+        });
+        for (decl, api_name, audio) in [
+            (&OPENROUTER, "openai/gpt-4o", false),
+            (&OPENROUTER, "openai/gpt-4o-audio-preview", true),
+            (&DEEPSEEK, "deepseek-chat", false),
+            (&GROQ, "llama-3.3-70b-versatile", false),
+            (&MISTRAL, "mistral-small-latest", false),
+        ] {
+            let server = MockServer::start().await;
+            let model = model_at_server(decl, &server, api_name);
+            let chat_path = model.endpoint.base_url.join("chat/completions").unwrap();
+            let (request, response) = chat_fixture(audio);
+            Mock::given(method("POST"))
+                .and(path(chat_path.path()))
+                .and(body_partial_json(serde_json::json!({"stream": !audio})))
+                .respond_with(response)
+                .expect(4)
+                .mount(&server)
+                .await;
+            let defaults = if decl.id == OPENROUTER.id {
+                HEADERS.map(|(_, v)| Some(v))
+            } else {
+                [None; 3]
+            };
+            let cases = [
+                (serde_json::json!({}), defaults),
+                (explicit.clone(), values.map(Some)),
+                (
+                    serde_json::json!({"x-openrouter-title": "partial fixture"}),
+                    [defaults[0], Some("partial fixture"), defaults[2]],
+                ),
+                (serde_json::json!({}), defaults), // Overrides must not poison the next request.
+            ];
+            for (extra, _) in &cases {
+                let overrides: RequestOverrides =
+                    serde_json::from_value(serde_json::json!({"headers": extra})).unwrap();
+                let result = client
+                    .complete_with_overrides(&model, request.clone(), overrides)
+                    .await
+                    .unwrap();
+                assert_eq!(result.response_id.as_deref(), Some("chatcmpl-attribution"));
+            }
+            let captured = server.received_requests().await.unwrap();
+            assert_eq!(captured.len(), cases.len(), "no extra attempts");
+            for (wire, (_, expected)) in captured.iter().zip(cases) {
+                assert_eq!(wire.method, http::Method::POST);
+                assert_eq!(wire.url.path(), chat_path.path());
+                assert_eq!(wire.headers["authorization"], AUTHORIZATION);
+                let body: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
+                assert_eq!(body["model"], api_name);
+                assert_eq!(body["stream"], !audio);
+                assert_headers(&wire.headers, expected);
+            }
+            assert_headers(&model.endpoint.default_headers, defaults);
+        }
+    }
+
+    #[tokio::test]
+    async fn openrouter_attribution_batch_submit_get_list_headers() {
+        let server = MockServer::start().await;
+        let client = fixture_client();
+        let model = model_at_server(&OPENROUTER, &server, "openai/gpt-4o");
+        let batch = serde_json::json!({
+            "id": "batch_attribution", "object": "batch", "endpoint": "/v1/chat/completions",
+            "model": "openai/gpt-4o", "completion_window": "24h", "status": "validating",
+            "created_at": 1, "request_counts": {"total": 1, "completed": 0, "failed": 0}
+        });
+        let routes = [
+            ("POST", "/api/beta/batches", batch.clone()),
+            ("GET", "/api/beta/batches/batch_attribution", batch),
+            (
+                "GET",
+                "/api/beta/batches",
+                serde_json::json!({"object": "list", "data": [], "has_more": false}),
+            ),
+        ];
+        for (verb, target, body) in &routes {
+            Mock::given(method(*verb))
+                .and(path(*target))
+                .respond_with(
+                    ResponseTemplate::new(if *verb == "POST" { 202 } else { 200 })
+                        .set_body_json(body),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let item = OpenRouterBatchRequestItem::new(
+            "one",
+            serde_json::json!({"messages": [{"role": "user", "content": "hello"}]}),
+        );
+        let submission =
+            OpenRouterBatchRequest::new("/v1/chat/completions", &model.spec.api_name, vec![item]);
+        let submitted = client
+            .submit_openrouter_batch(&model.endpoint, submission)
+            .await
+            .unwrap();
+        let retrieved = client
+            .get_openrouter_batch(&model.endpoint, "batch_attribution")
+            .await
+            .unwrap();
+        let listed = client
+            .list_openrouter_batches(&model.endpoint, &OpenRouterBatchListOptions::default())
+            .await
+            .unwrap();
+        assert_eq!([submitted.id, retrieved.id], ["batch_attribution"; 2]);
+        assert!(listed.data.is_empty());
+        let captured = server.received_requests().await.unwrap();
+        assert_eq!(captured.len(), routes.len(), "no extra attempts");
+        for (wire, (verb, target, _)) in captured.iter().zip(routes) {
+            assert_eq!(wire.method.as_str(), verb);
+            assert_eq!(wire.url.path(), target);
+            assert_eq!(wire.headers["authorization"], AUTHORIZATION);
+            assert_headers(&wire.headers, HEADERS.map(|(_, v)| Some(v)));
+        }
+        let body: serde_json::Value = serde_json::from_slice(&captured[0].body).unwrap();
+        assert_eq!(body["model"], model.spec.api_name);
     }
 }

@@ -105,6 +105,7 @@ export interface OctetTransport {
   searchProjectFiles(
     projectId: string,
     query: string,
+    signal?: AbortSignal,
   ): Promise<ProjectFileSearchResult>;
   writeProjectFile(
     projectId: string,
@@ -2650,12 +2651,14 @@ export class HttpTransport implements OctetTransport {
   async searchProjectFiles(
     projectId: string,
     query: string,
+    signal?: AbortSignal,
   ): Promise<ProjectFileSearchResult> {
     const response = await fetch(
       `/api/v1/fs/${encodeURIComponent(projectId)}/search?query=${encodeURIComponent(query)}`,
       {
         headers: { Accept: "application/json" },
         credentials: "same-origin",
+        signal,
       },
     );
     if (!response.ok) {

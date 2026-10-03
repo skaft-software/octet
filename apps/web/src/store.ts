@@ -1572,8 +1572,9 @@ export class OctetStore {
   searchProjectFiles(
     projectId: string,
     query: string,
+    signal?: AbortSignal,
   ): Promise<ProjectFileSearchResult> {
-    return this.transport.searchProjectFiles(projectId, query);
+    return this.transport.searchProjectFiles(projectId, query, signal);
   }
 
   writeProjectFile(

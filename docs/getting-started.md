@@ -8,7 +8,9 @@ lane, verify it with a read-only request, and only then allow edits or commands.
 Shell commands are in `sh` blocks; text in `text` blocks is entered inside the
 interactive Octet UI, not in your shell.
 
-> **Version boundary.** This guide targets octet 0.8.1. Check `octet --version`
+> **Version boundary.** This guide targets the octet 0.8.2 source candidate,
+> not a published release. Use the checkout lane below; native and npm installation
+> commands become usable only after verified publication. Check `octet --version`
 > and `octet --help` for the binary you will run. Source builds are not signed
 > release artifacts, and older binaries may not include these options.
 
@@ -16,37 +18,36 @@ interactive Octet UI, not in your shell.
 
 ### macOS or GNU/Linux: published native binary
 
-The current native release supports macOS Apple silicon/Intel and GNU/Linux
-x86-64, and needs no Node.js. Install from the version-pinned release, then
-check the version:
+The planned native release targets macOS Apple silicon/Intel and GNU/Linux
+x86-64, and needs no Node.js. After publication, install from the version-pinned
+release, then check the version:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.1/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.8.2/install-octet.sh | sh
 octet --version
 ```
 
-Expected output includes `octet 0.8.1`. The release page is authoritative for
+Expected output includes `octet 0.8.2`. The release page is authoritative for
 signed assets and availability; Homebrew, crates.io, and SDK registries are
 separate unpublished channels.
 
 ### macOS or GNU/Linux: npm launcher
 
-If you already have Node.js, the same signed platform package is available
-from npm:
+After npm publication, Node.js can install the same signed platform package:
 
 ```sh
-npm install -g @skaft/octet
+npm install -g @skaft/octet@0.8.2
 octet --version
 ```
 
-Expected output includes `octet 0.8.1`. npm resolves the matching platform
+Expected output includes `octet 0.8.2`. npm resolves the matching platform
 package automatically.
 
 ### Intentional source checkout: macOS or GNU/Linux
 
-Use this lane only when you intentionally need the checkout under test. Install
-Rust 1.86+ and [ripgrep](https://github.com/BurntSushi/ripgrep), then build and
+This is the available lane for the candidate under test. Install
+Rust 1.88+ and [ripgrep](https://github.com/BurntSushi/ripgrep), then build and
 run the binary by its full path:
 
 ```sh
@@ -61,9 +62,9 @@ publication. Use the matching binary consistently for the rest of this guide.
 
 There is no published native Windows download or support claim in this release
 snapshot. Do not treat WSL, cross-compilation, or a macOS/Linux check as native
-Windows qualification. Stop at this availability gate and use a separately
-qualified Windows instruction when one is published; do not invent a download
-URL.
+Windows qualification, and do not invent a download URL. Testers can run the
+unsigned native build attached to a pull request's CI run, or build from a
+checkout, as described in [Windows](windows.md); neither is a release.
 
 ## 2. Start in the repository you want to change
 
@@ -102,7 +103,7 @@ shell command, history, or session fixture.
 
 ### Interactive setup
 
-For an unconfigured octet 0.8.1 installation, start without `--model`:
+For an unconfigured octet 0.8.2 installation, start without `--model`:
 
 ```sh
 octet --safe-mode
@@ -122,9 +123,9 @@ key and discovering models are separate from verifying inference; if discovery
 fails, the saved key can remain for retry. Select a model from the refreshed
 picker, then follow the read-only verification step below.
 
-For subscription sign-in, choose **ChatGPT (OpenAI Codex)** or **GitHub Copilot**
-and authorize on the provider's device-login page. Only those two subscription
-flows are offered; availability depends on your account and supported routes.
+For subscription sign-in, choose **ChatGPT (OpenAI Codex)**, **GitHub Copilot**,
+**Grok**, **Kimi Code**, **Meta**, or **OpenRouter**. Availability depends on your
+account and supported routes; each flow has its own authorization boundary.
 Restart without `--offline` to sign in. For a local server, select the explicit
 endpoint and review the model/credential policy before saving.
 
@@ -163,16 +164,20 @@ picker; `--offline` skips it and still does not disable inference traffic.
 ### B. Subscription login
 
 Prerequisite: an account that can use the hosted Codex subscription flow and a
-browser (or a second device) for device authorization. Run this in a shell; the
+browser (or a second device for device authorization). Run this in a shell; the
 command exits after login:
 
 ```sh
 octet --login codex
 ```
 
-Octet prints the OpenAI verification URL and a one-time code. Keep the code
-private and enter it only on the OpenAI page. If opening a browser is not
-available, use the same flow without a browser opener:
+Choose browser sign-in (recommended) to open the OpenAI page and print its URL;
+octet receives the callback on `127.0.0.1:1455` (or `1457` when 1455 is busy)
+and displays a signed-in page. You can instead choose a device code. Octet
+prints the verification URL and a one-time code; keep it private and enter it
+only on the OpenAI page. SSH, no opener, or both callback ports being busy
+selects the device flow by default. To force device sign-in without opening a
+browser:
 
 ```sh
 octet --login codex --headless

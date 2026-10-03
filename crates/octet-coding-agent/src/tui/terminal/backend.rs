@@ -5,9 +5,10 @@
 //! not own input or terminal capability policy.
 #![allow(missing_docs)]
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Stdout, Write};
+use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -136,23 +137,85 @@ fn open_tui_write_log(configured: Option<std::ffi::OsString>) -> Option<File> {
 const SYNC_OUTPUT_BEGIN: &str = "\x1b[?2026h";
 const SYNC_OUTPUT_END: &str = "\x1b[?2026l";
 
-fn normalize_line_endings(data: &str, last_was_cr: &mut bool) -> String {
-    let mut normalized = String::with_capacity(data.len().saturating_add(8));
-    for character in data.chars() {
-        if character == '\n' && !*last_was_cr {
-            normalized.push('\r');
-        }
-        normalized.push(character);
-        *last_was_cr = character == '\r';
+fn normalize_line_endings<'a>(data: &'a str, last_was_cr: &mut bool) -> Cow<'a, str> {
+    let preceding_cr = *last_was_cr;
+    if let Some(last) = data.as_bytes().last() {
+        *last_was_cr = *last == b'\r';
     }
-    normalized
+    let mut bare_lfs = data.match_indices('\n').filter(|(index, _)| {
+        if *index == 0 {
+            !preceding_cr
+        } else {
+            data.as_bytes()[index - 1] != b'\r'
+        }
+    });
+    let Some(first) = bare_lfs.next() else {
+        // Complete renderer frames already use CRLF. Do not decode and copy
+        // their entire native-history payload just to return identical bytes.
+        return Cow::Borrowed(data);
+    };
+    let mut normalized = String::with_capacity(data.len().saturating_add(8));
+    let mut cursor = 0;
+    for (index, _) in std::iter::once(first).chain(bare_lfs) {
+        normalized.push_str(&data[cursor..index]);
+        normalized.push_str("\r\n");
+        cursor = index + 1;
+    }
+    normalized.push_str(&data[cursor..]);
+    Cow::Owned(normalized)
+}
+
+/// Destination for complete terminal frames.
+///
+/// The backend hands every flushed batch, normally one synchronized frame, to
+/// exactly one `write_frame` call. Implementations must not split it further
+/// when they can avoid it: a frame divided across writes can be painted half
+/// old and half new by a terminal without synchronized-output support.
+pub trait FrameSink: Write {
+    /// Write one complete frame.
+    fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.write_all(frame)
+    }
+}
+
+impl FrameSink for Vec<u8> {}
+
+impl FrameSink for Stdout {
+    fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            // The standard console writer converts only a few KiB per
+            // WriteConsoleW call. Keep std's buffered bytes ordered before
+            // the frame, then hand the whole frame to one console write.
+            let mut locked = self.lock();
+            locked.flush()?;
+            if let Some(result) = super::windows_console::write_frame(frame) {
+                return result;
+            }
+            locked.write_all(frame)
+        }
+        #[cfg(not(windows))]
+        {
+            self.write_all(frame)
+        }
+    }
+}
+
+/// UTF-16 code units for one console frame, or `None` when the bytes are not
+/// UTF-8 and must use the byte-oriented writer. Frames are built from `str`
+/// rows plus ASCII control sequences, so this is the normal case.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn frame_utf16(frame: &[u8]) -> Option<Vec<u16>> {
+    std::str::from_utf8(frame)
+        .ok()
+        .map(|text| text.encode_utf16().collect())
 }
 
 /// Render-only terminal adapter used by sexy-tui.
 ///
 /// Input is deliberately driven by the application's async crossterm stream;
 /// sexy-tui's blocking `Terminal::start` is never called.
-pub struct OctetTerminal<W: Write = Stdout> {
+pub struct OctetTerminal<W: FrameSink = Stdout> {
     out: W,
     size: TerminalSize,
     last_was_cr: bool,
@@ -166,6 +229,39 @@ pub struct OctetTerminal<W: Write = Stdout> {
 }
 
 impl OctetTerminal<Stdout> {
+    /// Request repeat/release kinds only while a remote component owns focus.
+    /// The ordinary text-preserving profile is restored when the lease ends.
+    pub(crate) fn set_remote_ui_keyboard_events(enabled: bool) -> Result<()> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if enabled {
+            execute!(
+                out,
+                event::PushKeyboardEnhancementFlags(
+                    lifecycle::keyboard_enhancement_flags()
+                        | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                )
+            )?;
+            lifecycle::mark_remote_keyboard_enhancement_active();
+        } else if lifecycle::take_remote_keyboard_enhancement_active() {
+            execute!(out, event::PopKeyboardEnhancementFlags)?;
+        }
+        Ok(())
+    }
+
+    /// Toggle reporting for a host-owned remote fullscreen mouse lease. The
+    /// locked stdout write cannot interleave with a renderer's physical write.
+    pub(crate) fn set_mouse_capture(enabled: bool) -> Result<()> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if enabled {
+            execute!(out, event::EnableMouseCapture)?;
+        } else {
+            execute!(out, event::DisableMouseCapture)?;
+        }
+        Ok(())
+    }
+
     /// Enter raw mode on the primary screen, returning the shared size cell.
     #[allow(dead_code)] // Used by the separately compiled Gate-0 spike target.
     pub fn enter() -> Result<(Self, TerminalSize)> {
@@ -200,6 +296,8 @@ impl OctetTerminal<Stdout> {
             return Err(error.into());
         }
         lifecycle::mark_raw_active();
+        #[cfg(windows)]
+        super::windows_console::enter_interactive();
 
         let result = Self::enter_inner(size, capture_mouse, image_store);
         if result.is_err() {
@@ -266,7 +364,7 @@ impl OctetTerminal<Stdout> {
     }
 }
 
-impl<W: Write> OctetTerminal<W> {
+impl<W: FrameSink> OctetTerminal<W> {
     /// Conservative product policy: only Kitty gets live image placement.
     /// iTerm2 has no targetable delete, so replay/destructive replacement would
     /// leave stale pixels behind; the transcript uses semantic fallback instead.
@@ -287,7 +385,9 @@ impl<W: Write> OctetTerminal<W> {
 
     fn append_backend_bytes(&mut self, bytes: &[u8]) {
         self.pending.extend_from_slice(bytes);
-        self.pending_log.extend_from_slice(bytes);
+        if self.write_log.is_some() {
+            self.pending_log.extend_from_slice(bytes);
+        }
     }
 
     fn append_text(&mut self, text: &str) {
@@ -313,12 +413,15 @@ impl<W: Write> OctetTerminal<W> {
         // the bytes once this exact placement has been written.
         if let Some(encoded) = self.image_store.encoded(&key) {
             if self.pending.try_reserve(encoded.len()).is_err()
-                || self.pending_log.try_reserve(LOG_MARKER.len()).is_err()
+                || (self.write_log.is_some()
+                    && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
             {
                 return;
             }
             self.pending.extend_from_slice(&encoded);
-            self.pending_log.extend_from_slice(LOG_MARKER);
+            if self.write_log.is_some() {
+                self.pending_log.extend_from_slice(LOG_MARKER);
+            }
             return;
         }
         let Ok(command) = ImageProtocolEncoder::new(anchor.protocol(), ImageLimits::default())
@@ -331,14 +434,16 @@ impl<W: Write> OctetTerminal<W> {
         // a partial graphics sequence in a synchronized frame or an image
         // write without its payload-free log replacement.
         if self.pending.try_reserve(command.encoded_len()).is_err()
-            || self.pending_log.try_reserve(LOG_MARKER.len()).is_err()
+            || (self.write_log.is_some() && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
         {
             return;
         }
         let mut encoded = Vec::with_capacity(command.encoded_len());
         if command.write_to(&mut encoded).is_ok() {
             self.pending.extend_from_slice(&encoded);
-            self.pending_log.extend_from_slice(LOG_MARKER);
+            if self.write_log.is_some() {
+                self.pending_log.extend_from_slice(LOG_MARKER);
+            }
             self.image_store.remember_encoded(key, encoded.into());
         }
     }
@@ -371,7 +476,7 @@ impl<W: Write> OctetTerminal<W> {
         if self.pending.is_empty() {
             return;
         }
-        let _ = self.out.write_all(&self.pending);
+        let _ = self.out.write_frame(&self.pending);
         let log_failed = self.write_log.as_mut().is_some_and(|log| {
             log.write_all(&self.pending_log)
                 .and_then(|()| log.flush())
@@ -399,14 +504,14 @@ impl<W: Write> OctetTerminal<W> {
     }
 }
 
-impl<W: Write> Drop for OctetTerminal<W> {
+impl<W: FrameSink> Drop for OctetTerminal<W> {
     fn drop(&mut self) {
         self.flush_pending();
         lifecycle::force_restore();
     }
 }
 
-impl<W: Write> sexy_tui_rs::Terminal for OctetTerminal<W> {
+impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
     fn start_events(
         &mut self,
         _on_input: Box<dyn FnMut(sexy_tui_rs::TerminalInput)>,

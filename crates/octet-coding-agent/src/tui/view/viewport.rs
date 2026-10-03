@@ -101,7 +101,7 @@ fn report_body_lines(report: &ReportOverlay, state: &ShellState, width: u16) -> 
         ReportBody::Text { text, styled } => {
             super::panel_render::document_visual_lines_styled(text, &state.theme, width, *styled)
         }
-        ReportBody::Markdown(document) => {
+        ReportBody::Markdown(document, _) => {
             let inset = " ".repeat(usize::from(plan.inset));
             let mut renderer = state.rich_renderer.borrow_mut();
             let renderer = renderer.get_or_insert_with(|| state.theme.rich_renderer());
@@ -412,7 +412,7 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
                 block_hint: block.index,
                 text_offset: 0,
                 trailing_affinity: false,
-                visual_width: state.size.0,
+                visual_width: state.transcript_content_width(state.size.0),
                 semantic_row_correction: 0,
                 fallback_block_row: row - block.start,
                 fallback_visual_row: row,
@@ -428,7 +428,7 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
                 block_hint: usize::MAX,
                 text_offset: 0,
                 trailing_affinity: false,
-                visual_width: state.size.0,
+                visual_width: state.transcript_content_width(state.size.0),
                 semantic_row_correction: 0,
                 fallback_block_row: 0,
                 fallback_visual_row: row,
@@ -445,6 +445,54 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
         let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
         let end = transcript.len().saturating_sub(scroll);
         capture_viewport_anchor(state, end.saturating_sub(capacity), end);
+    }
+}
+
+/// Convert an input owner's cheap visual receipt into a text coordinate while
+/// the renderer still has the layout that produced it. Doing this after reflow
+/// would reinterpret an old physical row at the new width and jump the reader.
+pub(super) fn upgrade_viewport_anchor(state: &ShellState) {
+    let Some(anchor) = state
+        .viewport_anchor
+        .get()
+        .filter(|anchor| !anchor.semantic)
+    else {
+        return;
+    };
+    let cache = state.transcript_cache.borrow();
+    if cache.width != Some(anchor.visual_width) {
+        return;
+    }
+    let row = if anchor.block_hint == usize::MAX {
+        anchor.fallback_visual_row
+    } else {
+        let block = state
+            .transcript_commit_ids
+            .iter()
+            .position(|id| *id == anchor.commit_id);
+        let Some(start) = block.and_then(|block| cache.block_starts.get(block)) else {
+            return;
+        };
+        start.saturating_add(anchor.fallback_block_row)
+    };
+    drop(cache);
+    let mut fallback = None;
+    for offset in 0..usize::from(state.size.1).max(1) {
+        let Some(upgraded) = viewport_anchor_for_visual_row(
+            state,
+            row.saturating_add(offset),
+            anchor.desired_screen_row.saturating_add(offset),
+        ) else {
+            break;
+        };
+        if upgraded.semantic {
+            state.viewport_anchor.set(Some(upgraded));
+            return;
+        }
+        fallback.get_or_insert(upgraded);
+    }
+    if let Some(fallback) = fallback {
+        state.viewport_anchor.set(Some(fallback));
     }
 }
 
@@ -594,11 +642,15 @@ pub(super) fn render_shell_viewport_update(
     frame: &mut ShellFrameState,
 ) -> FrameUpdate {
     let repaint_theme = frame.initialized && frame.theme_epoch != state.theme_epoch;
-    let resized = frame.initialized && (frame.width != width || frame.height != state.size.1);
+    let resized = frame.initialized
+        && (frame.width != width
+            || frame.height != state.size.1
+            || frame.resize_epoch != state.resize_epoch);
     let entering_application_viewport = frame.initialized && !frame.application_viewport;
     frame.initialized = true;
     frame.width = width;
     frame.height = state.size.1;
+    frame.resize_epoch = state.resize_epoch;
     frame.theme_epoch = state.theme_epoch;
     frame.transcript_epoch = state.transcript_epoch;
     frame.verbose_tools = state.verbose_tools;

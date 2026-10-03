@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 //! Real-binary PTY qualification for `/reload`'s hot re-exec path.
 //!
 //! Every pane runs a scratch *copy* of the built binary under a scratch
@@ -8,6 +6,8 @@
 //! records its pid, its parent pid, and its argv before `exec`ing a second
 //! scratch copy. The assertions therefore show *same process, same session,
 //! new image* without touching `target/` or the real `~/.octet`.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

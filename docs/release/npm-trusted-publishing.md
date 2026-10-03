@@ -1,11 +1,13 @@
 # npm trusted publishing
 
-**The octet npm channel is not published yet.** Native GitHub releases and npm
-publication are independent; see [installation](../installation.md) for the
-native installer and source build. This maintainer reference describes packaging,
-not completed registry publication. The source/release repository is now
-`skaft-software/octet`; configure future OIDC publishers for that identity.
-The already-published native v0.7.0 signatures retain `skaft-software/ygg`.
+**The octet 0.8.2 npm CLI is not published.** It is a planned channel for the
+source candidate; native GitHub releases and npm publication need independent
+approval and verification. See [installation](../installation.md) for the
+currently available source-build route. This maintainer reference describes packaging,
+protected publication, and recovery for the four immutable packages. The
+source/release repository is `skaft-software/octet`; future npm releases use
+trusted publishers for that identity. The already-published native v0.7.0
+signatures retain `skaft-software/ygg`.
 
 The source contract defines four immutable packages:
 
@@ -45,13 +47,18 @@ check deterministic packing, tarball/path/lifecycle/secret handling, and an
 offline install; they do **not** prove registry publication or macOS acceptance.
 
 All files in the [public documentation inventory](../package-assets.txt) are
-retained byte-for-byte from the verified native assets. Packing restores files
-that npm's ignore rules would omit before final checksums and provenance are
-computed; it never substitutes checkout documentation. Ordinary npm installation
-renames `.gitignore` metadata to `.npmignore`. Its bytes are verified at that
-installed name; other inventoried paths remain unchanged. This is documentation,
-not a Git checkout: use the version-pinned source checkout for benchmark
-reproduction and its original Git ignore rules. No lifecycle hook repairs files.
+retained byte-for-byte from the verified native assets. The 0.8.1 npm publication
+followed the signed native release, so its bundled docs are that release-time
+snapshot and may still describe npm as unpublished. That historical publication
+does not qualify the 0.8.2 candidate. Do not rewrite or republish immutable 0.8.1
+packages to refresh docs; a later native release can carry updated documentation.
+Packing restores files that npm's ignore rules would omit before final checksums
+and provenance are computed; it never substitutes checkout documentation.
+Ordinary npm installation renames `.gitignore` metadata to `.npmignore`. Its
+bytes are verified at that installed name; other inventoried paths remain
+unchanged. This is documentation, not a Git checkout: use the version-pinned
+source checkout for benchmark reproduction and its original Git ignore rules.
+No lifecycle hook repairs files.
 
 The protected job downloads a fixed npm CLI tarball, verifies its recorded
 SHA-512 integrity, and installs it with lifecycle scripts, audit, and funding
@@ -62,19 +69,20 @@ alone is insufficient.
 
 ## Protected publication
 
-A maintainer must configure trusted publishers for all four packages to the
-repository's `release-octet.yml` workflow and `stable-release-publish`
-environment. The workflow uses GitHub OIDC with `npm publish --provenance`, never
-`NPM_TOKEN`, `NODE_AUTH_TOKEN`, a checked-in `.npmrc`, or another long-lived
-registry credential. The environment is the human approval boundary.
+Trusted publishers for all four packages must target the repository's
+`release-octet.yml` workflow and `stable-release-publish` environment. The
+workflow uses GitHub OIDC with `npm publish --provenance`, never `NPM_TOKEN`,
+`NODE_AUTH_TOKEN`, a checked-in `.npmrc`, or another long-lived registry
+credential. The environment is the human approval boundary.
 
-Canonical binary tag runs leave npm publication disabled. After all four
-trusted publishers are configured, dispatch `release-octet.yml` from protected
-`main` with `release_tag=vX.Y.Z` and `publish_npm=true`. This npm-only path
-verifies and smokes the existing immutable native release; it does not rebuild
-or re-sign its assets. The npm manifest binds the new publication workflow
-commit while separately checking the original native signer commit recorded in
-`OCTET_RELEASE_METADATA.json`. A release-environment approval may be required.
+For a future version, canonical binary tag runs leave npm publication disabled.
+After verifying trusted-publisher configuration, dispatch `release-octet.yml`
+from protected `main` with `release_tag=vX.Y.Z` and `publish_npm=true`. This
+npm-only path verifies and smokes the existing immutable native release; it does
+not rebuild or re-sign its assets. The npm manifest binds the publication
+workflow commit while separately checking the original native signer commit
+recorded in `OCTET_RELEASE_METADATA.json`. A release-environment approval may
+be required.
 
 The publication job pins npm CLI `11.5.1` (or a later explicitly reviewed version
 supporting trusted publishing) before requesting OIDC provenance. It:
@@ -107,12 +115,13 @@ provenance is understood; revocation or closure is an explicit maintainer action
 
 ## Installation and updates
 
-This is a **future published-channel template**, not a current install
-recommendation. Use it only after publication is authorized and the exact
-package/version and provenance have been independently verified:
+The planned CLI is `@skaft/octet@0.8.2`; it is not published yet, and no 0.8.2
+registry provenance or public-install acceptance is established. See the
+[installation guide](../installation.md) for the source-build route. Only after
+verified publication, use the version-pinned install command:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@VERSION
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.2
 ```
 
 `octet update` offers npm automatically only for a physically validated global

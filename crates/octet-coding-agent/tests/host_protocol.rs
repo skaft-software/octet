@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! Process-boundary tests for the versioned `octet-host` NDJSON contract.
+
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt as _;
@@ -397,6 +397,14 @@ fn inline_provider_run_streams_and_resumes_a_native_session() {
         if message["type"] == "accepted" {
             accepted = Some(message.clone());
         }
+        if message["type"] == "provider_inference" {
+            let metrics = &message["data"]["metrics"];
+            assert_eq!(metrics["client"]["scope"], "request");
+            assert!(metrics["client"]["elapsed_ns"].as_u64().unwrap() > 0);
+            assert!(metrics["client"]["output_events"].as_u64().unwrap() > 0);
+            assert_eq!(metrics["server_unavailable"], "not_reported");
+            assert!(metrics["server"].is_null());
+        }
         if message["type"] == "final_result" {
             break message;
         }
@@ -431,6 +439,7 @@ fn inline_provider_run_streams_and_resumes_a_native_session() {
     assert!(policy["shell_path"]["value"].get("sha256").is_none());
     assert!(kinds.contains(&"started".to_owned()));
     assert!(kinds.contains(&"model_delta".to_owned()));
+    assert!(kinds.contains(&"provider_inference".to_owned()));
     assert!(kinds.contains(&"model_step".to_owned()));
     assert_eq!(first_result["data"]["status"], "completed");
     assert_eq!(first_result["data"]["output"], "HOST_RUN_ONE");

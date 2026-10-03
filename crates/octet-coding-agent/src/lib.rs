@@ -22,6 +22,7 @@ mod herdr;
 pub mod host;
 mod hydrate;
 mod migrate;
+mod models_dev;
 mod modes;
 mod output;
 mod presentation;
@@ -53,6 +54,23 @@ mod tui;
 mod update;
 
 use clap::Parser;
+
+/// Build the multi-thread runtime that the `octet` and `octet-host` binaries run on.
+///
+/// Size it to the CPUs this process may use, never below two, so that
+/// delegated agents, read waves and extension traffic can use the whole
+/// machine, and provider and control traffic still have a second worker on a
+/// single-CPU host. Blocking filesystem work stays on Tokio's blocking pool and
+/// terminal writes on `octet-tui-render`. The count is explicit so that a stray
+/// `TOKIO_WORKER_THREADS` cannot resize, or with a malformed value abort,
+/// octet's own scheduler.
+pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    let workers = std::thread::available_parallelism().map_or(2, |count| count.get().max(2));
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+}
 
 /// Run the terminal frontend with the same diagnostics and exit status as the `octet` binary.
 pub async fn run_cli() -> std::process::ExitCode {
@@ -328,6 +346,31 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                 }
             }
         }
-        other => anyhow::bail!("unknown provider {other:?}; supported: codex, copilot, custom"),
+        // Every remaining provider is a subscription login driven by the shared
+        // framework, so one lookup covers all of them. This must stay the final
+        // arm so the explicitly named providers above keep precedence.
+        selector => {
+            let Some(flow) = auth::subscription::registry::resolve(selector) else {
+                anyhow::bail!(
+                    "unknown provider {selector:?}; supported: codex, copilot, {}, custom",
+                    supported_subscription_providers().join(", ")
+                );
+            };
+            let store = auth::subscription::store_for(&flow);
+            match command {
+                AuthCommand::Login { headless } => {
+                    auth::subscription::login::login(&flow, &store, headless).await
+                }
+                AuthCommand::Logout => auth::subscription::login::logout(&flow, &store).await,
+            }
+        }
     }
+}
+
+/// The canonical `--login` selector for every supported subscription provider.
+pub fn supported_subscription_providers() -> Vec<&'static str> {
+    auth::subscription::registry::all()
+        .iter()
+        .map(|flow| flow.login())
+        .collect()
 }

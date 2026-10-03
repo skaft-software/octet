@@ -417,6 +417,12 @@ async fn handle_responses_connection_limit(
                 .send(WebSocketMessage::Text(event.to_string().into()))
                 .await?;
         }
+        // A limit asks for reconnection; close the handshake cleanly so the
+        // client observes the limit terminal instead of a transport reset.
+        // (An abrupt TCP abort surfaces as RST/10054 on Windows and masks the
+        // already-delivered limit outcome; crash drops are covered by the
+        // disconnect-recovery tests instead.)
+        let _ = socket.close(None).await;
         return Ok(());
     }
 
@@ -431,6 +437,34 @@ async fn handle_responses_connection_limit(
         if request.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
+    }
+    // Drain the request body, if any: closing with unread received data
+    // aborts the connection with RST on Windows, which the client reports
+    // as a transport error instead of reading the response already queued.
+    let head = String::from_utf8_lossy(&request).into_owned();
+    let mut body_remaining = head
+        .lines()
+        .find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                (name.trim().eq_ignore_ascii_case("content-length"))
+                    .then(|| value.trim().parse::<usize>().unwrap_or(0))
+            })
+        })
+        .unwrap_or(0);
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .unwrap_or(request.len());
+    body_remaining = body_remaining.saturating_sub(request.len().saturating_sub(header_end));
+    let mut discard = vec![0_u8; body_remaining.min(64 * 1024)];
+    while body_remaining > 0 {
+        let want = body_remaining.min(discard.len());
+        let read = stream.read(&mut discard[..want]).await?;
+        if read == 0 {
+            break;
+        }
+        body_remaining -= read;
     }
     let attempt = http_requests.fetch_add(1, Ordering::SeqCst);
     let completed_body = concat!(
@@ -6507,6 +6541,17 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     std::fs::write(&external_file, "host secret").unwrap();
     let external_write = external_dir.path().join("must-not-exist.txt");
     let bash_marker = workspace.join("bash-must-not-run.txt");
+    // The shell command carries a literal path: use the non-canonical
+    // spelling with forward slashes. Canonicalization adds a `\\?\`
+    // verbatim prefix shells cannot consume, and Git Bash silently drops
+    // `>` redirects to backslash paths (exit 0, no file created). Both
+    // spellings name the same file.
+    let bash_marker_for_shell = workspace_dir
+        .path()
+        .join("bash-must-not-run.txt")
+        .display()
+        .to_string()
+        .replace('\\', "/");
 
     let calls = vec![
         (
@@ -6527,7 +6572,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
         (
             "call_process",
             "bash",
-            serde_json::json!({"command": format!("printf ran > {}", bash_marker.display())}),
+            serde_json::json!({"command": format!("printf ran > {}", bash_marker_for_shell)}),
         ),
         (
             "call_host_mutation",
@@ -8023,12 +8068,72 @@ async fn qualified_codex_permanent_failures_do_not_replace() {
     }
 }
 
+struct Gateway504ThenAnswer(AtomicUsize);
+impl Respond for Gateway504ThenAnswer {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            ResponseTemplate::new(504)
+                .set_body_json(serde_json::json!({"error":{"code":"server_error"}}))
+        } else {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses_text_turn(
+                    "ok",
+                    "bounded retry",
+                    "response.completed",
+                    "accepted",
+                ))
+        }
+    }
+}
+
 #[tokio::test]
-async fn cap_supported_hard_cost_budget_fails_closed_on_unknown_interrupted_usage() {
+async fn capped_504_charges_worst_case_without_disabling_later_cost_ceiling() {
+    let (mut agent, server, _workspace, session_path) =
+        recovery_harness_with_output_cap(vec![], true).await;
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Gateway504ThenAnswer(AtomicUsize::new(0)))
+        .mount(&server)
+        .await;
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert_eq!(
+        agent.complete("possibly accepted").await.unwrap().text,
+        "bounded retry"
+    );
+    let exposure = agent.session().usage_uncertainty_exposure().unwrap();
+    assert!(exposure.tokens > 0);
+    let cost = exposure.cost_microdollars.unwrap();
+    assert!(cost > 0);
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert_eq!(wire_requests(&server).await.len(), 2);
+
+    let current = cost.saturating_add(agent.session().total_cost_microdollars());
+    agent.set_max_session_cost_microdollars(Some(current));
+    assert!(matches!(agent.complete("not affordable").await,
+        Err(octet_agent::AgentError::CostLimit { current: charged, .. }) if charged == current));
+    assert_eq!(wire_requests(&server).await.len(), 2);
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert_eq!(
+        agent.complete("now affordable").await.unwrap().text,
+        "bounded retry"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 3);
+    assert_eq!(
+        Session::open_read_only(&session_path)
+            .unwrap()
+            .usage_uncertainty_exposure(),
+        Some(exposure)
+    );
+}
+
+#[tokio::test]
+async fn cap_supported_hard_cost_budget_charges_unknown_interrupted_usage_at_its_worst_case() {
     let (mut agent, server, _workspace, _) = recovery_harness_with_output_cap(
         vec![
             interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
-            responses_text_turn("no", "must not replay", "response.completed", "no"),
+            responses_text_turn("ok", "later", "response.completed", "ok"),
         ],
         true,
     )
@@ -8037,21 +8142,55 @@ async fn cap_supported_hard_cost_budget_fails_closed_on_unknown_interrupted_usag
     let mut run = agent.prompt("bounded spending").await.unwrap();
     let events = collect(&mut run).await;
     drop(run);
+    // This route does not replay interrupted inference, and a hard ceiling does
+    // not change that. The attempt is charged its admitted worst case instead of
+    // closing the ceiling for the rest of the session.
     assert!(
         matches!(
             assert_single_run_finished(&events),
-            FinishReason::Failed(octet_agent::AgentError::ProviderRecovery {
-                retries: 0,
-                usage_unknown: true,
-                ..
-            })
+            FinishReason::Failed(octet_agent::AgentError::Ai(_))
+        ),
+        "{events:?}"
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ProviderUsageUncertain)));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ProviderRetry { .. })));
+    assert_eq!(wire_requests(&server).await.len(), 1);
+    let charged = agent
+        .session()
+        .usage_uncertainty_exposure()
+        .and_then(|exposure| exposure.cost_microdollars)
+        .expect("a capped, priced attempt has a bounded cost");
+    assert!(charged > 0);
+
+    // The charge counts against the ceiling before any later dispatch.
+    let current = charged.saturating_add(agent.session().total_cost_microdollars());
+    agent.set_max_session_cost_microdollars(Some(current));
+    let mut run = agent.prompt("not affordable").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Failed(octet_agent::AgentError::CostLimit { current: counted, .. })
+                if *counted == current
         ),
         "{events:?}"
     );
     assert_eq!(wire_requests(&server).await.len(), 1);
-    assert!(!events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::ProviderRetry { .. })));
+
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    let mut run = agent.prompt("now affordable").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 2);
 }
 
 #[tokio::test]
@@ -8452,6 +8591,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                     message: AssistantMessage { content: vec![AssistantPart::Text("R".into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn, usage: octet_ai::Usage::default(),
                     deferred: None,
+                    inference: None,
                     cost: response_cost, response_id: None, responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
@@ -8485,6 +8625,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                     stop_reason: octet_ai::StopReason::EndTurn,
                     usage: octet_ai::Usage::default(), cost: response_cost, response_id: None,
                     deferred: None,
+                    inference: None,
                     responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
@@ -8942,8 +9083,11 @@ async fn qualified_http_admission_and_stream_budgets_are_independent_and_cumulat
 }
 
 #[tokio::test(start_paused = true)]
-async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_admission_budget() {
-    for (status, code, hard_budget) in [
+async fn qualified_http_failures_replay_alike_under_a_roomy_hard_budget_and_permanent_rejections_never_replay(
+) {
+    // `bounded` marks transient failures on a capped route, which a hard ceiling
+    // can charge at their admitted worst case. Permanent rejections never replay.
+    for (status, code, bounded) in [
         (500, "server_error", true),
         (502, "server_error", true),
         (503, "server_error", true),
@@ -8956,41 +9100,67 @@ async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_adm
         (429, "insufficient_quota", false),
         (401, "invalid_api_key", false),
     ] {
-        let (mut agent, server, _workspace, _) =
-            recovery_harness_with_output_cap(vec![], hard_budget).await;
-        server.reset().await;
-        Mock::given(method("POST"))
-            .and(path("responses"))
-            .respond_with(
-                ResponseTemplate::new(status)
-                    .set_body_json(serde_json::json!({"error":{"code":code}})),
-            )
-            .mount(&server)
-            .await;
-        if hard_budget {
-            agent.set_max_session_cost_microdollars(Some(u64::MAX));
+        let mut attempts = Vec::new();
+        for hard_budget in [false, true] {
+            if hard_budget && !bounded {
+                continue;
+            }
+            let (mut agent, server, _workspace, _) =
+                recovery_harness_with_output_cap(vec![], bounded).await;
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("responses"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error":{"code":code}})),
+                )
+                .mount(&server)
+                .await;
+            if hard_budget {
+                agent.set_max_session_cost_microdollars(Some(u64::MAX));
+            }
+            let mut run = agent
+                .prompt("charge a hard budget and never retry permanent failures")
+                .await
+                .unwrap();
+            let events = collect_virtual_recovery(&mut run).await;
+            drop(run);
+            assert!(
+                matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
+                "{events:?}"
+            );
+            let requests = wire_requests(&server).await;
+            let retries = events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ProviderRetry { .. }))
+                .count();
+            assert_eq!(retries, requests.len() - 1, "{status} {code}");
+            if !bounded {
+                assert_eq!(requests.len(), 1, "{status} {code}");
+            }
+            if hard_budget {
+                // Every attempt carried the enforceable cap that bounds it, and
+                // any uncertainty it left keeps a priced bound, so the ceiling
+                // still works for the rest of the session.
+                assert!(requests
+                    .iter()
+                    .all(|request| request["max_output_tokens"].as_u64().is_some()));
+                assert!(agent.session().usage_uncertainty_records().len() <= requests.len());
+                assert!(agent
+                    .session()
+                    .usage_uncertainty_exposure()
+                    .is_some_and(|exposure| exposure.cost_microdollars.is_some()));
+            }
+            if status == 503 {
+                assert!(agent.session().has_uncertain_usage());
+            }
+            attempts.push(requests.len());
         }
-        let mut run = agent
-            .prompt("do not exceed hard budget or retry permanent failures")
-            .await
-            .unwrap();
-        let events = collect_virtual_recovery(&mut run).await;
-        drop(run);
+        // A ceiling with room never changes whether a failure replays.
         assert!(
-            matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
-            "{events:?}"
+            attempts.windows(2).all(|pair| pair[0] == pair[1]),
+            "{status} {code}: {attempts:?}"
         );
-        let requests = wire_requests(&server).await;
-        assert_eq!(requests.len(), 1);
-        if hard_budget {
-            assert!(requests[0]["max_output_tokens"].as_u64().is_some());
-        }
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
-        if status == 503 {
-            assert!(agent.session().has_uncertain_usage());
-        }
     }
 }
 
@@ -9028,7 +9198,12 @@ async fn unpriced_history_blocks_auxiliary_cost_reservation_before_dispatch() {
 async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_uncertainty() {
     for status in [503, 520] {
         for gate in [false, true] {
-            for hard_budget in [false, true] {
+            // The uncapped Codex route recovers through its full envelope. A
+            // capped route follows its own replacement policy, and a hard
+            // ceiling with room must not change it: it only charges each
+            // unknown attempt its admitted bound.
+            let mut capped_baseline = None;
+            for (capped, hard_budget) in [(false, false), (true, false), (true, true)] {
                 let mut steps = Vec::new();
                 if gate {
                     steps.push(RecoveryStep::Reply("candidate", Duration::ZERO));
@@ -9042,11 +9217,8 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                 if !gate {
                     steps.push(RecoveryStep::Reply("answer", Duration::ZERO));
                 }
-                let (mut agent, transport, workspace) = operation_recovery_agent_with_output_cap(
-                    steps,
-                    ExtensionHost::new(),
-                    hard_budget,
-                );
+                let (mut agent, transport, workspace) =
+                    operation_recovery_agent_with_output_cap(steps, ExtensionHost::new(), capped);
                 if gate {
                     agent.set_completion_policy(CompletionPolicy::TerminalGate);
                 } else {
@@ -9071,22 +9243,10 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                 let mut run = agent.prompt("recover auxiliary").await.unwrap();
                 let events = collect(&mut run).await;
                 drop(run);
-                assert_eq!(
+                let outcome = (
                     matches!(assert_single_run_finished(&events), FinishReason::Completed),
-                    !hard_budget,
-                    "gate={gate} hard={hard_budget} {events:?}"
-                );
-                assert_eq!(
                     transport.requests.lock().unwrap().len(),
-                    if hard_budget {
-                        1 + usize::from(gate)
-                    } else {
-                        23
-                    }
-                );
-                assert_eq!(
                     agent.session().usage_uncertainty_records().len(),
-                    if hard_budget { 1 } else { 21 }
                 );
                 assert_eq!(
                     events
@@ -9095,6 +9255,22 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                         .count(),
                     1
                 );
+                let label =
+                    format!("status={status} gate={gate} capped={capped} hard={hard_budget}");
+                match (capped, hard_budget) {
+                    (false, _) => assert_eq!(outcome, (true, 23, 21), "{label}"),
+                    (true, false) => capped_baseline = Some(outcome),
+                    (true, true) => {
+                        assert_eq!(Some(outcome), capped_baseline, "{label}");
+                        assert!(
+                            agent
+                                .session()
+                                .usage_uncertainty_exposure()
+                                .is_some_and(|exposure| exposure.cost_microdollars.is_some()),
+                            "{label}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -11242,9 +11418,13 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         .iter()
         .map(|contribution| contribution.name.as_str())
         .collect::<Vec<_>>();
+    // `PowerShellTool` registers (with a snippet) on Windows only.
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut expected = vec!["read", "edit", "write", "bash", "search"];
+    #[cfg(windows)]
+    expected.push("powershell");
     assert_eq!(
-        declared,
-        vec!["read", "edit", "write", "bash", "search"],
+        declared, expected,
         "contributions follow wire order for exactly the tools that declare a snippet"
     );
     // Search contributes its own snippet and stays callable. Rendering does
@@ -11987,3 +12167,6 @@ async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
 
 #[path = "agent_run/gpt6.rs"]
 mod gpt6;
+
+#[path = "agent_run/responses_prewarm.rs"]
+mod responses_prewarm;

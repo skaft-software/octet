@@ -46,7 +46,7 @@ models and legacy endpoint assertions ahead of self-description leaves. Sparse
 family defaults cannot override a self-description's disabled capabilities.
 
 Only selected-endpoint inventory or its URL/account-isolated raw cache may be
-passed as authority. The pinned models.dev record contributes a display name,
+passed as authority. The models.dev record, pinned or checked live, contributes a display name,
 provider-scoped pricing, and — solely where the endpoint asserts nothing —
 input modalities and context/output limits; it never supplies reasoning
 controls or tool/structured-output flags, and it never overrides an endpoint
@@ -213,6 +213,22 @@ cancellable bounds, not a requirement to wait before cancelling a stalled reques
 
 Observed indices use a hash set and are sorted only during final assembly, keeping hostile many-part processing near-linear.
 
+## Inference observations (unreleased)
+
+`Response.inference` keeps advisory performance observations outside `Usage`.
+The shared guarded-client wrapper freezes monotonic canonical-output offsets,
+byte/event counters, gaps and completion time before downstream settlement for
+all ordinary conversation transports. A cancellation-owned bounded receive task
+isolates clocks from ordinary downstream polling; queue saturation suppresses the
+usage-calibrated robust decode estimate, not accounting or native timing.
+Native steering successors and deferred
+submit/poll operations retain distinct origins rather than fabricated E2E rates.
+Codecs retain recognized native terminal count/duration pairs with source/unit
+provenance; unsupported, invalid, provisional and conflicting server timing is
+explicitly unavailable. Optional timing cannot replace billing/accounting or
+turn a valid response into a server-speed claim. See
+[the complete measurement contract](../inference-metrics.md).
+
 ## Validation and compatibility
 
 Strict mode rejects unsupported modalities, reasoning state, tools, malformed schemas, missing/orphan tool results, invalid sampling parameters, and model-limit violations before network I/O. Lossy conversion emits bounded diagnostics and visible placeholders rather than silently changing semantic data. Explicit generation reasoning selections are validated without clamping, even in Lossy mode: silently omitting a rejected Off could enable provider-default thinking. Token budgets must leave answer room within the effective output allowance. Anthropic/Bedrock thinking also rejects incompatible sampling and forced tool choices. Product-level normalization is separate from core wire validation.
@@ -248,6 +264,14 @@ Pricing is provider-scoped, represented as integer microdollars per million
 tokens, and is used as a fallback for discovered built-in routes; explicit
 `CatalogConfig` pricing remains authoritative. Runtime discovery is a
 coding-product concern and can be disabled with `--offline`/`OCTET_OFFLINE=true`.
+
+The crate never fetches models.dev itself. `live_metadata_from_models_dev`
+applies the refresh script's extraction to a catalog the host fetched and checks
+each record against the compiled snapshot; `install_live_metadata` then makes
+the accepted records visible to every lookup, which falls back to the snapshot
+per model. The coding product owns the fetch, its cache and six-hour TTL, and
+`--offline`; see
+[Live metadata](../../crates/octet-ai/models/SOURCES.md#live-metadata-v082).
 
 ## OpenRouter Batch API
 

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use octet_agent::{
-    EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
+    CacheWarmMode, EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
     DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_MAX_OUTPUT_BYTES,
 };
 
@@ -57,6 +57,45 @@ impl MouseMode {
     /// ownership is intentionally independent of this setting.
     pub fn application_owned(self) -> bool {
         matches!(self, Self::App)
+    }
+}
+
+/// Tern Surface Protocol rendering policy for the interactive frontend.
+///
+/// `Auto` (the default) negotiates native surfaces only when the terminal
+/// advertises itself (`TERM_PROGRAM=tern`), so every other terminal keeps the
+/// ANSI renderer untouched. `On` forces negotiation regardless of detection,
+/// which is how a non-Tern host is exercised against the protocol path. `Off`
+/// disables the native backend outright and always renders ANSI, even inside
+/// Tern.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TernMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl TernMode {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "on" | "true" | "yes" | "1" => Ok(Self::On),
+            "off" | "false" | "no" | "0" => Ok(Self::Off),
+            _ => anyhow::bail!("invalid tern mode {value:?}; use auto, on, or off"),
+        }
+    }
+
+    /// Whether octet may negotiate a native Tern surface at all. `Auto` still
+    /// requires terminal detection, so this is the cheap deny-first gate.
+    pub fn permitted(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Whether the terminal's own advertisement must be ignored and the
+    /// protocol path attempted unconditionally.
+    pub fn forced(self) -> bool {
+        matches!(self, Self::On)
     }
 }
 
@@ -434,6 +473,10 @@ pub struct Config {
     /// True when the reasoning mode came from an explicit command-line override.
     pub reasoning_mode_explicit: bool,
     pub cache_retention: CacheRetention,
+    /// Billable prompt-cache refresh policy. Project configuration cannot override it.
+    pub cache_warming: CacheWarmMode,
+    /// Opt-in presentation of cache misses and successful warming; accounting is unconditional.
+    pub show_cache_miss_notices: bool,
     /// Host-owned admission policy for model-requested tool effects.
     pub effect_policy: EffectPolicy,
     pub sandbox: SandboxPolicy,
@@ -451,6 +494,10 @@ pub struct Config {
     pub mouse: MouseMode,
     /// Force the chronological ASCII frontend even on a capable TTY.
     pub plain: bool,
+    /// Tern Surface Protocol policy for the interactive frontend. `Auto`
+    /// negotiates native surfaces only inside a Tern pane; `Off` always keeps
+    /// the ANSI renderer.
+    pub tern: TernMode,
     /// Opt in to bounded inline image placement for interactive tool results.
     /// Plain, print, and noninteractive frontends always remain payload-free.
     pub show_images: bool,
@@ -485,6 +532,10 @@ pub struct Config {
     pub trusted_extensions: Vec<String>,
     /// One-shot extension names trusted only for this process invocation.
     pub invocation_trusted_extensions: Vec<String>,
+    /// Whether this product surface may start executable extension processes
+    /// at all. The native-host protocol reports discovery only, whatever the
+    /// activation and host-authority grants in its request say.
+    pub start_extension_processes: bool,
     /// One-shot process-owner gate for experimental remote Streamable HTTP MCP.
     /// This is deliberately not loaded from configuration, environment, or sessions.
     pub experimental_streamable_http_mcp: bool,
@@ -562,6 +613,25 @@ pub fn parse_cache_retention(value: &str) -> anyhow::Result<CacheRetention> {
     }
 }
 
+/// Parse the user-owned billable cache-warming policy.
+pub fn parse_cache_warming(value: &str) -> anyhow::Result<CacheWarmMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(CacheWarmMode::Off),
+        "streaming" => Ok(CacheWarmMode::Streaming),
+        "idle" => Ok(CacheWarmMode::Idle),
+        _ => anyhow::bail!("invalid cache warming {value:?}; use off, streaming, or idle"),
+    }
+}
+
+/// Stable configuration and diagnostics spelling for a cache-warming mode.
+pub fn cache_warming_label(mode: CacheWarmMode) -> &'static str {
+    match mode {
+        CacheWarmMode::Off => "off",
+        CacheWarmMode::Streaming => "streaming",
+        CacheWarmMode::Idle => "idle",
+    }
+}
+
 /// Default location for persistent sessions.
 pub fn default_session_dir() -> PathBuf {
     dirs::home_dir()
@@ -589,6 +659,24 @@ mod tests {
     }
 
     #[test]
+    fn tern_mode_gates_native_surfaces_without_touching_detection() {
+        assert_eq!(TernMode::default(), TernMode::Auto);
+        assert_eq!(TernMode::parse("auto").unwrap(), TernMode::Auto);
+        assert_eq!(TernMode::parse("on").unwrap(), TernMode::On);
+        assert_eq!(TernMode::parse("1").unwrap(), TernMode::On);
+        assert_eq!(TernMode::parse("off").unwrap(), TernMode::Off);
+        assert_eq!(TernMode::parse("0").unwrap(), TernMode::Off);
+        assert!(TernMode::parse("sometimes").is_err());
+        // Off denies negotiation outright; On forces it past detection; Auto
+        // still waits for the terminal to advertise itself.
+        assert!(!TernMode::Off.permitted());
+        assert!(TernMode::Auto.permitted());
+        assert!(!TernMode::Auto.forced());
+        assert!(TernMode::On.permitted());
+        assert!(TernMode::On.forced());
+    }
+
+    #[test]
     fn colour_mode_accepts_the_three_portable_policies() {
         assert_eq!(ColorMode::parse("auto").unwrap(), ColorMode::Auto);
         assert_eq!(ColorMode::parse("always").unwrap(), ColorMode::Always);
@@ -605,6 +693,24 @@ mod tests {
         );
         assert_eq!(parse_cache_retention("long").unwrap(), CacheRetention::Long);
         assert!(parse_cache_retention("sometimes").is_err());
+    }
+
+    #[test]
+    fn cache_warming_accepts_only_the_three_modes() {
+        assert_eq!(CacheWarmMode::default(), CacheWarmMode::Streaming);
+        for mode in [
+            CacheWarmMode::Off,
+            CacheWarmMode::Streaming,
+            CacheWarmMode::Idle,
+        ] {
+            assert_eq!(
+                parse_cache_warming(cache_warming_label(mode)).unwrap(),
+                mode
+            );
+        }
+        for invalid in ["", "on", "none", "sometimes"] {
+            assert!(parse_cache_warming(invalid).is_err());
+        }
     }
 
     #[test]

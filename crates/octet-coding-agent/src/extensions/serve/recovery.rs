@@ -48,12 +48,14 @@ pub(super) fn session_deletion_directory(serve_state_dir: &Path) -> anyhow::Resu
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = std::fs::DirBuilder::new();
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt as _;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             builder.create(&directory)?;
         }
         Err(error) => return Err(error.into()),

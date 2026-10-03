@@ -10,6 +10,7 @@
 # isolated-browser case.
 # deprecated: octet-browse -> octet-computer-use
 octet-browse
+octet-codemode
 octet-computer-use
 octet-mcp
 octet-subagents

@@ -1,0 +1,12 @@
+{
+  "name": "@skaft-software/octet-extension-sdk",
+  "version": "0.8.2",
+  "description": "Bounded TypeScript/JavaScript process authoring for octet extension API 0.4",
+  "type": "module",
+  "exports": {".": {"types": "./index.d.mts", "import": "./index.mjs"}},
+  "bin": {"octet-extension": "./cli.mjs"},
+  "files": ["index.mjs", "index.d.mts", "schema.mjs", "diagnostics.mjs", "cli.mjs", "README.md"],
+  "scripts": {"test": "node --test ../tests/process_*.mjs"},
+  "engines": {"node": ">=22.19.0"},
+  "license": "MIT"
+}

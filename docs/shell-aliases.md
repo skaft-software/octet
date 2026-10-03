@@ -3,9 +3,9 @@
 [Documentation](README.md) · [Tools](tools.md) · [CLI](cli.md)
 
 octet runs shell commands non-interactively. The `bash` tool starts the selected
-Bash-compatible shell with `-c <command>` (`crates/octet-agent/src/tools/bash.rs:244`),
+Bash-compatible shell with `-c <command>` (`BashTool` in `crates/octet-agent/src/tools/bash.rs`),
 and the interactive `!<command>` local command runs through `sh -c`
-(`crates/octet-coding-agent/src/modes/interactive.rs:5838`). Neither is a login
+(`run_local_shell` in `crates/octet-coding-agent/src/modes/interactive.rs`). Neither is a login
 or interactive shell, so shell aliases defined in `~/.zshrc`, `~/.bashrc`, or a
 zsh profile are **not** expanded.
 

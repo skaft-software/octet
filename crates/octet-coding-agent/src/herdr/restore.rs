@@ -283,11 +283,28 @@ pub(crate) fn remove_record_in(directory: &Path, pane_id: &str) {
 }
 
 /// Canonical text for a directory, falling back to the literal path.
+///
+/// On Windows the spelling is normalized to forward slashes (this module's
+/// token language: `is_safe_command_token` admits `/`, and pane shells are
+/// POSIX-style), with any `\\?\` verbatim prefix stripped first so the text
+/// stays a plain drive-letter path. Verbatim-stripped drive paths still fail
+/// `quote_shell_path`'s leading-`/` check, so Windows restores keep skipping
+/// as unsafe until a native shell-quoting port lands; the normalization only
+/// keeps record identity comparisons self-consistent.
 fn canonical_text(path: &Path) -> String {
-    std::fs::canonicalize(path)
+    let text = std::fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
-        .into_owned()
+        .into_owned();
+    #[cfg(windows)]
+    {
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        text.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+    #[cfg(not(windows))]
+    {
+        text
+    }
 }
 
 /// Read every well-formed record in the directory, bounded in count and size.

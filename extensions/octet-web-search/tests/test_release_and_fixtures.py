@@ -47,13 +47,14 @@ class ReleaseAndFixtureTests(unittest.TestCase):
         manifest = (ROOT / "extension.toml").read_text(encoding="utf-8")
         for exact in (
             'name = "octet-web-search"',
-            'version = "0.8.1"',
+            'version = "0.8.2"',
             'api_version = "0.4"',
-            'requires_octet = "=0.8.1"',
+            'requires_octet = "=0.8.2"',
             'command = "extension.py"',
             'tools = ["web_search", "web_fetch", "web_find"]',
             'commands = ["web-search"]',
             "presentation = true",
+            "menu = true",
             "network = true",
         ):
             self.assertIn(exact, manifest)
@@ -74,6 +75,7 @@ class ReleaseAndFixtureTests(unittest.TestCase):
                     "commands": ["web-search"],
                     "ui": ["status"],
                     "presentation": True,
+                    "menu": True,
                 },
                 "protocol": {
                     "version": "0.4",

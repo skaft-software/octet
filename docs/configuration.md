@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [CLI](cli.md) · [Providers](providers.md)
 
-Put deliberate user choices in `~/.octet/config.toml`, for example:
+Put your own choices in `~/.octet/config.toml`:
 
 ```toml
 model = "claude-sonnet-4-6"
@@ -11,125 +11,148 @@ effect_policy = "controlled_bash_approval"
 allow_external_paths = false
 ```
 
-These are example choices, not a claim that this model is configured or that all
-values are defaults. Provider credentials belong in the [provider setup](providers.md),
-not this file.
+These are examples, not defaults. Provider credentials don't go in this file:
+see [provider setup](providers.md).
 
 ## Precedence
 
-The supplied reference orders layers from least to most explicit:
+Layers, from least to most explicit:
 
 1. Built-in defaults.
 2. `~/.octet/config.toml`.
-3. Trusted project `.octet/config.toml`, only with `--workspace-trusted`.
+3. A trusted project's `.octet/config.toml`, only with `--workspace-trusted`.
 4. Environment variables.
 5. CLI flags.
-6. Resumed-session model/reasoning, unless explicitly overridden by CLI.
+6. The resumed session's model and reasoning. An explicit CLI value still wins.
 
-A trusted project can tighten user authority floors, not relax them. If an
-absolute user home cannot be resolved, global config/resources are disabled
-with a diagnostic; octet never substitutes the invocation directory.
-
-System-prompt precedence follows the same order: global configuration, trusted
-project configuration, environment, then CLI. An explicit empty CLI value
-overrides all lower layers.
+A trusted project can tighten your authority limits, never relax them. If octet
+can't resolve an absolute home directory, it disables global config and
+resources and says so. It never substitutes the current directory. System-prompt
+precedence follows the same order, and an explicit empty CLI value overrides
+every lower layer. `cache_warming` and `show_cache_miss_notices` are user-only:
+trusted project config cannot override them. Cache-warming mode is never
+restored from session history. `/cache-warming MODE` persists the user choice.
 
 ## Settings
 
-Only explicitly stated defaults below are defaults. Other numeric/string values
-preserve the supplied reference's example configuration, not newly verified
-runtime defaults.
+Defaults are marked. Other values are examples.
 
-| Setting | Meaning and documented value |
-| --- | --- |
-| `model` | Model ID; examples include `claude-sonnet-4-6` and legacy `custom/Qwen3 Coder Next`. Prefer [provider-qualified custom IDs](providers.md#custom-registry) for new registry entries. |
-| `reasoning` | Model-supported choice, example `"high"`; `"off"` is an explicit preference. Unset uses [model-aware defaults](providers.md#defaults-unreleased), after session restoration. [Levels and budgets](providers.md#reasoning). |
-| `system_prompt` | Replace all composed system instructions, including with `""`; example `"You are a careful and concise reviewer."`. AGENTS/context/skill instructions are ignored while set. |
-| `cache_retention` | Provider prompt-cache retention selection; example `"short"`. |
-| `theme` | Built-in `"auto"`, `"light"`, or `"dark"`, or the file stem of a discovered TOML theme (e.g. `"mine"`). Auto adapts to the terminal background; light/dark override detection. [Theme discovery](themes.md). |
-| `color` | Terminal color selection; example `"auto"`, with terminal-capability fallbacks. |
-| `mouse` | Default `"auto"`; `auto`, `terminal`, and `off` preserve native selection/history; `app` selects the captured semantic viewport. |
-| `plain` | Chronological frontend; example `false`. |
-| `show_images` | Default `false`; `true` opts in to bounded inline tool-result images on compatible interactive terminals. This controls display, not upload or explicit input-attachment consent. Equivalent flag: `--show-images`. [Display limits](terminal.md#tool-evidence-and-worker-activity). |
-| `models` | Optional user-level ordered model scope written by `/scoped-models` as one comma-separated pattern string (e.g. `"openai/*:high,custom/alpha-model"`). Interactive Ctrl+P cycling only: headless modes ignore it, `--models` wins when both are present, and a trusted project layer can never override it. |
-| `effect_policy` | Default `"unsafe_host"`; alternatives `"controlled"`, `"controlled_bash_approval"`. [Authority profiles](tools.md#authority-profiles). |
-| `allow_external_paths` | Default `true` in full-access CLI launches. Set `false` for workspace-local built-in file admission; safe mode forces false. This does not contain shell commands or extension processes. |
-| `allow_edit`, `allow_write` | Independent mutation capabilities; example `true` for both. `--no-edit` removes both tools. |
-| `allow_process`, `allow_shell` | Independent process/shell gates; example `true` for both. Enabling does not override an effect denial. |
-| `allow_remote_read` | Default `false`; opt-in HTTPS image/audio reads, always disabled by `--offline`. |
-| `shell_path` | Optional explicit Bash-compatible shell; [selection order](tools.md#shell-selection). |
-| `bash_timeout_secs` | Command timeout; example `120` seconds. |
-| `max_output_bytes` | Command output capture bound; example `1048576` bytes. |
-| `context_files` | Include instruction/context files; example `true`, project inputs still require trust. |
-| `offline` | Example `false`; `true` skips optional model discovery and remote reads, not inference. |
-| `strict_config` | Default behavior warns about unknown keys; `true` makes them errors, as does `--strict-config`. |
-| `reload` | Default `true`: the interactive prompt silently arms the live-reload supervisor and applies reloads only at the idle prompt. `/reload --dry-run` shows watch counts, timing, and host re-exec policy; incomplete watch coverage still warns. `false` disables sampling for good. User level only; a trusted project layer may not arm it. |
-| `reload_poll_ms` | Default `1000`; interval between filesystem samples, clamped to `50..=300000`. Sampling covers the skill/prompt/theme/context/extension roots in use plus the resolved executable. |
-| `reload_debounce_ms` | Default `200`; save-burst debounce, clamped to `2000` maximum so a burst always flushes. |
-| `reload_max_files` | Default `512`; metadata inspections per poll, clamped to `1..=4096`. Directory enumeration shares a separate allowance of the same size, plus at most one overflow entry; entries are bounded before collection/sorting. Partially scanned layers are reported as capped, never as changes or removals. |
-| `session_dir` | Session-storage root; equivalent CLI option `--session-dir PATH`. [Storage and recovery](sessions.md). |
-| `max_turns` | Bound model turns; equivalent CLI option `--max-turns N`. |
-| `max_cost_microdollars` | Optional session cost guardrail; example `500000`, integer microdollars. |
-| `cost_warning_microdollars` | Optional cost warning; example `50000`, integer microdollars. |
-| `telemetry` | Optional explicit JSONL output path; disabled unless set. Example `"./artifacts/octet-telemetry.jsonl"`. |
-| `[compaction]` | `mode = "local"`, `threshold_fraction = 1.0`, optional `max_active_tokens` (zero/unset uses model limit), `keep_recent_tokens = 20000`, optional `compact_model = "provider/model"`. [Exact budgeting and caveats](context.md#settings). |
-| `enabled_extensions` | Default `[]`: installed executable extensions stay disabled until explicitly enabled. Full access does not change activation. |
-| `trusted_extensions` | Default `[]`: optional persistent source-bound grants. Full access implicitly trusts selected extensions without adding grants; safe mode removes implicit trust and blocks executable startup even with explicit grants. [Resource rules](resources.md#locations-and-precedence). |
+| Setting | Default or example | What it does |
+| --- | --- | --- |
+| `model` | `claude-sonnet-4-6` | Model ID. The legacy `custom/Qwen3 Coder Next` form still works. Prefer [provider-qualified custom IDs](providers.md#custom-registry) for new entries. |
+| `reasoning` | `"high"` | A reasoning choice the model supports. `"off"` is an explicit preference. When it's unset, octet uses [model-aware defaults](providers.md#defaults-unreleased) after restoring the session. [Levels and budgets](providers.md#reasoning). |
+| `system_prompt` | `"You are a careful and concise reviewer."` | Replaces all composed system instructions, even with `""`. AGENTS, context and skill instructions are ignored while it's set. |
+| `cache_retention` | `"short"` | Provider prompt-cache retention. |
+| `cache_warming` | default `"streaming"` | `off`, `streaming`, or `idle`. Additional billable cache refreshes; user level only, never project/session policy. [Scheduling and limits](cache-warming.md). |
+| `show_cache_miss_notices` | default `false` | User-level opt-in notices for material cache misses and successful refreshes. Accounting and `/session` diagnostics are unconditional. |
+| `theme` | `"auto"` | `auto`, `light` or `dark`, or the file stem of a discovered TOML theme (such as `"mine"`). Auto follows the terminal background. Light and dark override detection. [Themes](themes.md). |
+| `color` | `"auto"` | Terminal color, with capability fallbacks. |
+| `mouse` | default `"auto"` | `auto`, `terminal` and `off` keep native selection and history. `app` selects the captured viewport. |
+| `plain` | `false` | Chronological frontend. |
+| `show_images` | default `false` | `true` shows tool-result images inline on compatible terminals. Display only: not upload or attachment consent. Same as `--show-images`. [Limits](terminal.md#tool-evidence-and-worker-activity). |
+| `models` | | Optional user-level ordered model scope, written by `/scoped-models` as one comma-separated pattern string (such as `"openai/*:high,custom/alpha-model"`). It only affects Ctrl+P cycling in the interactive UI. Headless modes ignore it, `--models` wins if both are set, and a trusted project layer can't override it. |
+| `effect_policy` | default `"unsafe_host"` | Or `"controlled"` or `"controlled_bash_approval"`. [Permissions](tools.md#authority-profiles). |
+| `allow_external_paths` | default `true` in full-access CLI launches | `false` keeps the built-in file tools in the workspace. Safe mode forces `false`. It doesn't contain shell commands or extension processes. |
+| `allow_edit`, `allow_write` | `true` for both | Separate file-change switches. `--no-edit` removes both tools. |
+| `allow_process`, `allow_shell` | `true` for both | Separate process and shell gates. Enabling one doesn't override an effect denial. |
+| `allow_remote_read` | default `false` | Allow HTTPS image and audio reads. `--offline` always disables it. |
+| `shell_path` | optional | Explicit Bash-compatible shell. [Selection order](tools.md#shell-selection). |
+| `bash_timeout_secs` | `120` | Command timeout in seconds. |
+| `max_output_bytes` | `1048576` | Command output capture limit. |
+| `context_files` | `true` | Include instruction and context files. Project files still need trust. |
+| `offline` | `false` | `true` skips optional model discovery and remote reads, not inference. |
+| `strict_config` | default: warn | `true` makes unknown keys errors, like `--strict-config`. |
+| `reload` | default `true` | The interactive prompt quietly starts the live-reload supervisor and applies reloads only at the idle prompt. `/reload --dry-run` shows watch counts, timing and the host re-exec policy, and incomplete watch coverage still warns. `false` turns sampling off for good. User level only: a trusted project layer can't turn it on. |
+| `reload_poll_ms` | default `1000` | Interval between filesystem samples, clamped to `50..=300000`. Sampling covers the skill, prompt, theme, context and extension roots in use, plus the resolved executable. |
+| `reload_debounce_ms` | default `200` | Save-burst debounce, clamped to a maximum of `2000` so a burst always flushes. |
+| `reload_max_files` | default `512` | Metadata inspections per poll, clamped to `1..=4096`. Directory listing has its own allowance of the same size, plus at most one overflow entry, and entries are bounded before collection and sorting. A partly scanned layer is reported as capped, never as a change or a removal. |
+| `session_dir` | | Session storage root. Same as `--session-dir PATH`. [Sessions](sessions.md). |
+| `max_turns` | | Limit model turns. Same as `--max-turns N`. |
+| `max_cost_microdollars` | `500000` | Optional session cost limit, in integer microdollars. |
+| `cost_warning_microdollars` | `50000` | Optional cost warning, in integer microdollars. |
+| `telemetry` | `"./artifacts/octet-telemetry.jsonl"` | Optional JSONL output path. Off unless set. |
+| `[compaction]` | | `mode = "local"`, `threshold_fraction = 1.0`, optional `max_active_tokens` (zero or unset uses the model limit), `keep_recent_tokens = 20000`, optional `compact_model = "provider/model"`. [Details](context.md#settings). |
+| `enabled_extensions` | default `[]` | Installed executable extensions stay disabled until you enable them. Full access doesn't change activation. |
+| `trusted_extensions` | default `[]` | Persistent **host authority grants** (existing configs keep their meaning). A bare name grants only the global source. `NAME@/absolute/path/extension.toml` grants that exact manifest. Full access implicitly authorizes enabled extensions without writing a grant. Safe mode starts only enabled, explicitly granted sources (or an explicit `--extension-dir`). Extension code runs with your OS permissions, outside the tool-effect broker. [Resource rules](resources.md#locations-and-precedence). |
 
 `--theme-dir` adds a theme directory or TOML file to bounded discovery. Named
-files from global, trusted project, or explicit roots can be loaded at startup
-and selected interactively with `/theme`. [Themes](themes.md).
+files from global, trusted project or explicit roots can be loaded at startup
+and chosen with `/theme`. See [Themes](themes.md).
 
-Reload cap reports show **at least** the known skipped paths, not an exact total:
-unread directory contents are unknown. Failed directory entries also consume the
-enumeration allowance. Fully scanned directories retain deterministic ordering;
-capped layers neither replace their baseline nor infer changes from an arbitrary
-filesystem-order prefix. The first complete scan establishes that layer's
-baseline. Executable sampling remains independent of these resource-tree limits.
+<details>
+<summary>How the reload caps report</summary>
+
+Cap reports show **at least** the known skipped paths, not an exact total,
+because unread directory contents are unknown. Failed directory entries also use
+up the listing allowance. Fully scanned directories keep a deterministic order.
+A capped layer neither replaces its baseline nor infers changes from an
+arbitrary filesystem-order prefix. The first complete scan sets that layer's
+baseline. Executable sampling is separate from these resource-tree limits.
+
+</details>
 
 ## Environment variables
 
-| Variable | Corresponding control |
+| Variable | What it sets |
 | --- | --- |
 | `OCTET_MODEL`, `OCTET_REASONING` | Model and effort. |
 | `OCTET_EFFECT_POLICY` | Effect profile. |
-| `OCTET_SYSTEM_PROMPT` | System-instruction replacement; see [precedence](#precedence). |
+| `OCTET_SYSTEM_PROMPT` | System-instruction replacement ([precedence](#precedence)). |
 | `OCTET_CACHE_RETENTION` | Cache retention. |
-| `OCTET_COLOR`, `OCTET_MOUSE`, `OCTET_THEME`, `OCTET_COLOR_SCHEME` | Terminal presentation; `OCTET_THEME` accepts `auto`, `light`, `dark`, or a discovered TOML theme name, while `OCTET_COLOR_SCHEME` remains a background-detection override. |
-| `OCTET_SHOW_IMAGES` | `1` opts in to inline tool-result display, not media upload. |
-| `OCTET_WORKSPACE`, `OCTET_SESSION_DIR` | Workspace and session-storage roots. |
-| `OCTET_MAX_TURNS` | Turn bound. |
-| `OCTET_COMPACTION_MODE`, `OCTET_COMPACTION_THRESHOLD_FRACTION`, `OCTET_COMPACTION_MAX_ACTIVE_TOKENS` | Compaction mode and thresholds. |
+| `OCTET_CACHE_WARMING` | `off`, `streaming`, or `idle`; overrides the user config, below `--cache-warming`. |
+| `OCTET_COLOR`, `OCTET_MOUSE`, `OCTET_THEME`, `OCTET_COLOR_SCHEME` | Terminal presentation. `OCTET_THEME` takes `auto`, `light`, `dark` or a discovered TOML theme name. `OCTET_COLOR_SCHEME` stays a background-detection override. |
+| `OCTET_TERN`, `OCTET_TUI_TERN` | Tern native rendering: `auto`, `on` or `off`. Defaults to `auto`, which negotiates native surfaces only inside a Tern pane. `OCTET_TUI_TERN` is the older spelling and is read only when `OCTET_TERN` is unset. |
+| `OCTET_SHOW_IMAGES` | `1` shows tool-result images inline. It isn't a media upload. |
+| `OCTET_WORKSPACE`, `OCTET_SESSION_DIR` | Workspace and session roots. |
+| `OCTET_MAX_TURNS` | Turn limit. |
+| `OCTET_COMPACTION_MODE`, `OCTET_COMPACTION_THRESHOLD_FRACTION`, `OCTET_COMPACTION_MAX_ACTIVE_TOKENS` | Compaction. |
 | `OCTET_SHELL_PATH`, `OCTET_BASH_TIMEOUT_SECS`, `OCTET_MAX_OUTPUT_BYTES` | Shell and command limits. |
-| `OCTET_OFFLINE` | Skip optional discovery; not network isolation. |
-| `OCTET_TELEMETRY` | Opt-in telemetry path. |
-| `OCTET_ALLOW_*` | Mirrored capability controls; specifically `OCTET_ALLOW_REMOTE_READ=true` grants remote media reads unless offline. |
-| `OCTET_PACKAGE_DIR`, `OCTET_DATA_DIR` | Override the [self-documentation asset root](instructions.md#self-documentation). |
-| `OCTET_TUI_WRITE_LOG` | Opt-in sensitive raw terminal capture, below. |
+| `OCTET_OFFLINE` | Skip optional discovery and the background models.dev metadata refresh. Not network isolation. |
+| `OCTET_TELEMETRY` | Telemetry path. |
+| `OCTET_ALLOW_*` | The capability switches. `OCTET_ALLOW_REMOTE_READ=true` allows remote media reads unless offline. |
+| `OCTET_PACKAGE_DIR`, `OCTET_DATA_DIR` | Override the [self-documentation root](instructions.md#self-documentation). |
+| `OCTET_TUI_WRITE_LOG` | Raw terminal capture. Sensitive: see below. |
 
 ## Diagnostics and telemetry
 
-`--telemetry PATH` writes owner-only `octet.telemetry.v1` JSONL, separately from
-durable sessions. It records run boundaries, model latency/TTFT, disjoint
-input/cache/output usage, retries, tool timings/repetition signals, compaction
-outcomes, terminal status, and secret-safe effect admission. Decisions contain
-effect, stable denial code, effective policy values, and each configuration
-source layer. Shell identity is only a non-correlating resolution branch, never
-a path/digest. Prompt identity and tool arguments are hashed: raw prompts,
-arguments, results, and provider payloads are not logged. See the
-[telemetry schema and measurement methodology](benchmarks/README.md).
+`--telemetry PATH` writes owner-only `octet.telemetry.v1` JSONL, separate from
+your sessions. Raw prompts, tool arguments, results and provider payloads aren't
+logged, and prompt identity and tool arguments are hashed. See the [schema and
+method](benchmarks/README.md). `OCTET_TUI_WRITE_LOG=/path/to/ansi.log` captures
+the interactive screen's raw ANSI stream, into a unique
+`tui-<timestamp>-<pid>.log` if the path is an existing directory. It's off by
+default, and captured prompts and tool output make those logs sensitive even
+though telemetry is secret-safe.
 
-`OCTET_TUI_WRITE_LOG=/path/to/ansi.log` captures the interactive frontend's raw
-ANSI stream. An existing directory instead gets a unique
-`tui-<timestamp>-<pid>.log`. Disabled by default; captured prompts/tool output
-make these logs sensitive even when telemetry is secret-safe.
+<details>
+<summary>What telemetry records</summary>
+
+Run boundaries, model latency and time to first token, input, cache and output
+usage (counted separately), retries, tool timings and repetition signals,
+compaction outcomes, terminal status, and secret-safe effect admission. An
+admission record holds the effect, a stable denial code, the effective policy
+values and each config source layer. Shell identity is only a non-correlating
+resolution branch, never a path or digest.
+
+</details>
 
 ## Compatibility inputs
 
-- `OCTET_EXEC_TIMEOUT_SECS` remains a fallback for the previous timeout name.
-- `[compaction] enabled = true` and `OCTET_AUTO_COMPACT=true` select `local`.
-- `reasoning_mode = "pro"`, `OCTET_REASONING_MODE=pro`, and `--reasoning-mode pro` only load legacy config/sessions. They migrate to `reasoning = "ultra"` only with complete current Ultra/V2 support; otherwise octet removes the obsolete mode, retains independently selected supported effort, and warns. New config uses `reasoning` alone.
-- `--safe` is a hidden alias of `--safe-mode`; `--yolo` and its config/environment forms are rejected.
+Old names keep working so existing setups don't break. None of them imply Ygg
+command aliases, old-root discovery or an automatic first-party migration.
 
-Compatibility inputs do not imply Ygg command aliases, old-root discovery, or an
-automatic first-party migration.
+<details>
+<summary>The old inputs and what they do now</summary>
+
+- `OCTET_EXEC_TIMEOUT_SECS` still works as a fallback for the previous timeout
+  name.
+- `[compaction] enabled = true` and `OCTET_AUTO_COMPACT=true` select `local`.
+- `reasoning_mode = "pro"`, `OCTET_REASONING_MODE=pro` and
+  `--reasoning-mode pro` only load legacy config and sessions. With complete
+  current Ultra/V2 support they migrate to `reasoning = "ultra"`. Otherwise
+  octet drops the obsolete mode, keeps any separately selected supported effort
+  and warns. New config uses `reasoning` alone.
+- `--safe` is a hidden alias of `--safe-mode`. `--yolo`, and its config and
+  environment forms, are rejected.
+
+</details>

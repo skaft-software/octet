@@ -22,6 +22,19 @@ enum ContextKind {
 impl ContextKind {
     // Keep the existing context palette channels stable while the report moves
     // from transport-shaped estimates to the agent's semantic breakdown.
+    fn native_token(self) -> &'static str {
+        match self {
+            Self::Runtime | Self::Other => "dim",
+            Self::Instructions => "info",
+            Self::ToolResults => "toolOutput",
+            Self::Conversation => "customMessageText",
+            Self::Attachments => "accent",
+            Self::Summary => "muted",
+            Self::Free => "borderMuted",
+            Self::Buffer => "warning",
+        }
+    }
+
     fn role(self) -> &'static str {
         match self {
             Self::Runtime => "context_system",
@@ -154,6 +167,82 @@ impl ContextReport {
             estimated_input,
             slices,
         }
+    }
+
+    /// Native report from the same captured semantic quantities as the ANSI view.
+    pub(crate) fn native_node(&self, tables: bool) -> octet_tern::wire::Node {
+        use octet_tern::wire::{Kind, Node, Props, Span};
+        use serde_json::json;
+        let total = self
+            .slices
+            .iter()
+            .map(|slice| slice.tokens)
+            .fold(0u64, u64::saturating_add)
+            .max(self.context_window)
+            .max(1);
+        let percent = self.estimated_input as f64 * 100.0 / self.context_window.max(1) as f64;
+        let parts = self.slices.iter().filter(|slice| slice.tokens > 0).map(|slice| json!({
+            "value":slice.tokens as f64 / total as f64, "token":slice.kind.native_token(),
+            "label":sanitize_for_terminal(&slice.label), "hatch":slice.kind == ContextKind::Buffer,
+        })).collect::<Vec<_>>();
+        let rows = self.slices.iter().enumerate().filter(|(_, slice)| slice.tokens > 0).map(|(index, slice)| json!({
+            "id":index.to_string(), "cells":{
+                "category":[{"t":sanitize_for_terminal(&slice.label),"s":slice.kind.native_token()}],
+                "tokens":[{"t":slice.tokens.to_string(),"s":"mono"}],
+                "percent":[{"t":format!("{:.1}%", slice.tokens as f64 * 100.0 / self.context_window.max(1) as f64),"s":"dim mono"}],
+            }
+        })).collect::<Vec<_>>();
+        Node::with_children(
+            "report.context",
+            Kind::Col,
+            Props::new().set("gap", "md"),
+            vec![
+                Node::new(
+                    "report.context.model",
+                    Kind::Text,
+                    Props::new().text(
+                        "spans",
+                        vec![Span::styled(
+                            sanitize_for_terminal(&self.model_display),
+                            "strong",
+                        )],
+                    ),
+                ),
+                Node::new(
+                    "report.context.meter",
+                    Kind::Meter,
+                    Props::new()
+                        .set("style", "bar")
+                        .set("parts", parts)
+                        .set("value", (percent / 100.0).min(1.0))
+                        .set("label", format!("{percent:.0}%"))
+                        .set(
+                            "total",
+                            format!("{} / {} tokens", self.estimated_input, self.context_window),
+                        ),
+                ),
+                if tables {
+                    Node::new("report.context.categories", Kind::Table, Props::new()
+                    .set("cols", json!([{"id":"category","head":"Estimated usage","grow":1},{"id":"tokens","head":"Tokens","align":"end"},{"id":"percent","head":"Window","align":"end","priority":1}]))
+                    .set("rows", rows))
+                } else {
+                    Node::new(
+                        "report.context.categories",
+                        Kind::Kv,
+                        Props::new().set(
+                            "items",
+                            rows.iter()
+                                .map(|row| {
+                                    json!({
+                                        "k":row["cells"]["category"], "v":row["cells"]["tokens"],
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                    )
+                },
+            ],
+        )
     }
 
     #[cfg(test)]
@@ -428,6 +517,50 @@ fn compact_tokens(tokens: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_context_uses_captured_quantities_and_bounded_meter_parts() {
+        let report = super::ContextReport {
+            model_display: "Model".into(),
+            context_window: 1_000,
+            estimated_input: 800,
+            slices: vec![
+                super::ContextSlice {
+                    kind: super::ContextKind::Conversation,
+                    label: "Conversation".into(),
+                    tokens: 800,
+                },
+                super::ContextSlice {
+                    kind: super::ContextKind::Free,
+                    label: "Free".into(),
+                    tokens: 100,
+                },
+                super::ContextSlice {
+                    kind: super::ContextKind::Buffer,
+                    label: "Buffer".into(),
+                    tokens: 100,
+                },
+            ],
+        };
+        let node = serde_json::to_value(report.native_node(true)).unwrap();
+        assert_eq!(node["c"][1]["k"], "meter");
+        assert_eq!(node["c"][1]["p"]["value"], 0.8);
+        assert_eq!(node["c"][1]["p"]["parts"][2]["hatch"], true);
+        assert_eq!(node["c"][2]["k"], "table");
+        assert_eq!(
+            node["c"][2]["p"]["rows"][0]["cells"]["tokens"][0]["t"],
+            "800"
+        );
+        let fallback = serde_json::to_value(report.native_node(false)).unwrap();
+        assert_eq!(fallback["c"][2]["k"], "kv");
+        let oversized = super::ContextReport {
+            estimated_input: 1_200,
+            ..report
+        };
+        let node = serde_json::to_value(oversized.native_node(true)).unwrap();
+        assert_eq!(node["c"][1]["p"]["value"], 1.0);
+        assert_eq!(node["c"][1]["p"]["label"], "120%");
+    }
+
     use super::*;
 
     fn report(context_window: u64) -> ContextReport {

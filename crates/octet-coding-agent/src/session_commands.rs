@@ -465,6 +465,7 @@ fn project_export_visibility(records: &mut [Value]) {
         let Some(metadata) = record.get_mut("metadata").and_then(Value::as_object_mut) else {
             continue;
         };
+        metadata.remove("tool_composition");
         if let Some(extensions) = metadata
             .get_mut("extension_metadata")
             .and_then(Value::as_object_mut)
@@ -1029,6 +1030,7 @@ mod tests {
         let mut records = vec![
             serde_json::json!({"type": "entry", "metadata": {
                 "display_text": "keep host field",
+                "tool_composition": {"kind":"store","tool":"codemode","set":{"private":"not exported"},"delete":[]},
                 "extension_metadata": {"public": public.clone(), "private": {"public": false, "value": "hidden"}, "default": {"value": "also hidden"}}
             }, "value": ordinary.clone()}),
             serde_json::json!({"type": "entry", "metadata": {"extension_metadata": {"private": {"value": "hidden"}}}}),
@@ -1039,6 +1041,7 @@ mod tests {
             records[0]["metadata"]["extension_metadata"],
             serde_json::json!({"public": public})
         );
+        assert!(records[0]["metadata"].get("tool_composition").is_none());
         assert_eq!(records[0]["metadata"]["display_text"], "keep host field");
         assert_eq!(records[0]["value"], ordinary);
         assert!(records[1]["metadata"].get("extension_metadata").is_none());

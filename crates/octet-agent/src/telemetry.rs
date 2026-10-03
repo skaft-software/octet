@@ -176,7 +176,11 @@ impl TelemetryObserver {
             std::fs::create_dir_all(parent)?;
         }
         let mut options = OpenOptions::new();
-        options.create(true).append(true).read(false);
+        // `read(true)` is required on Windows: the writer thread takes an
+        // advisory exclusive lock with `LockFileEx`, which fails with
+        // `ERROR_ACCESS_DENIED` on a pure append-only handle. The handle only
+        // ever appends, so the extra read access changes nothing else.
+        options.create(true).append(true).read(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -379,6 +383,27 @@ impl EventObserver for TelemetryObserver {
         let run_id = state.run_id.clone();
 
         match event {
+            AgentEvent::ProviderInference { metrics } => {
+                let mut fields = Map::new();
+                fields.insert(
+                    "inference".into(),
+                    serde_json::to_value(metrics).expect("inference metrics serialize"),
+                );
+                fields.insert(
+                    "attempt".into(),
+                    Value::Number(state.request_attempts.into()),
+                );
+                fields.insert(
+                    "logical_turn".into(),
+                    Value::Number(state.turn_index.into()),
+                );
+                inner.emit(
+                    Some(resource_owner),
+                    Some(&run_id),
+                    "provider_inference",
+                    fields,
+                );
+            }
             AgentEvent::OutputDelta { channel, text } => {
                 let Some(attempt) = state.current_attempt.as_mut() else {
                     return;
@@ -798,6 +823,10 @@ impl EventObserver for TelemetryObserver {
                         "generation_ms".into(),
                         Value::Number(elapsed.saturating_sub(ttft).into()),
                     );
+                    fields.insert(
+                        "first_delta_to_turn_finished_ms".into(),
+                        Value::Number(elapsed.saturating_sub(ttft).into()),
+                    );
                 }
                 fields.insert("output_text_bytes".into(), Value::Number(text_bytes.into()));
                 fields.insert(
@@ -932,7 +961,8 @@ impl EventObserver for TelemetryObserver {
                     fields,
                 );
             }
-            AgentEvent::RecoveredOutput { .. }
+            AgentEvent::CacheWarmed { .. }
+            | AgentEvent::RecoveredOutput { .. }
             | AgentEvent::ToolProgress { .. }
             | AgentEvent::OutputMedia { .. }
             | AgentEvent::ProviderLifecycle { .. } => {}
@@ -1034,9 +1064,11 @@ fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::CompactionFinished { .. } => "compaction_finished",
         AgentEvent::TurnStarted => "model_request_started",
         AgentEvent::ProviderLifecycle { .. } => "provider_lifecycle",
+        AgentEvent::ProviderInference { .. } => "provider_inference",
         AgentEvent::ProviderWaitingForNetwork { .. } => "provider_waiting_for_network",
         AgentEvent::ProviderOperationRetry { .. } => "provider_operation_retry",
         AgentEvent::ProviderUsageUncertain => "provider_usage_uncertain",
+        AgentEvent::CacheWarmed { .. } => "cache_warmed",
         AgentEvent::ToolStarted { .. } => "tool_started",
         AgentEvent::ToolPolicyDecision { .. } => "tool_policy_decision",
         AgentEvent::ToolFinished { .. } => "tool_finished",
@@ -1328,6 +1360,12 @@ mod tests {
         let observer = TelemetryObserver::new(&path, "test").unwrap();
         let input = UserInput::from("secret task");
         observer.on_run_started_for_owner("entry-1", &input, &model(), "owner-1");
+        observer.on_event_for_owner(
+            &AgentEvent::ProviderInference {
+                metrics: octet_ai::InferenceMetrics::default(),
+            },
+            "owner-1",
+        );
         observer.on_event_for_owner(&AgentEvent::TurnStarted, "owner-1");
         observer.on_event_for_owner(
             &AgentEvent::OutputDelta {
@@ -1395,6 +1433,12 @@ mod tests {
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(records[0]["record"], "header");
+        let inference = records
+            .iter()
+            .find(|record| record["record"] == "provider_inference")
+            .unwrap();
+        assert_eq!(inference["inference"]["server_unavailable"], "not_reported");
+        assert!(inference["inference"]["server"].is_null());
         assert!(records
             .iter()
             .any(|record| record["record"] == "model_request_finished"));

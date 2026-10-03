@@ -66,6 +66,7 @@ export interface FilesPanelProps {
   searchFiles: (
     projectId: string,
     query: string,
+    signal?: AbortSignal,
   ) => Promise<ProjectFileSearchResult>;
   writeFile: (
     projectId: string,
@@ -406,8 +407,11 @@ function ProjectFilesWorkspace({
     const query = searchQuery.trim();
     if (!query) return;
     let cancelled = false;
+    // A superseded query aborts its request, so a burst of keystrokes never
+    // holds several searches open at once (#459).
+    const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      void searchFiles(projectId, query)
+      void searchFiles(projectId, query, controller.signal)
         .then((result) => {
           if (!cancelled) setSearchResult(result);
         })
@@ -421,6 +425,7 @@ function ProjectFilesWorkspace({
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      controller.abort();
     };
   }, [projectId, searchFiles, searchGeneration, searchQuery]);
 

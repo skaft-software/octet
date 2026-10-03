@@ -17,6 +17,8 @@ mod capabilities;
 mod input;
 mod lifecycle;
 mod signal;
+#[cfg(windows)]
+mod windows_console;
 
 pub use backend::OctetTerminal;
 pub(crate) use backend::TerminalImageStore;
@@ -35,6 +37,12 @@ pub type TerminalSize = Arc<Mutex<(u16, u16)>>;
 /// The same filtered input owner serves the probe and every interactive loop,
 /// preserving real input and incomplete replies across the startup timeout.
 /// Environment/config wins; timeout still falls back to Unknown.
+///
+/// Native Windows never sends the query. A console host turns the reply into
+/// key records, and Windows Terminal's reply reached the composer as typed
+/// text in a shape the reply filter did not recognize. The theme stays on the
+/// Unknown-background default there; `OCTET_COLOR_SCHEME` and the theme picker
+/// still choose explicitly.
 pub(crate) async fn query_terminal_background_color<S>(
     input: &mut TerminalInput<S>,
     timeout: Duration,
@@ -42,6 +50,9 @@ pub(crate) async fn query_terminal_background_color<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<crossterm::event::Event>> + Unpin,
 {
+    if cfg!(windows) {
+        return None;
+    }
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return None;
     }

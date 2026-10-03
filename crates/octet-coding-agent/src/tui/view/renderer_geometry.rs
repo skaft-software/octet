@@ -12,6 +12,7 @@ pub(super) struct GeometryFence {
     tool_input: u64,
     panel: u64,
     size: (u16, u16),
+    resize_epoch: u64,
     content_width: u16,
     verbose: bool,
     overlay: bool,
@@ -29,6 +30,7 @@ impl GeometryFence {
             tool_input: state.tool_input_revision,
             panel: state.panel_epoch,
             size: state.size,
+            resize_epoch: state.resize_epoch,
             content_width: state.transcript_content_width(state.size.0),
             verbose: state.verbose_tools,
             overlay: state.overlay.is_some(),
@@ -180,7 +182,7 @@ impl ReportRenderReceipt {
                     styled: b,
                 },
             ) => a == b && Arc::ptr_eq(left, right),
-            (super::ReportBody::Markdown(left), super::ReportBody::Markdown(right)) => {
+            (super::ReportBody::Markdown(left, _), super::ReportBody::Markdown(right, _)) => {
                 Arc::ptr_eq(left, right)
             }
             (super::ReportBody::Context(left), super::ReportBody::Context(right)) => {
@@ -202,6 +204,8 @@ pub(super) struct RenderedGeometry {
     pub(super) viewport_rows: usize,
     pub(super) viewport_available: usize,
     pub(super) blocks: Vec<VisibleBlockGeometry>,
+    /// Only live nodes; their headings are fenced against the painted viewport.
+    pub(super) animation_block_starts: Vec<(u64, usize)>,
 }
 impl RenderedGeometry {
     pub(super) fn capture(state: &ShellState, mut fence: GeometryFence) -> Arc<Self> {
@@ -244,6 +248,16 @@ impl RenderedGeometry {
             viewport_rows,
             viewport_available: chrome.transcript_rows,
             blocks,
+            animation_block_starts: state
+                .active_event_blocks
+                .iter()
+                .filter_map(|index| {
+                    Some((
+                        *state.transcript_commit_ids.get(*index)?,
+                        *cache.block_starts.get(*index)?,
+                    ))
+                })
+                .collect(),
         })
     }
     pub(super) fn is_current(&self, state: &ShellState) -> bool {
@@ -259,6 +273,7 @@ impl RenderedGeometry {
             && self.fence.semantic == state.transcript_semantic_revision
             && self.fence.theme == state.theme_epoch
             && self.fence.size == state.size
+            && self.fence.resize_epoch == state.resize_epoch
             && self.fence.verbose == state.verbose_tools
             && !self.fence.overlay
             && state.overlay.is_none()

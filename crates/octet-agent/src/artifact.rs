@@ -231,7 +231,9 @@ struct StoredArtifact {
 }
 
 struct GenerationState {
-    scratch: tempfile::TempDir,
+    // Removed, with the private scratch directory inside it, on settlement.
+    directory: tempfile::TempDir,
+    scratch: PathBuf,
     artifacts: HashMap<String, StoredArtifact>,
     retained_bytes: usize,
 }
@@ -249,14 +251,18 @@ struct ArtifactStoreInner {
 /// artifacts under session or workspace state instead of an OS temporary
 /// directory; it is created owner-only when missing and never removed on drop.
 enum StoreRoot {
-    Temporary(tempfile::TempDir),
+    Temporary {
+        // Removed, with the private root inside it, when the store drops.
+        _directory: tempfile::TempDir,
+        root: PathBuf,
+    },
     Durable(PathBuf),
 }
 
 impl StoreRoot {
     fn path(&self) -> &Path {
         match self {
-            Self::Temporary(directory) => directory.path(),
+            Self::Temporary { root, .. } => root,
             Self::Durable(path) => path,
         }
     }
@@ -298,15 +304,24 @@ impl ArtifactStore {
     /// Creates a temporary host-owned store with explicit bounds.
     pub fn with_limits(limits: ArtifactStoreLimits) -> Result<Self, ArtifactError> {
         validate_limits(limits)?;
-        let root = tempfile::Builder::new()
+        let directory = tempfile::Builder::new()
             .prefix("octet-artifacts-")
             .tempdir()?;
-        create_private_directory_all(root.path())?;
+        // Create the private root inside the temporary directory instead of
+        // adopting it. An elevated Windows process creates the temporary
+        // directory owned by the Administrators group, which private objects
+        // correctly refuse; the secure path creates this child owned by the
+        // current user with an owner-only ACL on every platform.
+        let root = directory.path().join("store");
+        create_private_directory_all(&root)?;
         Ok(Self {
             inner: Arc::new(ArtifactStoreInner {
                 generations: Mutex::new(HashMap::new()),
                 limits,
-                root: StoreRoot::Temporary(root),
+                root: StoreRoot::Temporary {
+                    _directory: directory,
+                    root,
+                },
             }),
         })
     }
@@ -355,15 +370,19 @@ impl ArtifactStore {
             return Err(ArtifactError::DuplicateGeneration(generation));
         }
         let prefix = format!("generation-{generation}-");
-        let scratch = tempfile::Builder::new()
+        let directory = tempfile::Builder::new()
             .prefix(&prefix)
             .tempdir_in(self.inner.root.path())?;
-        create_private_directory_all(scratch.path())?;
-        let path = scratch.path().to_path_buf();
+        // As for a temporary root, create the private scratch directory
+        // rather than adopting one an elevated Windows process made owned by
+        // the Administrators group.
+        let path = directory.path().join("scratch");
+        create_private_directory_all(&path)?;
         generations.insert(
             generation,
             GenerationState {
-                scratch,
+                directory,
+                scratch: path.clone(),
                 artifacts: HashMap::new(),
                 retained_bytes: 0,
             },
@@ -375,7 +394,7 @@ impl ArtifactStore {
     pub fn scratch_directory(&self, generation: u64) -> Result<PathBuf, ArtifactError> {
         self.generations()?
             .get(&generation)
-            .map(|state| state.scratch.path().to_path_buf())
+            .map(|state| state.scratch.clone())
             .ok_or(ArtifactError::StaleGeneration(generation))
     }
 
@@ -411,7 +430,7 @@ impl ArtifactStore {
                 .get(&generation)
                 .ok_or(ArtifactError::StaleGeneration(generation))?;
             preflight_generation_capacity(state, self.inner.limits, publication.size)?;
-            state.scratch.path().to_path_buf()
+            state.scratch.clone()
         };
 
         let bytes = match publication.source {
@@ -598,7 +617,7 @@ impl ArtifactStore {
             artifacts: state.artifacts.len(),
             bytes: state.retained_bytes,
         };
-        state.scratch.close()?;
+        state.directory.close()?;
         Ok(settlement)
     }
 
@@ -1008,7 +1027,10 @@ mod tests {
     #[test]
     fn traversal_absolute_and_link_paths_fail_closed() {
         let store = ArtifactStore::new().unwrap();
-        let scratch = store.begin_generation(1).unwrap();
+        // Publishing resolves every scratch path against the live generation's
+        // scratch directory, so both halves of this test start from a real one.
+        // Only the symlink half reads the directory back out.
+        let _scratch = store.begin_generation(1).unwrap();
         for path in [
             PathBuf::from("../escape.png"),
             PathBuf::from("/tmp/escape.png"),
@@ -1022,13 +1044,14 @@ mod tests {
             ));
         }
 
+        // Symlink resolution is POSIX-only; the traversal checks above are not.
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
 
             let outside = tempfile::NamedTempFile::new().unwrap();
             fs::write(outside.path(), PNG).unwrap();
-            symlink(outside.path(), scratch.join("linked.png")).unwrap();
+            symlink(outside.path(), _scratch.join("linked.png")).unwrap();
             assert!(matches!(
                 store.publish(
                     1,

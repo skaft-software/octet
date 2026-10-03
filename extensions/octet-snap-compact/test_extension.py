@@ -2,19 +2,90 @@
 
 import base64
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
+# The renderer is a separate package pinned to Rust 1.96, above octet's 1.88
+# MSRV. Source-extension CI explicitly installs Rust 1.96; on a supported
+# toolchain, renderer compilation failures must fail this suite.
+RENDERER_RUST_VERSION = (1, 96)
+
+
+def cargo_version() -> tuple[int, int]:
+    """The active Cargo toolchain version, or () when Cargo is unusable."""
+
+    for candidate in ([os.environ["CARGO"]] if "CARGO" in os.environ else ["cargo"]):
+        try:
+            completed = subprocess.run(
+                [candidate, "--version"], capture_output=True, text=True, timeout=60
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if completed.returncode != 0:
+            continue
+        words = completed.stdout.split()
+        # The CI shim's cargo --version reports the pinned toolchain version.
+        if len(words) < 2:
+            continue
+        try:
+            major, minor = words[1].split(".")[:2]
+            return int(major), int(minor)
+        except ValueError:
+            continue
+    return ()
+
+
+def build_renderer(target_dir: str) -> Path:
+    completed = subprocess.run(
+        [os.environ.get("CARGO", "cargo"), "build", "--release", "--locked",
+         "--quiet", "--target-dir", target_dir,
+         "--manifest-path", str(ROOT / "renderer" / "Cargo.toml")],
+        check=False, timeout=900,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"renderer build failed with exit status {completed.returncode} "
+            "on a supported Rust toolchain"
+        )
+    return Path(target_dir) / "release" / "octet-snap-renderer"
 
 
 class SnapcompactProcessTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        subprocess.run(["cargo", "build", "--release", "--locked", "--quiet",
-                        "--manifest-path", str(ROOT / "renderer" / "Cargo.toml")],
-                       check=True, timeout=180)
+        if shutil.which(os.environ.get("CARGO", "cargo")) is None:
+            raise unittest.SkipTest("cargo is unavailable")
+        active = cargo_version()
+        if not active:
+            raise unittest.SkipTest("no usable cargo toolchain on PATH")
+        if active < RENDERER_RUST_VERSION:
+            raise unittest.SkipTest(
+                f"Cargo {active[0]}.{active[1]} is older than the renderer's "
+                f"required {RENDERER_RUST_VERSION[0]}.{RENDERER_RUST_VERSION[1]} toolchain"
+            )
+        # Build outside the extension directory. A cargo target/ tree here would
+        # exceed the host's bounded source walk (1,024 entries), so the host
+        # would mark the source unverified and park the extension.
+        cls._target = tempfile.TemporaryDirectory(prefix="octet-snap-renderer-")
+        try:
+            binary = build_renderer(cls._target.name)
+        except Exception:
+            cls._target.cleanup()
+            raise
+        destination = ROOT / "renderer" / "target" / "release"
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(binary, destination / "octet-snap-renderer")
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "_target", None) is not None:
+            cls._target.cleanup()
 
     def test_negotiation_png_and_clean_shutdown(self):
         child = subprocess.Popen([str(ROOT / "extension.py")], cwd=ROOT,
@@ -63,6 +134,15 @@ class SnapcompactProcessTests(unittest.TestCase):
             for stream in (child.stdin, child.stdout, child.stderr):
                 if stream and not stream.closed:
                     stream.close()
+
+
+class RendererBuildFailureTests(unittest.TestCase):
+    @patch.object(subprocess, "run")
+    def test_compilation_error_is_failure_not_skip(self, run):
+        run.return_value.returncode = 101
+        with self.assertRaisesRegex(RuntimeError, "exit status 101"):
+            build_renderer("unused-target")
+        self.assertEqual(run.call_args.kwargs["check"], False)
 
 
 if __name__ == "__main__":

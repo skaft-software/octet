@@ -5,9 +5,9 @@ use octet_ai::Usage;
 use super::terminal_text::sanitize_for_terminal;
 use super::{OctetTheme, PriceDisplay, ShellState};
 
-/// Calculate a nonzero output-generation rate from a token count and measured
-/// generation interval. Completed turns pass provider-reported tokens; live
-/// rendering passes the explicitly marked character-based estimate.
+/// Client-observed end-to-end rate for a completed provider attempt. The token
+/// count includes reasoning; the interval must start at request start, not the
+/// first visible delta. This is not server-side generation speed.
 pub(super) fn output_tokens_per_second(output_tokens: u64, elapsed: Duration) -> Option<f64> {
     (output_tokens > 0 && !elapsed.is_zero())
         .then(|| output_tokens as f64 / elapsed.as_secs_f64())
@@ -83,19 +83,47 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
     if let (Some(rate), Some(tokens), Some(elapsed)) = (
         state.last_turn_tokens_per_second,
         state.last_turn_generated_tokens,
-        state.last_turn_generation_elapsed,
+        state.last_turn_provider_elapsed,
     ) {
         lines.push(format!(
-            "Throughput     {rate:.1} tok/s final ({tokens} reported tokens / {:.2}s measured)",
+            "Throughput     {rate:.1} tok/s end-to-end, last attempt ({tokens} reported output tokens / {:.2}s request-to-completion; not server speed)",
             elapsed.as_secs_f64()
         ));
-    } else if let Some(started) = state.turn_generation_started_at {
+    } else if let Some(started) = state.turn_requested_at {
         lines.push(format!(
-            "Throughput     awaiting turn completion ({:.2}s generation in progress)",
+            "Throughput     awaiting turn completion ({:.2}s request in progress)",
             now.saturating_duration_since(started).as_secs_f64()
         ));
     } else {
         lines.push("Throughput     unavailable".to_owned());
+    }
+    if let Some(metrics) = &state.last_turn_inference {
+        if let Some(server) = &metrics.server {
+            if let Some(rate) = server.tokens_per_second() {
+                lines.push(format!("Server timing  {rate:.1} tok/s generation, reported ({:?}; {} tokens / {:.6}s; native unit {:?}; not GPU-active or post-first-token decode)", server.source, server.tokens, server.generation_ns as f64 / 1e9, server.reported_unit));
+            }
+        } else {
+            lines.push(format!(
+                "Server timing  unavailable ({:?}); no client-derived substitute",
+                metrics.server_unavailable.unwrap_or_default()
+            ));
+        }
+        if let Some(estimate) = &metrics.decode_estimate {
+            lines.push(format!("Decode estimate ~{:.1} tok/s; {} visible-usage tokens; {:.3}s output window; {} arrival bursts; {:.1}% slope dispersion (not accuracy confidence); {} reasoning tokens excluded", estimate.tokens_per_second, estimate.reported_visible_tokens, estimate.observed_ns as f64 / 1e9, estimate.samples, estimate.relative_dispersion * 100.0, estimate.reasoning_tokens_excluded));
+        } else if let Some(reason) = metrics.decode_unavailable {
+            lines.push(format!(
+                "Decode estimate unavailable ({reason:?}); no E2E substitute"
+            ));
+        }
+        if let Some(client) = &metrics.client {
+            let offset = |value: Option<u64>| {
+                value.map_or_else(
+                    || "unavailable".to_owned(),
+                    |v| format!("{:.2}ms", v as f64 / 1e6),
+                )
+            };
+            lines.push(format!("Client timing  {:?}; first output {}, answer {}, reasoning {}, tool arguments {}; {} output events (not tokens); max gap {}; completion tail {} (includes buffering/backpressure)", client.scope, offset(client.first_output_ns), offset(client.first_text_ns), offset(client.first_reasoning_ns), offset(client.first_tool_arguments_ns), client.output_events, offset(client.max_output_gap_ns), offset(client.completion_tail_ns())));
+        }
     }
     lines.join("\n")
 }
@@ -140,7 +168,7 @@ mod tests {
     use futures_util::StreamExt as _;
 
     #[test]
-    fn output_token_rate_uses_authoritative_usage_and_generation_elapsed_time() {
+    fn output_token_rate_uses_reported_usage_and_request_elapsed_time() {
         assert_eq!(
             output_tokens_per_second(120, Duration::from_secs(2)),
             Some(60.0)
@@ -519,18 +547,18 @@ mod tests {
     }
 }
 
-/// Chrome for extension slash-command output. The body is sanitized here, then
+/// Chrome for titled extension output. The body is sanitized here, then
 /// framed with a heading rule and light per-line styling so long extension
 /// reports stay scannable: `label:` prefixes read as headings, `-` bullets get
 /// a quiet marker, and `·` separators stay dim.
-pub(super) fn styled_extension_output(theme: &OctetTheme, command: &str, text: &str) -> String {
+pub(super) fn styled_extension_output(theme: &OctetTheme, title: &str, text: &str) -> String {
     let safe = sanitize_for_terminal(text);
     let rule_width = 28;
     let rule = theme.fg("muted", &theme.glyph("horizontal").repeat(rule_width));
     let heading = format!(
         "{} {}",
         theme.settled_event_dot("neutral", if theme.unicode() { "•" } else { "*" }),
-        theme.bold(&theme.fg("foreground", &format!("/{command}")))
+        theme.bold(&theme.fg("foreground", &sanitize_for_terminal(title)))
     );
     let mut lines = vec![rule.clone(), heading, rule.clone()];
     for line in safe.lines() {
@@ -566,11 +594,11 @@ mod extension_output_tests {
         let theme = crate::tui::theme::test_theme();
         let styled = styled_extension_output(
             &theme,
-            "web-search",
+            "Web search",
             "provider: brave\n- result one\nplain line\nsome:thing: odd",
         );
         let plain = sanitize_for_terminal(&styled);
-        assert!(plain.contains("/web-search"));
+        assert!(plain.contains("Web search"));
         assert!(plain.contains("provider: brave"));
         assert!(plain.contains("- result one"));
         // Styling must survive as trusted ANSI in the overlay text.
@@ -587,8 +615,40 @@ mod extension_output_tests {
                 true,
                 crate::tui::terminal::ColorDepth::None,
             ));
-        let styled = styled_extension_output(&theme, "extensions", "no extensions configured");
+        let styled = styled_extension_output(&theme, "Extensions", "no extensions configured");
         assert!(!styled.contains('\x1b'), "{styled:?}");
-        assert!(styled.contains("/extensions"));
+        assert!(styled.contains("Extensions"));
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+    #[test]
+    fn status_distinguishes_unavailable_server_timing_from_client_observations() {
+        let state = ShellState {
+            last_turn_inference: Some(octet_ai::InferenceMetrics {
+                client: Some(octet_ai::ClientInferenceMetrics {
+                    scope: Some(octet_ai::ClientTimingScope::Request),
+                    first_output_ns: Some(100_000_000),
+                    first_reasoning_ns: Some(100_000_000),
+                    first_text_ns: Some(800_000_000),
+                    elapsed_ns: 1_000_000_000,
+                    output_events: 2,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..ShellState::default()
+        };
+        let text = status_telemetry(&state, Instant::now());
+        assert!(text.contains("Server timing  unavailable"), "{text}");
+        assert!(text.contains("no client-derived substitute"), "{text}");
+        assert!(
+            text.contains("answer 800.00ms, reasoning 100.00ms"),
+            "{text}"
+        );
+        assert!(text.contains("2 output events (not tokens)"), "{text}");
+        assert!(!text.contains("tok/s generation"), "{text}");
     }
 }

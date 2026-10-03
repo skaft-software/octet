@@ -12,7 +12,7 @@ and reload contract is documented in [`../resources.md`](../resources.md).
 
 ## Build and dependency boundary
 
-The workspace MSRV is Rust 1.86. `sexy-tui-rs` is vendored as
+The workspace MSRV is Rust 1.88. `sexy-tui-rs` is vendored as
 `crates/sexy-tui-rs`; builds must not depend on a sibling checkout. Its import
 provenance is recorded in `crates/sexy-tui-rs/VENDORED.md`.
 
@@ -45,6 +45,21 @@ catalog build. Once idle, `/model` opens from current routes and enriches the
 fleet in the background; filtering and highlighted model identity survive the
 refresh, while cancellation/failure leaves the active selection untouched.
 
+For OpenAI Responses routes that prefer WebSockets, plain, print (including
+JSON), and RPC prompt runs best-effort prewarm the settled system/tool/context
+prefix with `generate=false`, before the first admitted generation. Idle RPC
+readiness and construction of an undriven run do not open a provider connection.
+The warmup is caller-driven, cancellable by the run's abort control, and bounded
+to 30 seconds or the shorter endpoint timeout. Failure proceeds through ordinary
+inference and its HTTP/SSE fallback. A live pooled connection or latched fallback
+is not warmed again. SDK `Agent::prompt` and no-tools runs remain unchanged;
+headless hosts opt in through `Agent::prompt_with_responses_prewarm`.
+
+Warmup emits no assistant turn, tool call, usage record, or generation attempt.
+Its elapsed time is included in the first turn's timing. This accounting boundary
+does not promise that the provider will not bill warmup input, nor guarantee
+backend prompt-cache hits or a latency improvement.
+
 Startup resolves the persistent session before final model selection:
 
 1. Select a new, latest, named, or interactively picked session, or fork a
@@ -69,9 +84,9 @@ Runtime `/resume` and branch checkout use the same restoration behavior.
 Interactive resume follows renderer ownership. Default terminal-owned mode
 hydrates the complete active branch so the complete logical frame can populate
 native scrollback without an impossible later prepend. Explicit application-owned
-mode hydrates only a bounded active-branch tail for first paint; the complete
-branch is materialized when semantic navigation or selection reaches beyond that
-tail.
+mode hydrates a viewport-scaled active-branch tail for first paint (bounded
+between 32 and 512 entries); the complete branch is materialized when
+semantic navigation or selection reaches beyond that tail.
 
 Session discovery uses a workspace-local disposable SQLite projection of
 bounded active-branch titles and message counts keyed by transcript size and
@@ -269,8 +284,8 @@ During an active interactive run, the product schedules one nonblocking
 owner-scoped subagent status refresh every 250 ms, reduces the resulting fenced
 semantic snapshot, and updates one bounded tool-like **Subagents** transcript
 block in place, including between root turns. Its heading counts worker states
-and up to four active child lines show tasks and input/output tokens; `/subagents`
-retains the complete roster and cost. Ctrl+O retains disclosure. Structured
+and up to four active child lines show tasks and input/output tokens; the worker
+list retains the complete roster and cost. Ctrl+O retains disclosure. Structured
 priced child cost temporarily augments the host-owned footer; after
 `octet-agent` mirrors the settled child usage into root `delegated_agent`
 records, the idle footer reads only the durable session total.
@@ -363,8 +378,8 @@ remain disabled; the appearance selector is not a theme loader. See
 - `/name [name]`, `/export [path]` — name and safely export the current session.
 - `/prompt [name] [arguments]` — inspect or expand prompt templates.
 - `/skills search|load|reload|off ...` — inspect, invoke, reload, or deactivate skills; TUI load-prefill does not establish durable activation.
-- `/extensions [status|reload]` — interactively enable/disable managed executable bundles, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped.
-- `/subagents` — when supplied by the enabled `octet-subagents` package, navigate workers with arrow keys and open owner-authorized read-only transcripts with Enter.
+- `/extensions [status|reload]` — enable, disable, set up, and configure managed executable bundles through each one's options menu, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped. Runtime worker controls do not belong in this menu.
+- `/subagents [list|status|inspect|wait|reattach|stop|open-all]` — runtime inspection and control owned by the ready first-party octet-subagents extension. Bare, list and status open the live worker roster, and stop uses the bounded owner-bound queue during a run; other operations wait for idle. Arrow keys navigate workers and Enter opens owner-authorized read-only transcripts.
 - `/help [command]` — show local command help and octet self-documentation.
 - `/status`, `/exit` — product status and lifecycle controls.
 
@@ -397,10 +412,10 @@ closed.
 
 ## OpenAI Codex discovery and Ultra
 
-Authenticated Codex discovery sends compatibility client version `0.153.2` and
+Authenticated Codex discovery sends compatibility client version `0.159.2` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 7 invalidates inventories
-queried with older compatibility or context-window policies; entries carry the
+`multi_agent_version: "v2"`. Cache schema version 10 invalidates inventories
+queried with older compatibility, context-window or GPT-6.1 Sol policies; entries carry the
 pre-cap backend default window so the deliberate Codex cap can be reported and an
 explicit operator override resolved exactly (`docs/codex-context.md`). It
 preserves those fields, uses a 372K working window for GPT-5.6 Luna and 272K for

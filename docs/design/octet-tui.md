@@ -14,11 +14,13 @@ vocabulary that uses that hierarchy without adding a second TUI.
 
 - The interactive frontend renders on the primary screen. `auto`, `terminal`,
   and `off` use the complete logical-frame renderer: the first frame writes
-  every materialized row, pure appends flow naturally into terminal scrollback,
-  and a width/height change or mutation above the previous viewport clears the
-  screen and saved lines before replaying the complete frame. PageUp transfers
-  rendering to the bounded, application-owned semantic viewport for the rest of
-  that shell. Explicit `--mouse app` selects that viewport from startup.
+  every materialized row and pure appends flow naturally into terminal scrollback.
+  Dimension changes and canonical mutations above the old viewport clear and
+  replay the complete canonical frame, keeping saved and live rows complete.
+  Ordinary appends and addressable changed-row diffs retain their existing paths.
+  PageUp transfers rendering to the bounded, application-owned semantic viewport
+  for the rest of that shell. Explicit `--mouse app` selects that viewport from
+  startup; this viewport is separate from complete native history.
 - Auto, Light, and Dark use the compiled default layout. Auto adapts to the
   detected terminal background; Light and Dark explicitly select contrast. All
   retain model-aware accents and semantic status colours. Named file loading
@@ -66,20 +68,20 @@ cells with eight contiguous columns and the `01101111` silhouette. The footer,
 not the splash, owns the current model/reasoning row. Full access is a
 warning-class permission mode, not an ordinary failure.
 
-The eight-bar byte mark retains its model-blended gradient and finite colour
-sweep on true-colour terminals. ANSI256 and ANSI16 instead use one
+The eight-bar byte mark retains its model-blended static gradient on true-colour
+terminals. ANSI256 and ANSI16 instead use one
 background-balanced model accent uniformly across all bars, without brightening
 animation. With no model accent, the theme's model accent is used. Explicit
 custom splash colours keep precedence; no-colour output uses terminal-default
-foreground. Custom-theme fallback geometry remains unchanged; short compiled
-cards prioritize update and permission state over the changelog hint. The
-terminal background remains unchanged. User-customized ANSI16 palettes can
-still affect actual contrast.
+foreground. Pane-height budgeting reserves the composer and gap; very short
+cards prioritize identity, setup, and permission state. The budget changes on
+resize, not draft edits. The terminal background remains unchanged.
+User-customized ANSI16 palettes can still affect actual contrast.
 
 Interactive startup performs one best-effort newer-stable-release check outside
 the input and renderer loops, skipped in offline mode and cancelled on exit.
-A newer release adds an accent hint immediately below the muted
-`/changelog · what's new` row in the splash's right-hand version column:
+A newer release replaces the changelog hint in the splash's right-hand version
+column without adding a row:
 `↑ v<VERSION> available · run` followed by `octet update` rendered as Markdown
 inline code. Both hints use bounded compact/ASCII fallbacks; neither occupies a
 full-width footer beneath the logo. If conversation history has already frozen
@@ -114,36 +116,44 @@ renderer retains its own shrink policy. Optional dot/shimmer/timer ticks do not 
 headings already above the native live-screen seam.
 
 An active roster never clips subsequent unrelated conversation: only an ordinary
-trailing pending tool may use the bounded preview, while genuine historical
-roster updates can still require full replay.
+trailing pending tool may use the bounded preview. Genuine historical roster
+updates change the canonical transcript; changes above the old viewport rebuild
+native history rather than leaving stale snapshots.
 
-The current deterministic shell/renderer/VT matrix also tests fragmented table
-rows through narrow/wide width and height changes, exactly one required replay
-per resize, and late-reference finalization with exactly one historical repair.
-Repeated no-change frames remain quiet; source/copy and exactly-once history
-sentinels remain authoritative. These tests model emitted VT and saved-line
-reset, not a physical emulator's reflow, paint, or native selection.
+The deterministic shell/renderer/VT matrix tests fragmented table rows through
+narrow/wide width and height changes and late-reference finalization. Continuous
+VT regressions use the production renderer factory and check every saved and live
+marker after height, width, and away-and-back resize, including coalesced output
+and historical insertion. Height-only layout reuse and threaded semantic anchors
+retain separate coverage. Repeated no-change frames remain quiet; source/copy
+remain authoritative. Generic renderer replay and optional preservation tests
+are library evidence, not product preservation guarantees. These tests model
+emitted VT, not physical emulator reflow, paint, or native selection.
 
-This covers the tested pending → progress → result/error case, not every historical update.
-Real updates to historical concurrent tools or aggregate run outcomes,
-retrospective Markdown changes, resize, and other structural transitions can
-still take the replay path below. Worker-roster metric updates revise only the
-mutable orchestration tail, not earlier parent rows; moving that tail behind new
-parent output can still require a full replay above the native viewport. Do not
-suppress that path without an emitted-history policy that preserves real results. Maintainer-reported Terminal.app, Ghostty and
-Ghostty → SSH acceptance preceded 0.7.4 publication, but a subsequent model-switch
-regression showed stale splash
-rows. Acceptance of one journey does not qualify every reader/selection path.
+Concurrent tools, aggregate outcomes, retrospective Markdown, and retry rollback
+can revise content already in saved history. Portable cursor addressing cannot
+replace those saved rows, so octet restores the v0.8.1 canonical clear/replay
+policy. Structural repairs emit `ED 2` and `ED 3`, replay the complete frame, and
+restore Kitty placements and the composer cursor inside one synchronized frame.
+Overlays and disclosure use the same changed-row rules; visible changes alone do
+not force replay. The generic renderer still offers
+`TUI::set_preserve_scrollback(true)` for emitted snapshots, but octet does not
+enable it. Complete replay scales wire bytes and replay-output allocation with
+history and can reset a native reader's position; no constant live-grid repair
+bound is claimed. Initial paint and normal append still emit the complete native
+document; terminal-owned resume does not become tail-only.
 
-A change above the old viewport cannot be repaired with cursor addressing.
-That path emits `ED 2`, homes, clears saved lines with `ED 3`, and
-replays the complete materialized frame. Width changes do the same because line
-wrapping changed; height changes do so outside Termux. Disclosure contraction,
-theme repaint, overlays, and dynamic composer chrome therefore cannot leave an
-unwritten semantic gap in terminal history: they either take the visible-row
-differential path or the authoritative full replay path. Kitty image placements
-participate in the same changed-range expansion, targeted deletion, reserved-row
-painting, and full-replay fallback.
+Maintainer-reported Terminal.app, Ghostty and Ghostty → SSH acceptance preceded
+0.7.4 publication, but later regressions showed that acceptance of one journey
+does not qualify every reader/selection path.
+
+Resize requests settle after 75 ms of quiet, with a 150 ms maximum delay. Composer
+edits and readiness changes bypass that delay. A changed resize epoch forces
+canonical replay, including away-and-back geometry when final dimensions match
+the old frame, and fences stale receipts. Final and suspend flushes also honor
+pending resize epochs. Height-only changes reuse wrapped transcript rows; width
+changes still reflow canonical layout. No total-history-independent CPU or memory bound is
+claimed for width reflow or canonical frame materialization.
 
 Default terminal-owned resume materializes the complete active branch before it
 is rendered, because terminal scrollback cannot prepend a deferred prefix later.
@@ -153,16 +163,20 @@ that mode without claiming they already exist in native history.
 Application-owned mode—selected at startup by `--mouse app` or claimed by
 PageUp—uses `follow_tail` plus a monotonic transcript commit ID, semantic copy
 text offset/affinity, visual fallback, and desired screen row to select one
-bounded viewport. `scroll_from_bottom` remains only the cheap navigation delta;
+bounded viewport. A threaded visual receipt is promoted to a text position using
+the renderer's old content width before accepting the next model or reflowing;
+padding/separator rows search within the old viewport for semantic text.
+`scroll_from_bottom` remains only the cheap navigation delta;
 the semantic anchor rebases it after growth, contraction, deferred-history
 prepends, and width/height changes. Scrolling above the tail keeps semantic rows
 fixed while one Markdown block continues to grow, increments the new-output
 state, and exposes the PageDown return-to-live affordance.
 
-Terminal-owned modes preserve native selection and ordinary append scrollback,
-but octet cannot observe or freeze a reader's position. A full replay replaces
-the application's saved-line presentation and therefore returns the terminal to
-the live frame. Semantic copy retains stable coordinates in either renderer;
+Terminal-owned modes retain native selection and ordinary append scrollback,
+but octet cannot observe or freeze a reader's native position. Complete canonical
+rebuilds can reset that position; the terminal still owns native reflow,
+selection, and wheel-offset behavior. Semantic copy retains stable coordinates
+in either renderer;
 application-owned drag selection is available only while mouse capture is
 enabled. Terminal-owned resume eagerly loads the complete active branch;
 application-owned resume loads a bounded tail and materializes older blocks when
@@ -208,7 +222,7 @@ tokens, compacted with `K`/`M`/`B`/`T` suffixes. An inline
 uncached, cache-read, and cache-write usage; streamed
 output estimates carry `~` until provider usage settles. Later parent output
 is placed above this tail, and settlement fixes the summary in place without
-per-worker notices. Ctrl+O retains disclosure; `/subagents` exposes the
+per-worker notices. Ctrl+O retains disclosure; the worker list exposes the
 complete roster, exact outcomes/reasons, model, tools, cost, and read-only child
 transcripts. Neither estimates nor UI refresh change billed usage or budgets.
 Raw first-party orchestration calls/results, including errors, stay out of the
@@ -230,11 +244,16 @@ second transcript. The recall affordance is advertised only while at least one
 queued entry is genuinely editable, so the hint never promises a recall that the
 agent-side claim would refuse.
 
-`/extensions` opens an interactive installed-bundle activation panel instead.
-The no-argument `/subagents` command supplied by `octet-subagents` opens a
-frontend-owned worker list; Up/Down moves focus, Enter opens the selected bounded
-read-only transcript, and Escape or Left returns from the transcript to the
-list. While open, the same owner-bound status command reconciles the host's
+`/extensions` opens an interactive installed-bundle panel instead: Enter opens
+the selected extension's options menu (its `menu/collect` answer, or one entry
+per declared command), where setup and configuration actions live. Other typed
+extension commands are not accepted; `/subagents` remains a separate runtime
+surface and completion follows its first-party owner's live registration.
+Actions run with live progress and in-place confirmation and input dialogs.
+Bare `/subagents`, `list` and `status`, including during a run, open a
+frontend-owned worker list; Up/Down moves
+focus, Enter opens the selected bounded read-only transcript, Ctrl+X stops the
+selected worker, and Escape or Left returns from the transcript to the list. While open, the same owner-bound status command reconciles the host's
 authoritative worker state and publishes complete presentation revisions; the
 frontend preserves focus by stable node ID and revalidates the latest typed
 session reference immediately before opening. Transcript panels start at the
@@ -317,13 +336,23 @@ independent of semantic-event frequency. Late frames select the current phase
 without replaying missed frames; coalescing has a fixed deadline so incoming
 notifications cannot postpone painting indefinitely. Animation changes style
 rather than text or geometry and invalidates only the active status block.
+Native animation addressability is accepted after painting, not predicted from
+pre-write transcript height. `TUI::rendered_viewport_top()` supplies the physical
+seam; completed-frame geometry carries sparse active-heading offsets, and
+`frame_written_at` applies them only after the current-geometry fence passes.
+Differential shrink retains its physical seam; complete replay can move it
+backwards. This prevents tall tool progress contracting to a short result from
+misclassifying visible `Working` as offscreen and suppressing shimmer/timer wakes.
+A production-factory regression checks self-waking animation without resize or
+further semantic notifications.
 The `Working` and `Thinking` labels share a foreground-only moving sweep, with
 `Thinking` travelling a shallower luminance range. They also share one
 monotonic status clock, so the sweep phase continues across the transition
 instead of restarting or stalling: the two labels can neither shimmer
 differently nor freeze mid-row. Retry, compaction, and the provider lifecycle
-labels keep their timer without a sweep. Activity and reasoning dots
-keep a solid glyph while their foreground pulses with the label. The known
+labels keep their timer without a sweep. The `Working` activity dot shares the
+label sweep while the `Thinking` dot keeps its model colour. Both keep a solid
+glyph. The known
 Dark/Light TrueColor and ANSI256 physical field parks briefly after crossing
 the label. Elapsed and countdown text update independently; grapheme clusters
 stay intact. ANSI16, unknown-background, reduced-motion, and no-color paths
@@ -363,10 +392,10 @@ raw provider envelopes or headers.
 Tool calls expose deterministic intent and lifecycle rows. Event-margin dots
 identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning
-and activity dots keep a solid, fixed-size glyph whose foreground pulses with
-the activity-label sweep. `Working` and `Thinking` shimmer in the foreground
-where supported, from that one shared clock; reduced-motion and no-color paths
-remain static.
+and activity dots keep a solid, fixed-size glyph. The `Working` dot shares its
+label's phase and blinks as the sweep crosses it; the `Thinking` dot keeps its
+model colour. `Working` and `Thinking` shimmer in the foreground where supported,
+from that one shared clock; reduced-motion and no-color paths remain static.
 Assistant-response dots remain steady; active tool and shell dots may pulse
 through foreground and muted tones rather than changing size.
 Successful completed event dots use green,
@@ -384,7 +413,8 @@ discarded by the tool capture.
 
 Tool values begin two cells after their labels (with a six-cell minimum for
 short names), avoiding a wide dead column while keeping each wrapped header's
-value column fixed. A muted vertical `│` joins
+value column fixed. Computer-use labels omit their shared `computer_use_` prefix
+to preserve the action name within the label cap. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
 the output's ownership visible without adding another indentation level.
 
@@ -514,10 +544,11 @@ bounded actionable reason.
 - Ctrl+D requests a coordinated close from every input owner, including
   pickers, tool prompts, lifecycle waits, and local shell commands. Active work
   is aborted and settled before the process exits.
-- Safe presentation commands execute immediately. First-party
-  `/subagents stop <name-or-id|all>` also dispatches during an active run through
-  its registered, owner-bound extension command; arbitrary extension commands
-  do not gain active-run admission. Input and run events remain responsive, and
+- Safe presentation commands execute immediately. During an active run,
+  `/subagents`, `list` and `status` open the live worker list; Ctrl+X there and
+  `/subagents stop <name-or-id|all>` use the registered, owner-bound first-party
+  stop queue. Other worker operations and extension management queue until idle;
+  arbitrary extension commands do not gain active-run admission. Input and run events remain responsive, and
   a stop acknowledgement does not claim terminal worker settlement.
 - Model, reasoning, session, compaction, and reload work is queued in
   order and applied after the active `Run` releases its Agent borrow.
@@ -551,8 +582,9 @@ The countdown still uses the existing one-second refresh cadence.
 compaction/tool transitions, cancellation admission, and settlement end that
 backoff presentation. Raw causes remain with the event/diagnostic consumers;
 print, plain, and RPC output retain their existing contracts. Removing rejected
-output already above the native viewport can require saved-line clear and full
-replay. Quiet notices do not promise an undisturbed native scrollback position.
+output already above the native viewport clears and replays the canonical
+transcript. Quiet notices do not promise an undisturbed native scrollback
+position.
 
 API waiting is independently scheduled from animation: the real renderer thread
 wakes for status shimmer at 80 ms, elapsed time at one-second boundaries, and

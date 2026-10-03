@@ -1,0 +1,12 @@
+[package]
+name = "octet-typescript-authoring-smoke"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+octet-agent = { path = "../../../crates/octet-agent" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+serde_json = "1"

@@ -245,6 +245,13 @@ If `lifecycle_events` is negotiated and the subscription list is omitted or
 empty, all six events are subscribed. Otherwise it must be an exact subset of
 the six names above. A non-empty subscription without the feature is invalid.
 
+The API `0.4` host may additionally offer `tool_composition_v1` when its runtime
+explicitly enables `ExtensionRuntimeConfig.tool_composition` (false by default
+for embedders). The coding host enables this generic service for trusted enabled
+API `0.4` extensions, not just one package name. Negotiation alone conveys no
+authority: only a live model-tool request with a bound composition dispatcher
+can use it. See [composition](#225-compositioncontext-compositioncall-compositionstore-api-04-feature-tool_composition_v1).
+
 The coding host conditionally appends `agent_sessions` to
 `optional_features` only for the trusted, enabled first-party
 `octet-subagents` extension when its child-session service can be bound. The
@@ -621,6 +628,78 @@ remains protocol vocabulary for other host-owned frontends.
 ```
 
 Return `null` to contribute nothing.
+
+---
+
+### 1.6b `menu/collect` (API `0.2`+)
+
+Requires `contributes.menu = true` and at least one declared command. The
+coding TUI sends it when the person selects the extension under `/extensions`,
+and again after every action, so the menu is pulled fresh and never pushed. Keep
+the handler fast and side-effect free: answer from cached state. The host waits
+at most 5 seconds and then falls back to one generated entry per declared
+command.
+
+**Request:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "menu/collect",
+  "params": {
+    "context": {
+      "workspace": "/home/user/project",
+      "execution_scope": null,
+      "host": {},
+      "resource_owner": {
+        "session_id": "session-…",
+        "extension_instance_id": "…",
+        "process_generation": 1
+      }
+    }
+  }
+}
+```
+
+**Response:** the complete [`ExtensionMenu`](#extensionmenu-api-02):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "title": "Computer use",
+    "status": {"state": "pending", "label": "Not set up"},
+    "detail": "Set up installs Cua Driver and checks what your desktop needs.",
+    "items": [
+      {"id": "setup", "label": "Set up computer use", "command": "computer-use",
+       "arguments": ["setup"], "recommended": true,
+       "description": "Install the driver, then check permissions"},
+      {"id": "jev", "label": "Jev (optional)", "items": [
+        {"id": "forget", "label": "Forget stored API key", "command": "computer-use",
+         "arguments": ["jev", "forget"], "destructive": true}
+      ]}
+    ]
+  }
+}
+```
+
+Each item is either an action (`command` names one of the extension's declared
+commands, `arguments` are literal) or a submenu (`items`). Choosing an action
+runs `command/execute` with those arguments, so a menu can only run what the
+extension could already run. The host asks for confirmation before a
+`destructive` action and then pre-approves that action's own first
+`confirmation/request`. While the action runs, its `$/progress` status lines,
+`confirmation/request`, and `input/request` appear in place, and the person can
+cancel it. Because a person started it and watches it, the action may run for
+up to 30 minutes instead of the ordinary request deadline.
+
+The host rejects the whole menu (and shows generated entries instead) when an
+action routes to an undeclared command or a bound is exceeded: at most 256
+items across all levels, 4 levels, unique ids per level, at most one
+`recommended` item per level, and a submenu that carries neither `arguments` nor
+`destructive`.
 
 ---
 
@@ -1071,7 +1150,7 @@ recognizes owner-fenced `octet-subagents` activities as a first-party observed
 surface and updates one bounded tool-like **Subagents** transcript block in place
 from native `AgentEvent::DelegationUpdated` events, including between root turns.
 Its heading counts worker states and up to four active child lines show tasks and
-input/output tokens; `/subagents` retains the complete roster, metrics, and cost.
+input/output tokens; the worker list retains the complete roster, metrics, and cost.
 The TUI does not poll a status command, and the extension cannot supply footer
 text or terminal rows. It clears stale state on owner/process replacement; Serve
 action identity includes the instance fence, generation, and revision before
@@ -1584,7 +1663,7 @@ without opening its transcript, cumulative disjoint `usage`, optional
 `timed_out`, `failed` (with bounded `error`), and `shutdown`. Private delegation
 JSONL paths are never returned. A current owner-scoped presentation may route
 the opaque reference into Serve, `/extensions inspect`, or the native
-`/subagents` arrow-key browser as a locked read-only transcript; the resolver
+octet-subagents arrow-key worker list as a locked read-only transcript; the resolver
 separately verifies host-written parent-session, extension-principal, and
 resource-owner provenance. The TUI transcript panel starts at the live tail,
 supports bounded scrolling, and returns to the worker list on Escape or Left.
@@ -1764,6 +1843,125 @@ process must not be handed a second grant. The dispatch-level refusal is typed:
 `unsupported_feature` when `terminal_handoff` was not negotiated, and
 `invalid_request`/`bounds_exceeded`/`not_foreground_owner` for everything else.
 
+### 2.25 `composition/context`, `composition/call`, `composition/store` (API `0.4`, feature `tool_composition_v1`)
+
+This is an additive **feature-negotiated API `0.4`** service. API `0.1`, `0.2`
+and canonical `0.3` cannot select it. A tool definition may declare:
+
+```json
+{
+  "name": "compose",
+  "description": "Run a bounded program",
+  "parameters": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false},
+  "composition": {"mode":"on","inline_budget":3000}
+}
+```
+
+`mode` is `on` (ordinary direct tools plus composition) or `only` (composition
+advertised, ordinary tools nested-only). `inline_budget` is an integer from 0
+through 16000 estimated tokens. Unknown composition fields are rejected.
+Optional `constrained_sampling` remains the existing provider grammar/regex
+contract. A composition declaration without negotiated `tool_composition_v1`
+is invalid. Presentation never expands the policy-filtered registry or enables
+excluded tools; nested composition tools are removed to prevent recursion.
+
+Every request below has an exact JSON-RPC request envelope and includes the
+numeric `parent_request_id` of a **currently active model tool/call** in this
+extension process generation. No caller-supplied resource owner is accepted.
+Initialization, commands, hooks, unbound, stale, foreign and settled parents
+are refused. Parent settlement/cancellation revokes executing and queued
+children; cancellation of a reverse request also cancels its nested operation.
+Late replies cannot revive authority. Ordinary extension effects and controlled
+profile restrictions still apply to the outer call.
+
+**Frozen context:**
+
+```json
+{"jsonrpc":"2.0","id":"context-1","method":"composition/context","params":{"parent_request_id":2}}
+```
+
+```json
+{"jsonrpc":"2.0","id":"context-1","result":{"tools":[{"name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},"output_schema":{"type":"object"}}],"store":{},"limits":{"timeout_ms":30000,"max_calls":256}}}
+```
+
+The tools, schemas, workspace, effect broker, hooks and cancellation belong to
+the exact frozen outer-call snapshot. No model routes, credentials or implicit
+LLM authority are provided. The store is private branch-ancestry state scoped
+by the composing tool's host-derived name.
+
+**One nested call:**
+
+```json
+{"jsonrpc":"2.0","id":"call-1","method":"composition/call","params":{"parent_request_id":2,"name":"read","arguments":{"path":"README.md"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":"call-1","result":{"value":{"content":"Example","path":"README.md","hash":"...","start_line":1,"end_line":1,"total_lines":1,"next_offset":null,"truncated":false,"lines_clipped":false}}}
+```
+
+`name` is an exact frozen tool name (1..128 UTF-8 bytes); `arguments` is an
+object bounded to 128 KiB encoded JSON and depth 32. The normal host argument
+validator runs before hooks or effects. Each invocation receives a host-issued
+nested ID and fresh effect reservation; safe reads may overlap at most four at
+a time, while mutations, shell and extension effects are exclusive. There are
+at most 256 calls and one 30-second host deadline per parent, not per child.
+Guest preferences can only lower limits.
+
+The host returns programmatic/structured content for a schema-declaring tool,
+or text for a schema-less tool. It never parses arbitrary text as JSON or
+implicitly publishes nested media/raw stdout to chat. Extension output-schema
+validation remains in force. Nested errors use the JSON-RPC error envelope;
+policy refusals, unavailable tools and revoked authority do not become values.
+Completed nested usage is collected even if the program later fails or is
+cancelled, durably accounted before the next admission, and left unpriced when
+no authoritative model route/pricing exists. Hard token/cost ceilings refuse
+nested tools lacking host-authoritative unmetered/pre-execution bounds.
+
+**Commit successful store writes:**
+
+```json
+{"jsonrpc":"2.0","id":"store-1","method":"composition/store","params":{"parent_request_id":2,"set":{"answer":42},"delete":["obsolete"]}}
+```
+
+```json
+{"jsonrpc":"2.0","id":"store-1","result":{}}
+```
+
+The adapter submits writes only after successful noncancelled guest execution.
+The host accepts at most one commit per parent, durably syncing private metadata
+before acknowledgment. There are at most 4096 keys per write batch, keys at
+most 1024 UTF-8 bytes, each value at most 256 KiB JSON and the entire resulting
+store at most 1 MiB. Unknown fields/invalid JSON are refused. Failed/cancelled
+scripts do not submit writes. Earlier completed effects are **not undone**.
+Reopen, fork, switch and compaction use durable active ancestry; portable
+conversation exports omit this private sidecar. Started-but-unfinished nested
+effects and outer scripts are not automatically replayed.
+
+**Oversized private JSON transport:** the normal wire frame bound stays 1 MiB.
+A context or value too large for a frame uses exactly one sidecar envelope:
+
+```json
+{"jsonrpc":"2.0","id":"context-1","result":{"context_file":{"path":"composition-random.json","bytes":1500000,"sha256":"64-lowercase-hex-digits"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":"call-1","result":{"value_file":{"path":"composition-random.json","bytes":1500000,"sha256":"64-lowercase-hex-digits"}}}
+```
+
+`path` is a host-created **flat basename** beneath `OCTET_EXTENSION_SCRATCH`,
+never an absolute path or guest-selected path. Files use exclusive private
+creation, are regular/no-follow, have exact positive size at most 8 MiB and a
+SHA256 digest. Readers check size, identity, digest, UTF-8 and JSON before use,
+then unlink in `finally`. The host tracks at most 256 such files per parent and
+cleans undelivered/cancelled/settled files. No filesystem capability is exposed
+to guest code. A value above the limit produces an actionable error, not a
+widened frame or fallback to raw output.
+
+Private receipts contain argument digests and host policy/outcomes, not normal
+raw nested output. A tool with provisional delivery can acknowledge only after
+an exact private text receipt is synced, bounded by the smaller of the sandbox
+output cap and 1 MiB; oversized or failed persistence rolls it back.
+
 ## 3. Standard JSON-RPC errors
 
 | Code | Message | Meaning |
@@ -1939,6 +2137,31 @@ result.
 
 See [`presentation/update`](#25-presentationupdate-api-02) for exact state,
 reference, safety, parentage, and bound rules.
+
+### `ExtensionMenu` (API `0.2`)
+
+| Field | Type | Description |
+|---|---|---|
+| `title` | string \| null | Display title (≤256 bytes); the host falls back to the extension name |
+| `status` | object \| null | Generic `state`, compact `label`, optional `detail`, as in presentation snapshots |
+| `detail` | string \| null | Plain-text explanation (≤16 KiB); its first line is the menu subtitle |
+| `items` | array | Top-level `ExtensionMenuItem`s in display order |
+
+`ExtensionMenuItem`:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique among siblings (≤256 bytes); keeps the selection stable across refreshes |
+| `label` | string | Host-rendered label (≤256 bytes) |
+| `description` | string \| null | One-line explanation (≤2 KiB) |
+| `command` | string \| null | Declared command an action runs; absent for a submenu |
+| `arguments` | string array | Literal arguments (≤32, each ≤4 KiB) |
+| `destructive` | bool | Confirm before running |
+| `recommended` | bool | Preselected and emphasized; at most one per level |
+| `items` | array \| null | Submenu entries; mutually exclusive with `command` |
+| `detail` | string \| null | Shown when the submenu opens (≤16 KiB) |
+
+The encoded menu is at most 256 KiB.
 
 ### API `0.2` protocol features
 

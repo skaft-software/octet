@@ -4,7 +4,7 @@ A small retained terminal UI and a reusable semantic rich-text renderer for Rust
 It renders directly to terminal rows (no Ratatui dependency), keeps differential
 updates stable, and degrades to deterministic escape-free text.
 
-**octet vendored package 0.3.1 · workspace MSRV Rust 1.86**
+**octet vendored package 0.3.1 · workspace MSRV Rust 1.88**
 
 ## Highlights
 

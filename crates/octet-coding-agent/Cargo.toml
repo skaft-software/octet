@@ -33,14 +33,15 @@ name = "octet-host"
 path = "src/bin/octet-host.rs"
 
 [dependencies]
-octet-ai = { version = "=0.8.1", path = "../octet-ai" }
-octet-agent = { version = "=0.8.1", path = "../octet-agent" }
-octet-migrate-types = { version = "=0.8.1", path = "../octet-migrate-types" }
+octet-tern = { version = "=0.8.2", path = "../octet-tern" }
+octet-ai = { version = "=0.8.2", path = "../octet-ai" }
+octet-agent = { version = "=0.8.2", path = "../octet-agent" }
+octet-migrate-types = { version = "=0.8.2", path = "../octet-migrate-types" }
 # Vendored semantic rich-rendering integration. Keeping it in this workspace
 # makes fresh clones build the exact implementation reviewed with octet.
 sexy-tui-rs = { version = "=0.3.1", path = "../sexy-tui-rs" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "io-std", "process", "sync"] }
-crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "io-std", "process", "sync", "net"] }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
 futures-util = "0.3"
 tokio-stream = "0.1"
 clap = { version = "4", features = ["derive", "string"] }
@@ -49,7 +50,7 @@ serde_ignored = "0.1"
 serde_json = "1"
 serde_yaml = "0.9"
 schemars = "0.8"
-toml = "0.8"
+toml = "1.1"
 toml_edit = "0.22"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
@@ -60,7 +61,7 @@ fs2 = "0.4"
 url = "2"
 percent-encoding = "2"
 # Reuse the renderer's pinned CommonMark parser for script-free session exports.
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 http = "1"
 unicode-width = "0.2"
 unicode-segmentation = "1.12.0"
@@ -83,9 +84,14 @@ signal-hook = "0.4"
 sha2 = "0.10"
 ring = "0.17"
 libc = "0.2"
-getrandom = { version = "0.3", optional = true }
+getrandom = { version = "0.4", optional = true }
 globset = "0.4"
-octet-serve-backend = { version = "=0.8.1", path = "../../extensions/octet-serve", optional = true }
+octet-serve-backend = { version = "=0.8.2", path = "../../extensions/octet-serve", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Native console negotiation (VT output, delayed wrap, single-call frame
+# writes) and console control events. Already locked through octet-agent.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [build-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
@@ -97,4 +103,14 @@ url = "2"
 [dev-dependencies]
 tokio-test = "0.4"
 vt100 = "0.15.2"
-wiremock = "=0.6.4"
+wiremock = "=0.6.5"
+
+[target.'cfg(windows)'.dev-dependencies]
+# ConPTY harness for the native Windows frontend (tests/windows_conpty.rs).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

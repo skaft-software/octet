@@ -104,6 +104,13 @@
     "output": 10000000,
     "reasoning": null
   },
+  "anthropic/claude-sonnet-5-5": {
+    "cache_read": 200000,
+    "cache_write_5m": 2500000,
+    "input": 2000000,
+    "output": 10000000,
+    "reasoning": null
+  },
   "baseten/deepseek-ai/deepseek-v4-flash-0731": {
     "cache_read": 28000,
     "cache_write_5m": 0,
@@ -130,6 +137,13 @@
     "cache_write_5m": 0,
     "input": 300000,
     "output": 1200000,
+    "reasoning": null
+  },
+  "baseten/deepseek-ai/deepseek-v4.1-flash-fast": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 600000,
+    "output": 2400000,
     "reasoning": null
   },
   "baseten/moonshotai/kimi-k2.5": {
@@ -259,17 +273,17 @@
     "reasoning": null
   },
   "cerebras/qwen-3.8-27b": {
-    "cache_read": 0,
+    "cache_read": 990000,
     "cache_write_5m": 0,
     "input": 990000,
     "output": 1490000,
     "reasoning": null
   },
   "fireworks/accounts/fireworks/models/deepseek-v4p1-flash": {
-    "cache_read": 7000,
+    "cache_read": 6000,
     "cache_write_5m": 0,
-    "input": 220000,
-    "output": 660000,
+    "input": 300000,
+    "output": 1200000,
     "reasoning": null
   },
   "fireworks/accounts/fireworks/models/ember-1": {
@@ -350,10 +364,10 @@
     "reasoning": null
   },
   "fireworks/accounts/fireworks/routers/deepseek-flash-latest": {
-    "cache_read": 7000,
+    "cache_read": 6000,
     "cache_write_5m": 0,
-    "input": 220000,
-    "output": 660000,
+    "input": 300000,
+    "output": 1200000,
     "reasoning": null
   },
   "fireworks/accounts/fireworks/routers/glm-5p3-fast": {
@@ -1189,6 +1203,20 @@
     "output": 0,
     "reasoning": null
   },
+  "nvidia/deepseek-ai/deepseek-v4.1-flash": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
+  "nvidia/google/diffusiongemma-26b-a4b-it": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
   "nvidia/google/gemma-2-2b-it": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -1420,13 +1448,6 @@
     "output": 0,
     "reasoning": null
   },
-  "nvidia/moonshotai/kimi-k2-instruct-0905": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 0,
-    "output": 0,
-    "reasoning": null
-  },
   "nvidia/moonshotai/kimi-k2.6": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -1602,6 +1623,13 @@
     "output": 2500000,
     "reasoning": null
   },
+  "nvidia/nvidia/nemotron-3.5-content-safety": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
   "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -1708,13 +1736,6 @@
     "reasoning": null
   },
   "nvidia/nvidia/usdvalidate": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 0,
-    "output": 0,
-    "reasoning": null
-  },
-  "nvidia/openai/gpt-oss-120b": {
     "cache_read": 0,
     "cache_write_5m": 0,
     "input": 0,
@@ -2085,6 +2106,27 @@
     "output": 10000000,
     "reasoning": null
   },
+  "openai/gpt-6.1-sol": {
+    "cache_read": 100000,
+    "cache_write_5m": 2500000,
+    "input": 2000000,
+    "output": 10000000,
+    "reasoning": null
+  },
+  "openai/gpt-daybreak-blue-latest": {
+    "cache_read": 400000,
+    "cache_write_5m": 5000000,
+    "input": 4000000,
+    "output": 20000000,
+    "reasoning": null
+  },
+  "openai/gpt-daybreak-red-latest": {
+    "cache_read": 1250000,
+    "cache_write_5m": 15625000,
+    "input": 12500000,
+    "output": 75000000,
+    "reasoning": null
+  },
   "openai/gpt-image-2": {
     "cache_read": 1250000,
     "cache_write_5m": 0,
@@ -2274,6 +2316,13 @@
     "output": 10000000,
     "reasoning": null
   },
+  "opencode/claude-sonnet-5-5": {
+    "cache_read": 200000,
+    "cache_write_5m": 2500000,
+    "input": 2000000,
+    "output": 10000000,
+    "reasoning": null
+  },
   "opencode/deepseek-v4-flash": {
     "cache_read": 28000,
     "cache_write_5m": 0,
@@ -2307,6 +2356,13 @@
     "cache_write_5m": 0,
     "input": 300000,
     "output": 1200000,
+    "reasoning": null
+  },
+  "opencode/fledge-alpha-free": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
     "reasoning": null
   },
   "opencode/gemini-3-flash": {
@@ -2589,6 +2645,13 @@
     "output": 10000000,
     "reasoning": null
   },
+  "opencode/gpt-6.1-sol": {
+    "cache_read": 100000,
+    "cache_write_5m": 2500000,
+    "input": 2000000,
+    "output": 10000000,
+    "reasoning": null
+  },
   "opencode/grok-4.5": {
     "cache_read": 300000,
     "cache_write_5m": 0,
@@ -2604,10 +2667,10 @@
     "reasoning": null
   },
   "opencode/grok-4.7": {
-    "cache_read": 350000,
+    "cache_read": 500000,
     "cache_write_5m": 0,
-    "input": 1400000,
-    "output": 4200000,
+    "input": 2000000,
+    "output": 6000000,
     "reasoning": null
   },
   "opencode/grok-build-0.1": {
@@ -2716,6 +2779,13 @@
     "reasoning": null
   },
   "opencode/ling-3.0-tiny-free": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
+  "opencode/ling-3.1-flash-free": {
     "cache_read": 0,
     "cache_write_5m": 0,
     "input": 0,
@@ -3128,6 +3198,20 @@
     "output": 10000000,
     "reasoning": null
   },
+  "openrouter/anthropic/claude-sonnet-5.5": {
+    "cache_read": 200000,
+    "cache_write_5m": 2500000,
+    "input": 2000000,
+    "output": 10000000,
+    "reasoning": null
+  },
+  "openrouter/apodex/apodex-1.1-mini:free": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
   "openrouter/arcee-ai/trinity-large-thinking": {
     "cache_read": 60000,
     "cache_write_5m": 0,
@@ -3248,10 +3332,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-chat-v3-0324": {
-    "cache_read": 0,
+    "cache_read": 110000,
     "cache_write_5m": 0,
-    "input": 250000,
-    "output": 1000000,
+    "input": 290000,
+    "output": 1140000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-chat-v3.1": {
@@ -3275,25 +3359,18 @@
     "output": 2150000,
     "reasoning": null
   },
-  "openrouter/deepseek/deepseek-r1-distill-llama-70b": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 800000,
-    "output": 800000,
-    "reasoning": null
-  },
   "openrouter/deepseek/deepseek-v3.1-terminus": {
-    "cache_read": 135000,
+    "cache_read": 0,
     "cache_write_5m": 0,
     "input": 270000,
     "output": 1000000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v3.2": {
-    "cache_read": 134500,
+    "cache_read": 28000,
     "cache_write_5m": 0,
-    "input": 269000,
-    "output": 400000,
+    "input": 280000,
+    "output": 420000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v3.2-exp": {
@@ -3304,17 +3381,17 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash": {
-    "cache_read": 9380,
+    "cache_read": 5600,
     "cache_write_5m": 0,
-    "input": 46900,
-    "output": 93800,
+    "input": 28000,
+    "output": 56000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
-    "cache_read": 16000,
+    "cache_read": 15400,
     "cache_write_5m": 0,
-    "input": 21000,
-    "output": 320000,
+    "input": 17100,
+    "output": 1280000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
@@ -3325,24 +3402,24 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 29000,
+    "cache_read": 17400,
     "cache_write_5m": 0,
-    "input": 348000,
-    "output": 696000,
+    "input": 208800,
+    "output": 417600,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
-    "cache_read": 172000,
+    "cache_read": 22000,
     "cache_write_5m": 0,
-    "input": 293040,
-    "output": 3500000,
+    "input": 660000,
+    "output": 1980000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 1000,
+    "cache_read": 6000,
     "cache_write_5m": 0,
-    "input": 35000,
-    "output": 290000,
+    "input": 300000,
+    "output": 1200000,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -3612,17 +3689,10 @@
     "reasoning": null
   },
   "openrouter/inclusionai/ling-3.0-flash-fin": {
-    "cache_read": 12000,
+    "cache_read": 8400,
     "cache_write_5m": 0,
-    "input": 60000,
-    "output": 180000,
-    "reasoning": null
-  },
-  "openrouter/inclusionai/ling-3.0-flash-fin:free": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 0,
-    "output": 0,
+    "input": 42000,
+    "output": 123200,
     "reasoning": null
   },
   "openrouter/inclusionai/ling-3.0-flash-sante:free": {
@@ -3637,6 +3707,13 @@
     "cache_write_5m": 0,
     "input": 21000,
     "output": 61600,
+    "reasoning": null
+  },
+  "openrouter/inclusionai/ling-3.1-flash": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
     "reasoning": null
   },
   "openrouter/inference-net/schematron-v2-small": {
@@ -3740,8 +3817,8 @@
   "openrouter/meta/muse-glimmer-30b": {
     "cache_read": 40000,
     "cache_write_5m": 0,
-    "input": 300000,
-    "output": 1200000,
+    "input": 350000,
+    "output": 1500000,
     "reasoning": null
   },
   "openrouter/meta/muse-spark-1.1": {
@@ -3803,7 +3880,7 @@
   "openrouter/minimax/minimax-m1": {
     "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 400000,
+    "input": 550000,
     "output": 2200000,
     "reasoning": null
   },
@@ -3997,7 +4074,7 @@
     "reasoning": null
   },
   "openrouter/moonshotai/kimi-k2-thinking": {
-    "cache_read": 150000,
+    "cache_read": 0,
     "cache_write_5m": 0,
     "input": 600000,
     "output": 2500000,
@@ -4020,15 +4097,15 @@
   "openrouter/moonshotai/kimi-k2.7-code": {
     "cache_read": 180000,
     "cache_write_5m": 0,
-    "input": 656200,
-    "output": 3300000,
+    "input": 671200,
+    "output": 3350000,
     "reasoning": null
   },
   "openrouter/moonshotai/kimi-k3": {
-    "cache_read": 300000,
+    "cache_read": 270000,
     "cache_write_5m": 0,
-    "input": 3000000,
-    "output": 15000000,
+    "input": 2700000,
+    "output": 13500000,
     "reasoning": null
   },
   "openrouter/morph/morph-v3-fast": {
@@ -4043,6 +4120,20 @@
     "cache_write_5m": 0,
     "input": 900000,
     "output": 1900000,
+    "reasoning": null
+  },
+  "openrouter/nex-agi/nex-n2.5-mini": {
+    "cache_read": 2500,
+    "cache_write_5m": 0,
+    "input": 25000,
+    "output": 100000,
+    "reasoning": null
+  },
+  "openrouter/nex-agi/nex-n2.5-pro": {
+    "cache_read": 15000,
+    "cache_write_5m": 0,
+    "input": 75000,
+    "output": 250000,
     "reasoning": null
   },
   "openrouter/nousresearch/hermes-3-llama-3.1-405b": {
@@ -4095,10 +4186,10 @@
     "reasoning": null
   },
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b": {
-    "cache_read": 120000,
+    "cache_read": 100000,
     "cache_write_5m": 0,
-    "input": 600000,
-    "output": 2400000,
+    "input": 500000,
+    "output": 2200000,
     "reasoning": null
   },
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {
@@ -4123,10 +4214,10 @@
     "reasoning": null
   },
   "openrouter/nvidia/nemotron-3.5-lightning": {
-    "cache_read": 40000,
+    "cache_read": 29750,
     "cache_write_5m": 0,
-    "input": 80000,
-    "output": 200000,
+    "input": 59500,
+    "output": 170000,
     "reasoning": null
   },
   "openrouter/nvidia/nemotron-3.5-lightning:free": {
@@ -4417,10 +4508,10 @@
     "reasoning": null
   },
   "openrouter/openai/gpt-5.6-sol-pro": {
-    "cache_read": 200000,
-    "cache_write_5m": 2500000,
-    "input": 2000000,
-    "output": 10000000,
+    "cache_read": 400000,
+    "cache_write_5m": 5000000,
+    "input": 4000000,
+    "output": 20000000,
     "reasoning": null
   },
   "openrouter/openai/gpt-5.6-terra": {
@@ -4479,6 +4570,20 @@
     "output": 10000000,
     "reasoning": null
   },
+  "openrouter/openai/gpt-6.1-sol": {
+    "cache_read": 100000,
+    "cache_write_5m": 2500000,
+    "input": 2000000,
+    "output": 10000000,
+    "reasoning": null
+  },
+  "openrouter/openai/gpt-6.1-sol-pro": {
+    "cache_read": 100000,
+    "cache_write_5m": 2500000,
+    "input": 2000000,
+    "output": 10000000,
+    "reasoning": null
+  },
   "openrouter/openai/gpt-audio": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -4501,14 +4606,14 @@
     "reasoning": null
   },
   "openrouter/openai/gpt-oss-120b": {
-    "cache_read": 75000,
+    "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 150000,
-    "output": 600000,
+    "input": 37000,
+    "output": 170000,
     "reasoning": null
   },
   "openrouter/openai/gpt-oss-20b": {
-    "cache_read": 0,
+    "cache_read": 9000,
     "cache_write_5m": 0,
     "input": 18000,
     "output": 90000,
@@ -4662,7 +4767,7 @@
     "reasoning": null
   },
   "openrouter/prism-ml/ternary-bonsai-2-27b": {
-    "cache_read": 0,
+    "cache_read": 37500,
     "cache_write_5m": 0,
     "input": 75000,
     "output": 500000,
@@ -4748,8 +4853,8 @@
   "openrouter/qwen/qwen3-30b-a3b-instruct-2507": {
     "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 100000,
-    "output": 300000,
+    "input": 48150,
+    "output": 193050,
     "reasoning": null
   },
   "openrouter/qwen/qwen3-30b-a3b-thinking-2507": {
@@ -4900,10 +5005,10 @@
     "reasoning": null
   },
   "openrouter/qwen/qwen3.5-35b-a3b": {
-    "cache_read": 156250,
+    "cache_read": 50000,
     "cache_write_5m": 0,
-    "input": 312500,
-    "output": 1250000,
+    "input": 150000,
+    "output": 1000000,
     "reasoning": null
   },
   "openrouter/qwen/qwen3.5-397b-a17b": {
@@ -5173,10 +5278,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy3": {
-    "cache_read": 20625,
+    "cache_read": 33000,
     "cache_write_5m": 0,
-    "input": 82500,
-    "output": 330000,
+    "input": 132000,
+    "output": 528000,
     "reasoning": null
   },
   "openrouter/tencent/hy3-preview": {
@@ -5215,9 +5320,9 @@
     "reasoning": null
   },
   "openrouter/thinkingmachines/inkling": {
-    "cache_read": 170000,
+    "cache_read": 160000,
     "cache_write_5m": 0,
-    "input": 1000000,
+    "input": 950000,
     "output": 4050000,
     "reasoning": null
   },
@@ -5247,6 +5352,13 @@
     "cache_write_5m": 0,
     "input": 2500000,
     "output": 7500000,
+    "reasoning": null
+  },
+  "openrouter/unbiased/pareto-26.10-preview": {
+    "cache_read": 30000,
+    "cache_write_5m": 0,
+    "input": 800000,
+    "output": 3200000,
     "reasoning": null
   },
   "openrouter/undi95/remm-slerp-l2-13b": {
@@ -5320,10 +5432,10 @@
     "reasoning": null
   },
   "openrouter/x-ai/grok-4.7": {
-    "cache_read": 400000,
+    "cache_read": 500000,
     "cache_write_5m": 0,
-    "input": 1600000,
-    "output": 4800000,
+    "input": 2000000,
+    "output": 6000000,
     "reasoning": null
   },
   "openrouter/x-ai/grok-build-0.1": {
@@ -5397,7 +5509,7 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-4.6v": {
-    "cache_read": 55000,
+    "cache_read": 50000,
     "cache_write_5m": 0,
     "input": 300000,
     "output": 900000,
@@ -5432,31 +5544,31 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.1": {
-    "cache_read": 179140,
-    "cache_write_5m": 0,
-    "input": 964600,
-    "output": 3031600,
-    "reasoning": null
-  },
-  "openrouter/z-ai/glm-5.2": {
-    "cache_read": 120640,
-    "cache_write_5m": 0,
-    "input": 649600,
-    "output": 2041600,
-    "reasoning": null
-  },
-  "openrouter/z-ai/glm-5.3": {
     "cache_read": 260000,
     "cache_write_5m": 0,
     "input": 1400000,
     "output": 4400000,
     "reasoning": null
   },
-  "openrouter/z-ai/glm-5.3-flash": {
-    "cache_read": 10000,
+  "openrouter/z-ai/glm-5.2": {
+    "cache_read": 260000,
     "cache_write_5m": 0,
-    "input": 45000,
-    "output": 140000,
+    "input": 410000,
+    "output": 3990000,
+    "reasoning": null
+  },
+  "openrouter/z-ai/glm-5.3": {
+    "cache_read": 140000,
+    "cache_write_5m": 0,
+    "input": 1400000,
+    "output": 4400000,
+    "reasoning": null
+  },
+  "openrouter/z-ai/glm-5.3-flash": {
+    "cache_read": 30000,
+    "cache_write_5m": 0,
+    "input": 150000,
+    "output": 500000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flashx": {
@@ -5509,24 +5621,24 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 1000,
+    "cache_read": 10000,
     "cache_write_5m": 0,
-    "input": 35000,
-    "output": 290000,
+    "input": 20000,
+    "output": 600000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 7770,
+    "cache_read": 99000,
     "cache_write_5m": 0,
-    "input": 244200,
-    "output": 732600,
+    "input": 110000,
+    "output": 4200000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
-    "cache_read": 16000,
+    "cache_read": 15400,
     "cache_write_5m": 0,
-    "input": 21000,
-    "output": 320000,
+    "input": 17100,
+    "output": 1280000,
     "reasoning": null
   },
   "openrouter/~google/gemini-flash-latest": {
@@ -5544,10 +5656,10 @@
     "reasoning": 12000000
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "cache_read": 300000,
+    "cache_read": 450000,
     "cache_write_5m": 0,
-    "input": 1000000,
-    "output": 9000000,
+    "input": 790000,
+    "output": 13000000,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
@@ -5572,7 +5684,7 @@
     "reasoning": null
   },
   "openrouter/~openai/gpt-sol-latest": {
-    "cache_read": 200000,
+    "cache_read": 100000,
     "cache_write_5m": 2500000,
     "input": 2000000,
     "output": 10000000,
@@ -5586,24 +5698,24 @@
     "reasoning": null
   },
   "openrouter/~x-ai/grok-latest": {
-    "cache_read": 400000,
+    "cache_read": 500000,
     "cache_write_5m": 0,
-    "input": 1600000,
-    "output": 4800000,
+    "input": 2000000,
+    "output": 6000000,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-flash-latest": {
-    "cache_read": 10000,
+    "cache_read": 35000,
     "cache_write_5m": 0,
-    "input": 45000,
-    "output": 140000,
+    "input": 35000,
+    "output": 500000,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {
-    "cache_read": 66040,
+    "cache_read": 80000,
     "cache_write_5m": 0,
-    "input": 355600,
-    "output": 1117600,
+    "input": 120000,
+    "output": 4000000,
     "reasoning": null
   },
   "qwen-token-plan-cn/deepseek-v3.2": {
@@ -5949,13 +6061,6 @@
     "output": 0,
     "reasoning": null
   },
-  "together/deepcogito/cogito-v2-1-671b": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 1250000,
-    "output": 1250000,
-    "reasoning": null
-  },
   "together/deepseek-ai/deepseek-r1": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -5984,13 +6089,6 @@
     "output": 280000,
     "reasoning": null
   },
-  "together/deepseek-ai/deepseek-v4-pro": {
-    "cache_read": 200000,
-    "cache_write_5m": 0,
-    "input": 1740000,
-    "output": 3480000,
-    "reasoning": null
-  },
   "together/deepseek-ai/deepseek-v4-pro-0813": {
     "cache_read": 130000,
     "cache_write_5m": 0,
@@ -6012,20 +6110,6 @@
     "output": 150000,
     "reasoning": null
   },
-  "together/google/gemma-3n-e4b-it": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 60000,
-    "output": 120000,
-    "reasoning": null
-  },
-  "together/google/gemma-4-31b-it": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 390000,
-    "output": 970000,
-    "reasoning": null
-  },
   "together/liquidai/lfm2-24b-a2b": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -6038,13 +6122,6 @@
     "cache_write_5m": 0,
     "input": 1040000,
     "output": 1040000,
-    "reasoning": null
-  },
-  "together/meta-llama/meta-llama-3-8b-instruct-lite": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 140000,
-    "output": 140000,
     "reasoning": null
   },
   "together/minimaxai/minimax-m2.5": {
@@ -6068,27 +6145,6 @@
     "output": 1200000,
     "reasoning": null
   },
-  "together/moonshotai/kimi-k2.5": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 500000,
-    "output": 2800000,
-    "reasoning": null
-  },
-  "together/moonshotai/kimi-k2.6": {
-    "cache_read": 200000,
-    "cache_write_5m": 0,
-    "input": 1200000,
-    "output": 4500000,
-    "reasoning": null
-  },
-  "together/moonshotai/kimi-k2.7-code": {
-    "cache_read": 190000,
-    "cache_write_5m": 0,
-    "input": 950000,
-    "output": 4000000,
-    "reasoning": null
-  },
   "together/moonshotai/kimi-k3": {
     "cache_read": 300000,
     "cache_write_5m": 0,
@@ -6108,20 +6164,6 @@
     "cache_write_5m": 0,
     "input": 150000,
     "output": 600000,
-    "reasoning": null
-  },
-  "together/openai/gpt-oss-20b": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 50000,
-    "output": 200000,
-    "reasoning": null
-  },
-  "together/pearl-ai/gemma-4-31b-it": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 280000,
-    "output": 860000,
     "reasoning": null
   },
   "together/qwen/qwen2.5-7b-instruct-turbo": {

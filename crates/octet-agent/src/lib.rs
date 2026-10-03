@@ -78,10 +78,12 @@ pub mod events;
 pub mod extension;
 #[rustfmt::skip]
 pub mod extension_api_v03;
+pub mod extension_menu;
 pub mod extension_policy;
 pub mod extension_presentation;
 pub mod extension_process;
 pub mod extension_provider;
+pub mod extension_remote_ui;
 pub mod extension_runtime;
 pub mod extension_secret;
 pub mod goal_driver;
@@ -90,12 +92,14 @@ pub mod input;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod session;
+pub mod session_leaf;
 mod session_writer;
 mod shell_safety;
 /// The generic skill substrate containing descriptors, load errors, trust levels, and the registry trait.
 pub mod skills;
 pub mod telemetry;
 pub mod tool;
+pub mod tool_composition;
 pub mod tools;
 
 pub use agent::{
@@ -113,7 +117,10 @@ pub use cache::{
     analyze_session_cache, analyze_session_cache_stats, CacheMiss, CacheStats,
     CACHE_MISS_NOISE_TOKENS,
 };
-pub use cache_warmer::{CacheWarmMode, CacheWarmOutcome, CacheWarmPolicy};
+pub use cache_warmer::{
+    CacheWarmMode, CacheWarmingAction, CacheWarmingDecision, CacheWarmingPhase, CacheWarmingState,
+    CacheWarmingStatus,
+};
 pub use compaction::{
     build_branch_handoff_message, build_handoff_message, build_turn_prefix_handoff_message,
     choose_first_kept_by_tokens, finish_branch_handoff, finish_handoff, format_file_operations,
@@ -145,9 +152,17 @@ pub use extension::{
     AssistantPersistenceContext, CompactionStrategy, EventObserver, Extension, ExtensionHost,
     PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
     PostMutationDisposition, PostMutationKind, PostMutationRescan, PostMutationState,
-    ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, ToolCallHook,
-    MAX_POST_MUTATION_AFFECTED_RESOURCES, MAX_POST_MUTATION_ID_BYTES,
-    MAX_POST_MUTATION_RESOURCE_ID_BYTES, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+    ProviderContextHook, ProviderContextProjection, ProviderContextProjectionContext,
+    ProviderContextSessionWait, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
+    ProviderRetryKind, ToolCallHook, MAX_POST_MUTATION_AFFECTED_RESOURCES,
+    MAX_POST_MUTATION_ID_BYTES, MAX_POST_MUTATION_RESOURCE_ID_BYTES,
+    MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+};
+pub use extension_menu::{
+    ExtensionMenu, ExtensionMenuItem, MAX_EXTENSION_MENU_ARGUMENTS,
+    MAX_EXTENSION_MENU_ARGUMENT_BYTES, MAX_EXTENSION_MENU_BYTES, MAX_EXTENSION_MENU_DEPTH,
+    MAX_EXTENSION_MENU_DESCRIPTION_BYTES, MAX_EXTENSION_MENU_DETAIL_BYTES,
+    MAX_EXTENSION_MENU_ID_BYTES, MAX_EXTENSION_MENU_ITEMS, MAX_EXTENSION_MENU_LABEL_BYTES,
 };
 pub use extension_policy::{
     ExtensionActionIntent, ExtensionAdapterHints, ExtensionApprovalStore, ExtensionApprovalToken,
@@ -206,6 +221,19 @@ pub use extension_provider::{
     ExtensionProviderCatalogEntry, ExtensionProviderOwner, ExtensionProviderRegistry,
     ExtensionProviderRegistryError, ExtensionProviderRoute,
 };
+pub use extension_remote_ui::{
+    validate_remote_ui_line, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiCloseResult,
+    ExtensionRemoteUiClosed, ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification,
+    ExtensionRemoteUiKey, ExtensionRemoteUiKeyKind, ExtensionRemoteUiKeyModifier,
+    ExtensionRemoteUiMouse, ExtensionRemoteUiMouseButton, ExtensionRemoteUiMouseKind,
+    ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOpenResult, ExtensionRemoteUiOperation,
+    ExtensionRemoteUiPlacement, ExtensionRemoteUiResize, EXTENSION_FEATURE_REMOTE_UI,
+    MAX_EXTENSION_REMOTE_UI_FRAME_BYTES, MAX_EXTENSION_REMOTE_UI_KEY_BYTES,
+    MAX_EXTENSION_REMOTE_UI_LINES, MAX_EXTENSION_REMOTE_UI_LINE_BYTES,
+    MAX_EXTENSION_REMOTE_UI_REASON_BYTES, MAX_EXTENSION_REMOTE_UI_REVISION,
+    MAX_EXTENSION_REMOTE_UI_SGR_BYTES, MAX_EXTENSION_REMOTE_UI_SURFACES,
+    MAX_EXTENSION_REMOTE_UI_SURFACE_ID_BYTES, MAX_EXTENSION_REMOTE_UI_TITLE_BYTES,
+};
 pub use extension_secret::{
     ExtensionSecretBroker, ExtensionSecretError, ExtensionSecretRequest, ExtensionSecretValue,
     MAX_EXTENSION_SECRET_BYTES,
@@ -228,7 +256,7 @@ pub use session::{
     CacheWarmRecord, CacheWarmState, Checkpoint, Entry, EntryId, EntryMetadata, EntryValue,
     ExtensionEntryMetadata, ExtensionMetadataProvenance, Session, SessionError, SessionRecord,
     SessionRunOutcome, SessionRunOutcomeStatus, UsageRecord, UsageRecordKind,
-    UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
+    UsageUncertaintyBound, UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
     MAX_EXTENSION_ENTRY_METADATA_NAMESPACES, MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
 };
 pub use skills::{

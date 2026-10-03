@@ -200,6 +200,14 @@ TOOL_DESCRIPTIONS = {
 }
 
 
+def _progress(extension: Extension, message: str) -> None:
+    """Show one step live; without request progress it is skipped."""
+    try:
+        extension.progress(message=bounded_text(message, 512))
+    except Exception:
+        pass
+
+
 def create_runtime(
     *, controller_factory: Optional[Any] = None
 ) -> Tuple[Extension, BrowseController, BrowsePresentation, PresentationPublisher]:
@@ -207,7 +215,12 @@ def create_runtime(
         api_version="0.4",
         max_concurrent_requests=8,
         max_pending_requests=32,
-        supported_features=("request_cancellation", "content_parts", "artifacts"),
+        supported_features=(
+            "request_cancellation",
+            "content_parts",
+            "artifacts",
+            "request_progress",
+        ),
     )
     publisher = PresentationPublisher(extension)
     presentation = BrowsePresentation(publisher)
@@ -492,6 +505,7 @@ def create_runtime(
                 context,
                 confirmation_callback(),
                 cancellation=current_cancellation(),
+                progress=lambda message: _progress(extension, message),
             )
             return {"text": bounded_text(text, 16_384, collapse_whitespace=False)}
         except CancelledError:
@@ -505,6 +519,10 @@ def create_runtime(
         except Exception as error:
             extension.log.error("browse command failed", error_type=type(error).__name__)
             return {"text": "Browse command failed [internal_error]: operation failed safely."}
+
+    @extension.menu
+    def browse_menu(_request: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+        return controller.menu(context)
 
     @extension.status("status")
     def browse_status_surface(_params: Mapping[str, Any]) -> Dict[str, Any]:

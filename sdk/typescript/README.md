@@ -1,16 +1,38 @@
-# @skaft-software/octet-extension-api-v03
+# TypeScript / JavaScript extension SDKs
 
-This SDK's source distribution is **0.8.0**. Native assets and installation
-evidence are recorded in the [0.8.0 release notes](../../docs/releases/v0.8.0.md).
-Native publication does not publish SDK packages to PyPI or npm.
+The **0.8.2 source distributions** have two separate packages/wires. No npm
+publication or registry availability is asserted.
 
-Schema-generated ESM runtime and TypeScript declarations for the canonical octet
-extension API `0.3` contract, which remains supported alongside current API
-`0.4`. The package/schema name is intentional: `0.4` uses the distinct
-feature-negotiated wire, not a renamed canonical contract. These live generated
-bindings and their conformance tests are not a general extension platform.
-For a current process recipe use the [Python API 0.4 tool](../python/README.md#minimal-api-04-tool).
-This example negotiates a canonical contract locally:
+## Current API `0.4` process authoring
+
+Use the dependency-free local package
+[`@skaft-software/octet-extension-sdk`](process/README.md) under `process/`.
+Node >=22.19.0 runs a single ESM JavaScript or erasable TypeScript author file;
+`Extension` handles framing, exact negotiation, tools, commands, cancellation,
+progress and bounded shutdown. The CLI generates the local manifest from
+registration. Hooks and unimplemented services fail explicitly, never as no-ops.
+
+Try the [runnable text statistics example](../../examples/extensions/typescript-hello/README.md):
+
+```console
+npm run pack:sdk --prefix examples/extensions/typescript-hello
+npm install --offline --ignore-scripts --no-package-lock --prefix examples/extensions/typescript-hello
+npm run manifest --prefix examples/extensions/typescript-hello
+octet --extension-dir ./examples/extensions --enable-extension typescript-hello
+```
+
+Manifest generation executes registration code; review the source first.
+Discovery does not run or enable code. This local source recipe is not a
+portable bundle or publication claim. [Provider-free process and Rust host
+checks](host-smoke/README.md) cover more than loading declarations.
+
+## Retained canonical API `0.3` bindings
+
+The parent package remains **`@skaft-software/octet-extension-api-v03`**:
+schema-generated ESM runtime and TypeScript declarations for the supported,
+distinct canonical API `0.3` contract. It is not relabeled as API `0.4` and is
+not a general process runtime. Existing generated conformance and offline
+package tests remain live.
 
 ```js
 import { hostOffer, selectRequired, negotiate } from '@skaft-software/octet-extension-api-v03';
@@ -20,19 +42,16 @@ const contract = negotiate(offer, selectRequired(offer));
 ```
 
 This is a contract-binding example, **not a complete runnable extension**. It
-does not demonstrate a manifest, stdio process loop, tool dispatch, cancellation,
-or shutdown. The retained dependency-free canonical process reference is the
-[API `0.3` minimal example](../../examples/extensions/api-v03-minimal/README.md);
-its manifest pins octet 0.8.0 while retaining API `0.3` and extension version
-`0.1.0`. These bindings do not by themselves qualify a runnable extension.
+does not demonstrate a manifest, stdio process loop, dispatch, cancellation or
+shutdown. The retained dependency-free [API `0.3` minimal process](../../examples/extensions/api-v03-minimal/README.md)
+keeps its exact `=0.8.0` host pin, API `0.3`, and extension version `0.1.0`.
 
-The source package distribution version is `0.8.0`, independent of extension
-API `0.3`. The package name does not assert npm publication or registry
-availability; native octet publication does not publish this SDK to npm.
-Generated declarations/runtime have no registry dependencies.
+The source distribution version `0.8.2` is independent of extension API `0.3`.
+Native octet publication does not publish this package to npm. Generated
+runtime/declarations have no registry dependencies. Generated files come from
+`protocol/extension-api-v0.3.schema.json`; **do not edit them directly**.
 
-See [current extension authoring](../../docs/extensions.md) and the
-[generated API reference](../../docs/extensions/API-0.4-REFERENCE.md) for exact
-fields, bounds, nullable/optional distinctions, errors, and available methods.
-Generated files come from `protocol/extension-api-v0.3.schema.json`; do not edit
-them directly.
+See [current extension authoring](../../docs/extensions.md), the
+[canonical generated reference](../../docs/extensions/API-0.4-REFERENCE.md) and
+[feature-negotiated wire](../../docs/extensions/PROTOCOL-REFERENCE.md) for exact
+version-specific fields, bounds and host availability.

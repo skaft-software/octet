@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- A full server manager under `/extensions` replaces the `/mcp` slash command
+  in the terminal UI. **Add a server** walks through a guided form (name,
+  command, arguments, hidden environment values, display name; or a URL and a
+  bearer-token variable for remote servers when the experimental flag is on)
+  and asks before it adds and starts the server. Each server offers **Show
+  details**, **Refresh tools**, **Restart**/**Start**, **Stop**,
+  **Enable**/**Disable**, **Edit**, and **Remove**. Edits pass the launch-time
+  trust and schema checks before a private temporary file replaces
+  `~/.octet/mcp.json`, and apply live: only added, changed, or removed servers
+  start or stop. Project-file servers stay read-only. The web UI gains the same
+  `add`, `edit`, `enable`, `disable`, and `remove` actions on `/mcp`.
+
 ### Changed
 
 - Gate Streamable HTTP MCP behind the conspicuous, one-shot

@@ -522,7 +522,11 @@ fn copy_archive_file<R: Read>(
     destination: &Path,
     expected_size: u64,
 ) -> anyhow::Result<()> {
+    // Read on every platform so a header whose mode field cannot be decoded
+    // fails identically everywhere; only the unix branches below consult it.
     let mode = entry.header().mode()?;
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
@@ -872,6 +876,7 @@ mod tests {
             ids,
             vec![
                 "octet-browse",
+                "octet-codemode",
                 "octet-computer-use",
                 "octet-mcp",
                 "octet-subagents",
@@ -883,6 +888,13 @@ mod tests {
         }
     }
 
+    // The update path needs atomic directory exchange, which is unavailable
+    // on Windows (`atomic_exchange_directories` is linux/macOS-only); a
+    // non-atomic fallback with crash recovery is a separate product decision.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        ignore = "atomic directory exchange is unavailable on this platform"
+    )]
     #[test]
     fn local_bundle_installs_lists_updates_atomically_and_removes() {
         let directory = tempfile::tempdir().unwrap();

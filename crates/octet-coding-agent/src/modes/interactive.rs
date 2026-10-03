@@ -11,6 +11,8 @@ use anyhow::Context;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{Stream, StreamExt};
 use octet_agent::extension_api_v03::MAX_JSON_RPC_ID_BYTES;
+#[cfg(windows)]
+use octet_agent::extension_process::WindowsProcessLaunch;
 #[cfg(unix)]
 use octet_agent::extension_process::{wait_for_bash_process, BashProcessLaunch};
 use octet_agent::extension_process::{
@@ -66,7 +68,13 @@ use crate::tui::view::{
     SubagentPanel,
 };
 
+mod extension_menu;
 mod onboarding;
+
+use extension_menu::{
+    authority_label, extension_options_menu, set_extension_enabled, set_extension_host_authority,
+    ExtensionMenuOutcome,
+};
 
 /// Ordered controls sent to the frozen Agent during an active run.
 enum ControlIntent {
@@ -115,15 +123,58 @@ where
     outcome
 }
 
-struct InteractiveExtensionConfirmations<'a> {
+struct InteractiveExtensionConfirmations<'a, S> {
     shell: &'a mut InteractiveShell,
-    input: &'a mut EventStream,
+    input: &'a mut S,
     /// Process handles captured before the extension runtime took its mutable
     /// borrow, so a presented dialog can still announce its boundary.
     dialogs: &'a crate::extensions::ExtensionLifecycleSnapshot,
 }
 
-impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionConfirmations<'_> {
+impl<S> crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionConfirmations<'_, S>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
+        Some(self.shell)
+    }
+
+    fn wait_for_command_event<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => Ok(None),
+                event = self.input.next() => match event {
+                    Some(Ok(event)) => Ok(Some(event)),
+                    Some(Err(error)) => Err(error.into()),
+                    None => Ok(None),
+                },
+            }
+        })
+    }
+
+    fn command_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Key(key) if keymap::is_close_key(&key) => {
+                self.shell.request_close();
+                true
+            }
+            Event::Key(key) if is_ctrl_c(&key) => true,
+            Event::Resize(columns, rows) => {
+                self.shell.set_size(columns, rows);
+                self.shell.render();
+                false
+            }
+            event => {
+                let _ = handle_cancellable_wait_input(self.shell, event);
+                self.shell.render();
+                false
+            }
+        }
+    }
+
     fn wait_for_cancel<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
             loop {
@@ -227,6 +278,9 @@ pub enum PendingIdleAction {
     Logout(Option<String>),
     ChangeModel(ModelId),
     Fast(bool),
+    CacheWarming(octet_agent::CacheWarmMode),
+    /// Preference is already saved and sent to the active session owner.
+    SyncCacheWarming(octet_agent::CacheWarmMode),
     ChangeThinking(ReasoningConfig),
     ChangeThinkingLevel(ThinkingLevel),
     /// Save the active-run selection as the startup preference at the idle
@@ -250,6 +304,9 @@ pub enum PendingIdleAction {
     // the reported defect, so the queue cannot even represent it.
     /// Extension management that owns the application (menu, reload, actions).
     Extensions(commands::ExtensionsSubcommand),
+    /// Worker commands that need the idle application owner (wait, reattach,
+    /// inspect, and pane planning); live list and stop controls never queue here.
+    Subagents(Vec<String>),
     /// `/settings` mutations that must own the application (theme, images,
     /// default model/reasoning). Reports are rendered immediately instead.
     Settings(commands::SettingsCommand),
@@ -276,6 +333,10 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
                         | PendingIdleAction::ChangeThinkingLevel(_)
                 ),
                 PendingIdleAction::ChangeThinking(_) | PendingIdleAction::ChangeThinkingLevel(_)
+            )
+            | (
+                Some(PendingIdleAction::SyncCacheWarming(_)),
+                PendingIdleAction::SyncCacheWarming(_)
             )
             | (
                 Some(PendingIdleAction::PersistThinkingPreference(_)),
@@ -312,11 +373,14 @@ async fn wait_for_prompt<S>(
     reload_tick: &mut Interval,
     reload_watcher: &crate::reload::ReloadWatcher,
     reload: &mut crate::reload::ReloadSupervisor,
+    mut agent: Option<&mut octet_agent::Agent>,
 ) -> anyhow::Result<Idle>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let mut scroll_dirty = false;
+    let mut cache_warming_failed = false;
+    let remote_ui_wake = executable_extensions.remote_ui_wake();
     loop {
         if shell.close_requested() {
             return Ok(Idle::Quit);
@@ -332,6 +396,9 @@ where
                     Some(Err(error)) => return Err(error.into()),
                     None => return Ok(Idle::Quit),
                 };
+                if executable_extensions.route_remote_ui_event(shell, &event) {
+                    continue;
+                }
                 // Search owns its query before any extension or clipboard
                 // admission; pasted paths/text must not become composer input.
                 if shell.intercept_transcript_input(&event) {
@@ -511,6 +578,9 @@ where
                     None => std::future::pending::<()>().await,
                 }
             } => return Ok(Idle::GoalContinuation),
+            _ = crate::extensions::remote_ui::notified(&remote_ui_wake) => {
+                if apply_extension_background(shell, executable_extensions) { shell.render(); }
+            }
             _ = extension_tick.tick() => {
                 // A modal is an in-progress interactive action, not a safe
                 // active-session replacement boundary. Keep the bounded
@@ -572,6 +642,26 @@ where
                 if reload.is_due(now) {
                     return Ok(Idle::ReloadDue);
                 }
+            }
+            warm = async {
+                match agent.as_deref_mut() {
+                    Some(agent) => agent.drive_cache_warming().await,
+                    None => std::future::pending().await,
+                }
+            }, if !cache_warming_failed => {
+                match warm {
+                    Ok(event) => shell.on_cache_warming_event(&event),
+                    Err(_) => {
+                        // Background maintenance cannot end the prompt loop,
+                        // and a persistence failure must not spin or retry.
+                        cache_warming_failed = true;
+                        shell.notice("Cache warming stopped; usage may be uncertain. See /cache-warming.");
+                    }
+                }
+                if let Some(agent) = agent.as_deref() {
+                    shell.set_session_accounting(agent.session());
+                }
+                shell.render();
             }
         }
     }
@@ -818,8 +908,7 @@ fn settle_goal(
 }
 
 fn answer_now_prompt(instruction: Option<String>) -> String {
-    const DIRECTIVE: &str =
-        "Answer now using only the evidence already gathered. Do not call tools. State any remaining uncertainty.";
+    const DIRECTIVE: &str = "Answer now using only the evidence already gathered. Do not call tools. State any remaining uncertainty.";
     instruction
         .map(|instruction| format!("{}\n\n{DIRECTIVE}", instruction.trim()))
         .unwrap_or_else(|| DIRECTIVE.to_owned())
@@ -847,6 +936,7 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
             level => PendingIdleAction::ChangeThinkingLevel(level),
         },
         Command::Thinking(None) => PendingIdleAction::PickThinking,
+        Command::CacheWarming(Some(mode)) => PendingIdleAction::CacheWarming(mode),
         Command::New => PendingIdleAction::NewSession,
         Command::Resume(id) => PendingIdleAction::ResumeSession(id),
         Command::Fork => PendingIdleAction::Fork,
@@ -1098,358 +1188,7 @@ fn settle_active_clipboard_read(
     }
 }
 
-/// Native **text** clipboard read (parity row 2c.6). Clipboard image capture is
-/// an explicit exclusion, so only text ever leaves the clipboard and nothing in
-/// this module writes to it. The existing write transport (pbcopy plus OSC 52 in
-/// `tui/view.rs`) is untouched and remains the fallback.
-///
-/// Every helper is bounded by a deadline and a byte cap, and every failure fails
-/// closed. A helper that blocks — a disconnected display, a wedged Wayland
-/// compositor, no `pbpaste` on PATH — must never hold the interactive loop.
-mod clipboard_read {
-    use std::process::Stdio;
-    use std::time::Duration;
-
-    /// Deadline for one helper process.
-    const READ_TIMEOUT: Duration = Duration::from_millis(600);
-    /// Accepted clipboard text. A larger payload fails closed rather than
-    /// pasting a silently truncated document.
-    const MAX_TEXT_BYTES: usize = 1024 * 1024;
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Platform {
-        MacOs,
-        Linux,
-        Windows,
-    }
-
-    fn host_platform() -> Platform {
-        if cfg!(target_os = "macos") {
-            Platform::MacOs
-        } else if cfg!(target_os = "windows") {
-            Platform::Windows
-        } else {
-            Platform::Linux
-        }
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct Helper {
-        program: String,
-        args: Vec<String>,
-    }
-
-    fn helper(program: &str, args: &[&str]) -> Helper {
-        Helper {
-            program: program.to_owned(),
-            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
-        }
-    }
-
-    /// Declared helper order. A platform helper is used when it exists, so an
-    /// environment that declares no display yields no helper at all and the read
-    /// fails closed instead of scraping an unrelated transport.
-    fn helpers(platform: Platform, env: impl Fn(&str) -> Option<String>) -> Vec<Helper> {
-        match platform {
-            Platform::MacOs => vec![helper("pbpaste", &[])],
-            // `clip` writes only; PowerShell is the declared text reader.
-            Platform::Windows => vec![helper(
-                "powershell",
-                &["-NoProfile", "-Command", "Get-Clipboard -Raw"],
-            )],
-            Platform::Linux => {
-                let mut helpers = Vec::new();
-                if env("TERMUX_VERSION").is_some() {
-                    helpers.push(helper("termux-clipboard-get", &[]));
-                }
-                if env("WAYLAND_DISPLAY").is_some() {
-                    helpers.push(helper("wl-paste", &["--no-newline", "--type", "text"]));
-                }
-                if env("DISPLAY").is_some() {
-                    helpers.push(helper("xclip", &["-selection", "clipboard", "-out"]));
-                    helpers.push(helper("xsel", &["--clipboard", "--output"]));
-                }
-                helpers
-            }
-        }
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    enum Outcome {
-        /// The helper exited successfully and produced bytes.
-        Text(Vec<u8>),
-        /// The helper exited successfully and produced nothing.
-        Empty,
-        /// The helper is missing, failed, timed out, or exceeded the byte cap.
-        Failed,
-    }
-
-    /// Decide one helper's contribution. `Err(())` means "try the next helper";
-    /// every other outcome settles the read, matching the reference loop, where
-    /// a successful helper that printed nothing reports an empty clipboard
-    /// rather than leaking into the next transport.
-    fn settle(outcome: Outcome) -> Result<Option<String>, ()> {
-        match outcome {
-            Outcome::Failed => Err(()),
-            Outcome::Empty => Ok(None),
-            Outcome::Text(bytes) => Ok(decode(&bytes)),
-        }
-    }
-
-    /// Invalid UTF-8 is replaced rather than dropped, matching the reference
-    /// reader's `toString("utf8")`. At this point the payload is already
-    /// bounded, so only a genuinely empty clipboard yields `None`.
-    fn decode(bytes: &[u8]) -> Option<String> {
-        if bytes.is_empty() || bytes.len() > MAX_TEXT_BYTES {
-            return None;
-        }
-        Some(String::from_utf8_lossy(bytes).into_owned())
-    }
-
-    fn classify(bytes: Vec<u8>) -> Outcome {
-        if bytes.len() > MAX_TEXT_BYTES {
-            Outcome::Failed
-        } else if bytes.is_empty() {
-            Outcome::Empty
-        } else {
-            Outcome::Text(bytes)
-        }
-    }
-
-    async fn run(helper: &Helper) -> Outcome {
-        let command = tokio::process::Command::new(&helper.program)
-            .args(&helper.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            // A helper that ignores the deadline is killed when its future is
-            // dropped, so cancellation cannot leak a blocked child.
-            .kill_on_drop(true)
-            .spawn();
-        let Ok(mut child) = command else {
-            return Outcome::Failed;
-        };
-        let Some(mut stdout) = child.stdout.take() else {
-            return Outcome::Failed;
-        };
-        let operation = async move {
-            use tokio::io::AsyncReadExt;
-            let mut bytes = Vec::new();
-            let mut bounded = (&mut stdout).take(MAX_TEXT_BYTES as u64 + 1);
-            bounded.read_to_end(&mut bytes).await?;
-            let status = child.wait().await?;
-            Ok::<_, std::io::Error>((bytes, status))
-        };
-        match tokio::time::timeout(READ_TIMEOUT, operation).await {
-            // A helper that reports failure is transport failure, not an empty
-            // clipboard: `settle` then tries the next declared helper.
-            Ok(Ok((bytes, status))) if status.success() => classify(bytes),
-            _ => Outcome::Failed,
-        }
-    }
-
-    pub(super) async fn read_text() -> Option<String> {
-        #[cfg(test)]
-        if let Some(helper) = TEST_HELPER.with(|slot| slot.borrow_mut().take()) {
-            return helper.await;
-        }
-        #[cfg(test)]
-        if let Some(overridden) = test_override() {
-            return overridden;
-        }
-        for helper in helpers(host_platform(), |name| std::env::var(name).ok()) {
-            if let Ok(text) = settle(run(&helper).await) {
-                return text;
-            }
-        }
-        None
-    }
-
-    #[cfg(test)]
-    type TestHelper = std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>;
-
-    #[cfg(test)]
-    thread_local! {
-        /// One-shot controllable helper; no developer clipboard is accessed.
-        static TEST_HELPER: std::cell::RefCell<Option<TestHelper>> =
-            const { std::cell::RefCell::new(None) };
-        /// The outer `None` means no override; per-thread state isolates tests.
-        static OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_test_helper(
-        helper: impl std::future::Future<Output = Option<String>> + Send + 'static,
-    ) {
-        TEST_HELPER.with(|slot| *slot.borrow_mut() = Some(Box::pin(helper)));
-    }
-
-    #[cfg(test)]
-    fn test_override() -> Option<Option<String>> {
-        OVERRIDE.with(|slot| slot.borrow().clone())
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_test_text(text: Option<String>) {
-        OVERRIDE.with(|slot| *slot.borrow_mut() = Some(text));
-    }
-
-    #[cfg(test)]
-    pub(super) fn clear_test_text() {
-        OVERRIDE.with(|slot| *slot.borrow_mut() = None);
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
-            move |name| {
-                pairs
-                    .iter()
-                    .find(|(key, _)| *key == name)
-                    .map(|(_, value)| (*value).to_owned())
-            }
-        }
-
-        #[test]
-        fn linux_helper_order_follows_the_declared_environment_gates() {
-            let all = helpers(
-                Platform::Linux,
-                env(&[
-                    ("TERMUX_VERSION", "1"),
-                    ("WAYLAND_DISPLAY", "wayland-0"),
-                    ("DISPLAY", ":0"),
-                ]),
-            );
-            let programs: Vec<&str> = all.iter().map(|helper| helper.program.as_str()).collect();
-            assert_eq!(
-                programs,
-                ["termux-clipboard-get", "wl-paste", "xclip", "xsel"]
-            );
-            assert_eq!(
-                all[1].args,
-                [
-                    "--no-newline".to_owned(),
-                    "--type".to_owned(),
-                    "text".to_owned()
-                ]
-            );
-            assert_eq!(
-                all[2].args,
-                ["-selection", "clipboard", "-out"].map(str::to_owned)
-            );
-        }
-
-        #[test]
-        fn a_session_with_no_declared_display_yields_no_helper() {
-            assert!(helpers(Platform::Linux, env(&[])).is_empty());
-            assert_eq!(helpers(Platform::Linux, env(&[("DISPLAY", ":0")])).len(), 2);
-            assert_eq!(
-                helpers(Platform::Linux, env(&[("WAYLAND_DISPLAY", "wayland-1")])).len(),
-                1
-            );
-        }
-
-        #[test]
-        fn macos_and_windows_read_through_one_declared_helper() {
-            assert_eq!(helpers(Platform::MacOs, env(&[]))[0].program, "pbpaste");
-            let windows = helpers(Platform::Windows, env(&[]));
-            assert_eq!(windows[0].program, "powershell");
-            assert!(windows[0]
-                .args
-                .iter()
-                .any(|arg| arg.contains("Get-Clipboard")));
-            assert!(!windows[0].args.iter().any(|arg| arg.contains("clip\"")));
-        }
-
-        #[test]
-        fn helper_failure_tries_the_next_transport_and_empty_success_settles() {
-            assert_eq!(settle(Outcome::Failed), Err(()));
-            assert_eq!(settle(Outcome::Empty), Ok(None));
-            assert_eq!(
-                settle(Outcome::Text(b"from clipboard".to_vec())),
-                Ok(Some("from clipboard".to_owned()))
-            );
-        }
-
-        #[test]
-        fn oversized_payloads_fail_closed_instead_of_pasting_a_prefix() {
-            assert_eq!(classify(vec![b'x'; MAX_TEXT_BYTES + 1]), Outcome::Failed);
-            assert_eq!(classify(Vec::new()), Outcome::Empty);
-            assert_eq!(decode(&[]), None);
-            assert_eq!(decode(&vec![b'x'; MAX_TEXT_BYTES + 1]), None);
-            // The reference reader replaces invalid UTF-8 instead of dropping
-            // the whole clipboard.
-            assert_eq!(decode(&[0xff, 0xfe]), Some("\u{fffd}\u{fffd}".to_owned()));
-        }
-
-        #[tokio::test]
-        async fn a_missing_helper_fails_closed_without_panicking() {
-            let missing = Helper {
-                program: "octet-no-such-clipboard-helper".to_owned(),
-                args: Vec::new(),
-            };
-            assert_eq!(run(&missing).await, Outcome::Failed);
-        }
-
-        /// Exercise the real spawn/decode/reap path against throwaway helper
-        /// programs. The developer's own clipboard is never read or written.
-        #[cfg(unix)]
-        #[tokio::test]
-        async fn a_real_helper_is_read_bounded_and_its_exit_status_is_honoured() {
-            let text = Helper {
-                program: "/bin/echo".to_owned(),
-                args: vec!["clipboard text".to_owned()],
-            };
-            assert_eq!(
-                run(&text).await,
-                Outcome::Text(b"clipboard text\n".to_vec())
-            );
-            assert_eq!(
-                settle(Outcome::Text(b"clipboard text\n".to_vec())),
-                Ok(Some("clipboard text\n".to_owned()))
-            );
-
-            let empty = Helper {
-                // /bin/true is absent on macOS; use the portable shell builtin.
-                program: "/bin/sh".to_owned(),
-                args: vec!["-c".to_owned(), "exit 0".to_owned()],
-            };
-            assert_eq!(run(&empty).await, Outcome::Empty);
-
-            let failing = Helper {
-                program: "/bin/sh".to_owned(),
-                args: vec!["-c".to_owned(), "exit 3".to_owned()],
-            };
-            assert_eq!(run(&failing).await, Outcome::Failed);
-
-            // A helper that never returns is killed at the deadline instead of
-            // holding the interactive loop.
-            let wedged = Helper {
-                program: "/bin/sh".to_owned(),
-                args: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
-            };
-            let started = std::time::Instant::now();
-            assert_eq!(run(&wedged).await, Outcome::Failed);
-            assert!(
-                started.elapsed() < READ_TIMEOUT * 6,
-                "bounded helper read took {:?}",
-                started.elapsed()
-            );
-        }
-
-        #[tokio::test]
-        async fn the_test_override_replaces_the_platform_read() {
-            set_test_text(Some("overridden".to_owned()));
-            assert_eq!(read_text().await, Some("overridden".to_owned()));
-            set_test_text(None);
-            assert_eq!(read_text().await, None);
-            clear_test_text();
-        }
-    }
-}
+mod clipboard_read;
 
 /// Forward only normalized, bounded observations. Extensions never receive the
 /// terminal event itself and cannot influence the host keymap or resize path.
@@ -1652,7 +1391,7 @@ fn validate_provider(provider: Option<&str>) -> anyhow::Result<&str> {
     }
 }
 
-/// Run device-code login outside raw primary-screen rendering and return the
+/// Run Codex login outside raw primary-screen rendering and return the
 /// refreshed catalog. The caller decides whether it can install the catalog
 /// into a live Agent or must ask the user to restart from a model-less shell.
 async fn login_codex_catalog(
@@ -1662,7 +1401,7 @@ async fn login_codex_catalog(
     shell.render();
     shell.suspend();
     let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
-    let login_result = crate::auth::codex::login(&store, false).await;
+    let login_result = crate::auth::codex::login_without_prompt(&store).await;
     // Restoring the terminal is mandatory even when OAuth fails.
     shell.resume()?;
     shell.set_run_label("idle");
@@ -1870,8 +1609,8 @@ async fn logout_custom(
 }
 
 fn show_hotkeys(shell: &mut InteractiveShell) {
-    let text = shell.hotkeys_text();
-    shell.show_report_text("Hotkeys", "Resolved user keybindings", text);
+    let text = shell.hotkeys_markdown();
+    shell.show_report_markdown("Hotkeys", "Resolved user keybindings", &text);
 }
 
 fn copy_last_assistant(shell: &mut InteractiveShell) {
@@ -1944,6 +1683,11 @@ fn active_fast_status(
 fn apply_focus_transition(shell: &mut InteractiveShell, gained: bool) {
     if !gained {
         shell.begin_transcript_selection(u16::MAX, u16::MAX, false);
+    } else {
+        // A returning window may have lost native keyboard focus while Tern
+        // kept the pane visible (no TSP `Visible` event): ask the native
+        // surface to force a frame and re-assert `composer.editor` focus.
+        shell.request_tern_focus_resync();
     }
     shell.render();
 }
@@ -1989,6 +1733,8 @@ pub struct ActiveRunInspection {
     goal: Result<GoalAccess, ActiveGoalError>,
     /// Effective `/settings` facts (defaults, theme, transport, images).
     settings: commands::SettingsSurface,
+    cache_warming_status: octet_agent::CacheWarmingStatus,
+    cache_warming_control: Option<RunControl>,
     /// The launch ordered cycling scope, rendered by `/scoped-models` mid-run.
     model_scope: Option<Vec<crate::cli::parity::ScopedModel>>,
     /// Whether the catalog holds only the routes this launch proved it needs.
@@ -2022,8 +1768,23 @@ impl ActiveRunInspection {
             service_tier: app.agent.service_tier(),
             goal: GoalAccess::from_app(app),
             settings: commands::SettingsSurface::capture(app),
+            cache_warming_status: app.agent.cache_warming_status(),
+            cache_warming_control: None,
             model_scope: app.model_scope.clone(),
         }
+    }
+
+    fn cache_warming_text(&self, session: &Session) -> String {
+        let (mode, status) = self.cache_warming_control.as_ref().map_or_else(
+            || {
+                (
+                    self.settings.cache_warming,
+                    self.cache_warming_status.clone(),
+                )
+            },
+            |control| (control.cache_warming_mode(), control.cache_warming_status()),
+        );
+        commands::cache_warming_text(mode, &status, session)
     }
 
     fn session_id(&self) -> Option<&str> {
@@ -2197,7 +1958,11 @@ where
             Ok(session) => shell.show_report_text(
                 "Session",
                 "Durable session facts",
-                commands::session_text(&session),
+                format!(
+                    "{}\n\n{}",
+                    commands::session_text(&session),
+                    inspection.cache_warming_text(&session)
+                ),
             ),
             Err(error) => shell.error(format!("session report unavailable: {error}")),
         },
@@ -2218,10 +1983,38 @@ where
             Ok(session) => shell.show_report_text(
                 "Cache",
                 "Review session cache accounting",
-                commands::cache_text(&session),
+                format!(
+                    "{}\n\n{}",
+                    commands::cache_text(&session),
+                    inspection.cache_warming_text(&session)
+                ),
             ),
             Err(error) => shell.error(format!("cache report unavailable: {error}")),
         },
+        Command::CacheWarming(None) => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Cache warming",
+                "Billable refresh policy",
+                inspection.cache_warming_text(&session),
+            ),
+            Err(error) => shell.error(format!("cache warming report unavailable: {error}")),
+        },
+        Command::CacheWarming(Some(mode)) => {
+            if let Err(error) = crate::cli::persist_cache_warming(mode) {
+                shell.error(format!("failed to save cache warming: {error}"));
+            } else {
+                if let Some(control) = &inspection.cache_warming_control {
+                    if let Err(error) = control.set_cache_warming_mode(mode) {
+                        shell.error(error.to_string());
+                    }
+                }
+                push_pending_action(queue, PendingIdleAction::SyncCacheWarming(mode));
+                shell.notice(format!(
+                    "Cache warming: {} (saved to user config)",
+                    crate::config::cache_warming_label(mode)
+                ));
+            }
+        }
         Command::Context => shell.show_report_text(
             "Context",
             "Review the estimated request context before the next turn",
@@ -2400,17 +2193,25 @@ where
                 action: PanelAction::SelectGroupedModel {
                     models: presentation.ids,
                     providers: presentation.providers,
+                    details: presentation.details,
+                    scope: None,
                 },
             });
         }
         Command::Thinking(None) => open_active_thinking(shell, inspection),
         Command::Settings(sub) => {
             match sub {
-                commands::SettingsCommand::Show => shell.show_report_text(
-                    "Settings",
-                    "Effective display and default preferences",
-                    commands::settings_text(&inspection.settings),
-                ),
+                commands::SettingsCommand::Show => {
+                    let mut settings = inspection.settings.clone();
+                    if let Some(control) = &inspection.cache_warming_control {
+                        settings.cache_warming = control.cache_warming_mode();
+                    }
+                    shell.show_report_text(
+                        "Settings",
+                        "Effective display and default preferences",
+                        commands::settings_text(&settings),
+                    );
+                }
                 commands::SettingsCommand::Transport => shell.notice(format!(
                     "transport {} (declared by the {} route; not a user preference)",
                     inspection.settings.transport, inspection.settings.endpoint,
@@ -2504,7 +2305,21 @@ where
             }
         }
         Command::Exit => *quit_requested = true,
-        Command::Unknown(text) => shell.error(format!("unknown command: {text}")),
+        Command::Unknown(text) => {
+            if let Some(arguments) = subagents_command_arguments(&text, extensions) {
+                push_pending_action(queue, PendingIdleAction::Subagents(arguments));
+                shell.notice("subagent command queued for the next idle boundary");
+                shell.render();
+                return Ok(());
+            }
+            let name = split_prompt_invocation(&text).map_or("", |(name, _)| name);
+            match extensions.command_owner(name) {
+                Some(owner) => shell.error(format!(
+                    "/{name} is no longer a command: open /extensions and choose {owner}"
+                )),
+                None => shell.error(format!("unknown command: {text}")),
+            }
+        }
         command => match queue_command(command, queue) {
             Ok(()) => shell.notice("command queued for the next idle boundary"),
             Err(error) => shell.error(error.to_string()),
@@ -2940,7 +2755,7 @@ fn open_active_subagent_document(
 fn show_active_subagent_stop_result(shell: &mut InteractiveShell, result: anyhow::Result<String>) {
     match result {
         Ok(output) => shell.show_extension_output(
-            "subagents",
+            "Subagent stop",
             format!("Stop request responded; terminal settlement is not confirmed. Check /subagents.\n\n{output}"),
         ),
         Err(error) => shell.error(format!("subagent stop not confirmed: {error}; check /subagents")),
@@ -3020,6 +2835,7 @@ where
         Pin<Box<dyn Future<Output = anyhow::Result<crate::update::UpdateStatus>>>>,
     > = None;
     let mut update_report_open = false;
+    let remote_ui_wake = executable_extensions.remote_ui_wake();
     let mut modal_refresh = tokio::time::interval(Duration::from_secs(1));
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -3220,6 +3036,9 @@ where
                 } else { refresh_active_subagent_list(shell, executable_extensions); }
                 shell.render();
             }
+            _ = crate::extensions::remote_ui::notified(&remote_ui_wake) => {
+                if apply_extension_background(shell, executable_extensions) { shell.render(); }
+            }
             _ = extension_tick.tick() => {
                 if apply_extension_background(shell, executable_extensions) {
                     shell.render();
@@ -3255,6 +3074,9 @@ where
                         continue;
                     }
                 };
+                if !clipboard_replay && executable_extensions.route_remote_ui_event(shell, &event) {
+                    continue;
+                }
                 if clipboard_replay {
                     // A higher-priority branch may have changed ownership since
                     // the failed read settled on the preceding select iteration.
@@ -3310,6 +3132,33 @@ where
                             shell.set_run_preparing(run_id, "cancelling");
                         }
                         shell.render(); continue;
+                    }
+                    if subagents_open && subagent_document.is_none()
+                        && matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::CONTROL)
+                    {
+                        let target = shell
+                            .selected_subagent_node()
+                            .and_then(|node| subagent_stop_target(executable_extensions, &node));
+                        if let Some(target) = target {
+                            if subagent_stops.len() + usize::from(subagent_stop.is_some()) >= 8 {
+                                shell.error("subagent stop queue is full; retry after a response".into());
+                            } else if aborting || *quit_requested || shell.close_requested() {
+                                shell.error("subagent stop not admitted while closing".into());
+                            } else {
+                                match executable_extensions.subagent_stop_control(target, &inspection.resource_owner) {
+                                    Ok(stop) => {
+                                        subagent_stops.push_back(stop);
+                                        shell.notice("subagent stop queued; waiting for the owner-bound response (not terminal settlement)");
+                                    }
+                                    Err(error) => shell.error(format!("subagent stop not admitted: {error}")),
+                                }
+                            }
+                        } else {
+                            shell.error("the selected worker is not running".into());
+                        }
+                        shell.render();
+                        continue;
                     }
                     if let Some((result, action)) = shell.panel_input(&event) {
                         match (result, action) {
@@ -3607,34 +3456,33 @@ where
                             shell.render();
                             continue;
                         }
-                        if matches!(&command, Command::Unknown(text)
-                            if is_live_subagents_command(text, executable_extensions))
-                        {
-                            subagents_open = open_active_subagent_list(shell, executable_extensions);
-                            subagent_document = None;
-                            shell.render();
-                            continue;
-                        }
                         if let Command::Unknown(text) = &command {
-                            if let Some(target) = live_subagents_stop_target(text) {
-                                if subagent_stops.len() + usize::from(subagent_stop.is_some()) >= 8 {
-                                    shell.error("subagent stop queue is full; retry after a response".into());
-                                } else if aborting || *quit_requested || shell.close_requested() {
-                                    shell.error("subagent stop not admitted while closing".into());
-                                } else {
-                                    let result = executable_extensions.subagent_stop_control(
-                                        target.to_owned(), &inspection.resource_owner,
-                                    );
-                                    match result {
-                                        Ok(stop) => {
-                                            subagent_stops.push_back(stop);
-                                            shell.notice("subagent stop queued; waiting for the owner-bound response (not terminal settlement)");
+                            if let Some(arguments) = subagents_command_arguments(text, executable_extensions) {
+                                if subagent_list_requested(&arguments) {
+                                    subagents_open = open_active_subagent_list(shell, executable_extensions);
+                                    subagent_document = None;
+                                    shell.render();
+                                    continue;
+                                }
+                                if let [action, target] = arguments.as_slice() {
+                                    if action == "stop" {
+                                        if subagent_stops.len() + usize::from(subagent_stop.is_some()) >= 8 {
+                                            shell.error("subagent stop queue is full; retry after a response".into());
+                                        } else if aborting || *quit_requested || shell.close_requested() {
+                                            shell.error("subagent stop not admitted while closing".into());
+                                        } else {
+                                            match executable_extensions.subagent_stop_control(target.clone(), &inspection.resource_owner) {
+                                                Ok(stop) => {
+                                                    subagent_stops.push_back(stop);
+                                                    shell.notice("subagent stop queued; waiting for the owner-bound response (not terminal settlement)");
+                                                }
+                                                Err(error) => shell.error(format!("subagent stop not admitted: {error}")),
+                                            }
                                         }
-                                        Err(error) => shell.error(format!("subagent stop not admitted: {error}")),
+                                        shell.render();
+                                        continue;
                                     }
                                 }
-                                shell.render();
-                                continue;
                             }
                         }
                         let context = run.context_snapshot();
@@ -3872,6 +3720,13 @@ where
                             }
                         }
                     }
+                    if matches!(&event, AgentEvent::CacheWarmed { .. }) {
+                        // Read exact cumulative accounting without attributing
+                        // refresh traffic to assistant timing or cache metrics.
+                        if let Ok(session) = inspection.read_only_session() {
+                            shell.set_session_accounting(&session);
+                        }
+                    }
                     let run_finished = matches!(&event, AgentEvent::RunFinished { .. });
                     if run_finished {
                         interactions.clear();
@@ -3986,7 +3841,9 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
             .map(|skill| (format!("skill:{}", skill.id), skill.description.clone()))
             .collect::<Vec<_>>(),
     ));
-    shell.set_extension_commands(Arc::from(app.executable_extensions.command_suggestions()));
+    shell.set_extension_commands(Arc::from(
+        app.executable_extensions.tui_command_suggestions(),
+    ));
     shell.set_context_estimate(context_estimate, context_window(&app.model));
     shell.set_session_telemetry(
         app.agent.session(),
@@ -4050,7 +3907,8 @@ fn apply_extension_background(
     // Extension contributions can arrive (or change) after the initial
     // handshake; keep the composer's slash-command list in step so commands
     // like /subagents are enterable as soon as their owning process is ready.
-    shell.set_extension_commands(Arc::from(executable_extensions.command_suggestions()));
+    changed |=
+        shell.set_extension_commands(Arc::from(executable_extensions.tui_command_suggestions()));
     changed
 }
 
@@ -4939,7 +4797,7 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
         .registered_tool_names()
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
-    Ok(installed
+    let mut choices = installed
         .into_iter()
         .map(|bundle| {
             let summary = summaries.iter().find(|summary| summary.name == bundle.id);
@@ -5024,23 +4882,19 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                     colliding_tools.join(", ")
                 ),
                 Some(summary) if toggleable => format!(
-                    "{} · {} · {} · API {}",
+                    "{} · Host authority: {} · {} · API {}",
                     if summary.running {
                         "running"
                     } else {
                         "stopped"
                     },
-                    if summary.trusted {
-                        "trusted"
-                    } else {
-                        "untrusted"
-                    },
+                    authority_label(&app.config, summary),
                     bundle.version,
                     summary.api_version,
                 ),
                 Some(summary) => format!(
-                    "installed {} · shadowed by {:?} source; toggle unavailable",
-                    bundle.version, summary.source
+                    "installed {} · Host authority: {} · shadowed by {:?} source; toggle unavailable",
+                    bundle.version, authority_label(&app.config, summary), summary.source
                 ),
                 None if unavailable_disable && activation_authoritative => format!(
                     "installed {} · enabled but unavailable in discovery; Enter disables safely",
@@ -5063,94 +4917,41 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                 toggleable,
             }
         })
-        .collect())
-}
-
-const WEB_SEARCH_EXTENSION_NAME: &str = "octet-web-search";
-const WEB_SEARCH_COMMAND_NAME: &str = "web-search";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WebSearchMenuAction {
-    Configured,
-    Disable,
-    Back,
-}
-
-fn web_search_menu_entries(allow_disable: bool) -> (Vec<String>, Vec<Option<String>>) {
-    let mut items = vec![
-        "Brave Search (recommended)".to_owned(),
-        "SearXNG".to_owned(),
-    ];
-    let mut descriptions = vec![
-        Some(
-            "Hosted Brave Search API · setup asks for an API key and provides the signup link"
-                .to_owned(),
-        ),
-        Some("Use an existing self-hosted or public SearXNG JSON endpoint".to_owned()),
-    ];
-    if allow_disable {
-        items.push("Disable octet-web-search".to_owned());
-        descriptions.push(Some("Stop the extension and remove its tools".to_owned()));
-    }
-    (items, descriptions)
-}
-
-async fn web_search_management_menu(
-    app: &mut App,
-    shell: &mut InteractiveShell,
-    input: &mut EventStream,
-    allow_disable: bool,
-) -> anyhow::Result<WebSearchMenuAction> {
-    let (items, descriptions) = web_search_menu_entries(allow_disable);
-    let Some(index) = extension_picker(
-        shell,
-        input,
-        OrdinarySurfaceMetadata::with_purpose(
-            "Select web search provider",
-            "Choose a provider for web search or disable the extension",
-        ),
-        items,
-        descriptions,
-        0,
-    )
-    .await?
-    else {
-        return Ok(WebSearchMenuAction::Back);
-    };
-    if allow_disable && index == 2 {
-        return Ok(WebSearchMenuAction::Disable);
-    }
-    let provider = if index == 0 { "brave" } else { "searxng" };
-    let output = {
-        let dialogs = app.executable_extensions.lifecycle_snapshot();
-        let mut interaction = InteractiveExtensionConfirmations {
-            shell,
-            input,
-            dialogs: &dialogs,
-        };
-        app.executable_extensions
-            .execute_command_with_confirmation(
-                WEB_SEARCH_COMMAND_NAME,
-                vec!["setup".to_owned(), provider.to_owned()],
-                &mut interaction,
-            )
-            .await
-    };
-    match output {
-        Ok(Some(output)) => {
-            if !output.trim().is_empty() {
-                shell.notice(output);
-            }
-            shell.clear_error();
-            request_extension_ui(shell, app);
+        .collect::<Vec<_>>();
+    // A checkout (`--extension-dir`) or the project can supply extensions that
+    // are not installed bundles. Their activation is set where they came from,
+    // but their options live here like any other extension's.
+    for summary in &summaries {
+        if choices.iter().any(|choice| choice.name == summary.name) {
+            continue;
         }
-        Ok(None) => shell.error(
-            "octet-web-search is running but its setup command is unavailable; see /extensions status"
-                .to_owned(),
-        ),
-        Err(error) => shell.error(format!("web search provider was not changed: {error}")),
+        let origin = match summary.source {
+            octet_agent::extension_process::ExtensionSource::Project => "the project",
+            octet_agent::extension_process::ExtensionSource::Explicit => "--extension-dir",
+            octet_agent::extension_process::ExtensionSource::Global => "the extensions directory",
+        };
+        choices.push(InstalledExtensionChoice {
+            name: summary.name.clone(),
+            label: format!(
+                "{} {}",
+                if summary.enabled { "[x]" } else { "[ ]" },
+                summary.name
+            ),
+            description: format!(
+                "{} · Host authority: {} · {} · from {origin}; enable or disable it there",
+                if summary.running {
+                    "running"
+                } else {
+                    "stopped"
+                },
+                authority_label(&app.config, summary),
+                summary.version,
+            ),
+            enabled: summary.enabled,
+            toggleable: false,
+        });
     }
-    Ok(WebSearchMenuAction::Configured)
+    Ok(choices)
 }
 
 async fn extension_management_menu(
@@ -5189,7 +4990,7 @@ async fn extension_management_menu(
             input,
             OrdinarySurfaceMetadata::with_purpose(
                 "Manage extensions",
-                "Enter enables/disables; enabled web search opens provider setup",
+                "On/off selects activation; Host authority grants run code with your OS permissions (even in safe mode)",
             ),
             items,
             descriptions,
@@ -5201,18 +5002,30 @@ async fn extension_management_menu(
         };
         selected = index;
         let choice = &choices[index];
-        if choice.enabled
-            && choice.name == WEB_SEARCH_EXTENSION_NAME
-            && app
-                .executable_extensions
-                .command_owner(WEB_SEARCH_COMMAND_NAME)
-                .as_deref()
-                == Some(WEB_SEARCH_EXTENSION_NAME)
-        {
-            match web_search_management_menu(&mut app, shell, input, choice.toggleable).await? {
-                WebSearchMenuAction::Disable => {}
-                WebSearchMenuAction::Configured | WebSearchMenuAction::Back => continue,
+        if choice.enabled {
+            // An enabled extension opens straight into its options; Disable is
+            // its last entry.
+            match extension_options_menu(&mut app, shell, input, &choice.name, choice.toggleable)
+                .await?
+            {
+                ExtensionMenuOutcome::Back => {}
+                ExtensionMenuOutcome::ReturnToIdle => return Ok(app),
+                ExtensionMenuOutcome::Disable => {
+                    (app, _) = set_extension_enabled(app, shell, input, &choice.name, true).await?;
+                }
+                ExtensionMenuOutcome::GrantHostAuthority => {
+                    app =
+                        set_extension_host_authority(app, shell, input, &choice.name, true).await?;
+                }
+                ExtensionMenuOutcome::RevokeHostAuthority => {
+                    app = set_extension_host_authority(app, shell, input, &choice.name, false)
+                        .await?;
+                }
             }
+            if shell.close_requested() {
+                return Ok(app);
+            }
+            continue;
         }
         if !choice.toggleable {
             shell.error(format!(
@@ -5221,93 +5034,33 @@ async fn extension_management_menu(
             ));
             continue;
         }
-
-        let authoritative = match crate::cli::extension_activation_menu_authoritative(&app.config) {
-            Ok(authoritative) => authoritative,
-            Err(error) => {
-                shell.error(format!(
-                    "{} was not changed: could not revalidate activation precedence: {error}",
-                    choice.name
-                ));
-                continue;
-            }
-        };
-        if !authoritative {
-            shell.error(format!(
-                "{} was not changed: project, environment, or CLI activation now makes the user config read-only",
-                choice.name
-            ));
-            continue;
-        }
-
-        if refuse_resource_reload(&app, shell) {
-            continue;
-        }
-        let enabled = !choice.enabled;
-        let config_path = crate::cli::global_config_path();
-        let before_config = config_path.as_deref().and_then(configuration_snapshot);
-        let persisted = match crate::cli::persist_extension_enabled(&choice.name, enabled) {
-            Ok(persisted) => persisted,
-            Err(error) => {
-                shell.error(format!(
-                    "{} was not changed: could not update user configuration: {error}",
-                    choice.name
-                ));
-                continue;
-            }
-        };
-        app.config.enabled_extensions = persisted;
-        app = match reload_resources(app, shell, input).await {
-            Ok((app, _)) => app,
-            Err(error) => {
-                let rollback = crate::cli::persist_extension_enabled(&choice.name, choice.enabled);
-                return match rollback {
-                    Ok(_) => Err(error.context(format!(
-                        "{} runtime rebuild failed; the user-config activation change was rolled back",
-                        choice.name
-                    ))),
-                    Err(rollback_error) => Err(error.context(format!(
-                        "{} runtime rebuild failed and user-config rollback also failed: {rollback_error}",
-                        choice.name
-                    ))),
-                };
-            }
-        };
-        observe_configuration_commit(
-            &mut app.executable_extensions,
-            before_config,
-            config_path.as_deref(),
-        )
-        .await;
-        request_extension_ui(shell, &mut app);
-        let summary = app
+        let changed;
+        (app, changed) = set_extension_enabled(app, shell, input, &choice.name, false).await?;
+        let running = app
             .executable_extensions
             .summaries()
             .into_iter()
-            .find(|summary| summary.name == choice.name);
-        let detail = if enabled && summary.as_ref().is_some_and(|summary| !summary.trusted) {
-            "; executable extensions require full access; safe mode keeps them stopped"
-        } else {
-            ""
-        };
-        shell.notice(format!(
-            "{} {}{detail}",
-            choice.name,
-            if enabled { "enabled" } else { "disabled" }
-        ));
-        shell.clear_error();
-        if enabled
-            && choice.name == WEB_SEARCH_EXTENSION_NAME
-            && summary
-                .as_ref()
-                .is_some_and(|summary| summary.running && summary.trusted)
-            && app
-                .executable_extensions
-                .command_owner(WEB_SEARCH_COMMAND_NAME)
-                .as_deref()
-                == Some(WEB_SEARCH_EXTENSION_NAME)
-        {
-            let _ = web_search_management_menu(&mut app, shell, input, false).await?;
+            .any(|summary| summary.name == choice.name && summary.running && summary.trusted);
+        if changed && running {
+            // Enabling is the start of setup: show every option right away.
+            match extension_options_menu(&mut app, shell, input, &choice.name, true).await? {
+                ExtensionMenuOutcome::Disable => {
+                    (app, _) = set_extension_enabled(app, shell, input, &choice.name, true).await?;
+                }
+                ExtensionMenuOutcome::GrantHostAuthority => {
+                    app =
+                        set_extension_host_authority(app, shell, input, &choice.name, true).await?;
+                }
+                ExtensionMenuOutcome::RevokeHostAuthority => {
+                    app = set_extension_host_authority(app, shell, input, &choice.name, false)
+                        .await?;
+                }
+                ExtensionMenuOutcome::Back => {}
+                ExtensionMenuOutcome::ReturnToIdle => return Ok(app),
+            }
+            if shell.close_requested() {
+                return Ok(app);
+            }
         }
     }
 }
@@ -5606,37 +5359,111 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
     })
 }
 
-/// Admit only the exact stop verb and one target. Other extension commands
-/// retain the active dispatcher's ordinary unknown-command behavior.
-fn live_subagents_stop_target(text: &str) -> Option<&str> {
-    let mut parts = text.split_whitespace();
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some("/subagents"), Some("stop"), Some(target), None) => Some(target),
-        _ => None,
-    }
+/// The stop target (the worker's agent id) behind a live list node, taken from
+/// the destructive "stop" action the octet-subagents presentation attaches to
+/// that node. A worker without one is not running.
+fn subagent_stop_target(
+    extensions: &crate::extensions::ExecutableExtensions,
+    node_id: &str,
+) -> Option<String> {
+    let view = extensions
+        .presentation_views()
+        .into_iter()
+        .find(|view| view.extension == "octet-subagents")?;
+    let node = view
+        .snapshot
+        .collection
+        .as_ref()?
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)?;
+    node.action_ids.iter().find_map(|action_id| {
+        view.snapshot
+            .actions
+            .iter()
+            .find(|action| &action.id == action_id)
+            .filter(|action| {
+                action.command == "subagents"
+                    && action.arguments.first().map(String::as_str) == Some("stop")
+            })
+            .and_then(|action| action.arguments.get(1).cloned())
+    })
 }
 
-/// Whether an unknown-command text is the bare `/subagents` live view owned
-/// by the octet-subagents extension. Only that view is safe to open mid-run:
-/// it reads extension presentation state and never touches the running
-/// agent session.
-fn is_live_subagents_command(
+/// Admit only the runtime command registered by the first-party package.
+fn subagents_command_arguments(
     text: &str,
     extensions: &crate::extensions::ExecutableExtensions,
-) -> bool {
-    let Some(name) = text.strip_prefix('/') else {
-        return false;
-    };
-    name.trim() == "subagents"
-        && extensions.command_owner("subagents").as_deref() == Some("octet-subagents")
+) -> Option<Vec<String>> {
+    let (name, arguments) = split_prompt_invocation(text)?;
+    (name == "subagents"
+        && extensions.command_owner(name).as_deref()
+            == Some(crate::extensions::SUBAGENTS_EXTENSION_NAME))
+    .then(|| arguments.split_whitespace().map(str::to_owned).collect())
 }
 
-async fn subagents_view(
+fn subagent_list_requested(arguments: &[String]) -> bool {
+    arguments.is_empty()
+        || matches!(arguments, [action] if matches!(action.as_str(), "list" | "status"))
+}
+
+// Keep runtime-command construction out of the idle dispatcher's poll frame.
+fn run_subagents_command<'a, S>(
+    app: &'a mut App,
+    shell: &'a mut InteractiveShell,
+    input: &'a mut S,
+    arguments: Vec<String>,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin + 'a,
+{
+    Box::pin(async move {
+        // Revalidate after an idle-boundary reload or session transition. Another
+        // extension declaring the same command never gains worker authority.
+        if app
+            .executable_extensions
+            .command_owner("subagents")
+            .as_deref()
+            != Some(crate::extensions::SUBAGENTS_EXTENSION_NAME)
+        {
+            shell.error(
+                "first-party subagent command is unavailable; see /extensions status".into(),
+            );
+            return Ok(());
+        }
+        let open_list = subagent_list_requested(&arguments);
+        let dialogs = app.executable_extensions.lifecycle_snapshot();
+        let result = {
+            let mut confirmations = InteractiveExtensionConfirmations {
+                shell,
+                input,
+                dialogs: &dialogs,
+            };
+            app.executable_extensions
+                .execute_command_with_confirmation("subagents", arguments, &mut confirmations)
+                .await
+        };
+        request_extension_ui(shell, app);
+        match result {
+            Ok(Some(output)) if open_list => subagents_view(app, shell, input, output).await?,
+            Ok(Some(output)) if output.trim().is_empty() => shell.notice("/subagents completed"),
+            Ok(Some(output)) => shell.show_extension_output("subagents", output),
+            Ok(None) => shell.error("first-party subagent command is unavailable".into()),
+            Err(error) => shell.error(format!("subagent command failed: {error}")),
+        }
+        Ok(())
+    })
+}
+
+async fn subagents_view<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     command_output: String,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let unavailable = (!command_output.trim().is_empty()).then_some(command_output);
     if unavailable.as_deref().is_some_and(|output| {
         output.contains("failed closed")
@@ -5749,12 +5576,9 @@ async fn subagents_view(
                 .agent
                 .open_delegated_session_reference(principal, reference)
             {
-                Ok(Some(session)) => delegated_session_text(
-                    &session,
-                    &theme,
-                    initial_width,
-                    verbose_tools,
-                )?,
+                Ok(Some(session)) => {
+                    delegated_session_text(&session, &theme, initial_width, verbose_tools)?
+                }
                 Ok(None) => format!(
                     "{}\n\nThe delegated transcript is no longer available for this parent session.",
                     fallback_detail
@@ -5783,13 +5607,9 @@ async fn subagents_view(
                     .agent
                     .open_delegated_session_reference(principal, reference)
                 {
-                    Ok(Some(session)) => delegated_session_text(
-                        &session,
-                        &theme,
-                        width,
-                        verbose_tools,
-                    )
-                    .map(Some),
+                    Ok(Some(session)) => {
+                        delegated_session_text(&session, &theme, width, verbose_tools).map(Some)
+                    }
                     Ok(None) => Ok(Some(format!(
                         "{}\n\nThe delegated transcript is no longer available for this parent session.",
                         current_fallback
@@ -6392,6 +6212,24 @@ async fn apply_pending_actions(
             PendingIdleAction::Fast(enabled) => {
                 apply_fast_command(&mut app, shell, Some(enabled));
             }
+            PendingIdleAction::CacheWarming(mode) => {
+                if let Err(error) = commands::set_cache_warming(&mut app, mode) {
+                    shell.error(format!("failed to save cache warming: {error}"));
+                } else {
+                    shell.notice(format!(
+                        "Cache warming: {} (saved to user config)",
+                        crate::config::cache_warming_label(mode)
+                    ));
+                }
+            }
+            PendingIdleAction::SyncCacheWarming(mode) => {
+                app.config.cache_warming = mode;
+                if app.agent.cache_warming_mode() != mode {
+                    if let Err(error) = app.agent.set_cache_warming_mode(mode) {
+                        shell.error(error.to_string());
+                    }
+                }
+            }
             PendingIdleAction::ChangeModel(id) => {
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
             }
@@ -6511,6 +6349,9 @@ async fn apply_pending_actions(
                 } else {
                     execute_skills_command(&mut app, shell, sub).await?;
                 }
+            }
+            PendingIdleAction::Subagents(arguments) => {
+                run_subagents_command(&mut app, shell, input, arguments).await?;
             }
             PendingIdleAction::Extensions(sub) => {
                 // Reuse the idle dispatcher verbatim so the menu, reload, and
@@ -7044,8 +6885,28 @@ where
     let shell_id = shell.append_shell_in_progress(command.to_owned());
     shell.render();
 
+    // Windows has no `sh` on PATH by default (Git for Windows adds only its
+    // `cmd` directory); use the bash tool's Bash-compatible resolution.
+    #[cfg(windows)]
+    let program = match octet_agent::tools::resolve_windows_shell(sandbox.shell_path.as_deref()) {
+        Ok(program) => program,
+        Err(error) => {
+            let message = error.message;
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+    #[cfg(not(windows))]
+    let program = std::path::PathBuf::from("sh");
+
     // Spawn the child process with piped output.
-    let mut process = tokio::process::Command::new("sh");
+    let mut process = tokio::process::Command::new(&program);
     process
         .current_dir(workspace)
         .stdout(std::process::Stdio::piped())
@@ -7069,6 +6930,23 @@ where
             });
         }
     };
+    // The child starts suspended and runs only after it is assigned to a
+    // private Job Object, so cancellation reaches its whole process tree.
+    #[cfg(windows)]
+    let launch = match WindowsProcessLaunch::bash(&mut process) {
+        Ok(launch) => launch,
+        Err(error) => {
+            let message = format!("failed to prepare lifecycle supervision: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
     #[cfg(unix)]
     process.arg("-c").arg(launch.source());
     #[cfg(not(unix))]
@@ -7077,6 +6955,23 @@ where
         Ok(child) => child,
         Err(error) => {
             let message = format!("failed to spawn: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+    #[cfg(windows)]
+    let group_guard = match launch.register(&child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let message = format!("failed to register lifecycle supervision: {error}");
             shell.finalize_shell(&shell_id, message.clone(), -1);
             return Ok(ShellEscapeOutcome {
                 output: message.clone(),
@@ -7228,6 +7123,8 @@ where
             group_guard.terminate_now();
         }
         drop(work);
+        #[cfg(windows)]
+        group_guard.terminate_now();
         #[cfg(not(unix))]
         {
             let _ = child.kill().await;
@@ -7268,6 +7165,10 @@ where
     // Releasing the concurrent wait/drain future closes any descriptors
     // retained by an escaped descendant.
     drop(work);
+    #[cfg(windows)]
+    if interrupted || timed_out {
+        group_guard.terminate_now();
+    }
     #[cfg(not(unix))]
     if interrupted || timed_out {
         let _ = child.kill().await;
@@ -7620,7 +7521,28 @@ async fn run_idle_shell_escape(
     Ok(IdleCommandOutcome::Continue(Box::new(app)))
 }
 
-async fn run_idle_command(
+fn run_idle_command<'a>(
+    app: App,
+    shell: &'a mut InteractiveShell,
+    input: &'a mut EventStream,
+    command: Command,
+    goal_deadline: &'a mut Option<Instant>,
+    reexec: Option<&'a mut crate::reexec::ReexecController>,
+    reload: &'a mut crate::reload::ReloadSupervisor,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<IdleCommandOutcome>> + 'a>> {
+    // The complete dispatcher is too large to embed in every caller's future.
+    Box::pin(run_idle_command_inner(
+        app,
+        shell,
+        input,
+        command,
+        goal_deadline,
+        reexec,
+        reload,
+    ))
+}
+
+async fn run_idle_command_inner(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
@@ -7636,7 +7558,11 @@ async fn run_idle_command(
         Command::Session => shell.show_report_text(
             "Session",
             "Durable session facts",
-            commands::session_text(app.agent.session()),
+            format!(
+                "{}\n\n{}",
+                commands::session_text(app.agent.session()),
+                commands::app_cache_warming_text(&app)
+            ),
         ),
         Command::Help(topic) => {
             shell.show_report_text(
@@ -7659,8 +7585,30 @@ async fn run_idle_command(
         Command::Cache => shell.show_report_text(
             "Cache",
             "Review session cache accounting",
-            commands::cache_text(app.agent.session()),
+            format!(
+                "{}\n\n{}",
+                commands::cache_text(app.agent.session()),
+                commands::app_cache_warming_text(&app)
+            ),
         ),
+        Command::CacheWarming(mode) => {
+            if let Some(mode) = mode {
+                if let Err(error) = commands::set_cache_warming(&mut app, mode) {
+                    shell.error(format!("failed to save cache warming: {error}"));
+                } else {
+                    shell.notice(format!(
+                        "Cache warming: {} (saved to user config)",
+                        crate::config::cache_warming_label(mode)
+                    ));
+                }
+            } else {
+                shell.show_report_text(
+                    "Cache warming",
+                    "Billable refresh policy",
+                    commands::app_cache_warming_text(&app),
+                );
+            }
+        }
         Command::Update => {
             match await_lifecycle(shell, input, "checking for updates…", async {
                 crate::update::check().await
@@ -8006,100 +7954,60 @@ async fn run_idle_command(
             return run_idle_shell_escape(app, shell, input, escape).await;
         }
         Command::Unknown(text) => {
-            let (extension_name, extension_arguments) = split_prompt_invocation(&text)
-                .map(|(name, arguments)| {
-                    (
-                        name.to_owned(),
-                        arguments
-                            .split_whitespace()
-                            .map(str::to_owned)
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default();
-            let presentation_owner = app.executable_extensions.command_owner(&extension_name);
-            let open_subagents = extension_name == "subagents"
-                && extension_arguments.is_empty()
-                && presentation_owner.as_deref() == Some("octet-subagents");
-            let result = {
-                let dialogs = app.executable_extensions.lifecycle_snapshot();
-                let mut confirmations = InteractiveExtensionConfirmations {
-                    shell,
-                    input,
-                    dialogs: &dialogs,
-                };
-                app.executable_extensions
-                    .execute_command_with_confirmation(
-                        &extension_name,
-                        extension_arguments,
-                        &mut confirmations,
-                    )
-                    .await
-            };
-            match result {
-                Ok(Some(output)) if open_subagents => {
-                    subagents_view(&mut app, shell, input, output).await?;
-                }
-                Ok(Some(output)) => {
-                    let presentation = presentation_owner
-                        .as_deref()
-                        .and_then(|owner| app.executable_extensions.presentation_text_for(owner));
-                    let mut visible_blocks = Vec::new();
-                    if !output.trim().is_empty() {
-                        visible_blocks.push(output);
-                    }
-                    visible_blocks.extend(presentation);
-                    let visible = visible_blocks.join("\n\n");
-                    if visible.trim().is_empty() {
-                        shell.notice(format!("/{extension_name} completed"));
-                    } else {
-                        shell.show_extension_output(&extension_name, visible);
-                    }
-                }
-                Ok(None) => {
-                    let selection = shell.selected_plain_text();
-                    match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {
-                        Ok(Some(rendered)) => {
-                            if app.config.debug_prompt {
-                                shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
-                            }
-                            return Ok(IdleCommandOutcome::Submit {
-                                app: Box::new(app),
-                                input: ComposedInput::from_text(rendered.text),
-                            });
+            if let Some(arguments) = subagents_command_arguments(&text, &app.executable_extensions)
+            {
+                run_subagents_command(&mut app, shell, input, arguments).await?;
+            } else {
+                let selection = shell.selected_plain_text();
+                match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {
+                    Ok(Some(rendered)) => {
+                        if app.config.debug_prompt {
+                            shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
                         }
-                        Ok(None) => {
-                            // A slash command that no running extension
-                            // contributes may still belong to an extension
-                            // that is starting, degraded, or parked. Say so
-                            // instead of a bare unknown.
-                            let not_ready: Vec<String> = app
-                                .executable_extensions
-                                .summaries()
-                                .into_iter()
-                                .filter(|summary| {
-                                    summary.enabled
-                                        && (!summary.running
-                                            || summary.health.as_ref().is_some_and(|health| {
-                                                health.state
-                                                    != octet_agent::ExtensionHealthState::Ready
-                                            }))
-                                })
-                                .map(|summary| summary.name)
-                                .collect();
+                        return Ok(IdleCommandOutcome::Submit {
+                            app: Box::new(app),
+                            input: ComposedInput::from_text(rendered.text),
+                        });
+                    }
+                    Ok(None) => {
+                        // Other extension commands remain setup/configuration
+                        // entries under /extensions, not worker runtime controls.
+                        let name = split_prompt_invocation(&text)
+                            .map(|(name, _)| name.to_owned())
+                            .unwrap_or_default();
+                        if let Some(owner) = app.executable_extensions.command_owner(&name) {
+                            shell.error(format!(
+                            "/{name} is no longer a command: open /extensions and choose {owner}"
+                        ));
+                        } else {
+                            // A slash command may still name an extension that
+                            // is starting, degraded, or parked. Say so instead of
+                            // a bare unknown.
+                            let not_ready: Vec<String> =
+                                app.executable_extensions
+                                    .summaries()
+                                    .into_iter()
+                                    .filter(|summary| {
+                                        summary.enabled
+                                    && (!summary.running
+                                        || summary.health.as_ref().is_some_and(|health| {
+                                            health.state != octet_agent::ExtensionHealthState::Ready
+                                        }))
+                                    })
+                                    .map(|summary| summary.name)
+                                    .collect();
                             if text.starts_with('/') && !not_ready.is_empty() {
                                 shell.error(format!(
-                                    "unknown command: {text} (extensions not ready: {} — see /extensions status)",
-                                    not_ready.join(", ")
-                                ));
+                                "unknown command: {text} (extensions not ready: {} — see /extensions status)",
+                                not_ready.join(", ")
+                            ));
                             } else {
                                 shell.error(format!("unknown command: {text}"));
                             }
                         }
-                        Err(error) => shell.error(error.to_string()),
                     }
+                    Err(error) => shell.error(error.to_string()),
                 }
-                Err(error) => shell.error(format!("extension command failed: {error}")),
             }
         }
     }
@@ -8438,7 +8346,26 @@ async fn apply_detected_terminal_background<S>(
     shell: &mut InteractiveShell,
     input: &mut EventStream<S>,
     config: &crate::config::Config,
-) where
+) -> bool
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    apply_detected_terminal_background_with_timeout(
+        shell,
+        input,
+        config,
+        Duration::from_millis(120),
+    )
+    .await
+}
+
+async fn apply_detected_terminal_background_with_timeout<S>(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream<S>,
+    config: &crate::config::Config,
+    timeout: Duration,
+) -> bool
+where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     if explicit_terminal_background_override()
@@ -8447,21 +8374,21 @@ async fn apply_detected_terminal_background<S>(
             .is_some()
         || shell.theme().background() != TerminalBackground::Unknown
     {
-        return;
+        return false;
     }
     if shell.theme().capabilities().color == crate::tui::terminal::ColorDepth::None {
         // NO_COLOR still gets the deterministic Auto fallback, but should not
         // receive a background query or any other colour-oriented control.
-        return;
+        return false;
     }
     let Some((red, green, blue)) =
-        crate::tui::terminal::query_terminal_background_color(input, Duration::from_millis(120))
-            .await
+        crate::tui::terminal::query_terminal_background_color(input, timeout).await
     else {
-        return;
+        return false;
     };
     let background = background_from_terminal_rgb(red, green, blue);
     shell.set_theme(load_theme_for_background(config, background));
+    true
 }
 
 fn terminal_theme_picker_data() -> (Vec<String>, Vec<Option<String>>) {
@@ -8779,6 +8706,11 @@ async fn run_interactive_without_model(
     crate::app::bootstrap::startup_phase("frame.ready");
     shell.finish_startup();
     shell.render();
+    // Terminal appearance is cosmetic. The bounded OSC 11 probe must never
+    // delay the first editable frame or provider/session readiness.
+    if apply_detected_terminal_background(shell, input, &boot.config).await {
+        shell.render();
+    }
 
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     scroll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -8806,6 +8738,7 @@ async fn run_interactive_without_model(
             &mut reload_tick,
             &reload_watcher,
             &mut reload,
+            None,
         )
         .await?
         {
@@ -8993,6 +8926,7 @@ fn schedule_idle_responses_prewarm(app: &App, command: &Command) {
         command,
         Command::Changelog
             | Command::Fast(_)
+            | Command::CacheWarming(_)
             | Command::Hotkeys
             | Command::Copy
             | Command::Session
@@ -9532,6 +9466,9 @@ async fn run_interactive_once(
     let initial_prompt = config.initial_prompt.clone();
     let theme = load_theme(&config);
     let size = Arc::new(Mutex::new(crossterm::terminal::size().unwrap_or((80, 24))));
+    // Published before the frontend starts: the renderer thread and the shared
+    // input filter both read the resolved policy, and neither carries Config.
+    crate::tui::view::tern::set_policy(config.tern);
     let mut shell =
         InteractiveShell::enter_with_mouse(theme, size, config.mouse.application_owned())?;
     // Best-effort re-exec support: a host that cannot report its own executable
@@ -9543,8 +9480,12 @@ async fn run_interactive_once(
         crate::update::startup_available_update(),
         shell.startup_update_notifier(),
     );
-    let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
-    apply_detected_terminal_background(&mut shell, &mut input, &config).await;
+    // Live models.dev metadata refreshes off the startup path, at most every
+    // six hours; later catalog builds and lookups use it once cached.
+    tokio::spawn(crate::models_dev::refresh(config.offline));
+    let mut input = EventStream::new()
+        .with_cede_flag(shell.terminal_input_parking())
+        .with_tern_handler(shell.tern_input_handler());
     if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
         && !config.plain
@@ -9555,6 +9496,16 @@ async fn run_interactive_once(
             return Ok(InteractiveExit::Finished);
         }
     }
+    // Start Auto detection without waiting. The existing input owner filters
+    // and retains the reply while catalogs, extensions and sessions initialize.
+    // Explicit appearances and no-color terminals never issue the query.
+    apply_detected_terminal_background_with_timeout(
+        &mut shell,
+        &mut input,
+        &config,
+        Duration::ZERO,
+    )
+    .await;
     // Cold/expired model inventories can require network discovery. Give the
     // terminal an input owner before that work, just as for session/extension
     // startup below. Editing is live; submission still waits for full startup.
@@ -9642,6 +9593,16 @@ async fn run_interactive_once(
         }
         startup_prompt = Some(rendered.text);
     }
+    // Consume an already-arrived Auto reply before layout. Never put a probe
+    // deadline on readiness; absent replies keep the neutral fallback and the
+    // ordinary bounded post-ready detection below.
+    apply_detected_terminal_background_with_timeout(
+        &mut shell,
+        &mut input,
+        &app.config,
+        Duration::ZERO,
+    )
+    .await;
     // One atomic ready frame. History, identity, status, extension UI and the
     // startup prompt are all installed before `finish_startup` opens the
     // branded surface, so the terminal never sees an incremental
@@ -9649,6 +9610,9 @@ async fn run_interactive_once(
     // off-screen through `OCTET_STARTUP_TRACE=1`.
     crate::app::bootstrap::startup_phase("history.hydrate");
     shell.hydrate(app.agent.session())?;
+    if let Some(notice) = commands::resumed_cache_warming_notice(&app) {
+        shell.notice(notice);
+    }
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);
@@ -9665,6 +9629,9 @@ async fn run_interactive_once(
     crate::app::bootstrap::startup_phase("frame.ready");
     shell.finish_startup();
     shell.render();
+    if apply_detected_terminal_background(&mut shell, &mut input, &app.config).await {
+        shell.render();
+    }
 
     let mut pending_actions = VecDeque::new();
     let mut goal_deadline = recovered_goal_deadline(&app)?;
@@ -9711,6 +9678,7 @@ async fn run_interactive_once(
                     &mut reload_tick,
                     &reload_watcher,
                     &mut reload,
+                    Some(&mut app.agent),
                 )
                 .await?
             }
@@ -10022,7 +9990,8 @@ async fn run_interactive_once(
                 let pane_session_id = herdr_session_id(&app);
                 // Snapshot the read-only application facts the run cannot lend
                 // out (it owns `&mut Agent`), so inspection commands still work.
-                let inspection = ActiveRunInspection::capture(&app);
+                let prior_cache_misses = commands::cache_miss_count(&app);
+                let mut inspection = ActiveRunInspection::capture(&app);
                 let mut run = {
                     let user_input = composed.into_user_input();
                     let run_result = if answer_only {
@@ -10061,6 +10030,7 @@ async fn run_interactive_once(
                 shell.set_awaiting_provider(run_id);
                 shell.render();
                 let control = run.control();
+                inspection.cache_warming_control = Some(control.clone());
                 let mut quit_requested = false;
                 let mut made_tool_call = false;
                 let ended = drive_active_run(
@@ -10080,6 +10050,9 @@ async fn run_interactive_once(
                 )
                 .await?;
                 drop(run);
+                if let Some(notice) = commands::cache_miss_notice(&app, prior_cache_misses) {
+                    shell.notice(notice);
+                }
                 if app.model.responses_features().reasoning_effort_updates {
                     app.reasoning = app.agent.reasoning().clone();
                     update_status(&mut shell, &app);
@@ -10187,7058 +10160,4 @@ async fn run_interactive_once(
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn explicit_resource_reload_clears_only_reinitialized_extension_problems() {
-        use crate::reload::{ReloadComponent, ReloadSettings, ReloadSupervisor};
-        let mut reload = ReloadSupervisor::new(ReloadSettings::default());
-        let before: std::collections::BTreeMap<String, (String, u64)> =
-            std::collections::BTreeMap::from([
-                ("replaced".into(), ("old".into(), 1)),
-                ("retained".into(), ("shared".into(), 1)),
-                ("stopped".into(), ("old-stopped".into(), 1)),
-            ]);
-        let after = std::collections::BTreeMap::from([
-            ("replaced".into(), ("new".into(), 1)),
-            ("retained".into(), ("shared".into(), 1)),
-        ]);
-        let problem = || vec!["fixture failure".to_owned()];
-        for name in before.keys() {
-            reload.checked_problems(ReloadComponent::Extension(name.clone()), problem(), false);
-        }
-        reload.checked_problems(ReloadComponent::Host, problem(), false);
-        remember_rebuilt_extensions(&mut reload, &before, &after);
-        assert!(!reload
-            .checked_problems(
-                ReloadComponent::Extension("replaced".into()),
-                problem(),
-                false
-            )
-            .is_empty());
-        for name in ["retained", "stopped"] {
-            assert!(reload
-                .checked_problems(ReloadComponent::Extension(name.into()), problem(), false)
-                .is_empty());
-        }
-        assert!(reload
-            .checked_problems(ReloadComponent::Host, problem(), false)
-            .is_empty());
-    }
-
-    #[test]
-    fn automatic_reload_cannot_prompt_for_binary_or_worker_consent() {
-        assert!(!HostPass::ResourcesOnly.may_prompt());
-        assert!(!HostPass::Allowed {
-            redirect_confirmed: false
-        }
-        .may_prompt());
-        assert!(HostPass::Allowed {
-            redirect_confirmed: true
-        }
-        .may_prompt());
-    }
-
-    #[test]
-    fn automatic_extension_reload_silences_success_but_preserves_each_event() {
-        use crate::extensions::{ExtensionReloadReport, ExtensionRescanReport};
-        use crate::reload::{ReloadSettings, ReloadSupervisor};
-        let mut reload = ReloadSupervisor::new(ReloadSettings::default());
-        let success = |generation| ExtensionReloadReport {
-            processes: vec![(
-                "fixture".into(),
-                Ok(format!("reloaded fixture generation {generation}")),
-            )],
-            rescans: ExtensionRescanReport {
-                checked: vec![("resource:fixture".into(), Vec::new())],
-                details: vec![format!("rescanned fixture generation {generation}")],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(extension_reload_notices(&mut reload, success(1), false).is_empty());
-        assert!(extension_reload_notices(&mut reload, success(2), false).is_empty());
-        assert_eq!(
-            extension_reload_notices(&mut reload, success(3), true).len(),
-            2
-        );
-        let failure = || ExtensionReloadReport {
-            processes: vec![("fixture".into(), Err("fixture unavailable".into()))],
-            events: vec![
-                "discarded host request".into(),
-                "discarded host request".into(),
-            ],
-            ..Default::default()
-        };
-        assert_eq!(
-            extension_reload_notices(&mut reload, failure(), false).len(),
-            3
-        );
-        assert_eq!(
-            extension_reload_notices(&mut reload, failure(), false).len(),
-            2
-        );
-        // No process check in this pass: the previous failure remains remembered.
-        extension_reload_notices(&mut reload, ExtensionReloadReport::default(), false);
-        assert_eq!(
-            extension_reload_notices(&mut reload, failure(), false).len(),
-            2
-        );
-        assert_eq!(
-            extension_reload_notices(&mut reload, success(4), true).len(),
-            2
-        );
-        assert_eq!(
-            extension_reload_notices(&mut reload, failure(), false).len(),
-            3
-        );
-        assert_eq!(
-            extension_reload_notices(&mut reload, failure(), true).len(),
-            3
-        );
-    }
-
-    use super::*;
-    use octet_agent::EntryValue;
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn resource_reload_refusal_preserves_worker_owner_and_control() {
-        use crate::extensions::reload_lifecycle_test_support::fixture;
-        use octet_agent::ExtensionPresentationState as State;
-
-        for state in [
-            State::Pending,
-            State::Active,
-            State::Running,
-            State::Degraded,
-        ] {
-            for host in [
-                HostPass::ResourcesOnly,
-                HostPass::Allowed {
-                    redirect_confirmed: true,
-                },
-            ] {
-                let (directory, mut app) = crate::compaction::tests::app_for_estimate();
-                let (extensions, process, wire) = fixture(directory.path(), Some(state)).await;
-                app.executable_extensions = extensions;
-                let before = app.executable_extensions.presentation_views();
-                let path = app.agent.session().path().to_owned();
-                let session = std::fs::read(&path).unwrap();
-                let system = app.system.clone();
-                let skills = app.skills.clone();
-                let generation = process.health_snapshot().generation;
-                let mut shell = InteractiveShell::test_shell();
-                let mut input = EventStream::from_stream(futures_util::stream::pending());
-                let mut reexec = crate::reexec::ReexecController::capture().ok();
-                let (mut app, plan, applied) = reload_resources_with_reexec(
-                    app,
-                    &mut shell,
-                    &mut input,
-                    reexec.as_mut(),
-                    host,
-                    &mut crate::reload::ReloadSupervisor::new(Default::default()),
-                )
-                .await
-                .unwrap();
-
-                assert!(!applied);
-                assert!(plan.is_none());
-                assert_eq!(app.system, system);
-                assert!(Arc::ptr_eq(&skills, &app.skills), "the App was rebuilt");
-                assert_eq!(std::fs::read(&path).unwrap(), session);
-                assert_eq!(app.executable_extensions.presentation_views(), before);
-                assert_eq!(active_subagent_workers(&app), 1);
-                assert!(process.is_running());
-                assert_eq!(process.health_snapshot().generation, generation);
-                assert!(!std::fs::read_to_string(&wire)
-                    .unwrap_or_default()
-                    .contains("shutdown"));
-                assert_eq!(
-                    app.executable_extensions
-                        .execute_command_without_confirmation("worker-control", Vec::new(),)
-                        .await
-                        .unwrap()
-                        .as_deref(),
-                    Some("control retained"),
-                );
-                app.executable_extensions.shutdown().await;
-            }
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resource_reload_refuses_host_worker_without_presentation_and_retains_control() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        fn tool_turn(name: &str, arguments: serde_json::Value) -> String {
-            [
-                serde_json::json!({"type":"message_start", "message":{
-                    "id":"reload-worker", "usage":{"input_tokens":1,"output_tokens":0}}}),
-                serde_json::json!({"type":"content_block_start", "index":0,
-                    "content_block":{"type":"tool_use", "id":name, "name":name}}),
-                serde_json::json!({"type":"content_block_delta", "index":0,
-                    "delta":{"type":"input_json_delta", "partial_json":arguments.to_string()}}),
-                serde_json::json!({"type":"content_block_stop", "index":0}),
-                serde_json::json!({"type":"message_delta", "delta":{"stop_reason":"tool_use"},
-                    "usage":{"output_tokens":1}}),
-                serde_json::json!({"type":"message_stop"}),
-            ]
-            .into_iter()
-            .map(|event| {
-                format!(
-                    "event: {}\ndata: {event}\n\n",
-                    event["type"].as_str().unwrap()
-                )
-            })
-            .collect()
-        }
-
-        // Exercise a real host-owned worker, with all inference restricted to
-        // deterministic loopback responses and no subagents extension at all.
-        let server = MockServer::start().await;
-        let root_turns = Arc::new(AtomicUsize::new(0));
-        let child_turns = Arc::new(AtomicUsize::new(0));
-        let roots = root_turns.clone();
-        let children = child_turns.clone();
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |request: &wiremock::Request| {
-                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-                let response = if body["system"]
-                    .to_string()
-                    .contains("You are /root/survivor")
-                {
-                    let turn = children.fetch_add(1, Ordering::SeqCst) + 1;
-                    text_turn().replace("done", &format!("worker task {turn} complete"))
-                } else {
-                    match roots.fetch_add(1, Ordering::SeqCst) {
-                        0 => tool_turn(
-                            "spawn_agent",
-                            serde_json::json!({
-                            "task_name":"survivor", "message":"complete the first task"}),
-                        ),
-                        1 | 4 => tool_turn("wait_agent", serde_json::json!({"timeout_ms":3000})),
-                        2 | 5 => text_turn(),
-                        3 => tool_turn(
-                            "followup_task",
-                            serde_json::json!({
-                            "target":"/root/survivor", "message":"continue after refused reload"}),
-                        ),
-                        unexpected => panic!("unexpected root turn {unexpected}"),
-                    }
-                };
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(response)
-            })
-            .mount(&server)
-            .await;
-        let (directory, mut app) = fast_test_app(scripted_model(&server.uri()));
-        // Native delegation tools require explicit host authority; only the
-        // fixed local script above can request tools in this fixture.
-        app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
-        app = rebuild_app(app, None, None, None, None).unwrap();
-        app.agent
-            .enable_v2_delegation(octet_agent::DelegationConfig::new(
-                directory.path().join("delegation"),
-            ))
-            .unwrap();
-        assert_eq!(
-            app.agent.complete("start survivor").await.unwrap().text,
-            "done"
-        );
-        for entry in app.agent.session().entries() {
-            if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
-                for part in &message.content {
-                    if let octet_ai::UserPart::ToolResult(result) = part {
-                        assert!(!result.is_error, "{result:?}");
-                    }
-                }
-            }
-        }
-        assert_eq!(child_turns.load(Ordering::SeqCst), 1);
-        // The first task has settled, but its live receiver must still block
-        // destructive reloads, even though no presentation roster exists.
-        assert_eq!(app.agent.active_delegated_worker_count(), 1);
-        assert!(app.executable_extensions.presentation_views().is_empty());
-        assert_eq!(app.executable_extensions.active_subagent_worker_count(), 0);
-        let team = app.agent.delegation_team_directory().unwrap().to_path_buf();
-        let child_path = team.join("0001-survivor.jsonl");
-        let child_before = std::fs::read(&child_path).unwrap();
-        let root_path = app.agent.session().path().to_owned();
-        let root_before = std::fs::read(&root_path).unwrap();
-        let owner = app.agent.session().resource_owner_key();
-        let skills = app.skills.clone();
-        let mut shell = InteractiveShell::test_shell();
-        let mut input = EventStream::from_stream(futures_util::stream::pending());
-        let mut reexec = crate::reexec::ReexecController::capture().ok();
-        for host in [
-            HostPass::ResourcesOnly,
-            HostPass::Allowed {
-                redirect_confirmed: true,
-            },
-        ] {
-            let (next, plan, applied) = reload_resources_with_reexec(
-                app,
-                &mut shell,
-                &mut input,
-                reexec.as_mut(),
-                host,
-                &mut crate::reload::ReloadSupervisor::new(Default::default()),
-            )
-            .await
-            .unwrap();
-            app = next;
-            assert!(!applied);
-            assert!(plan.is_none());
-            assert!(Arc::ptr_eq(&skills, &app.skills));
-            assert_eq!(app.agent.session().resource_owner_key(), owner);
-            assert_eq!(app.agent.active_delegated_worker_count(), 1);
-            assert_eq!(std::fs::read(&root_path).unwrap(), root_before);
-            assert_eq!(std::fs::read(&child_path).unwrap(), child_before);
-        }
-        let notice = shell.debug_snapshot();
-        assert!(notice.contains("host worker tasks remain attached"));
-        assert!(notice.contains("then exit and resume the session to replace the owning host"));
-        assert!(notice.contains("The current application and workers are unchanged"));
-        // Control still targets the original child task/session, not a worker
-        // reconstructed from durable records after destroying the old owner.
-        assert_eq!(
-            app.agent.complete("continue survivor").await.unwrap().text,
-            "done"
-        );
-        assert_eq!(child_turns.load(Ordering::SeqCst), 2);
-        assert_eq!(root_turns.load(Ordering::SeqCst), 6);
-        assert_eq!(app.agent.active_delegated_worker_count(), 1);
-        assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
-        assert!(std::fs::read_to_string(child_path)
-            .unwrap()
-            .contains("worker task 2 complete"));
-        for entry in app.agent.session().entries() {
-            if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
-                for part in &message.content {
-                    if let octet_ai::UserPart::ToolResult(result) = part {
-                        assert!(!result.is_error, "{result:?}");
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn forced_watch_reload_refusal_does_not_restart_extensions_or_claim_success() {
-        use crate::extensions::reload_lifecycle_test_support::fixture;
-        use octet_agent::ExtensionPresentationState as State;
-        let (directory, mut app) = crate::compaction::tests::app_for_estimate();
-        let (extensions, process, wire) = fixture(directory.path(), Some(State::Running)).await;
-        app.executable_extensions = extensions;
-        let skills = app.skills.clone();
-        let mut shell = InteractiveShell::test_shell();
-        // A refusal must not poll raw input or enter any lifecycle worker.
-        shell.cede_terminal_input();
-        let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
-        let mut pending_reexec = None;
-        let mut supervisor = crate::reload::ReloadSupervisor::new(Default::default());
-        let plan = supervisor.force();
-        let mut app = tokio::time::timeout(
-            Duration::from_secs(2),
-            apply_live_reload_plan(
-                app,
-                &mut shell,
-                &mut input,
-                &mut supervisor,
-                plan,
-                None,
-                &mut pending_reexec,
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(!supervisor.is_in_flight());
-        assert!(pending_reexec.is_none());
-        assert!(Arc::ptr_eq(&skills, &app.skills));
-        assert!(process.is_running());
-        assert!(!std::fs::read_to_string(wire)
-            .unwrap_or_default()
-            .contains("shutdown"));
-        let visible = shell.debug_snapshot();
-        assert!(visible.contains("reload refused"), "{visible}");
-        assert!(
-            !visible.contains("reloaded") && !visible.contains("reload applied"),
-            "{visible}"
-        );
-        app.executable_extensions.shutdown().await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
-        use crate::extensions::reload_lifecycle_test_support::{
-            acquire_terminal, assert_revoked_before_shutdown, fixture,
-        };
-
-        for operation in [
-            "resources",
-            "model",
-            "reasoning",
-            "new",
-            "resume",
-            "extensions",
-        ] {
-            let (directory, mut app) = crate::compaction::tests::app_for_estimate();
-            let (extensions, process, wire) = fixture(directory.path(), None).await;
-            app.executable_extensions = extensions;
-            let mut shell = InteractiveShell::test_shell();
-            acquire_terminal(&mut app.executable_extensions, &mut shell, &process);
-            let parking = shell.terminal_input_parking();
-            let mut input = EventStream::from_stream(futures_util::stream::pending())
-                .with_cede_flag(parking.clone());
-            let mut app = match operation {
-                "resources" => {
-                    let (next, applied) =
-                        reload_resources(app, &mut shell, &mut input).await.unwrap();
-                    assert!(applied);
-                    next
-                }
-                "extensions" => {
-                    app.executable_extensions.revoke_terminal_grant_for_shell(
-                        &mut shell,
-                        "the extensions are being reloaded",
-                    );
-                    app.executable_extensions.reload().await;
-                    app
-                }
-                _ => {
-                    let reconfig = match operation {
-                        "model" => Reconfig::Model(app.model.spec.id.clone()),
-                        "reasoning" => Reconfig::Thinking(ReasoningConfig::Off),
-                        "new" => Reconfig::NewSession,
-                        "resume" => Reconfig::Resume(app.agent.session().path().to_owned()),
-                        _ => unreachable!(),
-                    };
-                    transition(app, &mut shell, &mut input, reconfig)
-                        .await
-                        .unwrap()
-                }
-            };
-            assert!(
-                !parking.load(std::sync::atomic::Ordering::SeqCst),
-                "{operation}"
-            );
-            assert!(
-                !app.executable_extensions.terminal_grant_is_active(),
-                "{operation}"
-            );
-            assert_revoked_before_shutdown(&wire);
-            // Test input uses the same restored ownership flag as the live stream.
-            let key = theme_picker_key(KeyCode::Char('x'));
-            let mut restored =
-                EventStream::from_stream(tokio_stream::iter([key])).with_cede_flag(parking);
-            assert!(
-                tokio::time::timeout(Duration::from_secs(1), restored.next())
-                    .await
-                    .unwrap()
-                    .is_some()
-            );
-            app.executable_extensions.shutdown().await;
-        }
-    }
-
-    fn test_theme() -> crate::tui::theme::OctetTheme {
-        crate::tui::theme::test_theme()
-    }
-
-    pub(super) fn terminal_theme_test_config(workspace: PathBuf) -> Config {
-        use crate::config::{CompactionPolicy, Mode, ResumeSelector, SandboxPolicy};
-
-        Config {
-            workspace: workspace.clone(),
-            invocation_cwd: workspace,
-            model: None,
-            model_explicit: false,
-            reasoning: None,
-            reasoning_explicit: false,
-            reasoning_mode: octet_ai::ReasoningMode::Standard,
-            reasoning_mode_explicit: false,
-            cache_retention: octet_ai::CacheRetention::Short,
-            effect_policy: octet_agent::EffectPolicy::Controlled,
-            sandbox: SandboxPolicy::default(),
-            theme: None,
-            system_prompt: None,
-            theme_paths: vec![],
-            color: crate::config::ColorMode::Auto,
-            mouse: crate::config::MouseMode::Auto,
-            plain: false,
-            show_images: false,
-            session_dir: PathBuf::from("sessions"),
-            compaction: CompactionPolicy::default(),
-            max_cost_microdollars: None,
-            cost_warning_microdollars: None,
-            max_turns: Some(40),
-            show_reasoning_in_print: false,
-            initial_prompt: None,
-            prompt_template: None,
-            debug_prompt: false,
-            prompt_paths: vec![],
-            mode: Mode::Interactive,
-            resume: ResumeSelector::New,
-            skill_paths: vec![],
-            extension_paths: vec![],
-            enabled_extensions: vec![],
-            extension_activation_overridden: false,
-            trusted_extensions: vec![],
-            invocation_trusted_extensions: vec![],
-            experimental_streamable_http_mcp: false,
-            extension_flag_values: Default::default(),
-            tools: crate::config::ToolPolicy::default(),
-            telemetry: None,
-            context_files: true,
-            offline: true,
-            workspace_trusted: true,
-        }
-    }
-
-    fn theme_picker_key(code: KeyCode) -> std::io::Result<Event> {
-        Ok(Event::Key(crossterm::event::KeyEvent::new(
-            code,
-            KeyModifiers::NONE,
-        )))
-    }
-
-    #[tokio::test]
-    async fn terminal_theme_picker_confirms_compiled_previews_without_changing_config() {
-        for choice in TerminalThemeChoice::all() {
-            let mut config = terminal_theme_test_config(PathBuf::from("."));
-            config.theme = Some("auto".into());
-            let mut shell = InteractiveShell::test_shell();
-            let mut original = crate::tui::theme::test_theme_for(
-                TerminalBackground::Dark,
-                shell.theme().capabilities(),
-            );
-            original.override_token("foreground", "#123456");
-            shell.set_theme(original.clone());
-            let mut events = vec![
-                theme_picker_key(KeyCode::End),
-                theme_picker_key(KeyCode::Home),
-            ];
-            for _ in 0..choice.index() {
-                events.push(theme_picker_key(KeyCode::Down));
-            }
-            // Filtering leaves a single displayed row whose original index
-            // is still the choice's index, not necessarily zero.
-            events.extend(
-                choice
-                    .key()
-                    .chars()
-                    .map(|key| theme_picker_key(KeyCode::Char(key))),
-            );
-            events.push(theme_picker_key(KeyCode::Enter));
-            let mut input = tokio_stream::iter(events);
-
-            assert_eq!(
-                pick_terminal_theme(&mut shell, &mut input, &config, false)
-                    .await
-                    .unwrap(),
-                Some(ThemeSelection::Builtin(choice))
-            );
-            assert_eq!(
-                shell.theme().background(),
-                choice
-                    .explicit_background()
-                    .unwrap_or(TerminalBackground::Dark),
-                "Auto must retain its already-resolved background after visiting other rows"
-            );
-            if choice == TerminalThemeChoice::Auto {
-                assert_eq!(shell.theme().capabilities(), original.capabilities());
-                assert_eq!(
-                    shell.theme().role_rgb("foreground"),
-                    original.role_rgb("foreground")
-                );
-            }
-            assert_eq!(config.theme.as_deref(), Some("auto"));
-            assert!(!shell.has_panel());
-        }
-    }
-
-    #[tokio::test]
-    async fn terminal_theme_picker_filters_file_metadata_and_preserves_active_theme_until_confirmed(
-    ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config = terminal_theme_test_config(directory.path().to_owned());
-        let themes = config.workspace.join(".octet/themes");
-        std::fs::create_dir_all(&themes).unwrap();
-        let path = themes.join("picker-amber.toml");
-        std::fs::write(
-            &path,
-            "[metadata]\nname = 'Golden Hour'\ndescription = 'warm orange palette'\n[colors]\naccent = '#aabbcc'\n",
-        )
-        .unwrap();
-        let mut shell = InteractiveShell::test_shell();
-        let original = shell.theme();
-        let mut events: Vec<_> = "warm orange"
-            .chars()
-            .map(|key| theme_picker_key(KeyCode::Char(key)))
-            .collect();
-        events.push(theme_picker_key(KeyCode::Enter));
-        let mut input = tokio_stream::iter(events);
-        assert_eq!(
-            pick_terminal_theme(&mut shell, &mut input, &config, false)
-                .await
-                .unwrap(),
-            Some(ThemeSelection::File("picker-amber".into()))
-        );
-        assert_eq!(
-            shell.theme().source_path(),
-            Some(path.canonicalize().unwrap().as_path())
-        );
-        assert_eq!(
-            shell.theme().resolve::<String>("accent").as_deref(),
-            Some("#aabbcc")
-        );
-        assert!(config.theme.is_none(), "preview must not commit config");
-        assert!(!shell.has_panel());
-
-        let mut selected_config = config.clone();
-        selected_config.theme = Some("picker-amber".into());
-        let prior = shell.theme();
-        std::fs::write(&path, "accent = '#abcdef'").unwrap();
-        let mut input = tokio_stream::iter([theme_picker_key(KeyCode::Enter)]);
-        assert_eq!(
-            pick_terminal_theme(&mut shell, &mut input, &selected_config, false)
-                .await
-                .unwrap(),
-            Some(ThemeSelection::File("picker-amber".into()))
-        );
-        assert_eq!(
-            shell.theme().resolve::<String>("accent"),
-            prior.resolve::<String>("accent")
-        );
-        assert_eq!(selected_config.theme.as_deref(), Some("picker-amber"));
-
-        let mut input = tokio_stream::iter([
-            theme_picker_key(KeyCode::Home),
-            theme_picker_key(KeyCode::Enter),
-        ]);
-        assert_eq!(
-            pick_terminal_theme(&mut shell, &mut input, &selected_config, false)
-                .await
-                .unwrap(),
-            Some(ThemeSelection::Builtin(TerminalThemeChoice::Auto))
-        );
-        assert!(shell.theme().is_compiled_default());
-        assert_eq!(shell.theme().background(), original.background());
-    }
-
-    #[tokio::test]
-    async fn terminal_theme_file_preview_cancel_and_onboarding_keep_the_original() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = terminal_theme_test_config(directory.path().to_owned());
-        config.theme = Some("light".into());
-        let themes = config.workspace.join(".octet/themes");
-        std::fs::create_dir_all(&themes).unwrap();
-        std::fs::write(themes.join("picker-custom.toml"), "accent = '#aabbcc'").unwrap();
-        let mut shell = InteractiveShell::test_shell();
-        let original = shell.theme();
-        let mut events: Vec<_> = "picker-custom"
-            .chars()
-            .map(|key| theme_picker_key(KeyCode::Char(key)))
-            .collect();
-        events.push(theme_picker_key(KeyCode::Esc));
-        let mut input = EventStream::from_stream(tokio_stream::iter(events));
-        assert_eq!(
-            configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None)
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(shell.theme().source_path(), original.source_path());
-        assert_eq!(
-            shell.theme().role_rgb("foreground"),
-            original.role_rgb("foreground")
-        );
-        assert_eq!(config.theme.as_deref(), Some("light"));
-        assert!(!shell.has_panel());
-
-        let mut events: Vec<_> = "picker-custom"
-            .chars()
-            .map(|key| theme_picker_key(KeyCode::Char(key)))
-            .collect();
-        events.push(theme_picker_key(KeyCode::Enter));
-        events.push(theme_picker_key(KeyCode::Esc));
-        let mut input = tokio_stream::iter(events);
-        assert_eq!(
-            pick_terminal_theme(&mut shell, &mut input, &config, true)
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(shell.theme().source_path(), original.source_path());
-    }
-
-    #[test]
-    fn direct_theme_name_loads_only_valid_selectable_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = terminal_theme_test_config(directory.path().to_owned());
-        let themes = config.workspace.join(".octet/themes");
-        std::fs::create_dir_all(&themes).unwrap();
-        std::fs::write(themes.join("picker-custom.toml"), "accent = '#aabbcc'").unwrap();
-        std::fs::write(themes.join("picker-broken.toml"), "[invalid").unwrap();
-        std::fs::write(themes.join("dark.toml"), "accent = '#123456'").unwrap();
-        for name in ["picker-custom", "picker-custom.toml"] {
-            let (key, loaded) =
-                requested_file_theme(name, &config, TerminalBackground::Dark).unwrap();
-            assert_eq!(key, "picker-custom");
-            assert_eq!(
-                loaded.resolve::<String>("accent").as_deref(),
-                Some("#aabbcc")
-            );
-            config.theme = Some(key);
-            assert_eq!(
-                load_theme_for_background(&config, TerminalBackground::Dark).source_path(),
-                loaded.source_path()
-            );
-        }
-        for name in [
-            "picker-broken",
-            "missing",
-            "../picker-custom",
-            "dark.toml",
-            "default",
-        ] {
-            assert!(
-                requested_file_theme(name, &config, TerminalBackground::Dark).is_none(),
-                "accepted {name}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn invalid_direct_theme_selection_keeps_current_config_and_appearance() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = terminal_theme_test_config(directory.path().to_owned());
-        config.theme = Some("light".into());
-        let mut shell = InteractiveShell::test_shell();
-        let original = shell.theme();
-        let mut input = EventStream::from_stream(tokio_stream::empty());
-        assert_eq!(
-            configure_terminal_theme(
-                &mut shell,
-                &mut input,
-                &mut config,
-                Some("missing-theme".into()),
-                false,
-                None,
-            )
-            .await
-            .unwrap(),
-            None
-        );
-        assert_eq!(config.theme.as_deref(), Some("light"));
-        assert_eq!(shell.theme().source_path(), original.source_path());
-        assert_eq!(
-            shell.theme().role_rgb("foreground"),
-            original.role_rgb("foreground")
-        );
-    }
-
-    #[tokio::test]
-    async fn terminal_theme_preview_restores_on_cancel_eof_error_and_close() {
-        for exit in ["escape", "eof", "error", "close"] {
-            let mut config = terminal_theme_test_config(PathBuf::from("."));
-            config.theme = Some("light".into());
-            let mut shell = InteractiveShell::test_shell();
-            let mut original = crate::tui::theme::test_theme_for(
-                TerminalBackground::Light,
-                shell.theme().capabilities(),
-            );
-            original.override_token("foreground", "#123456");
-            shell.set_theme(original.clone());
-            let mut events = vec![theme_picker_key(KeyCode::End)];
-            match exit {
-                "escape" => events.push(theme_picker_key(KeyCode::Esc)),
-                "eof" => {}
-                "error" => events.push(Err(std::io::Error::other("preview input failed"))),
-                "close" => events.push(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                    KeyCode::Char('d'),
-                    KeyModifiers::CONTROL,
-                )))),
-                _ => unreachable!(),
-            }
-            let mut input = EventStream::from_stream(tokio_stream::iter(events));
-            // Exercise the configuration boundary too: none of these /theme
-            // outcomes may reach its persistence branch or mutate the config.
-            let result =
-                configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None)
-                    .await;
-            if exit == "error" {
-                assert_eq!(result.unwrap_err().to_string(), "preview input failed");
-            } else {
-                assert_eq!(result.unwrap(), None);
-            }
-            assert_eq!(shell.theme().background(), original.background(), "{exit}");
-            assert_eq!(
-                shell.theme().role_rgb("foreground"),
-                original.role_rgb("foreground"),
-                "{exit}"
-            );
-            assert_eq!(
-                shell.theme().capabilities(),
-                original.capabilities(),
-                "{exit}"
-            );
-            assert_eq!(config.theme.as_deref(), Some("light"), "{exit}");
-            assert_eq!(shell.close_requested(), exit == "close");
-            assert!(!shell.has_panel());
-        }
-    }
-
-    #[tokio::test]
-    async fn terminal_theme_onboarding_dismissal_returns_no_preview_choice() {
-        let config = terminal_theme_test_config(PathBuf::from("."));
-        let mut shell = InteractiveShell::test_shell();
-        let original = shell.theme();
-        let mut input = tokio_stream::iter([
-            theme_picker_key(KeyCode::End),
-            theme_picker_key(KeyCode::Esc),
-        ]);
-        // configure_terminal_theme retains its dismissal-to-Auto fallback;
-        // the highlighted Dark preview must not masquerade as confirmation.
-        assert_eq!(
-            pick_terminal_theme(&mut shell, &mut input, &config, true)
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(shell.theme().background(), original.background());
-        assert_eq!(shell.theme().capabilities(), original.capabilities());
-        assert!(config.theme.is_none());
-    }
-
-    #[test]
-    fn posix_shell_quote_round_trips_shell_sensitive_selector() {
-        let selector = "resume id;$(printf pwned);'\"$HOME\" * 雪";
-        let script = format!("set -- {}; printf '%s' \"$1\"", posix_shell_quote(selector));
-        let output = std::process::Command::new("sh")
-            .args(["-c", &script, "resume-test"])
-            .env_clear()
-            .env("HOME", "should-not-expand")
-            .env("PATH", "/usr/bin:/bin")
-            .output()
-            .expect("run POSIX shell");
-        assert!(
-            output.status.success(),
-            "POSIX shell rejected quoted selector: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(output.stdout, selector.as_bytes());
-    }
-
-    #[test]
-    fn answer_now_prompt_preserves_optional_instruction_and_enforces_tool_free_synthesis() {
-        let bare = answer_now_prompt(None);
-        assert!(bare.contains("evidence already gathered"));
-        assert!(bare.contains("Do not call tools"));
-
-        let instructed = answer_now_prompt(Some("Be concise".into()));
-        assert!(instructed.starts_with("Be concise\n\n"));
-        assert!(instructed.contains("Do not call tools"));
-
-        let input = answer_now_input(Some("Be concise".into()));
-        assert!(input.answer_only);
-        assert_eq!(input.display_text, "/answer Be concise");
-        assert!(matches!(
-            input.parts.as_slice(),
-            [octet_agent::InputPart::Text(text)] if text.contains("Do not call tools")
-        ));
-    }
-
-    #[test]
-    fn confirmation_notices_identify_core_tools_and_extensions() {
-        assert_eq!(
-            confirmation_notice(Some("write"), true),
-            "write action approved"
-        );
-        assert_eq!(
-            confirmation_notice(Some("bash"), false),
-            "bash action denied"
-        );
-        assert_eq!(
-            confirmation_notice(Some("custom_tool"), true),
-            "extension action approved"
-        );
-        assert_eq!(confirmation_notice(None, false), "tool action denied");
-    }
-
-    #[test]
-    fn fork_message_projection_uses_the_active_branch_and_adds_a_head_row() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("source.jsonl");
-        let mut session = Session::create(&path).unwrap();
-        session
-            .append(EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text("first prompt".into())],
-                },
-            )))
-            .unwrap();
-        session
-            .append(EntryValue::Message(octet_ai::Message::Assistant(
-                octet_ai::AssistantMessage {
-                    content: vec![octet_ai::AssistantPart::Text("answer".into())],
-                    model: octet_ai::ModelId("test".into()),
-                    protocol: octet_ai::Protocol::OpenAiChat,
-                },
-            )))
-            .unwrap();
-        session
-            .append(EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text("second prompt".into())],
-                },
-            )))
-            .unwrap();
-
-        let messages = active_fork_messages(&session);
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].text, "first prompt");
-        assert_eq!(messages[1].text, "second prompt");
-        assert!(messages[2].whole_conversation);
-        assert_eq!(messages[2].entry_id, session.head().unwrap().0);
-    }
-
-    #[test]
-    fn extension_lifecycle_fork_copies_the_active_head_and_records_provenance() {
-        let directory = tempfile::tempdir().unwrap();
-        let workspace = directory.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let sessions =
-            crate::session_store::SessionStore::new(&directory.path().join("sessions"), &workspace);
-        let source_path = sessions.new_path("2026-03-16");
-        let mut prepared = None;
-        let mut source = open_launch_session(
-            &mut prepared,
-            SessionSelection::CreateNew(source_path.clone()),
-        )
-        .unwrap();
-        let head = source
-            .append(EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text("current head".into())],
-                },
-            )))
-            .unwrap();
-        drop(source);
-
-        let destination = sessions.new_path("2026-03-17");
-        let fork_path =
-            fork_active_session(&sessions, &source_path, destination, Some(&head)).unwrap();
-        let fork = Session::open(&fork_path).unwrap();
-        let source_id = session_id_for_path(&source_path).unwrap();
-        let fork_id = session_id_for_path(&fork_path).unwrap();
-
-        assert_eq!(fork.head(), Some(head.clone()));
-        assert!(fork.entry(&head).is_some());
-        let metadata = sessions.load_metadata(&fork_id).unwrap();
-        assert_eq!(
-            metadata.forked_from_session_id.as_deref(),
-            Some(source_id.as_str())
-        );
-        assert_eq!(
-            metadata.forked_from_entry_id.as_deref(),
-            Some(head.0.as_str())
-        );
-    }
-
-    #[test]
-    fn extension_lifecycle_session_ids_fit_the_generated_result_bound() {
-        assert_eq!(
-            bounded_extension_session_id("x".repeat(MAX_JSON_RPC_ID_BYTES)).unwrap(),
-            "x".repeat(MAX_JSON_RPC_ID_BYTES)
-        );
-        assert!(bounded_extension_session_id("x".repeat(MAX_JSON_RPC_ID_BYTES + 1)).is_err());
-    }
-
-    #[test]
-    fn web_search_menu_recommends_brave_and_keeps_searxng_and_disable() {
-        let (items, descriptions) = web_search_menu_entries(true);
-        assert_eq!(
-            items,
-            [
-                "Brave Search (recommended)",
-                "SearXNG",
-                "Disable octet-web-search"
-            ]
-        );
-        assert!(descriptions[0]
-            .as_deref()
-            .is_some_and(|description| description.contains("API key")));
-
-        let (items, _) = web_search_menu_entries(false);
-        assert_eq!(items, ["Brave Search (recommended)", "SearXNG"]);
-    }
-
-    #[test]
-    fn delegated_session_document_is_bounded_path_free_and_styled() {
-        let directory = tempfile::tempdir().unwrap();
-        let private_path = directory.path().join("private-child.jsonl");
-        let mut session = Session::create(&private_path).unwrap();
-        session
-            .append(EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text(
-                        "Inspect the worker result.".into(),
-                    )],
-                },
-            )))
-            .unwrap();
-        let theme = test_theme();
-        let text = delegated_session_text(&session, &theme, 80, false).unwrap();
-        let overlay = delegated_session_overlay_text(&text, &theme);
-        let plain = crate::tui::view::sanitize_for_terminal(&overlay);
-        assert!(plain.contains("Delegated worker transcript"));
-        assert!(plain.contains("read-only · mutation remains owner-bound"));
-        assert!(plain.contains("Inspect the worker result."));
-        assert!(
-            overlay.contains('\x1b'),
-            "the trusted theme styling was lost"
-        );
-        assert!(!overlay.contains(private_path.to_str().unwrap()));
-        assert!(text.len() <= 128 * 1024);
-    }
-
-    #[test]
-    fn delegated_session_overlay_keeps_newest_output_within_the_exact_byte_cap() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut session = Session::create(directory.path().join("child.jsonl")).unwrap();
-        for index in 0..20 {
-            let marker = if index == 19 {
-                "NEWEST-FINAL-WORKER-RESULT"
-            } else {
-                "older-worker-output"
-            };
-            session
-                .append(EntryValue::Message(octet_ai::Message::Assistant(
-                    octet_ai::AssistantMessage {
-                        content: vec![octet_ai::AssistantPart::Text(format!(
-                            "block-{index:02}-{marker}-{}",
-                            "x".repeat(16 * 1024)
-                        ))],
-                        model: octet_ai::ModelId("worker-test".into()),
-                        protocol: octet_ai::Protocol::OpenAiChat,
-                    },
-                )))
-                .unwrap();
-        }
-
-        let text = delegated_session_text(&session, &test_theme(), 80, false).unwrap();
-        assert!(text.contains("NEWEST-FINAL-WORKER-RESULT"), "{text}");
-        assert!(!text.contains("block-00-older-worker-output"));
-        assert!(text.contains("[older transcript entries omitted]"));
-        assert!(text.len() <= 128 * 1024, "{}", text.len());
-    }
-
-    #[test]
-    fn delegated_session_renders_markdown_like_the_main_transcript() {
-        // The worker transcript must flow through the exact same rich
-        // markdown renderer as the main conversation: headings, bold, and
-        // inline code keep their theme styling instead of being flattened to
-        // raw text.
-        let directory = tempfile::tempdir().unwrap();
-        let mut session = Session::create(directory.path().join("child.jsonl")).unwrap();
-        let markdown = "# Heading One\n\nplain **bold** and `code` tail";
-        session
-            .append(EntryValue::Message(octet_ai::Message::Assistant(
-                octet_ai::AssistantMessage {
-                    content: vec![octet_ai::AssistantPart::Text(markdown.into())],
-                    model: octet_ai::ModelId("worker-test".into()),
-                    protocol: octet_ai::Protocol::OpenAiChat,
-                },
-            )))
-            .unwrap();
-        let text = delegated_session_text(&session, &test_theme(), 80, false).unwrap();
-        let plain = crate::tui::view::sanitize_for_terminal(&text);
-
-        assert!(text.contains('\x1b'), "styled block not found in {text}");
-        assert!(plain.contains("Heading One"), "{plain}");
-        assert!(plain.contains("plain bold and code tail"), "{plain}");
-        assert!(!plain.contains("# Heading One"), "{plain}");
-        assert!(!plain.contains("**bold**"), "{plain}");
-        assert!(!plain.contains("`code`"), "{plain}");
-    }
-
-    #[test]
-    fn delegated_session_hydrates_main_transcript_tool_cards_and_results() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut session = Session::create(directory.path().join("child.jsonl")).unwrap();
-        let call_id = octet_ai::ToolCallId("worker-write".into());
-        session
-            .append(EntryValue::Message(octet_ai::Message::Assistant(
-                octet_ai::AssistantMessage {
-                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
-                        async_execution: false,
-                        id: call_id.clone(),
-                        name: "write".into(),
-                        arguments_json: serde_json::json!({
-                            "path": "worker.rs",
-                            "content": "pub fn worker() {}\n",
-                        })
-                        .to_string(),
-                        argument_error: None,
-                    })],
-                    model: octet_ai::ModelId("worker-test".into()),
-                    protocol: octet_ai::Protocol::OpenAiChat,
-                },
-            )))
-            .unwrap();
-        session
-            .append(EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::ToolResult(octet_ai::ToolResult {
-                        tool_call_id: call_id,
-                        content: vec![octet_ai::ToolResultPart::Text(
-                            "ok\nworker.rs  created\n--- /dev/null\n+++ b/worker.rs\n@@ -0,0 +1 @@\n+SUBAGENT-TOOL-RESULT"
-                                .into(),
-                        )],
-                        is_error: false,
-                        added_tool_names: None,
-                    })],
-                },
-            )))
-            .unwrap();
-
-        let text = delegated_session_text(&session, &test_theme(), 80, false).unwrap();
-        let plain = crate::tui::view::sanitize_for_terminal(&text);
-        assert!(plain.contains("Write"), "{plain}");
-        assert!(plain.contains("SUBAGENT-TOOL-RESULT"), "{plain}");
-    }
-
-    #[test]
-    fn subagent_presentation_becomes_navigable_rows_with_opaque_session_references() {
-        let mut snapshot: octet_agent::ExtensionPresentationSnapshot =
-            serde_json::from_str(include_str!("../../fixtures/extension-presentation.json"))
-                .unwrap();
-        let collection = snapshot.collection.as_mut().unwrap();
-        collection.nodes[0].references = collection.detail.as_ref().unwrap().references.clone();
-        let (title, entries) =
-            subagent_view_entries_from_presentation(crate::extensions::ExtensionPresentationView {
-                extension: "octet-subagents".into(),
-                generation: 1,
-                extension_instance_id: "instance".into(),
-                resource_owner: Some("owner".into()),
-                snapshot,
-            })
-            .unwrap();
-
-        // The picker header is the collection's stable surface name only: the
-        // per-worker states are on the rows and the key affordances are in the
-        // panel action footer, so no counts or hints may be composed into it.
-        assert_eq!(title, "Subagents");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].label, "test-review");
-        assert!(entries[0].description.contains("running"));
-        assert_eq!(
-            entries[0].session_reference.as_deref(),
-            Some("session-worker-1")
-        );
-        assert!(entries[0].fallback_detail.contains("bounded child session"));
-        assert!(!entries[0].fallback_detail.contains(".jsonl"));
-    }
-
-    #[tokio::test]
-    async fn cancellable_wait_returns_none_on_ctrl_c() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('c'),
-                KeyModifiers::CONTROL,
-            ))))
-            .await
-            .unwrap();
-        drop(sender);
-        let mut input = ReceiverStream::new(receiver);
-
-        let mut shell = InteractiveShell::test_shell();
-        let result = await_with_ctrl_c(std::future::pending::<()>(), &mut shell, &mut input).await;
-        assert!(result.is_none());
-        assert!(!shell.close_requested());
-    }
-
-    #[tokio::test]
-    async fn cancellable_wait_finishes_after_input_stream_closes() {
-        let mut input = tokio_stream::empty::<std::io::Result<Event>>();
-        let mut shell = InteractiveShell::test_shell();
-        assert_eq!(
-            await_with_ctrl_c(async { 42 }, &mut shell, &mut input).await,
-            Some(42)
-        );
-    }
-
-    #[tokio::test]
-    async fn cancellable_wait_propagates_ctrl_d_as_a_close_request() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('d'),
-                KeyModifiers::CONTROL,
-            ))))
-            .await
-            .unwrap();
-        drop(sender);
-        let mut input = ReceiverStream::new(receiver);
-        let mut shell = InteractiveShell::test_shell();
-
-        let result = await_with_ctrl_c(std::future::pending::<()>(), &mut shell, &mut input).await;
-
-        assert!(result.is_none());
-        assert!(shell.close_requested());
-    }
-
-    #[tokio::test]
-    async fn cancellable_wait_preserves_input_and_disclosure_before_escape() {
-        use crossterm::event::KeyEvent;
-
-        let mut input = tokio_stream::iter([
-            Ok(Event::Resize(46, 8)),
-            Ok(Event::Paste("draft during wait".into())),
-            Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('o'),
-                KeyModifiers::CONTROL,
-            ))),
-            Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))),
-            Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
-        ]);
-        let mut shell = InteractiveShell::test_shell();
-        let was_verbose = shell.verbose_tools();
-        // This budget bounds input handling, not the provider's timeout.
-        let result = tokio::time::timeout(
-            Duration::from_millis(250),
-            await_with_ctrl_c(std::future::pending::<()>(), &mut shell, &mut input),
-        )
-        .await
-        .expect("Escape must interrupt a held-open operation within 250 ms");
-        assert!(result.is_none());
-        assert_eq!(shell.pending(), "draft during wait");
-        assert_ne!(shell.verbose_tools(), was_verbose);
-        assert!(!shell.close_requested());
-    }
-
-    #[tokio::test]
-    async fn silent_startup_lifecycle_keeps_typed_input_and_names_the_phase_off_screen() {
-        use crossterm::event::KeyEvent;
-
-        // Typing before readiness is buffered into the draft, exactly as the
-        // labeled wait does; nothing renders a phase label.
-        let events = [
-            Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('x'),
-                KeyModifiers::NONE,
-            ))),
-            Ok(Event::Paste(" draft during startup".into())),
-        ];
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-        let mut done_tx = Some(done_tx);
-        let source = tokio_stream::iter(events).chain(futures_util::stream::poll_fn(move |_| {
-            if let Some(done_tx) = done_tx.take() {
-                let _ = done_tx.send(());
-            }
-            std::task::Poll::Ready(None)
-        }));
-        let mut input = EventStream::from_stream(source);
-        let mut shell = InteractiveShell::test_shell();
-        let result = run_blocking_startup_lifecycle(
-            &mut shell,
-            &mut input,
-            STARTUP_APP_OPERATION,
-            move || {
-                done_rx.recv()?;
-                Ok(7)
-            },
-        )
-        .await
-        .expect("the silent startup phase completes");
-        assert_eq!(result, 7);
-        assert_eq!(shell.pending(), "x draft during startup");
-
-        // A failed silent phase stays attributable without rendering: the
-        // operation name is carried by the diagnostic alone.
-        let mut input =
-            EventStream::from_stream(tokio_stream::iter(Vec::<std::io::Result<Event>>::new()));
-        let error = run_blocking_startup_lifecycle(
-            &mut shell,
-            &mut input,
-            STARTUP_MODELS_OPERATION,
-            || -> anyhow::Result<()> { anyhow::bail!("catalog unavailable") },
-        )
-        .await
-        .expect_err("the failed startup phase surfaces");
-        assert_eq!(
-            error.to_string(),
-            "model discovery failed: catalog unavailable"
-        );
-    }
-
-    #[tokio::test]
-    async fn osc11_startup_lifecycle_keeps_handed_off_typing_paste_and_shortcuts() {
-        use crossterm::event::KeyEvent;
-
-        let events = [
-            Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('x'),
-                KeyModifiers::NONE,
-            ))),
-            Ok(Event::Paste(" draft during startup".into())),
-            Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('o'),
-                KeyModifiers::CONTROL,
-            ))),
-            Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))),
-        ];
-        let (finished, settled) = tokio::sync::oneshot::channel();
-        let mut finished = Some(finished);
-        // Settle only after the input owner has processed every queued event.
-        let source = tokio_stream::iter(events).chain(futures_util::stream::poll_fn(move |_| {
-            if let Some(finished) = finished.take() {
-                let _ = finished.send(());
-            }
-            std::task::Poll::Ready(None)
-        }));
-        let mut input = EventStream::from_stream(source);
-        let mut shell = InteractiveShell::test_shell();
-        let verbose = shell.verbose_tools();
-        let result = await_lifecycle(&mut shell, &mut input, "starting…", async move {
-            settled.await?;
-            Ok(42)
-        })
-        .await
-        .unwrap();
-        assert_eq!(result, 42);
-        assert_eq!(shell.pending(), "x draft during startup");
-        assert_ne!(shell.verbose_tools(), verbose);
-        assert!(!shell.close_requested());
-    }
-
-    #[test]
-    fn startup_picker_close_is_a_graceful_exit_but_other_errors_survive() {
-        let mut shell = InteractiveShell::test_shell();
-        shell.request_close();
-        assert_eq!(
-            startup_launch_outcome::<u8>(&shell, Err(anyhow::anyhow!("selection cancelled")))
-                .unwrap(),
-            None
-        );
-
-        let shell = InteractiveShell::test_shell();
-        let error =
-            startup_launch_outcome::<u8>(&shell, Err(anyhow::anyhow!("selection cancelled")))
-                .unwrap_err();
-        assert_eq!(error.to_string(), "selection cancelled");
-    }
-
-    #[test]
-    fn bounded_shell_output_keeps_head_and_tail_within_budget() {
-        let mut output = BoundedShellOutput::new(10);
-        output.push(b"0123");
-        output.push(b"456789");
-        output.push(b"abcdef");
-
-        assert_eq!(output.head, b"01234");
-        assert_eq!(output.tail, b"bcdef");
-        assert_eq!(output.total_bytes, 16);
-        let rendered = output.render("stdout");
-        assert!(rendered.starts_with("01234\n"), "{rendered:?}");
-        assert!(rendered.contains("stdout truncated; 6 bytes omitted"));
-        assert!(rendered.ends_with("\nbcdef"), "{rendered:?}");
-    }
-
-    #[test]
-    fn bounded_shell_output_does_not_claim_untruncated_tail_was_omitted() {
-        let mut output = BoundedShellOutput::new(10);
-        output.push("012345é".as_bytes());
-
-        assert_eq!(output.total_bytes, 8);
-        assert_eq!(output.render("stdout"), "012345é");
-    }
-
-    #[tokio::test]
-    async fn shell_pipes_are_drained_concurrently_with_process_exit() {
-        let mut child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg("yes o | head -c 1048576 & yes e | head -c 1048576 >&2 & wait")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
-        let stdout = std::sync::Arc::new(std::sync::Mutex::new(BoundedShellOutput::new(1024)));
-        let stderr = std::sync::Arc::new(std::sync::Mutex::new(BoundedShellOutput::new(1024)));
-        let (updates, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let status = tokio::time::timeout(Duration::from_secs(5), async {
-            let (_, _, status) = tokio::join!(
-                drain_shell_pipe(&mut stdout_pipe, &stdout, &updates),
-                drain_shell_pipe(&mut stderr_pipe, &stderr, &updates),
-                child.wait(),
-            );
-            status
-        })
-        .await
-        .expect("full stdout and stderr pipes must not deadlock")
-        .unwrap();
-
-        assert!(status.success());
-        let stdout = stdout.lock().unwrap();
-        let stderr = stderr.lock().unwrap();
-        assert_eq!(stdout.total_bytes, 1_048_576);
-        assert_eq!(stderr.total_bytes, 1_048_576);
-        assert_eq!(stdout.head.len() + stdout.tail.len(), 1024);
-        assert_eq!(stderr.head.len() + stderr.tail.len(), 1024);
-        assert!(
-            update_rx.try_recv().is_ok(),
-            "pipe reads must wake live rendering"
-        );
-    }
-
-    #[test]
-    fn a_failed_checkout_can_restore_the_previous_durable_head() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("rollback.jsonl");
-        let mut session = Session::create(&path).unwrap();
-        let previous = session
-            .append(EntryValue::Config {
-                model: Some("model".to_string()),
-                reasoning: Some("off".to_string()),
-                reasoning_mode: None,
-            })
-            .unwrap();
-        let target = session
-            .append(EntryValue::Config {
-                model: Some("missing-model".to_string()),
-                reasoning: None,
-                reasoning_mode: None,
-            })
-            .unwrap();
-        session.checkout(target).unwrap();
-        drop(session);
-
-        restore_session_head(&path, previous.clone()).unwrap();
-        assert_eq!(Session::open(path).unwrap().head(), Some(previous));
-    }
-
-    #[test]
-    fn adjacent_reconfigurations_coalesce_but_boundaries_survive() {
-        let mut queue = VecDeque::new();
-        push_pending_action(
-            &mut queue,
-            PendingIdleAction::ChangeModel(ModelId("a".into())),
-        );
-        push_pending_action(
-            &mut queue,
-            PendingIdleAction::ChangeModel(ModelId("b".into())),
-        );
-        push_pending_action(&mut queue, PendingIdleAction::NewSession);
-        push_pending_action(
-            &mut queue,
-            PendingIdleAction::ChangeModel(ModelId("c".into())),
-        );
-        assert_eq!(
-            queue,
-            VecDeque::from([
-                PendingIdleAction::ChangeModel(ModelId("b".into())),
-                PendingIdleAction::NewSession,
-                PendingIdleAction::ChangeModel(ModelId("c".into())),
-            ])
-        );
-    }
-
-    #[test]
-    fn active_thinking_preference_writes_coalesce_without_crossing_barriers() {
-        let mut queue = VecDeque::new();
-        push_pending_action(
-            &mut queue,
-            PendingIdleAction::PersistThinkingPreference("low".into()),
-        );
-        push_pending_action(
-            &mut queue,
-            PendingIdleAction::PersistThinkingPreference("medium".into()),
-        );
-        push_pending_action(&mut queue, PendingIdleAction::NewSession);
-        push_pending_action(
-            &mut queue,
-            PendingIdleAction::PersistThinkingPreference("high".into()),
-        );
-
-        assert_eq!(
-            queue,
-            VecDeque::from([
-                PendingIdleAction::PersistThinkingPreference("medium".into()),
-                PendingIdleAction::NewSession,
-                PendingIdleAction::PersistThinkingPreference("high".into()),
-            ])
-        );
-    }
-
-    #[test]
-    fn command_queue_parses_reconfiguration_values() {
-        let mut queue = VecDeque::new();
-        queue_command(Command::Login(None), &mut queue).unwrap();
-        queue_command(Command::Setup, &mut queue).unwrap();
-        queue_command(Command::Thinking(Some("high".into())), &mut queue).unwrap();
-        queue_command(Command::Resume(Some("id".into())), &mut queue).unwrap();
-        assert_eq!(queue.pop_front(), Some(PendingIdleAction::Login(None)));
-        assert_eq!(queue.pop_front(), Some(PendingIdleAction::Setup));
-        assert!(matches!(
-            queue.pop_front(),
-            Some(PendingIdleAction::ChangeThinkingLevel(ThinkingLevel::High))
-        ));
-        assert_eq!(
-            queue.pop_front(),
-            Some(PendingIdleAction::ResumeSession(Some("id".into())))
-        );
-    }
-
-    #[tokio::test]
-    async fn startup_update_is_skipped_offline_and_cancelled_with_its_owner() {
-        let offline = startup_update_task(
-            true,
-            async { panic!("offline startup must not poll the release request") },
-            |_| panic!("offline startup must not publish a notice"),
-        );
-        assert!(offline.is_empty());
-
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
-        let check = startup_update_task(
-            false,
-            async move {
-                let _ = started_tx.send(());
-                let _ = held_rx.await;
-                Some(semver::Version::new(9, 8, 7))
-            },
-            |_| panic!("exited startup must not publish a notice"),
-        );
-        started_rx.await.unwrap();
-        assert_eq!(check.len(), 1);
-        drop(check);
-        let mut held_tx = held_tx;
-        tokio::time::timeout(Duration::from_secs(1), held_tx.closed())
-            .await
-            .expect("owner exit must cancel the held check");
-    }
-
-    #[tokio::test]
-    async fn startup_update_publishes_once_and_failure_is_quiet() {
-        for latest in [None, Some(semver::Version::new(9, 8, 7))] {
-            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let count = calls.clone();
-            let expected = usize::from(latest.is_some());
-            let mut check = startup_update_task(false, async move { latest }, move |_| {
-                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            });
-            assert_eq!(check.len(), 1);
-            check.join_next().await.unwrap().unwrap();
-            assert!(check.is_empty());
-            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn idle_slash_enter_returns_the_highlighted_command_to_dispatch() {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let mut shell = InteractiveShell::test_shell();
-        let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        for event in [
-            Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        ] {
-            sender.send(Ok(event)).await.unwrap();
-        }
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
-        let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let (reload_watcher, mut reload, mut reload_tick) = test_reload();
-
-        let idle = wait_for_prompt(
-            &mut shell,
-            &mut input,
-            &mut scroll_tick,
-            &mut extension_tick,
-            &mut extensions,
-            None,
-            &mut reload_tick,
-            &reload_watcher,
-            &mut reload,
-        )
-        .await
-        .unwrap();
-        let Idle::Command(command) = idle else {
-            panic!("highlighted slash command was not handed to the idle dispatcher");
-        };
-        assert_eq!(command.trim(), "/resume");
-        assert!(shell.pending_is_empty());
-        assert!(!shell.slash_popup_open());
-    }
-
-    /// Drive the idle input owner with a fixed event list and return the shell.
-    async fn idle_shell_after(events: Vec<Event>) -> (InteractiveShell, Idle) {
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let mut shell = InteractiveShell::test_shell();
-        let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        for event in events {
-            sender.send(Ok(event)).await.unwrap();
-        }
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
-        let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let (reload_watcher, mut reload, mut reload_tick) = test_reload();
-        let idle = wait_for_prompt(
-            &mut shell,
-            &mut input,
-            &mut scroll_tick,
-            &mut extension_tick,
-            &mut extensions,
-            None,
-            &mut reload_tick,
-            &reload_watcher,
-            &mut reload,
-        )
-        .await
-        .unwrap();
-        (shell, idle)
-    }
-
-    /// A disabled live-reload supervisor for idle-loop tests: it samples
-    /// nothing and can never report a due pass, so the existing idle-loop
-    /// assertions keep their meaning unchanged.
-    fn test_reload() -> (
-        crate::reload::ReloadWatcher,
-        crate::reload::ReloadSupervisor,
-        tokio::time::Interval,
-    ) {
-        let reload =
-            crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
-        let watcher = crate::reload::ReloadWatcher::new(crate::reload::ReloadWatchSet::new());
-        let mut tick = tokio::time::interval(reload.settings().tick_interval());
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        (watcher, reload, tick)
-    }
-
-    fn ctrl_key(character: char) -> Event {
-        Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Char(character),
-            KeyModifiers::CONTROL,
-        ))
-    }
-
-    #[tokio::test]
-    async fn idle_clipboard_gesture_inserts_native_text_without_submitting() {
-        clipboard_read::set_test_text(Some("pasted from the clipboard".to_owned()));
-        // Ctrl-D settles the idle wait without submitting or discarding the
-        // draft the paste created.
-        let (shell, idle) = idle_shell_after(vec![ctrl_key('v'), ctrl_key('d')]).await;
-        clipboard_read::clear_test_text();
-
-        assert!(matches!(idle, Idle::Quit));
-        assert_eq!(shell.pending(), "pasted from the clipboard");
-    }
-
-    #[tokio::test]
-    async fn idle_clipboard_gesture_without_text_keeps_the_existing_fallback() {
-        clipboard_read::set_test_text(None);
-        let (shell, idle) = idle_shell_after(vec![
-            ctrl_key('v'),
-            // The terminal-originated bracketed paste remains the fallback when
-            // no native transport produced text.
-            Event::Paste("terminal bracketed paste".to_owned()),
-            ctrl_key('d'),
-        ])
-        .await;
-        clipboard_read::clear_test_text();
-
-        assert!(matches!(idle, Idle::Quit));
-        assert_eq!(shell.pending(), "terminal bracketed paste");
-    }
-
-    #[tokio::test]
-    async fn active_clipboard_completion_preserves_native_and_terminal_paste() {
-        for native in [Some("native draft".to_owned()), None] {
-            let (_server, _workspace, mut agent) =
-                scripted_agent_with_delay(Duration::from_secs(2)).await;
-            let mut shell = InteractiveShell::test_shell();
-            clipboard_read::set_test_text(native.clone());
-            let gesture = Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('v'),
-                if cfg!(windows) {
-                    KeyModifiers::ALT
-                } else {
-                    KeyModifiers::CONTROL
-                },
-            ));
-            let mut events = vec![Ok(gesture)];
-            if native.is_none() {
-                events.push(Ok(Event::Paste("terminal draft".into())));
-            }
-            events.push(Ok(ctrl_key('d')));
-            let mut input = tokio_stream::iter(events).chain(futures_util::stream::pending());
-            let run_id = shell.begin_run("test");
-            let mut run = agent.prompt("initial").await.unwrap();
-            shell.set_awaiting_provider(run_id);
-            let control = run.control();
-            let mut ticker = tokio::time::interval(Duration::from_millis(16));
-            let mut pending = VecDeque::new();
-            let mut quit = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let mut deadline = None;
-            let ended = tokio::time::timeout(
-                Duration::from_secs(1),
-                drive_active_run(
-                    &mut run,
-                    &control,
-                    &mut shell,
-                    &mut input,
-                    &mut ticker,
-                    &mut pending,
-                    &mut quit,
-                    None,
-                    None,
-                    &mut extensions,
-                    &mut false,
-                    test_run_inspection(),
-                    &mut deadline,
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            clipboard_read::clear_test_text();
-            assert_eq!(ended, HostRunOutcome::Aborted);
-            assert!(quit);
-            assert_eq!(
-                shell.pending(),
-                native.as_deref().unwrap_or("terminal draft")
-            );
-            assert!(pending.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn active_clipboard_slow_helper_cancels_on_ctrl_c_and_settlement() {
-        for cancel in [true, false] {
-            let (_server, _workspace, mut agent) = scripted_agent_with_delay(if cancel {
-                Duration::from_secs(2)
-            } else {
-                Duration::from_millis(10)
-            })
-            .await;
-            let mut shell = InteractiveShell::test_shell();
-            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-            let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
-            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-            // A deterministic wedged helper: input cannot send Ctrl-C until the
-            // read is actually polled, and the helper cannot finish on its own.
-            clipboard_read::set_test_helper(async move {
-                let _guard = dropped_tx;
-                let _ = started_tx.send(());
-                let _ = release_rx.await;
-                Some("must never reach the draft".into())
-            });
-            let gesture = Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('v'),
-                if cfg!(windows) {
-                    KeyModifiers::ALT
-                } else {
-                    KeyModifiers::CONTROL
-                },
-            ));
-            let mut input = tokio_stream::iter([Ok(gesture)])
-                .chain(
-                    futures_util::stream::once(async move {
-                        started_rx.await.unwrap();
-                        if cancel {
-                            Ok(ctrl_key('c'))
-                        } else {
-                            futures_util::future::pending().await
-                        }
-                    })
-                    .boxed(),
-                )
-                .chain(futures_util::stream::pending());
-            let run_id = shell.begin_run("test");
-            let mut run = agent.prompt("initial").await.unwrap();
-            shell.set_awaiting_provider(run_id);
-            let control = run.control();
-            let mut ticker = tokio::time::interval(Duration::from_millis(16));
-            let mut pending = VecDeque::new();
-            let mut quit = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let mut deadline = None;
-            let ended = tokio::time::timeout(
-                Duration::from_secs(1),
-                drive_active_run(
-                    &mut run,
-                    &control,
-                    &mut shell,
-                    &mut input,
-                    &mut ticker,
-                    &mut pending,
-                    &mut quit,
-                    None,
-                    None,
-                    &mut extensions,
-                    &mut false,
-                    test_run_inspection(),
-                    &mut deadline,
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert_eq!(
-                ended,
-                if cancel {
-                    HostRunOutcome::Aborted
-                } else {
-                    HostRunOutcome::Completed
-                }
-            );
-            assert!(shell.pending().is_empty());
-            assert!(!quit);
-            assert!(matches!(
-                dropped_rx.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-            ));
-            shell.extension_set_editor("replacement composer".into());
-            assert!(
-                release_tx.send(()).is_err(),
-                "settled helper must be dropped"
-            );
-            tokio::task::yield_now().await;
-            assert_eq!(shell.pending(), "replacement composer");
-        }
-    }
-
-    #[tokio::test]
-    async fn active_clipboard_editor_ownership_fences_text_and_fallback() {
-        for text in [Some("stale native text".to_owned()), None] {
-            for owner in ["extension", "search", "panel"] {
-                let text = text.clone();
-                let mut shell = InteractiveShell::test_shell();
-                shell.begin_run("test");
-                shell.extension_set_editor("original draft".into());
-                let revision = shell.extension_editor_snapshot().revision;
-                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-                let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-                let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
-                clipboard_read::set_test_helper(async move {
-                    let _guard = dropped_tx;
-                    let _ = started_tx.send(());
-                    let _ = release_rx.await;
-                    text
-                });
-                let mut read = Box::pin(clipboard_read::read_text());
-                assert!(futures_util::poll!(&mut read).is_pending());
-                started_rx.await.unwrap();
-                // These changes bypass InputAction ownership-transfer checks.
-                // Search and panels leave the normal editor revision unchanged.
-                match owner {
-                    "extension" => {
-                        shell.extension_set_editor("replacement composer".into());
-                        assert_ne!(shell.extension_editor_snapshot().revision, revision);
-                    }
-                    "search" => {
-                        assert!(shell.intercept_transcript_input(&transcript_search_open_key()));
-                        assert!(shell.transcript_search_active());
-                    }
-                    "panel" => shell.open_panel(Panel::ReadOnlyDocument {
-                        title: "Inspection".into(),
-                        text: "Read-only document".into(),
-                        styled: false,
-                        scroll_from_bottom: 0,
-                    }),
-                    _ => unreachable!(),
-                }
-                if owner != "extension" {
-                    let editor = shell.extension_editor_snapshot();
-                    assert_eq!(editor.revision, revision);
-                    assert!(!editor.focused);
-                }
-                let before = shell.debug_snapshot();
-                release_tx.send(()).unwrap();
-                let gesture = Event::Key(crossterm::event::KeyEvent::new(
-                    KeyCode::Char('v'),
-                    if cfg!(windows) {
-                        KeyModifiers::ALT
-                    } else {
-                        KeyModifiers::CONTROL
-                    },
-                ));
-                let fallback =
-                    settle_active_clipboard_read(&mut shell, revision, read.await, Some(gesture));
-                assert!(
-                    fallback.is_none(),
-                    "stale gestures must not be replayed either"
-                );
-                assert_eq!(
-                    shell.pending(),
-                    if owner == "extension" {
-                        "replacement composer"
-                    } else {
-                        "original draft"
-                    }
-                );
-                assert_eq!(
-                    shell.debug_snapshot(),
-                    before,
-                    "{owner} must not receive stale paste"
-                );
-                assert!(matches!(
-                    dropped_rx.try_recv(),
-                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-                ));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn active_clipboard_draft_handoff_drops_pending_read_before_replacement() {
-        for boundary in ["queue", "steer", "recall", "command"] {
-            let (_server, _workspace, mut agent) =
-                scripted_agent_with_delay(Duration::from_secs(2)).await;
-            let mut shell = InteractiveShell::test_shell();
-            shell.extension_set_editor(if boundary == "command" {
-                "/answer answer now".into()
-            } else {
-                "original draft".into()
-            });
-            let boundary_key = match boundary {
-                "steer" => ctrl_key('s'),
-                "recall" => {
-                    let queued = shell.drain_composed();
-                    shell.queue_follow_up(queued);
-                    Event::Key(crossterm::event::KeyEvent::new(
-                        KeyCode::Up,
-                        KeyModifiers::ALT,
-                    ))
-                }
-                _ => Event::Key(crossterm::event::KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                )),
-            };
-            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-            let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
-            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-            clipboard_read::set_test_helper(async move {
-                let _guard = dropped_tx;
-                let _ = started_tx.send(());
-                let _ = release_rx.await;
-                Some("late clipboard payload".into())
-            });
-            let gesture = Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('v'),
-                if cfg!(windows) {
-                    KeyModifiers::ALT
-                } else {
-                    KeyModifiers::CONTROL
-                },
-            ));
-            let mut input = tokio_stream::iter([Ok(gesture)])
-                .chain(
-                    futures_util::stream::once(async move {
-                        started_rx.await.unwrap();
-                        Ok(boundary_key)
-                    })
-                    .boxed(),
-                )
-                .chain(
-                    futures_util::stream::once(async move {
-                        // Checked before close or run settlement can clean up the
-                        // helper: ownership transfer itself must cancel the read.
-                        assert!(
-                            matches!(
-                                dropped_rx.try_recv(),
-                                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-                            ),
-                            "{boundary}"
-                        );
-                        assert!(release_tx.send(()).is_err(), "{boundary}");
-                        Ok(Event::Paste(" replacement composer".into()))
-                    })
-                    .boxed(),
-                )
-                .chain(tokio_stream::iter([Ok(ctrl_key('d'))]))
-                .chain(futures_util::stream::pending());
-            let run_id = shell.begin_run("test");
-            let mut run = agent.prompt("initial").await.unwrap();
-            shell.set_awaiting_provider(run_id);
-            let control = run.control();
-            let mut ticker = tokio::time::interval(Duration::from_millis(16));
-            let mut pending = VecDeque::new();
-            let mut quit = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let mut deadline = None;
-            let ended = tokio::time::timeout(
-                Duration::from_secs(1),
-                drive_active_run(
-                    &mut run,
-                    &control,
-                    &mut shell,
-                    &mut input,
-                    &mut ticker,
-                    &mut pending,
-                    &mut quit,
-                    None,
-                    None,
-                    &mut extensions,
-                    &mut false,
-                    test_run_inspection(),
-                    &mut deadline,
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert_eq!(ended, HostRunOutcome::Aborted, "{boundary}");
-            assert!(quit);
-            assert!(
-                shell.pending().contains("replacement composer"),
-                "{boundary}"
-            );
-            assert!(
-                !shell.pending().contains("late clipboard payload"),
-                "{boundary}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn clipboard_gesture_is_consumed_on_the_active_run_path_too() {
-        let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("test");
-        let gesture = ctrl_key('v');
-
-        clipboard_read::set_test_text(Some("steer text".to_owned()));
-        assert!(paste_clipboard_text(&mut shell, &gesture).await);
-        assert_eq!(shell.pending(), "steer text");
-
-        // Only the declared gesture is consumed.
-        let typed = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-        ));
-        assert!(!paste_clipboard_text(&mut shell, &typed).await);
-
-        // A failed read reports that nothing was pasted and leaves the draft.
-        clipboard_read::set_test_text(None);
-        assert!(!paste_clipboard_text(&mut shell, &gesture).await);
-        assert_eq!(shell.pending(), "steer text");
-        clipboard_read::clear_test_text();
-    }
-
-    fn transcript_search_open_key() -> Event {
-        let bindings = keymap::keybindings::KeybindingsManager::current_platform();
-        let mut key = crossterm::event::KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
-        // Windows/WSL use Ctrl-F; other platforms use Ctrl-Shift-F.
-        if !bindings.matches(&key, "tui.altScreen.search") {
-            key.modifiers |= KeyModifiers::SHIFT;
-        }
-        assert!(bindings.matches(&key, "tui.altScreen.search"));
-        Event::Key(key)
-    }
-
-    #[tokio::test]
-    async fn transcript_search_idle_owner_intercepts_paste_before_composer_admission() {
-        clipboard_read::set_test_text(Some("native clipboard must stay out of the draft".into()));
-        let (mut shell, idle) = idle_shell_after(vec![
-            Event::Paste("preserved draft".into()),
-            transcript_search_open_key(),
-            Event::Paste("search query /tmp/image.png".into()),
-            Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('v'),
-                if cfg!(windows) {
-                    KeyModifiers::ALT
-                } else {
-                    KeyModifiers::CONTROL
-                },
-            )),
-            ctrl_key('d'),
-        ])
-        .await;
-        clipboard_read::clear_test_text();
-        assert!(matches!(idle, Idle::Quit));
-        assert!(shell.transcript_search_active());
-        assert_eq!(shell.pending(), "preserved draft");
-        assert!(shell.drain_composed().attachments.is_empty());
-    }
-
-    #[tokio::test]
-    async fn transcript_search_active_owner_consumes_query_and_escape_without_interrupting_run() {
-        let (_server, _workspace, mut agent) =
-            scripted_agent_with_delay(Duration::from_millis(100)).await;
-        let mut shell = InteractiveShell::test_shell();
-        shell.extension_set_editor("preserved active draft".into());
-        let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        for event in [
-            transcript_search_open_key(),
-            Event::Paste("search query /tmp/image.png".into()),
-            Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('v'),
-                if cfg!(windows) {
-                    KeyModifiers::ALT
-                } else {
-                    KeyModifiers::CONTROL
-                },
-            )),
-            Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Esc,
-                KeyModifiers::NONE,
-            )),
-        ] {
-            sender.send(Ok(event)).await.unwrap();
-        }
-        let _sender = sender;
-        let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut deadline = None;
-        clipboard_read::set_test_text(Some("native clipboard must stay out of the draft".into()));
-        let ended = tokio::time::timeout(
-            Duration::from_secs(5),
-            drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut extensions,
-                &mut false,
-                test_run_inspection(),
-                &mut deadline,
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        clipboard_read::clear_test_text();
-        drop(run);
-        assert_eq!(ended, HostRunOutcome::Completed);
-        assert!(!quit);
-        assert!(pending.is_empty());
-        assert!(!shell.transcript_search_active());
-        assert_eq!(shell.pending(), "preserved active draft");
-        assert!(shell.drain_composed().attachments.is_empty());
-        assert!(!format!("{:?}", agent.session().context().unwrap()).contains("search query"));
-    }
-
-    #[tokio::test]
-    async fn configuration_commit_observer_skips_noops_and_unknown_snapshots() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().canonicalize().unwrap().join("config.toml");
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let missing = configuration_snapshot(&path);
-        assert_eq!(missing, Some(None));
-        assert!(!observe_configuration_commit(&mut extensions, missing.clone(), Some(&path)).await);
-        std::fs::write(&path, b"theme = \"dark\"\n").unwrap();
-        assert!(observe_configuration_commit(&mut extensions, missing, Some(&path)).await);
-        let unchanged = configuration_snapshot(&path);
-        assert!(!observe_configuration_commit(&mut extensions, unchanged, Some(&path)).await);
-        assert!(!observe_configuration_commit(&mut extensions, None, Some(&path)).await);
-        assert!(!observe_configuration_commit(&mut extensions, Some(None), None).await);
-        std::fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
-        assert!(configuration_snapshot(&path).is_none());
-        #[cfg(unix)]
-        {
-            let link = path.with_file_name("link.toml");
-            std::os::unix::fs::symlink(&path, &link).unwrap();
-            assert!(configuration_snapshot(&link).is_none());
-        }
-        let failed: anyhow::Result<()> = persist_configuration(Some(&mut extensions), || {
-            anyhow::bail!("failed before commit")
-        })
-        .await;
-        assert!(failed.is_err());
-    }
-
-    #[tokio::test]
-    async fn scoped_model_cycle_reaches_idle_owner_without_draining_draft() {
-        for draft in ["unfinished prompt", "/model second"] {
-            let mut shell = InteractiveShell::test_shell();
-            shell.set_identity("test", "first", "off");
-            shell.set_model_cycle(vec!["first".into(), "second".into()]);
-            shell.extension_set_editor(draft.into());
-            let mut input = tokio_stream::iter([Ok(ctrl_key('p'))]);
-            let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
-            let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let (reload_watcher, mut reload, mut reload_tick) = test_reload();
-            let idle = wait_for_prompt(
-                &mut shell,
-                &mut input,
-                &mut scroll_tick,
-                &mut extension_tick,
-                &mut extensions,
-                None,
-                &mut reload_tick,
-                &reload_watcher,
-                &mut reload,
-            )
-            .await
-            .unwrap();
-            assert!(matches!(idle, Idle::Command(text) if text == "/model second"));
-            assert_eq!(shell.pending(), draft);
-        }
-    }
-
-    #[tokio::test]
-    async fn scoped_model_cycle_queues_on_active_owner_without_draining_draft() {
-        for draft in ["unfinished active prompt", "/model second"] {
-            let (_server, _workspace, mut agent) =
-                scripted_agent_with_delay(Duration::from_millis(100)).await;
-            let mut shell = InteractiveShell::test_shell();
-            shell.set_identity("test", "scripted", "off");
-            shell.set_model_cycle(vec!["scripted".into(), "second".into(), "third".into()]);
-            shell.extension_set_editor(draft.into());
-            let (sender, receiver) = tokio::sync::mpsc::channel(4);
-            sender.send(Ok(ctrl_key('p'))).await.unwrap();
-            sender.send(Ok(ctrl_key('p'))).await.unwrap();
-            let _sender = sender;
-            let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-            let mut ticker = tokio::time::interval(Duration::from_millis(1));
-            let mut pending = VecDeque::new();
-            let mut quit = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let run_id = shell.begin_run("test");
-            let mut run = agent.prompt("initial").await.unwrap();
-            shell.set_awaiting_provider(run_id);
-            let control = run.control();
-            let mut deadline = None;
-            let ended = tokio::time::timeout(
-                Duration::from_secs(5),
-                drive_active_run(
-                    &mut run,
-                    &control,
-                    &mut shell,
-                    &mut input,
-                    &mut ticker,
-                    &mut pending,
-                    &mut quit,
-                    None,
-                    None,
-                    &mut extensions,
-                    &mut false,
-                    test_run_inspection(),
-                    &mut deadline,
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            drop(run);
-            assert_eq!(ended, HostRunOutcome::Completed);
-            assert!(!quit);
-            assert_eq!(shell.pending(), draft);
-            assert_eq!(
-                pending,
-                VecDeque::from([PendingIdleAction::ChangeModel(ModelId("third".into()))])
-            );
-            assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/model"));
-        }
-    }
-
-    #[tokio::test]
-    async fn compact_custom_instructions_queue_and_reach_only_the_summary_wire() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        for queued in [false, true] {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("content-type", "text/event-stream")
-                        .set_body_string(text_turn()),
-                )
-                .mount(&server)
-                .await;
-            let (_directory, mut app) = fast_test_app(scripted_model(&server.uri()));
-            seed_compaction_session(&mut app.agent);
-            app.config.compaction.keep_recent_tokens = 1;
-            let mut shell = InteractiveShell::test_shell();
-            let requested = commands::parse("/compact preserve the API contract");
-            let instructions = if queued {
-                let (mut queue, quit) =
-                    run_active_command(&mut shell, requested, test_run_inspection()).await;
-                assert!(!quit);
-                assert!(server.received_requests().await.unwrap().is_empty());
-                let Some(PendingIdleAction::CompactWithInstructions(value)) = queue.pop_front()
-                else {
-                    panic!("missing queued instructions")
-                };
-                assert!(queue.is_empty());
-                value
-            } else {
-                let Command::CompactWithInstructions(value) = requested else {
-                    panic!("missing instructions")
-                };
-                value
-            };
-            let mut input = futures_util::stream::pending();
-            compact_interactively(
-                &mut app,
-                &mut shell,
-                &mut input,
-                !queued,
-                Some(&instructions),
-            )
-            .await;
-            assert_eq!(shell.debug_error(), None);
-            let requests = server.received_requests().await.unwrap();
-            assert_eq!(requests.len(), 1);
-            let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-            assert!(body["system"].to_string().contains(&instructions));
-            assert!(!body["messages"].to_string().contains(&instructions));
-            assert_eq!(
-                app.agent.session().usage_records().len(),
-                1,
-                "summary accounted exactly once"
-            );
-            assert!(
-                !format!("{:?}", app.agent.session().context().unwrap()).contains(&instructions)
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn compact_custom_instructions_fail_closed_for_native_and_oversize() {
-        let server = wiremock::MockServer::start().await;
-        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
-        app.config.compaction.mode = CompactionMode::NativeResponses;
-        let mut shell = InteractiveShell::test_shell();
-        let mut input = futures_util::stream::pending();
-        compact_interactively(
-            &mut app,
-            &mut shell,
-            &mut input,
-            true,
-            Some("preserve evidence"),
-        )
-        .await;
-        assert!(shell
-            .debug_snapshot()
-            .contains("custom instructions require local compaction mode"));
-        let oversized = "x".repeat(16 * 1024 + 1);
-        compact_interactively(&mut app, &mut shell, &mut input, true, Some(&oversized)).await;
-        assert!(shell.debug_error().unwrap().contains("at most 16 KiB"));
-        assert!(server.received_requests().await.unwrap().is_empty());
-    }
-
-    #[test]
-    fn app_shell_policy_is_explicit_and_checkpoints_survive_rebuilds() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        #[cfg(any(unix, windows))]
-        assert!(app.agent.partial_output_checkpoint_stats().is_some());
-        assert!(!app.config.tool_available("powershell"));
-        app.config.tools = crate::config::ToolPolicy::only(["powershell".into()]).unwrap();
-        assert_eq!(app.config.tool_available("powershell"), cfg!(windows));
-        app.config.sandbox.allow_process = false;
-        assert!(!app.config.tool_available("powershell"));
-        app.config.sandbox.allow_process = true;
-        app.config.sandbox.allow_shell = false;
-        assert!(!app.config.tool_available("powershell"));
-        // Restore fixture policy before checking the rebuild, not an unavailable
-        // Windows-only explicit request on this platform.
-        app.config.tools = Default::default();
-        app.config.sandbox.allow_shell = true;
-        app = rebuild_app(app, None, None, None, None).unwrap();
-        #[cfg(any(unix, windows))]
-        assert!(app.agent.partial_output_checkpoint_stats().is_some());
-    }
-
-    /// 2d.11 — `!command` results enter model context; `!!command` results are
-    /// durably recorded but explicitly excluded from it.
-    #[test]
-    fn shell_escape_records_are_explicitly_included_or_excluded_from_context() {
-        let (_directory, mut app) = fast_test_app(scripted_codex_model("http://127.0.0.1:1"));
-        let included = commands::ShellEscapeRecord::new("printf hi", "hi", 0, false);
-        record_shell_escape(&mut app, &included).unwrap();
-        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
-        assert!(context.contains("printf hi"), "{context}");
-        assert!(context.contains("exit 0"), "{context}");
-
-        let excluded = commands::ShellEscapeRecord::new("printf secret", "secret-value", 1, true);
-        record_shell_escape(&mut app, &excluded).unwrap();
-        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
-        assert!(!context.contains("secret-value"), "{context}");
-        assert!(!context.contains("printf secret"), "{context}");
-        // The excluded execution is still durably accounted for, with an
-        // explicit exclusion marker and its exact command and output.
-        let head = app.agent.session().head().unwrap();
-        let entry = app.agent.session().entry(&head).unwrap();
-        let display = entry
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.display_text.as_deref())
-            .expect("the excluded record retains its presentation text");
-        assert!(
-            display.contains("[excluded from model context]"),
-            "{display}"
-        );
-        assert!(display.contains("printf secret"), "{display}");
-        assert!(display.contains("secret-value"), "{display}");
-    }
-
-    /// A pending tool call must never be split from its result by a shell
-    /// record, even for the context-including `!` form.
-    #[test]
-    fn an_unresolved_tool_call_keeps_an_included_record_out_of_context() {
-        let (_directory, mut app) = fast_test_app(scripted_codex_model("http://127.0.0.1:1"));
-        let model = app.model.spec.id.clone();
-        app.agent
-            .session_mut()
-            .append(octet_agent::EntryValue::Message(
-                octet_ai::Message::Assistant(octet_ai::AssistantMessage {
-                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
-                        async_execution: false,
-                        id: ToolCallId("call-1".into()),
-                        name: "bash".into(),
-                        arguments_json: "{\"command\":\"ls\"}".into(),
-                        argument_error: None,
-                    })],
-                    model,
-                    protocol: octet_ai::Protocol::AnthropicMessages,
-                }),
-            ))
-            .unwrap();
-        assert!(session_has_unresolved_tool_calls(app.agent.session()));
-        record_shell_escape(
-            &mut app,
-            &commands::ShellEscapeRecord::new("printf hi", "hi", 0, false),
-        )
-        .unwrap();
-        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
-        assert!(!context.contains("printf hi"), "{context}");
-    }
-
-    /// 2d.2 — the scope mutations materialize deterministically, toggle the
-    /// requested provider, reorder by request, and hand back the exact ordered
-    /// pattern list (with reasoning suffixes) the writer persists.
-    #[test]
-    fn scoped_models_mutations_materialize_toggle_reorder_and_persist() {
-        let mut model = scripted_codex_model("http://127.0.0.1:1");
-        std::sync::Arc::make_mut(&mut model.spec).id = ModelId("first".into());
-        std::sync::Arc::make_mut(&mut model.spec).api_name = "first".into();
-        let (_directory, mut app) = fast_test_app(model);
-        let mut second = (*app.model.spec).clone();
-        second.id = ModelId("second".into());
-        second.api_name = "second".into();
-        app.catalog.register_model(second).unwrap();
-
-        // `all` builds the explicit ordered scope from the complete catalog in
-        // a stable order and persists a re-selectable glob.
-        let persistence =
-            apply_scope_mutation(&mut app, &commands::ScopedModelsCommand::All).unwrap();
-        assert_eq!(persistence, Some(Some("*".to_owned())));
-        let all = app.model_cycle();
-        assert!(all.contains(&"first".to_owned()), "{all:?}");
-        assert!(all.contains(&"second".to_owned()), "{all:?}");
-        assert!(
-            all.windows(2).all(|pair| pair[0] < pair[1]),
-            "`all` must materialize a stable order: {all:?}"
-        );
-        // `clear` removes the restriction and the persisted key; unrestricted
-        // cycling follows the same stable catalog order.
-        assert_eq!(
-            apply_scope_mutation(&mut app, &commands::ScopedModelsCommand::Clear).unwrap(),
-            Some(None)
-        );
-        assert_eq!(app.model_cycle(), all);
-
-        // A narrow ordered scope exercises provider toggle and reorder exactly.
-        app.set_model_scope_patterns(Some("first:low,second"))
-            .unwrap();
-        assert_eq!(app.model_cycle(), vec!["first", "second"]);
-        // A provider toggle disables every model of that provider, then
-        // restores them in stable order.
-        assert_eq!(
-            apply_scope_mutation(
-                &mut app,
-                &commands::ScopedModelsCommand::Toggle("test/*".into())
-            )
-            .unwrap(),
-            Some(None)
-        );
-        assert!(app.model_cycle().is_empty());
-        assert_eq!(
-            apply_scope_mutation(
-                &mut app,
-                &commands::ScopedModelsCommand::Toggle("test/*".into())
-            )
-            .unwrap(),
-            Some(Some("first,second".to_owned()))
-        );
-        // Reorder follows the requested move; the untouched entry keeps the
-        // launch suffix in the persisted list.
-        app.set_model_scope_patterns(Some("first:low,second"))
-            .unwrap();
-        assert_eq!(
-            apply_scope_mutation(
-                &mut app,
-                &commands::ScopedModelsCommand::Move {
-                    model: "second".into(),
-                    direction: commands::ScopeMove::Top,
-                }
-            )
-            .unwrap(),
-            Some(Some("second,first:low".to_owned()))
-        );
-        assert_eq!(app.model_cycle(), vec!["second", "first"]);
-        // Unmatched targets and boundary moves are explicit errors.
-        assert!(apply_scope_mutation(
-            &mut app,
-            &commands::ScopedModelsCommand::Enable("nope/*".into())
-        )
-        .is_err());
-        assert!(apply_scope_mutation(
-            &mut app,
-            &commands::ScopedModelsCommand::Move {
-                model: "second".into(),
-                direction: commands::ScopeMove::Up,
-            }
-        )
-        .is_err());
-    }
-
-    /// 2d.1 / 2d.2 — the active-run path renders both reports immediately and
-    /// queues the mutations it cannot own mid-run.
-    #[tokio::test]
-    async fn settings_and_scoped_models_render_mid_run_and_queue_mutations() {
-        let directory = tempfile::tempdir().unwrap();
-        let inspection = test_run_inspection_with_session(directory.path());
-        let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("test");
-
-        let (queue, quit) = run_active_command(
-            &mut shell,
-            Command::Settings(commands::SettingsCommand::Show),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty());
-        assert!(!quit);
-        assert!(shell.has_overlay());
-        shell.close_overlay();
-
-        let (queue, quit) = run_active_command(
-            &mut shell,
-            Command::Settings(commands::SettingsCommand::Images(Some(true))),
-            &inspection,
-        )
-        .await;
-        assert!(!quit);
-        assert!(matches!(
-            queue.back(),
-            Some(PendingIdleAction::Settings(
-                commands::SettingsCommand::Images(Some(true))
-            ))
-        ));
-
-        let (queue, quit) = run_active_command(
-            &mut shell,
-            Command::ScopedModels(commands::ScopedModelsCommand::Show),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty());
-        assert!(!quit);
-        assert!(shell.has_overlay());
-        shell.close_overlay();
-
-        let (queue, quit) = run_active_command(
-            &mut shell,
-            Command::ScopedModels(commands::ScopedModelsCommand::All),
-            &inspection,
-        )
-        .await;
-        assert!(!quit);
-        assert!(matches!(
-            queue.back(),
-            Some(PendingIdleAction::ScopedModels(
-                commands::ScopedModelsCommand::All
-            ))
-        ));
-    }
-
-    /// 2d.11 active path: an approved escape runs immediately under the captured
-    /// sandbox, and its explicit context decision is queued for the idle owner
-    /// that owns the session writer.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn active_shell_escape_runs_and_queues_its_context_decision() {
-        let directory = tempfile::tempdir().unwrap();
-        let inspection = test_run_inspection_with_session(directory.path());
-        let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("test");
-        let (queue, quit) = run_active_command(
-            &mut shell,
-            Command::Bash(commands::BashEscape {
-                command: "printf octet-active-shell".into(),
-                excluded: false,
-            }),
-            &inspection,
-        )
-        .await;
-        assert!(!quit);
-        let Some(PendingIdleAction::RecordShellEscape(record)) = queue.back() else {
-            panic!("the active escape must queue its durable record: {queue:?}");
-        };
-        assert!(!record.excluded());
-        assert_eq!(record.exit_code(), 0);
-        assert!(record.output().contains("octet-active-shell"), "{record:?}");
-
-        // `!!` fixes the opposite decision without touching execution.
-        let (queue, quit) = run_active_command(
-            &mut shell,
-            Command::Bash(commands::BashEscape {
-                command: "printf octet-excluded".into(),
-                excluded: true,
-            }),
-            &inspection,
-        )
-        .await;
-        assert!(!quit);
-        let Some(PendingIdleAction::RecordShellEscape(record)) = queue.back() else {
-            panic!("the excluded escape must still be accounted for: {queue:?}");
-        };
-        assert!(record.excluded());
-    }
-
-    /// The shared local-shell execution path keeps bounded capture, an exit
-    /// status, and no refusal for an ordinary command.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn local_shell_escape_runs_through_the_bounded_capture_path() {
-        let mut shell = InteractiveShell::test_shell();
-        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-        let outcome = run_local_shell(
-            &mut shell,
-            &mut input,
-            Path::new("/"),
-            &SandboxPolicy::default(),
-            "printf octet-shell-test",
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.exit_code, 0);
-        assert!(
-            outcome.output.contains("octet-shell-test"),
-            "{}",
-            outcome.output
-        );
-        assert!(outcome.refusal.is_none());
-        assert!(!outcome.stopped);
-        assert!(!outcome.shutting_down);
-    }
-
-    #[test]
-    fn scoped_model_order_suffixes_and_rebuilds_preserve_launch_defaults() {
-        let mut model = scripted_codex_model("http://127.0.0.1:1");
-        Arc::make_mut(&mut model.spec).capabilities.reasoning =
-            Some(octet_ai::ReasoningCapability {
-                options: None,
-                control: octet_ai::ReasoningControl::Effort,
-                exposes_text: true,
-                preserves_state: false,
-                effort_budgets: None,
-                openai_chat_mode: Default::default(),
-                min_effort: octet_ai::ReasoningEffort::Minimal,
-                max_effort: octet_ai::ReasoningEffort::High,
-            });
-        let (_directory, mut app) = fast_test_app(model);
-        let mut second = (*app.model.spec).clone();
-        second.id = ModelId("second".into());
-        app.catalog.register_model(second).unwrap();
-        app.set_model_scope_patterns(Some("second:low,scripted:high"))
-            .unwrap();
-        assert_eq!(app.model_cycle(), vec!["second", "scripted"]);
-        assert_eq!(app.model.spec.id.0, "scripted");
-        assert_eq!(
-            app.reasoning,
-            ReasoningConfig::Off,
-            "scope handoff must not override launch defaults"
-        );
-        app = crate::app::apply_reconfig(app, Reconfig::Model(ModelId("second".into()))).unwrap();
-        assert_eq!(
-            app.reasoning,
-            ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)
-        );
-        app = crate::app::apply_reconfig(app, Reconfig::Model(ModelId("scripted".into()))).unwrap();
-        assert_eq!(
-            app.reasoning,
-            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
-        );
-        app = rebuild_app(app, None, None, None, None).unwrap();
-        assert_eq!(app.model_cycle(), vec!["second", "scripted"]);
-        // Removing an available route narrows, rather than widens, the scope.
-        app.catalog
-            .remove_model_if_endpoint(&ModelId("second".into()), &app.model.endpoint.id);
-        assert_eq!(app.model_cycle(), vec!["scripted"]);
-        app.set_model_scope_patterns(None).unwrap();
-        let cycle = app.model_cycle();
-        assert!(cycle.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-
-    #[tokio::test]
-    async fn session_and_hotkeys_reports_remain_read_only_during_runs() {
-        let directory = tempfile::tempdir().unwrap();
-        let inspection = test_run_inspection_with_session(directory.path());
-        let before = std::fs::read(&inspection.session_path).unwrap();
-        let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("test");
-        for (command, expected) in [
-            ("/session info", "Active-branch messages: 1"),
-            ("/hotkeys", "app.model.cycleForward"),
-        ] {
-            let (queue, quit) =
-                run_active_command(&mut shell, commands::parse(command), &inspection).await;
-            assert!(queue.is_empty());
-            assert!(!quit);
-            assert!(shell.has_overlay());
-            let text = if command == "/hotkeys" {
-                shell.hotkeys_text()
-            } else {
-                commands::session_text(&inspection.read_only_session().unwrap())
-            };
-            assert!(text.contains(expected), "{text}");
-            shell.close_overlay();
-        }
-        let (queue, quit) = run_active_command(&mut shell, Command::Copy, &inspection).await;
-        assert!(queue.is_empty());
-        assert!(!quit);
-        assert!(shell
-            .debug_error()
-            .unwrap()
-            .contains("no assistant message"));
-        assert_eq!(std::fs::read(&inspection.session_path).unwrap(), before);
-    }
-
-    /// A narrowed launch opens `/model` without waiting for fleet discovery.
-    /// Cancelling before completion cannot apply a late catalog to the app.
-    #[tokio::test]
-    async fn model_picker_cancel_keeps_the_narrowed_launch_catalog() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        let active = app.model.spec.id.clone();
-        let narrowed = app.catalog.models().count();
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
-        assert!(ActiveRunInspection::capture(&app).is_narrowed());
-        let mut shell = InteractiveShell::test_shell();
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        sender
-            .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Esc,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-        assert!(open_model_picker(&mut app, &mut shell, &mut input)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(!shell.has_panel());
-        assert!(!app.readiness.is_fleet());
-        assert_eq!(app.catalog.models().count(), narrowed);
-        assert_eq!(app.model.spec.id, active);
-    }
-
-    #[test]
-    fn picker_catalog_completion_keeps_the_active_route() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        let active = app.model.spec.id.clone();
-        let narrowed = app.catalog.models().count();
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
-        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
-            app.config.offline,
-            &crate::app::bootstrap::CatalogReadiness::Fleet,
-        )
-        .unwrap();
-        assert!(app.apply_picker_catalog(&active, catalog, notes).unwrap());
-        assert!(app.readiness.is_fleet());
-        assert!(app.catalog.models().count() >= narrowed);
-        assert!(app.catalog.resolve(&active).is_ok());
-        assert!(!ActiveRunInspection::capture(&app).is_narrowed());
-    }
-
-    #[test]
-    fn picker_catalog_rejects_an_obsolete_selection() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
-        let before = app.catalog.models().count();
-        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
-            app.config.offline,
-            &crate::app::bootstrap::CatalogReadiness::Fleet,
-        )
-        .unwrap();
-        assert!(!app
-            .apply_picker_catalog(&ModelId("obsolete".into()), catalog, notes)
-            .unwrap());
-        assert!(!app.readiness.is_fleet());
-        assert_eq!(app.catalog.models().count(), before);
-    }
-
-    #[test]
-    fn picker_catalog_rejects_a_withdrawn_active_route() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        let active = app.model.spec.id.clone();
-        let endpoint = app.model.endpoint.id.clone();
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
-        let (mut catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
-            app.config.offline,
-            &crate::app::bootstrap::CatalogReadiness::Fleet,
-        )
-        .unwrap();
-        assert!(catalog.remove_model_if_endpoint(&active, &endpoint));
-        assert!(app.apply_picker_catalog(&active, catalog, notes).is_err());
-        assert!(!app.readiness.is_fleet());
-        assert!(app.catalog.resolve(&active).is_ok());
-    }
-
-    #[test]
-    fn model_scope_does_not_override_an_existing_explicit_session() {
-        for existing in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let mut config = terminal_theme_test_config(directory.path().to_owned());
-            config.session_dir = directory.path().join("sessions");
-            let store =
-                crate::session_store::SessionStore::new(&config.session_dir, &config.workspace);
-            store.write_workspace_marker().unwrap();
-            if existing {
-                let mut session = Session::create(store.dir().join("chosen.jsonl")).unwrap();
-                session
-                    .append(EntryValue::Config {
-                        model: Some("saved-model".into()),
-                        reasoning: None,
-                        reasoning_mode: None,
-                    })
-                    .unwrap();
-            }
-            let options = crate::cli::parity::ParityOptions {
-                session_id: Some("chosen".into()),
-                models: Some("gpt-5.4-mini-responses:high".into()),
-                ..Default::default()
-            };
-            options
-                .resolve_models_in_catalog(&mut config, &octet_ai::ModelCatalog::builtin().unwrap())
-                .unwrap();
-            assert_eq!(config.model.is_none(), existing);
-            assert_eq!(config.model_explicit, !existing);
-            options.select_session(&mut config).unwrap();
-            assert!(
-                matches!(config.resume, crate::config::ResumeSelector::Resume(Some(ref id)) if id == "chosen")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn direct_model_selection_enriches_and_unknown_models_preserve_the_app() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
-        let target = ModelId("gpt-5.4-mini-responses".into());
-        let target_model = app.catalog.resolve(&target).unwrap();
-        app.catalog
-            .remove_model_if_endpoint(&target, &target_model.endpoint.id);
-        let mut shell = InteractiveShell::test_shell();
-        let mut input = futures_util::stream::pending();
-        let mut app = transition(app, &mut shell, &mut input, Reconfig::Model(target.clone()))
-            .await
-            .unwrap();
-        assert!(app.readiness.is_fleet());
-        assert_eq!(app.model.spec.id, target);
-        let path = app.agent.session().path().to_owned();
-        app = transition(
-            app,
-            &mut shell,
-            &mut input,
-            Reconfig::Model(ModelId("nonexistent/route".into())),
-        )
-        .await
-        .unwrap();
-        assert_eq!(app.model.spec.id, target);
-        assert_eq!(app.agent.session().path(), path);
-        assert!(shell.debug_error().unwrap().contains("Unknown model"));
-    }
-
-    fn fast_test_app(model: Model) -> (tempfile::TempDir, App) {
-        let (directory, mut app) = crate::compaction::tests::app_for_estimate();
-        app.catalog
-            .register_endpoint((*model.endpoint).clone())
-            .unwrap();
-        app.catalog.register_model((*model.spec).clone()).unwrap();
-        let app = rebuild_app(app, Some(model), None, None, None).unwrap();
-        (directory, app)
-    }
-
-    fn fast_response() -> String {
-        let output = serde_json::json!([{
-            "id": "fast-message", "type": "message", "role": "assistant",
-            "content": [{"type": "output_text", "text": "done", "annotations": []}]
-        }]);
-        [
-            serde_json::json!({"type":"response.created", "response":{"id":"fast-response"}}),
-            serde_json::json!({"type":"response.output_item.added", "output_index":0,
-                "item":{"id":"fast-message", "type":"message"}}),
-            serde_json::json!({"type":"response.output_text.delta", "output_index":0, "delta":"done"}),
-            serde_json::json!({"type":"response.output_text.done", "output_index":0}),
-            serde_json::json!({"type":"response.completed", "response":{"output":output,
-                "usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}),
-        ].into_iter().map(|event| format!("data: {event}\n\n")).collect()
-    }
-
-    async fn fast_idle(mut app: App, shell: &mut InteractiveShell, command: &str) -> App {
-        let command = commands::parse(command);
-        let Command::Fast(requested) = command else {
-            panic!("expected fast control")
-        };
-        apply_fast_command(&mut app, shell, requested);
-        schedule_idle_responses_prewarm(&app, &command);
-        app
-    }
-
-    /// Exercise the slash handler, actual HTTP/SSE requests, status, route
-    /// transitions, and rebuilds together; a setter-only assertion is not enough.
-    #[tokio::test]
-    async fn fast_commands_reach_live_requests_and_fail_closed_on_other_routes() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/responses"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(fast_response()),
-            )
-            .mount(&server)
-            .await;
-        let mut model = scripted_codex_model(&server.uri());
-        Arc::make_mut(&mut model.spec).limits.context_window = 272_000;
-        let (_directory, mut app) = fast_test_app(model.clone());
-        let mut shell = InteractiveShell::test_shell();
-        let before = std::fs::read(app.agent.session().path()).unwrap();
-        app = fast_idle(app, &mut shell, "/fast").await;
-        assert!(shell.debug_snapshot().contains("Fast mode: off"));
-        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
-        assert!(!app.agent.session().has_uncertain_usage());
-        assert!(server.received_requests().await.unwrap().is_empty());
-
-        app = fast_idle(app, &mut shell, "/fast on").await;
-        assert!(shell.debug_snapshot().contains("Fast mode: on"));
-        assert!(commands::status_text(&app, None).contains("Fast mode: on"));
-        assert!(commands::status_text(&app, None).contains("known subtotal"));
-        assert!(app.agent.session().has_uncertain_usage());
-        assert_eq!(app.model.spec.limits.context_window, 272_000);
-        app.agent.complete("priority turn").await.unwrap();
-        // Rebuilds for reasoning/reload must retain the real request control.
-        app = rebuild_app(app, None, Some(ReasoningConfig::Off), None, None).unwrap();
-        app.agent.complete("priority after rebuild").await.unwrap();
-        let before = std::fs::read(app.agent.session().path()).unwrap();
-        app = fast_idle(app, &mut shell, "/fast status").await;
-        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
-        app = fast_idle(app, &mut shell, "/fast off").await;
-        app.agent.complete("ordinary turn").await.unwrap();
-        assert!(commands::status_text(&app, None).contains("Fast mode: off"));
-        assert!(
-            commands::cost_text(app.agent.session(), &app.model).contains("Known subtotal only")
-        );
-        // Clearing a request control does not erase uncertain spend.
-        assert!(app.agent.session().has_uncertain_usage());
-        assert_eq!(
-            app.agent
-                .session()
-                .usage_uncertainty_records()
-                .iter()
-                .filter(|record| record.operation == "responses-priority-tier")
-                .count(),
-            1
-        );
-
-        app = fast_idle(app, &mut shell, "/fast on").await;
-        let mut ordinary = model.clone();
-        Arc::make_mut(&mut ordinary.endpoint)
-            .runtime
-            .responses_profile = octet_ai::ResponsesRuntimeProfile::Default;
-        Arc::make_mut(&mut ordinary.endpoint).id = octet_ai::EndpointId("ordinary".into());
-        Arc::make_mut(&mut ordinary.spec).endpoint = ordinary.endpoint.id.clone();
-        Arc::make_mut(&mut ordinary.spec).id = ModelId("ordinary".into());
-        app.catalog
-            .register_endpoint((*ordinary.endpoint).clone())
-            .unwrap();
-        app.catalog
-            .register_model((*ordinary.spec).clone())
-            .unwrap();
-        app = rebuild_app(app, Some(ordinary), None, None, None).unwrap();
-        assert_eq!(
-            app.agent.service_tier(),
-            None,
-            "unsupported model switches clear the tier"
-        );
-        let before = std::fs::read(app.agent.session().path()).unwrap();
-        for command in ["/fast on", "/fast off", "/fast", "/fast status"] {
-            app = fast_idle(app, &mut shell, command).await;
-            assert!(shell
-                .debug_error()
-                .unwrap()
-                .contains("only available on Codex Responses routes"));
-        }
-        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
-        app.agent
-            .complete("unsupported route stays ordinary")
-            .await
-            .unwrap();
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(
-            requests.len(),
-            4,
-            "status and rejected controls never invoke inference"
-        );
-        let bodies: Vec<serde_json::Value> = requests
-            .iter()
-            .map(|request| serde_json::from_slice(&request.body).unwrap())
-            .collect();
-        assert_eq!(bodies[0]["service_tier"], "priority");
-        assert_eq!(bodies[1]["service_tier"], "priority");
-        assert!(bodies[2].get("service_tier").is_none());
-        assert!(bodies[3].get("service_tier").is_none());
-        for body in bodies {
-            let body = body.to_string();
-            assert!(
-                !body.contains("/fast"),
-                "local controls must not enter model context"
-            );
-        }
-        app.agent.set_max_session_cost_microdollars(Some(u64::MAX));
-        assert!(app
-            .agent
-            .complete("hard ceilings must fail closed")
-            .await
-            .is_err());
-        assert_eq!(server.received_requests().await.unwrap().len(), 4);
-    }
-
-    #[tokio::test]
-    async fn fast_compaction_preserves_selection_and_restart_keeps_uncertainty_fenced() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/responses"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(fast_response()),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("POST")).and(path("/v1/responses/compact"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "output":[{"type":"compaction", "id":"compact-fast", "encrypted_content":"checkpoint"}],
-                "usage":{"input_tokens":5,"output_tokens":2}
-            }))).mount(&server).await;
-        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
-        let mut shell = InteractiveShell::test_shell();
-        app = fast_idle(app, &mut shell, "/fast on").await;
-        app.agent.complete("before compaction").await.unwrap();
-        app.config.compaction.mode = CompactionMode::NativeResponses;
-        assert_eq!(
-            attempt_compaction(&mut app).await.unwrap(),
-            CompactionOutcome::NativeCompacted
-        );
-        assert_eq!(
-            app.agent.service_tier(),
-            Some(octet_ai::ServiceTier::Priority)
-        );
-        assert!(app.agent.session().has_uncertain_usage());
-        app.agent.complete("after compaction").await.unwrap();
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 3);
-        for request in &requests {
-            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-            if request.url.path().ends_with("/compact") {
-                // Compact has no declared tier field: never invent one or
-                // promise that this auxiliary operation used priority.
-                assert!(body.get("service_tier").is_none());
-            } else {
-                assert_eq!(body["service_tier"], "priority");
-            }
-        }
-
-        // Reconstruct through startup, not a compatible idle rebuild: fast is
-        // process-scoped, whereas past uncertain spend is durable and sticky.
-        let session_path = app.agent.session().path().to_owned();
-        let model = app.model.spec.id.clone();
-        let catalog = app.catalog.clone();
-        let mut config = app.config.clone();
-        config.max_cost_microdollars = Some(u64::MAX);
-        drop(app);
-        let mut boot = crate::app::bootstrap::bootstrap(config).unwrap();
-        boot.catalog = catalog;
-        let mut app = build_app(
-            boot,
-            crate::app::bootstrap::LaunchSelection {
-                model,
-                session: SessionSelection::OpenExisting(session_path),
-                reasoning: ReasoningConfig::Off,
-                reasoning_mode: ReasoningMode::Standard,
-            },
-            "system".into(),
-        )
-        .unwrap();
-        assert_eq!(app.agent.service_tier(), None);
-        assert!(app.agent.session().has_uncertain_usage());
-        // Match the budget error itself, not a guessed word in its display:
-        // UsageUncertain reports "unsettled provider usage".
-        assert_eq!(
-            attempt_compaction(&mut app).await.unwrap(),
-            CompactionOutcome::Skipped {
-                reason: octet_agent::AgentError::UsageUncertain.to_string(),
-            },
-            "compaction must refuse the unsettled ledger before network I/O",
-        );
-        assert!(app.agent.complete("ceiling after restart").await.is_err());
-        assert_eq!(server.received_requests().await.unwrap().len(), 3);
-    }
-
-    #[test]
-    fn unpriced_usage_marks_local_and_native_compaction_reports_after_reopen() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("compaction-report.jsonl");
-        let mut session = Session::create(&path).unwrap();
-        let first_kept = session
-            .append(EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text("retained turn".into())],
-                },
-            )))
-            .unwrap();
-        session
-            .record_compaction_usage(
-                octet_ai::EndpointId("fixture".into()),
-                ModelId("fixture".into()),
-                octet_ai::Usage::default(),
-                None,
-            )
-            .unwrap();
-        // A later fully priced compaction does not repair the old missing cost.
-        session
-            .record_compaction_usage(
-                octet_ai::EndpointId("fixture".into()),
-                ModelId("fixture".into()),
-                octet_ai::Usage::default(),
-                Some(octet_ai::Cost::default()),
-            )
-            .unwrap();
-        session.compact("summary", first_kept).unwrap();
-        drop(session);
-        let session = Session::open_read_only(path).unwrap();
-        assert!(session.has_unpriced_usage());
-        assert!(!session.has_uncertain_usage());
-        for outcome in [
-            CompactionOutcome::Compacted { elided: 1 },
-            CompactionOutcome::NativeCompacted,
-        ] {
-            let mut shell = InteractiveShell::test_shell();
-            report_compaction(&mut shell, &outcome, &session);
-            assert!(shell
-                .debug_snapshot()
-                .contains("session usage or pricing uncertain"));
-        }
-    }
-
-    #[tokio::test]
-    async fn fast_local_summary_cost_ceiling_fails_closed_before_network_io() {
-        let server = wiremock::MockServer::start().await;
-        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
-        seed_compaction_session(&mut app.agent);
-        app.config.compaction.keep_recent_tokens = 1;
-        app.set_fast_mode(true).unwrap();
-        app.agent.set_max_session_cost_microdollars(Some(u64::MAX));
-        // Match the budget error itself, not a guessed word in its display:
-        // UsageUncertain reports "unsettled provider usage".
-        assert_eq!(
-            attempt_compaction(&mut app).await.unwrap(),
-            CompactionOutcome::Skipped {
-                reason: octet_agent::AgentError::UsageUncertain.to_string(),
-            },
-            "compaction must refuse the unsettled ledger before network I/O",
-        );
-        assert_eq!(
-            app.agent.service_tier(),
-            Some(octet_ai::ServiceTier::Priority)
-        );
-        assert!(server.received_requests().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn fast_unsupported_active_controls_are_not_queued() {
-        let mut inspection = test_run_inspection().clone();
-        // A profile alone must not lend a Chat route Responses capabilities.
-        Arc::make_mut(&mut inspection.model.spec).protocol = octet_ai::Protocol::OpenAiChat;
-        Arc::make_mut(&mut inspection.model.endpoint)
-            .runtime
-            .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
-        let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("test");
-        for command in ["/fast", "/fast status", "/fast on", "/fast off"] {
-            let (queue, quit) =
-                run_active_command(&mut shell, commands::parse(command), &inspection).await;
-            assert!(queue.is_empty());
-            assert!(!quit);
-            assert!(shell
-                .debug_error()
-                .unwrap()
-                .contains("only available on Codex Responses routes"));
-        }
-    }
-
-    #[test]
-    fn fast_rebuild_scope_and_queue_barriers_are_explicit() {
-        let model = scripted_codex_model("http://127.0.0.1:1");
-        let (directory, mut app) = fast_test_app(model);
-        app.set_fast_mode(true).unwrap();
-        let path = app.agent.session().path().to_path_buf();
-        app = rebuild_app(
-            app,
-            None,
-            None,
-            None,
-            Some(SessionSelection::OpenExisting(path.clone())),
-        )
-        .unwrap();
-        assert_eq!(
-            app.agent.service_tier(),
-            Some(octet_ai::ServiceTier::Priority)
-        );
-        let mut next = app.model.clone();
-        Arc::make_mut(&mut next.spec).id = ModelId("another-scripted".into());
-        app.catalog.register_model((*next.spec).clone()).unwrap();
-        app = rebuild_app(app, Some(next), None, None, None).unwrap();
-        assert_eq!(
-            app.agent.service_tier(),
-            Some(octet_ai::ServiceTier::Priority)
-        );
-        app = rebuild_app(
-            app,
-            None,
-            None,
-            None,
-            Some(SessionSelection::CreateNew(
-                directory.path().join("new-fast.jsonl"),
-            )),
-        )
-        .unwrap();
-        assert_eq!(app.agent.service_tier(), None);
-        assert!(!app.agent.session().has_uncertain_usage());
-        app = rebuild_app(
-            app,
-            None,
-            None,
-            None,
-            Some(SessionSelection::OpenExisting(path)),
-        )
-        .unwrap();
-        assert_eq!(
-            app.agent.service_tier(),
-            None,
-            "resuming a different session does not silently opt into billing"
-        );
-        assert!(
-            app.agent.session().has_uncertain_usage(),
-            "old accounting remains sticky"
-        );
-
-        let mut queue = VecDeque::new();
-        for action in [
-            PendingIdleAction::Fast(true),
-            PendingIdleAction::Fast(false),
-            PendingIdleAction::NewSession,
-            PendingIdleAction::Fast(true),
-        ] {
-            push_pending_action(&mut queue, action);
-        }
-        assert_eq!(
-            queue.into_iter().collect::<Vec<_>>(),
-            vec![
-                PendingIdleAction::Fast(false),
-                PendingIdleAction::NewSession,
-                PendingIdleAction::Fast(true)
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
-        let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("test");
-        let before = shell.debug_snapshot();
-        let (queue, quit_requested) =
-            run_active_command(&mut shell, Command::Changelog, test_run_inspection()).await;
-        assert!(shell.has_overlay());
-        assert!(queue.is_empty());
-        assert!(!quit_requested);
-        assert_eq!(
-            shell.debug_snapshot(),
-            before,
-            "release notes are not conversation"
-        );
-        assert_eq!(
-            shell.overlay_input(&Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Esc,
-                crossterm::event::KeyModifiers::NONE,
-            ))),
-            OverlayInputResult::Closed
-        );
-        assert_eq!(
-            shell.debug_snapshot(),
-            before,
-            "escape closes the report, not the run"
-        );
-    }
-
-    #[tokio::test]
-    async fn active_inspection_reports_render_without_waiting_for_the_idle_boundary() {
-        let session_dir = tempfile::tempdir().expect("inspection fixture");
-        let inspection = test_run_inspection_with_session(session_dir.path());
-        for command in [
-            Command::Help(None),
-            Command::Context,
-            Command::Cost,
-            Command::Cache,
-        ] {
-            let mut shell = InteractiveShell::test_shell();
-            shell.begin_run("test");
-            let (queue, quit_requested) =
-                run_active_command(&mut shell, command.clone(), &inspection).await;
-
-            assert!(shell.has_overlay(), "{command:?} did not render a report");
-            assert!(queue.is_empty(), "{command:?} must not wait for idle");
-            assert!(!quit_requested);
-            assert_eq!(shell.debug_error(), None, "{command:?} reported an error");
-        }
-    }
-
-    #[tokio::test]
-    async fn active_session_commands_report_through_the_read_only_session() {
-        let session_dir = tempfile::tempdir().expect("inspection fixture");
-        let inspection = test_run_inspection_with_session(session_dir.path());
-        let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("test");
-
-        // `/name` without an argument reports the name stored beside the live
-        // session file; `/export` writes a portable copy of the same records.
-        let (queue, quit_requested) =
-            run_active_command(&mut shell, Command::Name(None), &inspection).await;
-        assert!(queue.is_empty());
-        assert!(!quit_requested);
-        assert!(
-            shell.debug_snapshot().contains("session name:"),
-            "transcript: {}",
-            shell.debug_snapshot()
-        );
-
-        let output = session_dir.path().join("exported.json");
-        let (queue, quit_requested) = run_active_command(
-            &mut shell,
-            Command::Export(Some(output.display().to_string())),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty());
-        assert!(!quit_requested);
-        assert!(shell.has_overlay(), "export did not render a report");
-        assert!(output.exists(), "export did not write {}", output.display());
-        assert_eq!(shell.debug_error(), None);
-    }
-
-    #[tokio::test]
-    async fn active_name_updates_the_foreground_title_without_waiting_for_run_settlement() {
-        let session_dir = tempfile::tempdir().unwrap();
-        let inspection = test_run_inspection_with_session(session_dir.path());
-        let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("test");
-        let (queue, quit_requested) = run_active_command(
-            &mut shell,
-            Command::Name(Some("Release audit".into())),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty());
-        assert!(!quit_requested);
-        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
-
-        // Read-only `/name` does not rename, and a refused rename cannot
-        // replace the title already shown for the current session.
-        run_active_command(&mut shell, Command::Name(None), &inspection).await;
-        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
-        run_active_command(&mut shell, Command::Name(Some("\x07".into())), &inspection).await;
-        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
-        assert_eq!(
-            inspection
-                .sessions
-                .load_metadata("session")
-                .unwrap()
-                .name
-                .as_deref(),
-            Some("Release audit")
-        );
-    }
-
-    #[tokio::test]
-    async fn foreground_title_tracks_idle_name_new_resume_fork_and_clear() {
-        let (_workspace, app) = crate::compaction::tests::app_for_estimate();
-        let mut shell = InteractiveShell::test_shell();
-        let mut input = EventStream::from_stream(futures_util::stream::pending());
-        let mut app = transition(app, &mut shell, &mut input, Reconfig::NewSession)
-            .await
-            .unwrap();
-        assert_eq!(shell.debug_session_name(), None);
-        let named_path = app.agent.session().path().to_owned();
-        let named_id = named_path.file_stem().unwrap().to_str().unwrap().to_owned();
-        let mut goal_deadline = None;
-        let mut idle_input = EventStream::new();
-        let mut reload =
-            crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
-        let outcome = run_idle_command(
-            app,
-            &mut shell,
-            &mut idle_input,
-            Command::Name(Some("Release audit".into())),
-            &mut goal_deadline,
-            None,
-            &mut reload,
-        )
-        .await
-        .unwrap();
-        let IdleCommandOutcome::Continue(next) = outcome else {
-            panic!("name command must keep the current app");
-        };
-        app = *next;
-        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
-
-        app = transition(app, &mut shell, &mut input, Reconfig::NewSession)
-            .await
-            .unwrap();
-        assert_eq!(
-            shell.debug_session_name(),
-            None,
-            "a new session must clear the old name"
-        );
-        app = transition(
-            app,
-            &mut shell,
-            &mut input,
-            Reconfig::Resume(named_path.clone()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
-
-        let head = app.agent.session().head();
-        let fork_path = app.sessions.new_path("fork-title");
-        fork_active_session(&app.sessions, &named_path, fork_path.clone(), head.as_ref()).unwrap();
-        app = transition(app, &mut shell, &mut input, Reconfig::Resume(fork_path))
-            .await
-            .unwrap();
-        assert_eq!(
-            shell.debug_session_name(),
-            None,
-            "forks do not inherit the name"
-        );
-
-        app.sessions.rename(&named_id, "").unwrap();
-        let _ = transition(app, &mut shell, &mut input, Reconfig::Resume(named_path))
-            .await
-            .unwrap();
-        assert_eq!(
-            shell.debug_session_name(),
-            None,
-            "a cleared name restores the default"
-        );
-    }
-
-    #[tokio::test]
-    async fn model_and_thinking_transitions_update_status_without_success_notices() {
-        let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
-        let mut shell = InteractiveShell::test_shell();
-        update_status(&mut shell, &app);
-        let mut input = futures_util::stream::pending();
-        let model = ModelId("claude-sonnet-4-5".into());
-        assert_ne!(shell.selected_identity().0, model.0);
-        app = transition(app, &mut shell, &mut input, Reconfig::Model(model.clone()))
-            .await
-            .unwrap();
-        assert_eq!(shell.selected_identity().0, model.0);
-        assert!(shell.status_detail().contains(&model.0));
-        assert!(shell.debug_snapshot().is_empty());
-
-        for level in [ThinkingLevel::High, ThinkingLevel::Low, ThinkingLevel::High] {
-            let reasoning =
-                requested_thinking_to_reasoning(level, &app.model, app.subagents_available())
-                    .unwrap();
-            let label = reasoning_label(&reasoning);
-            let previous = shell.selected_identity();
-            app = transition(app, &mut shell, &mut input, Reconfig::Thinking(reasoning))
-                .await
-                .unwrap();
-            assert_ne!(shell.selected_identity(), previous);
-            assert_eq!(shell.selected_identity(), (model.0.clone(), label.clone()));
-            assert!(shell.status_detail().contains(&label));
-            assert!(
-                shell.debug_snapshot().is_empty(),
-                "success notices must not accumulate"
-            );
-            assert_eq!(shell.debug_error(), None);
-            assert!(
-                app.agent.session().entries().iter().any(|entry| matches!(
-                    &entry.value,
-                    EntryValue::Config { reasoning: Some(value), .. } if value == &label
-                )),
-                "configuration provenance must remain durable"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn failed_model_transition_returns_diagnostic_without_changing_status() {
-        let (_workspace, app) = crate::compaction::tests::app_for_estimate();
-        let mut shell = InteractiveShell::test_shell();
-        update_status(&mut shell, &app);
-        let identity = shell.selected_identity();
-        let mut input = futures_util::stream::pending();
-        let app = transition(
-            app,
-            &mut shell,
-            &mut input,
-            Reconfig::Model(ModelId("missing-release-test-model".into())),
-        )
-        .await
-        .expect("an unresolved model must preserve the usable app");
-        let error = shell
-            .debug_error()
-            .expect("a diagnostic must remain visible");
-        assert!(
-            error.to_string().contains("missing-release-test-model"),
-            "{error}"
-        );
-        assert_eq!(shell.selected_identity(), identity);
-        assert_eq!(
-            app.config.model.as_ref().map(|id| id.0.as_str()),
-            Some(identity.0.as_str())
-        );
-        assert!(shell.debug_snapshot().is_empty());
-    }
-
-    #[tokio::test]
-    async fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retain_errors() {
-        for command in [
-            Command::Model(Some("gpt-4o-mini".into())),
-            Command::Thinking(Some("high".into())),
-        ] {
-            let mut shell = InteractiveShell::test_shell();
-            let (queue, _) = run_active_command(&mut shell, command, test_run_inspection()).await;
-            assert_eq!(queue.len(), 1);
-            assert!(shell
-                .debug_snapshot()
-                .contains("command queued for the next idle boundary"));
-            assert_eq!(shell.debug_error(), None);
-        }
-        let mut shell = InteractiveShell::test_shell();
-        let (queue, _) = run_active_command(
-            &mut shell,
-            Command::Thinking(Some("invalid-effort".into())),
-            test_run_inspection(),
-        )
-        .await;
-        assert!(queue.is_empty());
-        assert!(shell.debug_error().is_some());
-        assert!(shell.debug_snapshot().is_empty());
-    }
-
-    #[test]
-    fn starting_a_new_prompt_clears_the_previous_error() {
-        let mut shell = InteractiveShell::test_shell();
-        shell.error("old failure".to_string());
-        assert_eq!(shell.debug_error().as_deref(), Some("old failure"));
-
-        prepare_prompt(&mut shell);
-
-        assert_eq!(shell.debug_error(), None);
-    }
-
-    fn text_turn() -> String {
-        concat!(
-            "event: message_start\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
-            "event: content_block_start\n",
-            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
-            "event: content_block_stop\n",
-            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-            "event: message_delta\n",
-            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
-            "event: message_stop\n",
-            "data: {\"type\":\"message_stop\"}\n\n"
-        )
-        .to_owned()
-    }
-
-    fn scripted_model(uri: &str) -> octet_ai::Model {
-        use octet_ai::{
-            Auth, Capabilities, Endpoint, EndpointId, Modality, ModalitySet, ModelLimits,
-            ModelSpec, Protocol,
-        };
-        use std::sync::Arc;
-        use std::time::Duration;
-
-        octet_ai::Model {
-            spec: Arc::new(ModelSpec {
-                preset: Default::default(),
-                id: ModelId("scripted".into()),
-                endpoint: EndpointId("test".into()),
-                api_name: "scripted".into(),
-                display_name: None,
-                protocol: Protocol::AnthropicMessages,
-                capabilities: Capabilities {
-                    responses_features: Default::default(),
-                    input_modalities: ModalitySet::none().with(Modality::Image),
-                    output_modalities: ModalitySet::none(),
-                    tools: true,
-                    parallel_tool_calls: false,
-                    reasoning: None,
-                    responses_lite: false,
-                    agent_delegation: None,
-                    structured_output: false,
-                    deferred_tool_loading: false,
-                },
-                limits: ModelLimits {
-                    context_window: 16_000,
-                    max_output_tokens: 1024,
-                },
-                pricing: None,
-                cache: octet_ai::CacheCompatibility::default(),
-            }),
-            endpoint: Arc::new(Endpoint {
-                id: EndpointId("test".into()),
-                base_url: url::Url::parse(&format!("{uri}/v1/")).unwrap(),
-                auth: Auth::None,
-                default_headers: http::HeaderMap::new(),
-                transport: octet_ai::EndpointTransport::Http,
-                runtime: octet_ai::RequestRuntime::default(),
-                timeout: Duration::from_secs(5),
-            }),
-        }
-    }
-
-    /// The same scripted fixture on the Codex Responses route, the only profile
-    /// that declares the `service_tier` capability.
-    fn scripted_codex_model(uri: &str) -> octet_ai::Model {
-        let mut model = scripted_model(uri);
-        std::sync::Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
-        std::sync::Arc::make_mut(&mut model.endpoint)
-            .runtime
-            .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
-        model
-    }
-
-    /// The effort menu must offer the Codex context-window surface on a Codex
-    /// route and nowhere else, and it must report the live effective window.
-    #[test]
-    fn codex_context_surface_follows_the_declared_route_and_the_effective_window() {
-        let plain = scripted_model("http://127.0.0.1:1");
-        assert!(
-            codex_context_surface(&plain).is_none(),
-            "a non-Codex route must not offer a Codex context-window surface"
-        );
-
-        let mut codex = scripted_codex_model("http://127.0.0.1:1");
-        std::sync::Arc::make_mut(&mut codex.spec).id = octet_ai::ModelId("gpt-6-astra".into());
-        std::sync::Arc::make_mut(&mut codex.spec)
-            .limits
-            .context_window = 272_000;
-        let surface = codex_context_surface(&codex).expect("Codex route");
-        assert_eq!(surface.effective_window(), 272_000);
-        assert!(!surface.has_uncertain_usage());
-        let row = pickers::codex_context_menu_row(&surface);
-        assert!(row.contains("272000"), "{row}");
-        let lines = surface.summary_lines().join("\n");
-        assert!(lines.contains("272K"), "{lines}");
-        assert!(
-            lines.contains("effective 272K"),
-            "the surface must label the effective window it reports: {lines}"
-        );
-
-        // An above-standard-tier route renders its accounting as uncertain and
-        // never as an exact figure.
-        std::sync::Arc::make_mut(&mut codex.spec).id = octet_ai::ModelId("gpt-5.6-luna".into());
-        std::sync::Arc::make_mut(&mut codex.spec)
-            .limits
-            .context_window = 372_000;
-        let uncertain = codex_context_surface(&codex).expect("Codex route");
-        assert!(uncertain.has_uncertain_usage());
-        assert!(pickers::codex_context_menu_row(&uncertain).contains("UNCERTAIN"));
-        let lines = uncertain.summary_lines().join("\n");
-        assert!(lines.contains("UNCERTAIN"), "{lines}");
-        assert!(lines.contains("double-priced"), "{lines}");
-        assert!(
-            !lines.contains(octet_ai_operation_name()),
-            "the internal operation id must never be rendered: {lines}"
-        );
-        assert!(!lines.contains("::"), "{lines}");
-        assert!(
-            !lines.contains('$'),
-            "no exact-looking figure may be rendered above the standard tier: {lines}"
-        );
-    }
-
-    fn octet_ai_operation_name() -> &'static str {
-        crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
-    }
-
-    /// Inspection facts for tests that drive `drive_active_run` directly. The
-    /// paths do not exist: only the mechanics tests use this, and none of them
-    /// issue an inspection command.
-    ///
-    /// The durable goal is deliberately unaddressable here, so this fixture is
-    /// also the fail-closed case: a mechanics test that issued `/goal` would
-    /// have to observe the typed error rather than a silent no-op.
-    fn test_run_inspection() -> &'static ActiveRunInspection {
-        static INSPECTION: std::sync::OnceLock<ActiveRunInspection> = std::sync::OnceLock::new();
-        INSPECTION.get_or_init(|| {
-            let missing = PathBuf::from("/nonexistent/octet-run-inspection");
-            ActiveRunInspection {
-                workspace: missing.clone(),
-                invocation_cwd: missing.clone(),
-                session_path: missing.join("session.jsonl"),
-                resource_owner: "fixture-owner".into(),
-                model: scripted_model("http://127.0.0.1:1"),
-                catalog: octet_ai::ModelCatalog::default(),
-                reasoning: octet_ai::ReasoningConfig::Off,
-                sessions: crate::session_store::SessionStore::new(&missing, &missing),
-                sandbox: SandboxPolicy::default(),
-                effect_policy: octet_agent::EffectPolicy::UnsafeHost,
-                subagents_available: false,
-                service_tier: None,
-                goal: Err(ActiveGoalError::UnaddressableSession),
-                settings: commands::SettingsSurface {
-                    default_model: None,
-                    reasoning: "off".into(),
-                    theme: None,
-                    transport: "http",
-                    endpoint: "test-endpoint".into(),
-                    show_images: false,
-                },
-                model_scope: None,
-                catalog_is_narrowed: false,
-            }
-        })
-    }
-
-    /// Inspection whose session path is a real, empty session file, so
-    /// session-scoped reports render instead of failing to open.
-    fn test_run_inspection_with_session(dir: &Path) -> ActiveRunInspection {
-        let session_path = dir.join("session.jsonl");
-        let mut created = octet_agent::Session::create(&session_path).expect("inspection session");
-        // `/export` refuses a session with no resumable conversation, so the
-        // fixture carries the smallest resumable turn.
-        created
-            .append(EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text("inspection fixture".into())],
-                },
-            )))
-            .expect("inspection fixture prompt");
-        let resource_owner = created.resource_owner_key();
-        drop(created);
-        ActiveRunInspection {
-            workspace: dir.to_path_buf(),
-            invocation_cwd: dir.to_path_buf(),
-            session_path,
-            resource_owner,
-            model: scripted_model("http://127.0.0.1:1"),
-            catalog: octet_ai::ModelCatalog::default(),
-            reasoning: octet_ai::ReasoningConfig::Off,
-            sessions: crate::session_store::SessionStore::for_directory(dir, dir),
-            sandbox: SandboxPolicy::default(),
-            effect_policy: octet_agent::EffectPolicy::UnsafeHost,
-            subagents_available: false,
-            service_tier: None,
-            goal: Err(ActiveGoalError::UnaddressableSession),
-            settings: commands::SettingsSurface {
-                default_model: None,
-                reasoning: "off".into(),
-                theme: None,
-                transport: "http",
-                endpoint: "test-endpoint".into(),
-                show_images: false,
-            },
-            model_scope: None,
-            catalog_is_narrowed: false,
-        }
-    }
-
-    /// A run inspection whose durable goal is addressable, exactly as `App`
-    /// addresses it: the same store, the same driver state, the same session
-    /// key. The caller keeps its own store handle to read the mutation back.
-    fn test_run_inspection_with_goal(
-        dir: &Path,
-        store: Arc<octet_agent::DurableGoalStore>,
-        driver: octet_agent::GoalDriver,
-        session_id: &str,
-    ) -> ActiveRunInspection {
-        let mut inspection = test_run_inspection_with_session(dir);
-        inspection.goal = GoalAccess::from_parts(store, driver, session_id.to_owned());
-        inspection
-    }
-
-    /// Drive one active-run slash command with the minimum test scaffolding.
-    async fn run_active_command(
-        shell: &mut InteractiveShell,
-        command: Command,
-        inspection: &ActiveRunInspection,
-    ) -> (VecDeque<PendingIdleAction>, bool) {
-        let (queue, quit_requested, _) =
-            run_active_command_observing_deadline(shell, command, inspection).await;
-        (queue, quit_requested)
-    }
-
-    /// [`run_active_command`] plus the goal deadline the command armed or
-    /// cleared, so a mid-run `/goal` is provably applied to the same driver
-    /// state an idle `/goal` reaches.
-    async fn run_active_command_observing_deadline(
-        shell: &mut InteractiveShell,
-        command: Command,
-        inspection: &ActiveRunInspection,
-    ) -> (VecDeque<PendingIdleAction>, bool, Option<Instant>) {
-        let mut queue = VecDeque::new();
-        let mut quit_requested = false;
-        let mut goal_deadline = None;
-        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let context = octet_agent::ContextSnapshot::default();
-        handle_active_command(
-            shell,
-            command,
-            inspection,
-            &mut extensions,
-            &context,
-            &mut goal_deadline,
-            |_, _| Ok(None),
-            &mut input,
-            &mut queue,
-            &mut quit_requested,
-        )
-        .await
-        .expect("active command");
-        (queue, quit_requested, goal_deadline)
-    }
-
-    async fn scripted_agent_with_delay(
-        response_delay: Duration,
-    ) -> (wiremock::MockServer, tempfile::TempDir, octet_agent::Agent) {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_delay(response_delay)
-                    .set_body_string(text_turn()),
-            )
-            .mount(&server)
-            .await;
-
-        let (workspace, agent) =
-            scripted_agent_for_route(scripted_model(&server.uri()), octet_ai::AiClient::new());
-        (server, workspace, agent)
-    }
-
-    fn scripted_agent_for_route(
-        model: octet_ai::Model,
-        client: octet_ai::AiClient,
-    ) -> (tempfile::TempDir, octet_agent::Agent) {
-        use octet_agent::{
-            Agent, AgentConfig, CoreTools, EffectBroker, ExtensionHost, SandboxConfig, Session,
-        };
-        let workspace = tempfile::tempdir().unwrap();
-        let session_path = workspace.path().join("session.jsonl");
-        let mut extensions = ExtensionHost::new();
-        extensions.load(&CoreTools);
-        let mut sandbox = SandboxConfig::new(workspace.path());
-        sandbox.allow_edit = true;
-        sandbox.allow_process = true;
-        let agent = Agent::new(AgentConfig {
-            client,
-            model,
-            session: Session::create(&session_path).unwrap(),
-            system: "test".into(),
-            sandbox,
-            effect_broker: EffectBroker::default(),
-            extensions,
-            max_turns: Some(4),
-            reasoning: ReasoningConfig::Off,
-            reasoning_mode: octet_ai::ReasoningMode::Standard,
-            cache_retention: octet_ai::CacheRetention::default(),
-            session_id: None,
-        })
-        .unwrap();
-        (workspace, agent)
-    }
-
-    async fn scripted_agent() -> (wiremock::MockServer, tempfile::TempDir, octet_agent::Agent) {
-        scripted_agent_with_delay(Duration::ZERO).await
-    }
-
-    // A real loopback HTTP response held after headers, independently of tokens.
-    // No prompts or response bytes are written to diagnostics.
-    struct HeldApi {
-        uri: String,
-        requests: Arc<std::sync::atomic::AtomicUsize>,
-        bodies: Arc<Mutex<Vec<serde_json::Value>>>,
-        task: tokio::task::JoinHandle<()>,
-    }
-
-    impl Drop for HeldApi {
-        fn drop(&mut self) {
-            self.task.abort();
-        }
-    }
-
-    impl HeldApi {
-        async fn start(
-            body: String,
-        ) -> (
-            Self,
-            tokio::sync::oneshot::Receiver<()>,
-            tokio::sync::oneshot::Sender<bool>,
-        ) {
-            Self::start_with_repeat(body, false).await
-        }
-
-        async fn start_with_repeat(
-            body: String,
-            repeat: bool,
-        ) -> (
-            Self,
-            tokio::sync::oneshot::Receiver<()>,
-            tokio::sync::oneshot::Sender<bool>,
-        ) {
-            use std::sync::atomic::Ordering;
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let uri = format!("http://{}", listener.local_addr().unwrap());
-            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let counted = requests.clone();
-            let bodies = Arc::new(Mutex::new(Vec::new()));
-            let captured = bodies.clone();
-            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-            let task = tokio::spawn(async move {
-                let mut started_tx = Some(started_tx);
-                let mut release_rx = Some(release_rx);
-                // The held first body must not block admission of a replacement
-                // request after its client times out. This set owns that one
-                // body task, so aborting the fixture also retires the socket.
-                let mut held_responses = tokio::task::JoinSet::new();
-                loop {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    let mut request = Vec::new();
-                    let header_end = loop {
-                        let mut bytes = [0; 1024];
-                        let n = socket.read(&mut bytes).await.unwrap();
-                        assert!(n > 0);
-                        request.extend_from_slice(&bytes[..n]);
-                        assert!(request.len() < 128 * 1024, "bounded fixture request");
-                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                            break end + 4;
-                        }
-                    };
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let length: usize = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse().unwrap())
-                        })
-                        .unwrap();
-                    assert!(length < 128 * 1024);
-                    while request.len() < header_end + length {
-                        let mut bytes = [0; 1024];
-                        let n = socket.read(&mut bytes).await.unwrap();
-                        assert!(n > 0);
-                        request.extend_from_slice(&bytes[..n]);
-                    }
-                    if repeat {
-                        captured.lock().unwrap().push(
-                            serde_json::from_slice(&request[header_end..header_end + length])
-                                .unwrap(),
-                        );
-                    }
-                    let attempt = counted.fetch_add(1, Ordering::SeqCst);
-                    if attempt != 0 && !repeat {
-                        // Bound an existing recovery policy without ever replaying
-                        // the fixture's successful result on an unexpected POST.
-                        socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
-                        continue;
-                    }
-                    let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-                    socket.write_all(headers.as_bytes()).await.unwrap();
-                    if attempt != 0 {
-                        socket.write_all(body.as_bytes()).await.unwrap();
-                        continue;
-                    }
-                    let _ = started_tx.take().unwrap().send(());
-                    let release = release_rx.take().unwrap();
-                    let body = body.clone();
-                    held_responses.spawn(async move {
-                        if let Ok(complete) = release.await {
-                            let response = if complete {
-                                body.as_bytes()
-                            } else {
-                                &body.as_bytes()[..1]
-                            };
-                            let _ = socket.write_all(response).await;
-                        }
-                    });
-                }
-            });
-            (
-                Self {
-                    uri,
-                    requests,
-                    bodies,
-                    task,
-                },
-                started_rx,
-                release_tx,
-            )
-        }
-    }
-
-    /// Acknowledges only on the poll after the event's handler returned. This
-    /// proves input handling while the API gate is still held, not after reply.
-    struct ProbedInput {
-        input: tokio_stream::wrappers::ReceiverStream<std::io::Result<Event>>,
-        remaining: usize,
-        handled: Option<tokio::sync::oneshot::Sender<()>>,
-    }
-
-    impl Stream for ProbedInput {
-        type Item = std::io::Result<Event>;
-
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            context: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            if self.remaining == 0 {
-                if let Some(handled) = self.handled.take() {
-                    let _ = handled.send(());
-                }
-            }
-            let event = Pin::new(&mut self.input).poll_next(context);
-            if matches!(event, std::task::Poll::Ready(Some(_))) {
-                self.remaining = self.remaining.saturating_sub(1);
-            }
-            event
-        }
-    }
-
-    /// A real registered first-party command goes through the active dispatcher,
-    /// not the idle extension dispatcher, while the root provider is held.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn active_subagent_stops_are_owned_and_survive_root_completion() {
-        for (target, owner_mode) in [
-            ("all", "owned"),
-            ("worker-one", "owned"),
-            ("all", "slow"),
-            ("all", "cancel"),
-            ("all", "after-completion-abort"),
-            ("all", "missing"),
-            ("all", "wrong"),
-            ("all", "impostor"),
-            ("all extra", "owned"),
-            ("inspect worker-one", "owned"),
-        ] {
-            let (server, started, release) = HeldApi::start(text_turn()).await;
-            let (_agent_dir, mut agent) =
-                scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
-            let mut inspection = test_run_inspection().clone();
-            inspection.session_path = agent.session().path().to_path_buf();
-            let owner = agent.session().resource_owner_key();
-            inspection.resource_owner = owner.clone();
-            let fixture_dir = tempfile::tempdir().unwrap();
-            let (mut extensions, process, log) =
-                crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
-                    fixture_dir.path(),
-                    match owner_mode {
-                        "missing" => None,
-                        "wrong" => Some("another-session"),
-                        _ => Some(&owner),
-                    },
-                    if owner_mode == "impostor" {
-                        "other-extension"
-                    } else {
-                        "octet-subagents"
-                    },
-                    match owner_mode {
-                        "slow" => 6,
-                        "after-completion-abort" => 2,
-                        _ => 1,
-                    },
-                )
-                .await;
-            let command = if target.starts_with("inspect ") {
-                format!("/subagents {target}")
-            } else {
-                format!("/subagents stop {target}")
-            };
-            let events = vec![
-                Event::Paste(command),
-                Event::Key(crossterm::event::KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                )),
-            ];
-            let after_completion_abort = owner_mode == "after-completion-abort";
-            let owned = matches!(target, "all" | "worker-one")
-                && matches!(
-                    owner_mode,
-                    "owned" | "slow" | "cancel" | "after-completion-abort"
-                );
-            let (sender, receiver) = tokio::sync::mpsc::channel(128);
-            let (handled_tx, handled) = tokio::sync::oneshot::channel();
-            let mut input = ProbedInput {
-                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
-                remaining: events.len()
-                    + 1
-                    + usize::from(owner_mode == "cancel")
-                    + 2 * usize::from(after_completion_abort),
-                handled: Some(handled_tx),
-            };
-            let mut shell = InteractiveShell::test_shell();
-            let run_id = shell.begin_run("test");
-            let run_active = shell.test_run_active_probe();
-            let mut run = agent.prompt("held turn").await.unwrap();
-            shell.set_awaiting_provider(run_id);
-            let control = run.control();
-            let mut ticker = tokio::time::interval(Duration::from_millis(16));
-            let mut pending = VecDeque::new();
-            let mut quit = false;
-            let mut made_tool_call = false;
-            let mut deadline = None;
-            let driver = drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut extensions,
-                &mut made_tool_call,
-                &inspection,
-                &mut deadline,
-            );
-            let producer = async {
-                let mut release = Some(release);
-                started.await.unwrap();
-                for event in events {
-                    sender.send(Ok(event)).await.unwrap();
-                }
-                if owned {
-                    tokio::time::timeout(Duration::from_secs(2), async {
-                        while !log.exists() {
-                            tokio::time::sleep(Duration::from_millis(5)).await;
-                        }
-                    })
-                    .await
-                    .expect("stop request reached the registered extension");
-                }
-                sender
-                    .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                        KeyCode::Char('x'),
-                        KeyModifiers::NONE,
-                    ))))
-                    .await
-                    .unwrap();
-                if owner_mode == "cancel" {
-                    sender
-                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                            KeyCode::Esc,
-                            KeyModifiers::NONE,
-                        ))))
-                        .await
-                        .unwrap();
-                }
-                if after_completion_abort {
-                    sender
-                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                            KeyCode::Enter,
-                            KeyModifiers::NONE,
-                        ))))
-                        .await
-                        .unwrap();
-                    release.take().unwrap().send(true).unwrap();
-                    tokio::time::timeout(Duration::from_secs(1), async {
-                        while run_active() {
-                            tokio::time::sleep(Duration::from_millis(5)).await;
-                        }
-                    })
-                    .await
-                    .expect("root settled before stop response and Ctrl+C");
-                    sender
-                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
-                            KeyCode::Char('c'),
-                            KeyModifiers::CONTROL,
-                        ))))
-                        .await
-                        .unwrap();
-                }
-                tokio::time::timeout(Duration::from_millis(500), handled)
-                    .await
-                    .expect("input/cancel stays responsive while stop response is pending")
-                    .expect("input handler completed while waiting for the stop response");
-                if let Some(release) = release {
-                    let _ = release.send(true);
-                }
-            };
-            let (ended, ()) = tokio::time::timeout(Duration::from_secs(8), async {
-                tokio::join!(driver, producer)
-            })
-            .await
-            .expect("active run and stop should settle");
-            drop(run);
-            assert_eq!(
-                ended.unwrap(),
-                if owner_mode == "cancel" {
-                    HostRunOutcome::Aborted
-                } else {
-                    HostRunOutcome::Completed
-                }
-            );
-            if after_completion_abort {
-                assert!(shell.pending().is_empty());
-                assert_eq!(shell.queued_follow_up_len(), 1);
-                assert!(
-                    shell.take_ready_follow_up().is_none(),
-                    "Ctrl+C must revoke dispatch after root settlement"
-                );
-            } else {
-                assert_eq!(shell.pending(), "x");
-            }
-            assert!(!quit);
-            assert!(pending.is_empty());
-            let wire = std::fs::read_to_string(&log).unwrap_or_default();
-            if owned {
-                let commands: Vec<serde_json::Value> = wire
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-                    .collect();
-                assert_eq!(
-                    commands.len(),
-                    1,
-                    "{owner_mode} {target}: {wire}; error={:?}; frame={:?}; transcript={}",
-                    shell.debug_error(),
-                    shell.dump_rendered_frame().await,
-                    shell.debug_snapshot()
-                );
-                assert_eq!(
-                    commands[0]["params"]["arguments"],
-                    serde_json::json!(["stop", target])
-                );
-                assert_eq!(
-                    commands[0]["params"]["context"]["resource_owner"]["session_id"],
-                    owner
-                );
-                let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
-                assert!(frame.contains("not settled"), "{target}: {frame}");
-                assert!(!shell.debug_snapshot().contains("unknown command"));
-            } else {
-                assert!(
-                    wire.is_empty(),
-                    "unexpected command for {owner_mode} {target}: {wire}"
-                );
-            }
-            assert!(process.shutdown().await);
-        }
-    }
-
-    /// Input is acknowledged while the first response is held by a gate. The
-    /// running request keeps its tier; only a subsequent run sees the change.
-    #[tokio::test]
-    async fn fast_active_commands_wait_for_ownership_before_changing_wire_requests() {
-        use crossterm::event::KeyEvent;
-        for initially_on in [false, true] {
-            let (server, started, release) =
-                HeldApi::start_with_repeat(fast_response(), true).await;
-            let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri));
-            let mut shell = InteractiveShell::test_shell();
-            if initially_on {
-                app = fast_idle(app, &mut shell, "/fast on").await;
-            }
-            update_status(&mut shell, &app);
-            let inspection = ActiveRunInspection::capture(&app);
-            let command = if initially_on {
-                "/fast off"
-            } else {
-                "/fast on"
-            };
-            let events: Vec<_> = [command, "/fast"]
-                .into_iter()
-                .flat_map(|text| {
-                    text.chars()
-                        .map(|character| {
-                            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
-                        })
-                        .chain(std::iter::once(KeyEvent::new(
-                            KeyCode::Enter,
-                            KeyModifiers::NONE,
-                        )))
-                })
-                .collect();
-            let (sender, receiver) = tokio::sync::mpsc::channel(32);
-            let (handled_tx, handled) = tokio::sync::oneshot::channel();
-            let mut input = ProbedInput {
-                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
-                remaining: events.len(),
-                handled: Some(handled_tx),
-            };
-            let mut pending = VecDeque::new();
-            let mut ticker = tokio::time::interval(Duration::from_millis(1));
-            let mut quit = false;
-            let mut made_tool_call = false;
-            let mut deadline = None;
-            let run_id = shell.begin_run("test");
-            let mut run = app.agent.prompt("held first turn").await.unwrap();
-            let control = run.control();
-            shell.set_awaiting_provider(run_id);
-            let driver = drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut app.executable_extensions,
-                &mut made_tool_call,
-                &inspection,
-                &mut deadline,
-            );
-            let producer = async {
-                started.await.unwrap();
-                for event in events {
-                    sender.send(Ok(Event::Key(event))).await.unwrap();
-                }
-                handled
-                    .await
-                    .expect("slash commands handled before releasing response");
-                assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
-                release.send(true).unwrap();
-            };
-            let (ended, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::join!(driver, producer)
-            })
-            .await
-            .unwrap();
-            drop(run);
-            assert_eq!(ended.unwrap(), HostRunOutcome::Completed);
-            assert!(!quit);
-            assert_eq!(
-                app.agent.service_tier(),
-                initially_on.then_some(octet_ai::ServiceTier::Priority)
-            );
-            assert_eq!(
-                pending.len(),
-                1,
-                "read-only status must not enqueue another toggle"
-            );
-            assert!(shell
-                .debug_snapshot()
-                .contains("queued for the next idle boundary"));
-            let PendingIdleAction::Fast(enabled) = pending.pop_front().unwrap() else {
-                panic!("wrong action")
-            };
-            assert_eq!(enabled, !initially_on);
-            // The production idle queue uses this same handler after Run drops.
-            apply_fast_command(&mut app, &mut shell, Some(enabled));
-            assert!(pending.is_empty());
-            app.agent
-                .complete("second turn after idle change")
-                .await
-                .unwrap();
-            let bodies = server.bodies.lock().unwrap();
-            assert_eq!(bodies.len(), 2);
-            for (body, priority) in bodies.iter().zip([initially_on, !initially_on]) {
-                if priority {
-                    assert_eq!(body["service_tier"], "priority");
-                } else {
-                    assert!(body.get("service_tier").is_none());
-                }
-                assert!(!body.to_string().contains("/fast"));
-            }
-        }
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    enum HeldOutcome {
-        Success,
-        Timeout,
-        TransportFailure,
-        Cancel,
-    }
-
-    fn seed_compaction_session(agent: &mut octet_agent::Agent) {
-        for index in 0..5 {
-            agent
-                .session_mut()
-                .append(octet_agent::EntryValue::Message(octet_ai::Message::User(
-                    octet_ai::UserMessage {
-                        content: vec![octet_ai::UserPart::Text(format!("fixture user {index}"))],
-                    },
-                )))
-                .unwrap();
-            agent
-                .session_mut()
-                .append(octet_agent::EntryValue::Message(
-                    octet_ai::Message::Assistant(octet_ai::AssistantMessage {
-                        content: vec![octet_ai::AssistantPart::Text(format!(
-                            "fixture assistant {index}"
-                        ))],
-                        model: ModelId("scripted".into()),
-                        protocol: octet_ai::Protocol::AnthropicMessages,
-                    }),
-                ))
-                .unwrap();
-        }
-        // Retain a user boundary, so this fixture exercises one summary
-        // request rather than the separate split-turn-prefix summary request.
-        agent
-            .session_mut()
-            .append(octet_agent::EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text("retained fixture user".into())],
-                },
-            )))
-            .unwrap();
-    }
-
-    async fn held_api_input(
-        started: tokio::sync::oneshot::Receiver<()>,
-        sender: tokio::sync::mpsc::Sender<std::io::Result<Event>>,
-        handled: tokio::sync::oneshot::Receiver<()>,
-        release: tokio::sync::oneshot::Sender<bool>,
-        outcome: HeldOutcome,
-        columns: u16,
-    ) {
-        use crossterm::event::KeyEvent;
-        tokio::time::timeout(Duration::from_secs(2), started)
-            .await
-            .unwrap()
-            .unwrap();
-        sender.send(Ok(Event::Resize(columns, 8))).await.unwrap();
-        sender
-            .send(Ok(Event::Paste("draft while API waits".into())))
-            .await
-            .unwrap();
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('o'),
-                KeyModifiers::CONTROL,
-            ))))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_millis(250), handled)
-            .await
-            .expect("input handling budget while response is held: 250 ms")
-            .unwrap();
-        match outcome {
-            HeldOutcome::Success => {
-                release.send(true).unwrap();
-            }
-            HeldOutcome::TransportFailure => {
-                release.send(false).unwrap();
-            }
-            HeldOutcome::Cancel => {
-                sender
-                    .send(Ok(Event::Key(KeyEvent::new(
-                        KeyCode::Esc,
-                        KeyModifiers::NONE,
-                    ))))
-                    .await
-                    .unwrap();
-                // Keep both gates alive until the driven operation has settled.
-                std::future::pending::<()>().await;
-            }
-            HeldOutcome::Timeout => std::future::pending::<()>().await,
-        }
-        // An input EOF would itself abort an ordinary run, masking its result.
-        std::future::pending::<()>().await;
-    }
-
-    #[tokio::test]
-    async fn held_open_manual_compaction_keeps_input_live_and_settles_all_outcomes() {
-        for outcome in [
-            HeldOutcome::Success,
-            HeldOutcome::Timeout,
-            HeldOutcome::TransportFailure,
-            HeldOutcome::Cancel,
-        ] {
-            for columns in [46, 80] {
-                let (server, started, release) = HeldApi::start(text_turn()).await;
-                let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
-                // complete() drives the real streaming path even for a local
-                // compaction summary. Only this fixture changes stream limits.
-                app.client = octet_ai::AiClient::new()
-                    .with_stream_timeouts(Duration::from_millis(750), Duration::from_secs(2));
-                // Summaries now use Agent's retry/accounting client. Rebuild it
-                // with the fixture's bounded stream timeouts before starting.
-                app = rebuild_app(app, None, None, None, None).unwrap();
-                app.agent
-                    .set_compaction_model(Some(scripted_model(&server.uri)));
-                seed_compaction_session(&mut app.agent);
-                let force = columns == 46;
-                let original_keep = if force { 99 } else { 1 };
-                app.config.compaction.keep_recent_tokens = original_keep;
-                let before = app.agent.session().entries().len();
-                let mut shell = InteractiveShell::test_shell();
-                let was_verbose = shell.verbose_tools();
-                let (sender, receiver) = tokio::sync::mpsc::channel(8);
-                let (handled_tx, handled_rx) = tokio::sync::oneshot::channel();
-                let mut input = ProbedInput {
-                    input: tokio_stream::wrappers::ReceiverStream::new(receiver),
-                    remaining: 3,
-                    handled: Some(handled_tx),
-                };
-                let stimulus =
-                    held_api_input(started, sender, handled_rx, release, outcome, columns);
-                tokio::pin!(stimulus);
-                // 750ms initial body timeout + the shared summary policy's
-                // 500ms first backoff + an immediate terminal HTTP 400 on the
-                // replacement fits the original bound. Do not hide a blocked
-                // fixture accept loop by extending this deadline.
-                tokio::time::timeout(Duration::from_secs(3), async {
-                    tokio::select! {
-                        result = compact_interactively(&mut app, &mut shell, &mut input, force, None) => result,
-                        _ = &mut stimulus => unreachable!(),
-                    }
-                }).await.unwrap_or_else(|error| panic!(
-                    "held compaction must settle: outcome={outcome:?}, columns={columns}, requests={}, error={error}",
-                    server.requests.load(std::sync::atomic::Ordering::SeqCst),
-                ));
-                let snapshot = shell.debug_snapshot();
-                match outcome {
-                    HeldOutcome::Success => {
-                        assert!(snapshot.contains("Context compacted"), "{snapshot}")
-                    }
-                    HeldOutcome::Timeout | HeldOutcome::TransportFailure => {
-                        assert!(snapshot.contains("compaction skipped"), "{snapshot}")
-                    }
-                    HeldOutcome::Cancel => {
-                        assert!(snapshot.contains("compaction cancelled"), "{snapshot}")
-                    }
-                }
-                assert_eq!(app.config.compaction.keep_recent_tokens, original_keep);
-                assert_eq!(shell.pending(), "draft while API waits");
-                assert_ne!(shell.verbose_tools(), was_verbose);
-                let expected_requests = match outcome {
-                    HeldOutcome::Timeout | HeldOutcome::TransportFailure => 2,
-                    HeldOutcome::Success | HeldOutcome::Cancel => 1,
-                };
-                assert_eq!(
-                    server.requests.load(std::sync::atomic::Ordering::SeqCst),
-                    expected_requests,
-                    "the first summary replacement must hit the fixture's terminal rejection: {outcome:?}",
-                );
-                if !matches!(outcome, HeldOutcome::Success) {
-                    assert!(app.agent.session().has_uncertain_usage(), "{outcome:?}");
-                    assert!(app.agent.session().usage_records().is_empty(),
-                        "failed/abandoned summaries have unknown usage, not invented successful receipts");
-                    assert_eq!(
-                        app.agent.session().entries().len(),
-                        before,
-                        "unsettled compaction must not append a summary"
-                    );
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn held_open_model_request_keeps_input_live_and_settles_once() {
-        for outcome in [
-            HeldOutcome::Success,
-            HeldOutcome::Timeout,
-            HeldOutcome::TransportFailure,
-            HeldOutcome::Cancel,
-        ] {
-            let (server, started, release) = HeldApi::start(text_turn()).await;
-            let client = octet_ai::AiClient::new()
-                .with_stream_timeouts(Duration::from_millis(750), Duration::from_secs(2));
-            let (_workspace, mut agent) =
-                scripted_agent_for_route(scripted_model(&server.uri), client);
-            let mut shell = InteractiveShell::test_shell();
-            let was_verbose = shell.verbose_tools();
-            let run_id = shell.begin_run("test");
-            let mut run = agent.prompt("initial").await.unwrap();
-            shell.set_awaiting_provider(run_id);
-            let control = run.control();
-            let (sender, receiver) = tokio::sync::mpsc::channel(8);
-            let (handled_tx, handled_rx) = tokio::sync::oneshot::channel();
-            let mut input = ProbedInput {
-                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
-                remaining: 3,
-                handled: Some(handled_tx),
-            };
-            let mut ticker = tokio::time::interval(Duration::from_millis(16));
-            let mut pending = VecDeque::new();
-            let mut quit = false;
-            let mut made_tool_call = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let stimulus = held_api_input(started, sender, handled_rx, release, outcome, 80);
-            tokio::pin!(stimulus);
-            let ended = tokio::time::timeout(Duration::from_secs(5), async {
-                let mut goal_deadline = None;
-                tokio::select! {
-                    result = drive_active_run(&mut run, &control, &mut shell, &mut input,
-                        &mut ticker, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call,
-                        test_run_inspection(), &mut goal_deadline) => result.unwrap(),
-                    _ = &mut stimulus => unreachable!(),
-                }
-            }).await.expect("held model request must settle");
-            assert!(run.next().await.is_none(), "exactly one terminal event");
-            drop(run);
-            match outcome {
-                HeldOutcome::Success => assert_eq!(ended, HostRunOutcome::Completed),
-                HeldOutcome::Cancel => assert_eq!(ended, HostRunOutcome::Aborted),
-                HeldOutcome::Timeout | HeldOutcome::TransportFailure => {
-                    assert!(matches!(ended, HostRunOutcome::Failed(_)))
-                }
-            }
-            assert_eq!(shell.pending(), "draft while API waits");
-            assert_ne!(shell.verbose_tools(), was_verbose);
-            assert_eq!(agent.session().checkpoints().len(), 1);
-            if !matches!(outcome, HeldOutcome::TransportFailure) {
-                assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
-            }
-            assert!(!quit);
-        }
-    }
-
-    #[tokio::test]
-    async fn caller_driven_run_settles_and_cancels_while_real_renderer_is_gated() {
-        // The independent watchdog releases a stalled renderer even when an
-        // inline render/held mutex prevents this Tokio thread polling a timeout.
-        struct ReleaseGate(Box<dyn Fn()>);
-        impl Drop for ReleaseGate {
-            fn drop(&mut self) {
-                (self.0)();
-            }
-        }
-        for cancel in [false, true] {
-            let (server, started, release_response) = HeldApi::start(text_turn()).await;
-            let (_workspace, mut agent) =
-                scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
-            let (mut shell, gate) = InteractiveShell::test_blocked_renderer();
-            // Declared after shell: always releases before shell's join on unwind.
-            let release_gate = gate.clone();
-            let _release = ReleaseGate(Box::new(move || release_gate.release()));
-            let (settled_tx, settled_rx) = std::sync::mpsc::channel();
-            let watchdog_gate = gate.clone();
-            let watchdog = std::thread::spawn(move || {
-                let settled_while_blocked = settled_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-                watchdog_gate.release();
-                settled_while_blocked
-            });
-            assert!(gate.wait_until_entered(Duration::from_secs(3)));
-            let (sender, receiver) = tokio::sync::mpsc::channel(8);
-            let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-            let mut ticker = tokio::time::interval(Duration::from_millis(1));
-            let mut pending = VecDeque::new();
-            let mut quit = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let run_id = shell.begin_run("test");
-            let mut run = agent.prompt("settle independently of paint").await.unwrap();
-            let control = run.control();
-            shell.set_awaiting_provider(run_id);
-            let stimulus = async move {
-                started.await.unwrap();
-                if cancel {
-                    // Empty-draft Ctrl+C must reach the real Agent control and
-                    // the caller must continue polling through RunFinished.
-                    sender.send(Ok(ctrl_key('c'))).await.unwrap();
-                    let _keep_response_held = release_response;
-                    std::future::pending::<()>().await;
-                } else {
-                    release_response.send(true).unwrap();
-                    let _keep_input_open = sender;
-                    std::future::pending::<()>().await;
-                }
-            };
-            tokio::pin!(stimulus);
-            let mut made_tool_call = false;
-            let mut deadline = None;
-            let result = tokio::select! {
-                result = drive_active_run(
-                    &mut run, &control, &mut shell, &mut input, &mut ticker,
-                    &mut pending, &mut quit, None, None, &mut extensions,
-                    &mut made_tool_call, test_run_inspection(), &mut deadline,
-                ) => result.unwrap(),
-                _ = &mut stimulus => unreachable!(),
-            };
-            assert_eq!(
-                result,
-                if cancel {
-                    HostRunOutcome::Aborted
-                } else {
-                    HostRunOutcome::Completed
-                }
-            );
-            assert!(
-                run.next().await.is_none(),
-                "driver must consume the terminal outcome"
-            );
-            drop(run);
-            assert_eq!(agent.session().checkpoints().len(), 1);
-            assert!(pending.is_empty());
-            assert!(!quit);
-            settled_tx.send(()).ok();
-            assert!(
-                watchdog.join().unwrap(),
-                "Run only settled after the renderer watchdog released layout: cancel={cancel}"
-            );
-        }
-    }
-
-    fn reasoning_control_model(uri: &str) -> Model {
-        let mut model = scripted_model(uri);
-        let spec = Arc::make_mut(&mut model.spec);
-        spec.protocol = octet_ai::Protocol::OpenAiResponses;
-        spec.capabilities
-            .responses_features
-            .reasoning_effort_updates = true;
-        spec.capabilities.reasoning = Some(octet_ai::ReasoningCapability {
-            options: Some(octet_ai::types::ReasoningOptions {
-                values: vec!["none".into(), "high".into(), "low".into()],
-                default: Some("low".into()),
-            }),
-            control: octet_ai::ReasoningControl::Effort,
-            exposes_text: true,
-            preserves_state: true,
-            effort_budgets: None,
-            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
-            min_effort: octet_ai::ReasoningEffort::Low,
-            max_effort: octet_ai::ReasoningEffort::High,
-        });
-        Arc::make_mut(&mut model.endpoint)
-            .runtime
-            .responses_features
-            .reasoning_effort_updates = true;
-        model
-    }
-
-    /// The cycle gesture walks the advertised levels in ascending order and
-    /// wraps from the last one back to the first.
-    #[test]
-    fn thinking_cycle_walks_the_advertised_levels_in_ascending_order() {
-        let model = reasoning_control_model("http://127.0.0.1:1");
-        let levels = supported_levels_with_subagents(&model, false);
-        assert_eq!(
-            levels,
-            vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
-        );
-
-        // From the first level the walk ascends one step per press and wraps.
-        // `levels[0]` is the current level, so the first press yields
-        // `levels[1]`, and the press after the last returns to `levels[0]`.
-        let mut current = Some(octet_ai::ReasoningConfig::Off);
-        let mut visited = Vec::new();
-        for _ in 0..levels.len() {
-            let level = next_thinking_level(&levels, current.as_ref(), &model).unwrap();
-            visited.push(level);
-            current = Some(requested_thinking_to_reasoning(level, &model, false).unwrap());
-        }
-        let mut expected = levels.clone();
-        expected.rotate_left(1);
-        assert_eq!(visited, expected, "each press advances ascending");
-        // `visited` ends on the first level, so the walk wrapped from the last
-        // advertised level rather than stalling at the top.
-        assert_eq!(
-            visited.last().copied(),
-            Some(levels[0]),
-            "the walk must wrap past the last level"
-        );
-    }
-
-    /// A selection with no portable level is a start position, not a failure.
-    ///
-    /// The active path used to compare the footer's display string, so a token
-    /// budget matched nothing and the press silently did nothing; the idle path
-    /// propagated the translation error out of the interactive loop.
-    #[test]
-    fn thinking_cycle_advances_from_a_selection_without_a_portable_level() {
-        let model = reasoning_control_model("http://127.0.0.1:1");
-        let levels = supported_levels_with_subagents(&model, false);
-
-        // `Off` on an effort-only model has a level, so it advances normally.
-        assert_eq!(
-            next_thinking_level(&levels, Some(&octet_ai::ReasoningConfig::Off), &model).unwrap(),
-            ThinkingLevel::Low
-        );
-        // An absent selection starts at the first advertised level.
-        assert_eq!(
-            next_thinking_level(&levels, None, &model).unwrap(),
-            levels[0]
-        );
-        // A budget this model does not publish has no portable level. The press
-        // must still land on an advertised level instead of erroring or
-        // matching nothing.
-        let budget = octet_ai::ReasoningConfig::Budget(999_999);
-        assert_eq!(
-            next_thinking_level(&levels, Some(&budget), &model).unwrap(),
-            levels[0]
-        );
-        // A level the model no longer advertises behaves the same way.
-        let unlisted = octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
-        assert_eq!(
-            next_thinking_level(&levels, Some(&unlisted), &model).unwrap(),
-            levels[0]
-        );
-        // A model with no levels at all still reports the single honest error.
-        assert!(next_thinking_level(&[], None, &model).is_err());
-    }
-
-    #[tokio::test]
-    async fn thinking_control_preserves_active_run_and_hands_off_wire_update() {
-        // Exercise real preference persistence without modifying the developer HOME.
-        const CHILD: &str = "OCTET_TEST_REASONING_CONTROL_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let home = tempfile::tempdir().unwrap();
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "modes::interactive::tests::thinking_control_preserves_active_run_and_hands_off_wire_update", "--nocapture"])
-                .env(CHILD, "1").env("HOME", home.path()).output().unwrap();
-            assert!(
-                result.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&result.stdout),
-                String::from_utf8_lossy(&result.stderr)
-            );
-            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
-            return;
-        }
-        use crossterm::event::KeyEvent;
-        for (requested, qualified) in [
-            ("high", true),
-            ("medium", true),
-            ("ultra", true),
-            ("high", false),
-            ("cycle", true),
-        ] {
-            let accepted = (requested == "high" || requested == "cycle") && qualified;
-            let (server, started, release) =
-                HeldApi::start_with_repeat(fast_response(), true).await;
-            let mut model = reasoning_control_model(&server.uri);
-            Arc::make_mut(&mut model.endpoint)
-                .runtime
-                .responses_features
-                .reasoning_effort_updates = qualified;
-            let (_workspace, mut agent) =
-                scripted_agent_for_route(model.clone(), octet_ai::AiClient::new());
-            let mut inspection = test_run_inspection().clone();
-            inspection.model = model;
-            inspection.session_path = agent.session().path().to_path_buf();
-            let mut shell = InteractiveShell::test_shell();
-            shell.set_identity("test", "scripted", "off");
-            let events: Vec<_> = if requested == "cycle" {
-                (0..2)
-                    .map(|_| Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)))
-                    .collect()
-            } else {
-                format!("/thinking {requested}")
-                    .chars()
-                    .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
-                    .chain(std::iter::once(Event::Key(KeyEvent::new(
-                        KeyCode::Enter,
-                        KeyModifiers::NONE,
-                    ))))
-                    .collect()
-            };
-            let (sender, receiver) = tokio::sync::mpsc::channel(32);
-            let (handled_tx, handled) = tokio::sync::oneshot::channel();
-            let mut input = ProbedInput {
-                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
-                remaining: events.len(),
-                handled: Some(handled_tx),
-            };
-            let mut pending = VecDeque::new();
-            let mut ticker = tokio::time::interval(Duration::from_millis(1));
-            let mut quit = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let id = shell.begin_run("test");
-            let mut run = agent.prompt("keep the root alive").await.unwrap();
-            let control = run.control();
-            shell.set_awaiting_provider(id);
-            let mut deadline = None;
-            let mut made_tool_call = false;
-            let driver = drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut extensions,
-                &mut made_tool_call,
-                &inspection,
-                &mut deadline,
-            );
-            let stimulus = async move {
-                started.await.unwrap();
-                for event in events {
-                    sender.send(Ok(event)).await.unwrap();
-                }
-                handled.await.unwrap();
-                release.send(true).unwrap();
-                std::future::pending::<()>().await;
-            };
-            tokio::pin!(stimulus);
-            let outcome = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::select! { result = driver => result.unwrap(), _ = &mut stimulus => unreachable!() }
-        }).await.unwrap();
-            assert_eq!(outcome, HostRunOutcome::Completed);
-            drop(run);
-            assert!(!quit);
-            if qualified && accepted {
-                assert_eq!(
-                    pending,
-                    VecDeque::from([PendingIdleAction::PersistThinkingPreference(
-                        "high".to_owned()
-                    )]),
-                    "active updates defer only the final preference write until idle"
-                );
-                assert!(
-                    !crate::cli::global_config_path().unwrap().exists(),
-                    "active control handling must not persist before the idle boundary"
-                );
-            } else if qualified {
-                assert!(pending.is_empty(), "rejected control must not persist");
-            } else {
-                assert_eq!(
-                    pending.front(),
-                    Some(&PendingIdleAction::ChangeThinkingLevel(ThinkingLevel::High))
-                );
-            }
-            assert_eq!(agent.session().checkpoints().len(), 1);
-            assert_eq!(
-                agent.reasoning(),
-                &if accepted {
-                    ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
-                } else {
-                    ReasoningConfig::Off
-                }
-            );
-            assert_eq!(
-                shell.selected_identity().1,
-                if accepted { "high" } else { "off" }
-            );
-            let bodies = server.bodies.lock().unwrap();
-            if !accepted {
-                assert_eq!(
-                    bodies.len(),
-                    1,
-                    "rejected effort must not create a model response"
-                );
-                assert!(!agent.session().entries().iter().any(|entry| matches!(
-                    &entry.value,
-                    EntryValue::ResponsesReasoning {
-                        update: Some(_),
-                        ..
-                    }
-                )));
-                if qualified {
-                    assert!(shell.debug_error().unwrap().contains("not supported"));
-                } else {
-                    assert!(shell.debug_error().is_none());
-                    assert!(shell.debug_snapshot().contains("next idle boundary"));
-                }
-                continue;
-            }
-            if requested != "cycle" {
-                assert!(shell
-                    .debug_snapshot()
-                    .contains("not provider acknowledgement"));
-            }
-            assert_eq!(bodies.len(), 2);
-            assert_eq!(bodies[0]["reasoning"]["effort"], "none");
-            assert_eq!(
-                bodies[1]["reasoning"]["effort"], "none",
-                "wire baseline stays pinned"
-            );
-            assert!(bodies[1]["input"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["type"] == "configuration_update"
-                    && item["reasoning"]["effort"] == "high"));
-        }
-    }
-
-    #[tokio::test]
-    async fn idle_thinking_rejection_preserves_session_and_startup_preference() {
-        const CHILD: &str = "OCTET_TEST_IDLE_THINKING_PREFERENCE_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let home = tempfile::tempdir().unwrap();
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "modes::interactive::tests::idle_thinking_rejection_preserves_session_and_startup_preference", "--nocapture"])
-                .env(CHILD, "1").env("HOME", home.path()).output().unwrap();
-            assert!(
-                result.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&result.stdout),
-                String::from_utf8_lossy(&result.stderr)
-            );
-            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
-            return;
-        }
-        let mut model = reasoning_control_model("http://127.0.0.1:1");
-        let capabilities = &mut Arc::make_mut(&mut model.spec).capabilities;
-        capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
-        let capability = capabilities.reasoning.as_mut().unwrap();
-        capability.max_effort = octet_ai::ReasoningEffort::Ultra;
-        capability
-            .options
-            .as_mut()
-            .unwrap()
-            .values
-            .extend(["max".into(), "ultra".into()]);
-        // Metadata alone cannot authorize Ultra: the observation runtime must
-        // be installed before a selection is committed.
-        let ultra = requested_thinking_to_reasoning(ThinkingLevel::Ultra, &model, true).unwrap();
-        let (_workspace, mut app) = fast_test_app(model);
-        let mut shell = InteractiveShell::test_shell();
-        let mut input = futures_util::stream::pending();
-        app = select_thinking(
-            app,
-            &mut shell,
-            &mut input,
-            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
-            None,
-        )
-        .await
-        .unwrap();
-        let preference = crate::cli::global_config_path().unwrap();
-        let config_before = std::fs::read(&preference).unwrap();
-        assert!(String::from_utf8_lossy(&config_before).contains("high"));
-        let session = app.agent.session().path().to_path_buf();
-        let session_before = std::fs::read(&session).unwrap();
-        let identity = shell.selected_identity();
-        // None is the slash/shortcut path; Some(Standard) is picker selection.
-        for mode in [None, Some((ReasoningMode::Standard, ThinkingLevel::Ultra))] {
-            shell.clear_error();
-            app = select_thinking(app, &mut shell, &mut input, ultra.clone(), mode)
-                .await
-                .unwrap();
-            assert_eq!(std::fs::read(&preference).unwrap(), config_before);
-            assert_eq!(std::fs::read(&session).unwrap(), session_before);
-            assert_eq!(shell.selected_identity(), identity);
-            assert_eq!(
-                app.reasoning,
-                ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
-            );
-            assert_eq!(app.agent.reasoning(), &app.reasoning);
-            let error = shell.debug_error().unwrap();
-            assert!(
-                error.contains("thinking unchanged") && error.contains("observation runtime"),
-                "{error}"
-            );
-        }
-        app.agent
-            .enable_v2_delegation_extension_only(octet_agent::DelegationConfig::new(
-                _workspace.path().join("delegation"),
-            ))
-            .unwrap();
-        let team = app.agent.delegation_team_directory().unwrap().to_path_buf();
-        for level in [
-            ThinkingLevel::Max,
-            ThinkingLevel::Ultra,
-            ThinkingLevel::Off,
-            ThinkingLevel::Low,
-            ThinkingLevel::Max,
-            ThinkingLevel::Ultra,
-            ThinkingLevel::Low,
-        ] {
-            let reasoning = requested_thinking_to_reasoning(level, &app.model, true).unwrap();
-            shell.clear_error();
-            app = select_thinking(app, &mut shell, &mut input, reasoning.clone(), None)
-                .await
-                .unwrap();
-            assert!(shell.debug_error().is_none(), "{:?}", shell.debug_error());
-            assert_eq!(app.reasoning, reasoning);
-            assert_eq!(app.agent.reasoning(), &reasoning);
-            assert_eq!(app.agent.session().path(), session);
-            assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
-            assert!(std::fs::read_to_string(&preference)
-                .unwrap()
-                .contains(level.label()));
-        }
-    }
-
-    #[tokio::test]
-    async fn thinking_control_idle_is_durable_and_rejected_effort_leaves_session_unchanged() {
-        let model = reasoning_control_model("http://127.0.0.1:1");
-        let (_workspace, mut app) = fast_test_app(model.clone());
-        let mut shell = InteractiveShell::test_shell();
-        let mut input = futures_util::stream::pending();
-        let session = app.agent.session().path().to_path_buf();
-        app = transition(
-            app,
-            &mut shell,
-            &mut input,
-            Reconfig::Thinking(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)),
-        )
-        .await
-        .unwrap();
-        assert_eq!(app.agent.session().path(), session);
-        assert_eq!(
-            app.reasoning,
-            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
-        );
-        assert_eq!(shell.selected_identity().1, "high");
-        let before = std::fs::read(&session).unwrap();
-        for level in [ThinkingLevel::Medium, ThinkingLevel::Ultra] {
-            assert!(requested_thinking_to_reasoning(level, &app.model, false).is_err());
-        }
-        app = transition(
-            app,
-            &mut shell,
-            &mut input,
-            Reconfig::Thinking(ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)),
-        )
-        .await
-        .unwrap();
-        assert_eq!(app.model.spec.id, model.spec.id);
-        assert_eq!(
-            app.reasoning,
-            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
-        );
-        assert_eq!(std::fs::read(&session).unwrap(), before);
-        assert!(shell.debug_error().unwrap().contains("thinking unchanged"));
-        let resumed = Session::open_read_only(&session).unwrap();
-        assert_eq!(
-            resumed
-                .responses_reasoning(&model.endpoint.id, &model.spec.id)
-                .unwrap()
-                .unwrap()
-                .1,
-            app.reasoning
-        );
-        let mut codex = model;
-        Arc::make_mut(&mut codex.spec)
-            .capabilities
-            .reasoning
-            .as_mut()
-            .unwrap()
-            .options
-            .as_mut()
-            .unwrap()
-            .values
-            .remove(0);
-        assert!(requested_thinking_to_reasoning(ThinkingLevel::Off, &codex, false).is_err());
-        Arc::make_mut(&mut codex.endpoint)
-            .runtime
-            .responses_features = Default::default();
-        assert!(
-            !codex.responses_features().reasoning_effort_updates,
-            "unknown routes keep selector fallback"
-        );
-    }
-
-    #[tokio::test]
-    async fn active_model_and_thinking_panels_do_not_suspend_run() {
-        use crossterm::event::KeyEvent;
-        for command in ["/model", "/thinking"] {
-            let (server, started, release) = HeldApi::start(text_turn()).await;
-            let (_workspace, mut agent) =
-                scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
-            let mut inspection = test_run_inspection().clone();
-            inspection
-                .catalog
-                .register_endpoint((*inspection.model.endpoint).clone())
-                .unwrap();
-            inspection
-                .catalog
-                .register_model((*inspection.model.spec).clone())
-                .unwrap();
-            let mut shell = InteractiveShell::test_shell();
-            let events: Vec<_> = command
-                .chars()
-                .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
-                .chain(std::iter::once(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))))
-                .collect();
-            let (sender, receiver) = tokio::sync::mpsc::channel(32);
-            let (handled_tx, handled) = tokio::sync::oneshot::channel();
-            let mut input = ProbedInput {
-                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
-                remaining: events.len(),
-                handled: Some(handled_tx),
-            };
-            let mut pending = VecDeque::new();
-            let mut ticker = tokio::time::interval(Duration::from_millis(1));
-            let mut quit = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let run_id = shell.begin_run("test");
-            let mut run = agent
-                .prompt("complete while the picker remains open")
-                .await
-                .unwrap();
-            let control = run.control();
-            shell.set_awaiting_provider(run_id);
-            let mut deadline = None;
-            let mut made_tool_call = false;
-            let driver = drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut extensions,
-                &mut made_tool_call,
-                &inspection,
-                &mut deadline,
-            );
-            let stimulus = async move {
-                started.await.unwrap();
-                for event in events {
-                    sender.send(Ok(event)).await.unwrap();
-                }
-                handled.await.unwrap();
-                // No Escape, Enter, or EOF follows opening the panel. This
-                // failed previously because the modal stopped polling Run.
-                release.send(true).unwrap();
-                std::future::pending::<()>().await;
-            };
-            tokio::pin!(stimulus);
-            let result = tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::select! { result = driver => result.unwrap(), _ = &mut stimulus => unreachable!() }
-            }).await.expect("an open picker must not stall settlement");
-            assert_eq!(result, HostRunOutcome::Completed, "{command}");
-            assert!(run.next().await.is_none());
-            drop(run);
-            assert_eq!(agent.session().checkpoints().len(), 1);
-            assert!(
-                pending.is_empty(),
-                "opening or settlement must not imply selection"
-            );
-            assert!(!quit);
-            assert!(
-                !shell.has_panel(),
-                "settlement cannot leave a driverless modal"
-            );
-            assert!(shell.debug_snapshot().contains("done"));
-        }
-    }
-
-    #[tokio::test]
-    async fn active_modal_escape_ctrl_c_and_close_keep_their_owners() {
-        use crossterm::event::KeyEvent;
-        for (draft, keys, expected, closing) in [
-            (
-                "draft",
-                vec![
-                    ctrl_key('c'),
-                    Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-                ],
-                HostRunOutcome::Completed,
-                false,
-            ),
-            ("", vec![ctrl_key('c')], HostRunOutcome::Aborted, false),
-            ("draft", vec![ctrl_key('d')], HostRunOutcome::Aborted, true),
-        ] {
-            let (_server, _workspace, mut agent) =
-                scripted_agent_with_delay(Duration::from_millis(100)).await;
-            let mut shell = InteractiveShell::test_shell();
-            shell.extension_set_editor(draft.into());
-            let (sender, receiver) = tokio::sync::mpsc::channel(8);
-            sender.send(Ok(ctrl_key('l'))).await.unwrap();
-            for key in keys {
-                sender.send(Ok(key)).await.unwrap();
-            }
-            let _sender = sender;
-            let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-            let mut ticker = tokio::time::interval(Duration::from_millis(1));
-            let mut pending = VecDeque::new();
-            let mut quit = false;
-            let mut extensions = crate::extensions::ExecutableExtensions::default();
-            let run_id = shell.begin_run("test");
-            let mut run = agent.prompt("initial").await.unwrap();
-            let control = run.control();
-            shell.set_awaiting_provider(run_id);
-            let result = tokio::time::timeout(
-                Duration::from_secs(5),
-                drive_active_run(
-                    &mut run,
-                    &control,
-                    &mut shell,
-                    &mut input,
-                    &mut ticker,
-                    &mut pending,
-                    &mut quit,
-                    None,
-                    None,
-                    &mut extensions,
-                    &mut false,
-                    test_run_inspection(),
-                    &mut None,
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert_eq!(result, expected);
-            assert_eq!(quit, closing);
-            assert_eq!(shell.pending(), if closing { draft } else { "" });
-            assert!(pending.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn active_tool_consent_requires_a_visible_fresh_confirmation_and_drop_denies() {
-        use crossterm::event::{KeyEvent, KeyEventKind};
-        let (sink, mut progress) = ToolProgressSink::bounded_channel();
-        let answer = tokio::spawn(async move {
-            sink.confirmation(
-                "Approve fixture effect?".into(),
-                Some("Consequence retained".into()),
-                true,
-                true,
-            )
-            .await
-        });
-        let ToolProgress::Confirmation(request) = progress.recv().await.unwrap() else {
-            panic!("confirmation")
-        };
-        let mut interaction = ActiveToolInteraction {
-            id: ToolCallId("fixture".into()),
-            tool: Some("write".into()),
-            request: ActiveToolRequest::Confirmation(request),
-        };
-        let mut shell = InteractiveShell::test_shell();
-        shell.set_size(80, 24);
-        interaction.open(&mut shell);
-        assert!(!interaction.input(
-            &mut shell,
-            &Event::Key(KeyEvent::new_with_kind(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-                KeyEventKind::Repeat
-            ))
-        ));
-        assert!(!answer.is_finished(), "repeat must not approve");
-        shell.set_size(1, 1);
-        assert!(!interaction.input(
-            &mut shell,
-            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-        ));
-        assert!(!answer.is_finished(), "invisible action must not approve");
-        drop(interaction);
-        assert!(
-            !answer.await.unwrap(),
-            "cancel/settlement/error must deny unanswered requests"
-        );
-    }
-
-    #[tokio::test]
-    async fn cancellation_retains_answer_draft_and_ordered_undelivered_steering() {
-        use crossterm::event::KeyEvent;
-        let (_server, _workspace, mut agent) =
-            scripted_agent_with_delay(Duration::from_secs(2)).await;
-        let mut shell = InteractiveShell::test_shell();
-        let events = [
-            Event::Paste("first queued".into()),
-            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-            Event::Paste("second queued".into()),
-            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            Event::Paste("/answer preserve this instruction".into()),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            // Repeated close/submit keys must not duplicate or drain the draft.
-            Event::Key(KeyEvent::new_with_kind(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-                KeyEventKind::Repeat,
-            )),
-        ];
-        let mut input =
-            tokio_stream::iter(events.into_iter().map(Ok)).chain(futures_util::stream::pending());
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut ticker = tokio::time::interval(Duration::from_millis(16));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let mut goal_deadline = None;
-        let ended = tokio::time::timeout(
-            Duration::from_secs(1),
-            drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut extensions,
-                &mut false,
-                test_run_inspection(),
-                &mut goal_deadline,
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        drop(run);
-        assert_eq!(ended, HostRunOutcome::Aborted);
-        assert_eq!(
-            shell.pending(),
-            "first queued\n\nsecond queued\n\n/answer preserve this instruction"
-        );
-        assert!(!shell.debug_snapshot().contains("Steering:"));
-        assert_eq!(agent.session().checkpoints().len(), 1);
-        assert_eq!(
-            agent.session().context().unwrap().len(),
-            1,
-            "undelivered input is not durable or replayed"
-        );
-    }
-
-    #[tokio::test]
-    async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement() {
-        use crossterm::event::KeyEvent;
-        for (cancel, dispatch, quit_expected, escape_first) in [
-            (
-                Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-                true,
-                false,
-                false,
-            ),
-            (
-                Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-                false,
-                false,
-                false,
-            ),
-            (
-                Some(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
-                false,
-                true,
-                false,
-            ),
-            (
-                Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-                false,
-                false,
-                true,
-            ),
-            (None, true, false, false),
-        ] {
-            let (_server, _workspace, mut agent) =
-                scripted_agent_with_delay(Duration::from_millis(10)).await;
-            let mut shell = InteractiveShell::test_shell();
-            let mut events = vec![
-                Event::Paste("queued first".into()),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-                Event::Paste("queued second".into()),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
-                Event::Paste(" edited".into()),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            ];
-            if escape_first {
-                events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-            }
-            if let Some(cancel) = cancel {
-                events.push(Event::Key(cancel));
-                // Neither repeated Escape nor a second fresh Escape can arm a
-                // Ctrl+C cancellation after settlement has already started.
-                events.push(Event::Key(KeyEvent::new_with_kind(
-                    KeyCode::Esc,
-                    KeyModifiers::NONE,
-                    KeyEventKind::Repeat,
-                )));
-                events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-            }
-            let mut input = tokio_stream::iter(events.into_iter().map(Ok))
-                .chain(futures_util::stream::pending());
-            let run_id = shell.begin_run("test");
-            let mut run = agent.prompt("initial").await.unwrap();
-            shell.set_awaiting_provider(run_id);
-            let control = run.control();
-            let mut ticker = tokio::time::interval(Duration::from_millis(16));
-            let mut quit = false;
-            let mut goal_deadline = None;
-            let ended = tokio::time::timeout(
-                Duration::from_secs(2),
-                drive_active_run(
-                    &mut run,
-                    &control,
-                    &mut shell,
-                    &mut input,
-                    &mut ticker,
-                    &mut VecDeque::new(),
-                    &mut quit,
-                    None,
-                    None,
-                    &mut crate::extensions::ExecutableExtensions::default(),
-                    &mut false,
-                    test_run_inspection(),
-                    &mut goal_deadline,
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert!(run.next().await.is_none(), "one terminal event");
-            drop(run);
-            assert_eq!(quit, quit_expected);
-            assert_eq!(
-                ended,
-                if cancel.is_some() {
-                    HostRunOutcome::Aborted
-                } else {
-                    HostRunOutcome::Completed
-                }
-            );
-            assert_eq!(agent.session().checkpoints().len(), 1);
-            assert_eq!(
-                shell
-                    .take_ready_follow_up()
-                    .map(|input| input.transcript_text),
-                dispatch.then(|| "queued first".to_owned())
-            );
-            assert!(shell.take_ready_follow_up().is_none());
-            shell.edit_queued_message();
-            assert_eq!(shell.pending(), "queued second edited");
-        }
-    }
-
-    struct EndsThenPanics(bool);
-
-    impl Stream for EndsThenPanics {
-        type Item = std::io::Result<Event>;
-
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            _context: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            assert!(!self.0, "a closed input stream was polled more than once");
-            self.0 = true;
-            std::task::Poll::Ready(None)
-        }
-    }
-
-    #[tokio::test]
-    async fn closed_input_is_disabled_while_the_aborted_run_settles() {
-        let (_server, _workspace, mut agent) = scripted_agent().await;
-        let mut shell = InteractiveShell::test_shell();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut input = EndsThenPanics(false);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
-
-        let mut goal_deadline = None;
-        let ended = drive_active_run(
-            &mut run,
-            &control,
-            &mut shell,
-            &mut input,
-            &mut ticker,
-            &mut pending,
-            &mut quit,
-            None,
-            None,
-            &mut executable_extensions,
-            &mut false,
-            test_run_inspection(),
-            &mut goal_deadline,
-        )
-        .await
-        .unwrap();
-        drop(run);
-
-        assert_eq!(ended, HostRunOutcome::Aborted);
-        assert!(quit);
-        assert!(shell.debug_snapshot().contains("Interrupted"));
-    }
-
-    #[tokio::test]
-    async fn changelog_startup_and_idle_skip_responses_context_prewarm() {
-        use base64::Engine;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        // A real loopback WebSocket records response.create bodies, including
-        // generate=false. No provider credentials or external endpoint exist.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let uri = format!("http://{}", listener.local_addr().unwrap());
-        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let mut server = tokio::task::JoinSet::new();
-        server.spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut head = Vec::new();
-            while !head.ends_with(b"\r\n\r\n") {
-                head.push(socket.read_u8().await.unwrap());
-                assert!(head.len() < 16 * 1024);
-            }
-            let head = String::from_utf8(head).unwrap();
-            assert!(head.starts_with("GET /v1/responses HTTP/1.1"));
-            assert!(!head.to_ascii_lowercase().contains("authorization:"));
-            let key = head.lines().find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("sec-websocket-key").then(|| value.trim())
-            }).unwrap();
-            let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
-                format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes());
-            let accept = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
-            socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
-            loop {
-                let opcode = socket.read_u8().await.unwrap();
-                assert_eq!(opcode, 0x81, "fixture expects one complete JSON text frame");
-                let flags = socket.read_u8().await.unwrap();
-                assert_ne!(flags & 0x80, 0, "client frames must be masked");
-                let length = match flags & 0x7f {
-                    126 => u64::from(socket.read_u16().await.unwrap()),
-                    127 => socket.read_u64().await.unwrap(),
-                    length => u64::from(length),
-                };
-                assert!(length <= 128 * 1024);
-                let mut mask = [0; 4];
-                socket.read_exact(&mut mask).await.unwrap();
-                let mut body = vec![0; length as usize];
-                socket.read_exact(&mut body).await.unwrap();
-                for (index, byte) in body.iter_mut().enumerate() { *byte ^= mask[index % 4]; }
-                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(body["type"], "response.create");
-                assert_eq!(body["generate"], false);
-                let completed = br#"{"type":"response.completed","response":{"id":"fixture-prewarm"}}"#;
-                socket.write_all(&[0x81, completed.len() as u8]).await.unwrap();
-                socket.write_all(completed).await.unwrap();
-                requests.send(body).unwrap();
-            }
-        });
-        let mut model = scripted_model(&uri);
-        Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
-        Arc::make_mut(&mut model.endpoint).transport =
-            octet_ai::EndpointTransport::WebSocketPreferred;
-        let (workspace, agent) = scripted_agent_for_route(model.clone(), octet_ai::AiClient::new());
-        let (_app_workspace, mut app) = crate::compaction::tests::app_for_estimate();
-        app.agent = agent;
-        app.model = model;
-        let path = workspace.path().join("session.jsonl");
-        let before = std::fs::read(&path).unwrap();
-        let mut shell = InteractiveShell::test_shell();
-        for prompt in ["/changelog", " /chang  "] {
-            assert!(prepare_startup_input(&app, &mut shell, Some(prompt.into())).is_none());
-            assert!(shell.has_overlay());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            received.try_recv().is_err(),
-            "release-note startup sent context"
-        );
-
-        // An ordinary startup must still prewarm. This positive control also
-        // proves the synthetic model can exercise the transport under test.
-        assert!(prepare_startup_input(&app, &mut shell, None).is_none());
-        tokio::time::timeout(Duration::from_secs(3), received.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        for command in ["/changelog", "/chang"] {
-            schedule_idle_responses_prewarm(&app, &commands::parse(command));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            received.try_recv().is_err(),
-            "idle release notes sent context"
-        );
-        schedule_idle_responses_prewarm(&app, &Command::Status);
-        tokio::time::timeout(Duration::from_secs(3), received.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        // This is not a general startup slash-command dispatcher. Unknown
-        // arguments, ordinary text, and explicit templates remain prompts.
-        for (template, prompt) in [
-            (None, "/changelog extra"),
-            (None, "/status"),
-            (None, "Explain the changelog"),
-            (Some("fixture"), "/changelog"),
-            (Some("fixture"), "Expanded template argument: /changelog"),
-        ] {
-            app.config.prompt_template = template.map(str::to_owned);
-            let input = prepare_startup_input(&app, &mut shell, Some(prompt.into())).unwrap();
-            assert_eq!(input.display_text, prompt);
-            tokio::time::timeout(Duration::from_secs(3), received.recv())
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        server.abort_all();
-    }
-
-    #[tokio::test]
-    async fn scripted_active_changelog_keeps_running_without_provider_input() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-        let (_server, _workspace, mut agent) = scripted_agent().await;
-        let mut shell = InteractiveShell::test_shell();
-        let (sender, receiver) = tokio::sync::mpsc::channel(32);
-        for character in "/changelog".chars() {
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Char(character),
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-        }
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut goal_deadline = None;
-        let ended = tokio::time::timeout(
-            Duration::from_secs(5),
-            drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut extensions,
-                &mut false,
-                test_run_inspection(),
-                &mut goal_deadline,
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        drop(run);
-        assert_eq!(ended, HostRunOutcome::Completed);
-        assert!(
-            shell.has_overlay(),
-            "the report stays open while the run settles"
-        );
-        assert!(pending.is_empty());
-        assert!(!quit);
-        assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/changelog"));
-    }
-
-    #[tokio::test]
-    async fn active_skill_invocations_queue_as_prompts_instead_of_unknown_commands() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (_server, _workspace, mut agent) = scripted_agent().await;
-        let mut shell = InteractiveShell::test_shell();
-        shell.set_skill_commands(Arc::from([("skill:review".into(), "Review".into())]));
-        let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        for invocation in ["/skill:review inspect", "/skill:rev"] {
-            for character in invocation.chars() {
-                sender
-                    .send(Ok(Event::Key(KeyEvent::new(
-                        KeyCode::Char(character),
-                        KeyModifiers::NONE,
-                    ))))
-                    .await
-                    .unwrap();
-            }
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-        }
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut goal_deadline = None;
-        let ended = tokio::time::timeout(
-            Duration::from_secs(5),
-            drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut extensions,
-                &mut false,
-                test_run_inspection(),
-                &mut goal_deadline,
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        drop(run);
-        assert_eq!(ended, HostRunOutcome::Completed);
-        assert!(!quit);
-        assert!(pending.is_empty());
-        assert_eq!(shell.queued_follow_up_len(), 2);
-        assert_eq!(
-            shell.take_ready_follow_up().unwrap().transcript_text,
-            "/skill:review inspect"
-        );
-        shell.settle_queued_follow_ups(true);
-        assert_eq!(
-            shell.take_ready_follow_up().unwrap().transcript_text,
-            "/skill:review "
-        );
-        assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/skill:"));
-    }
-
-    #[tokio::test]
-    async fn scripted_active_loop_queues_controls_and_never_forwards_active_model_command() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (_server, workspace, mut agent) = scripted_agent().await;
-        let image = workspace.path().join("shot.png");
-        std::fs::write(
-            &image,
-            include_bytes!("../../tests/fixtures/export_html/one-pixel.png"),
-        )
-        .unwrap();
-
-        let mut shell = InteractiveShell::test_shell();
-        shell.set_input_modalities(octet_ai::ModalitySet::none().with(octet_ai::Modality::Image));
-        for character in "steer first".chars() {
-            shell.apply_edit(crate::tui::keymap::EditAction::Char(character));
-        }
-        shell.apply_edit(crate::tui::keymap::EditAction::Paste(
-            image.display().to_string(),
-        ));
-        let (sender, receiver) = tokio::sync::mpsc::channel(32);
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('s'),
-                KeyModifiers::CONTROL,
-            ))))
-            .await
-            .unwrap();
-        for character in "/model gpt-4o-mini".chars() {
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Char(character),
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-        }
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        // Keep the sender alive so the receiver remains pending rather than
-        // signalling an input close that would abort the real run.
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut goal_deadline = None;
-        let ended = drive_active_run(
-            &mut run,
-            &control,
-            &mut shell,
-            &mut input,
-            &mut ticker,
-            &mut pending,
-            &mut quit,
-            None,
-            None,
-            &mut executable_extensions,
-            &mut false,
-            test_run_inspection(),
-            &mut goal_deadline,
-        )
-        .await
-        .unwrap();
-        drop(run);
-
-        assert_eq!(ended, HostRunOutcome::Completed);
-        assert!(!quit);
-        assert_eq!(
-            pending.pop_front(),
-            Some(PendingIdleAction::ChangeModel(ModelId(
-                "gpt-4o-mini".into()
-            )))
-        );
-        let context = agent.session().context().unwrap();
-        let user_text = context
-            .iter()
-            .filter_map(|message| match message {
-                octet_ai::Message::User(user) => user.content.iter().find_map(|part| match part {
-                    octet_ai::UserPart::Text(text) => Some(text.as_str()),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(user_text.contains(&"steer first"));
-        assert!(!user_text.iter().any(|text| text.contains("/model")));
-        assert!(context.iter().any(|message| matches!(
-            message,
-            octet_ai::Message::User(user)
-                if user
-                    .content
-                    .iter()
-                    .any(|part| matches!(part, octet_ai::UserPart::Media(_)))
-        )));
-    }
-
-    #[tokio::test]
-    async fn abort_restores_all_undelivered_steering_after_the_final_event() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (_server, _workspace, mut agent) =
-            scripted_agent_with_delay(Duration::from_secs(2)).await;
-        let mut shell = InteractiveShell::test_shell();
-        for character in "steer first".chars() {
-            shell.apply_edit(crate::tui::keymap::EditAction::Char(character));
-        }
-        let (sender, receiver) = tokio::sync::mpsc::channel(32);
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('s'),
-                KeyModifiers::CONTROL,
-            ))))
-            .await
-            .unwrap();
-        for character in "steer second".chars() {
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Char(character),
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-        }
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('s'),
-                KeyModifiers::CONTROL,
-            ))))
-            .await
-            .unwrap();
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Esc,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        let _sender = sender;
-
-        let mut input = ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut goal_deadline = None;
-        let ended = drive_active_run(
-            &mut run,
-            &control,
-            &mut shell,
-            &mut input,
-            &mut ticker,
-            &mut pending,
-            &mut quit,
-            None,
-            None,
-            &mut executable_extensions,
-            &mut false,
-            test_run_inspection(),
-            &mut goal_deadline,
-        )
-        .await
-        .unwrap();
-        drop(run);
-
-        assert_eq!(ended, HostRunOutcome::Aborted);
-        assert_eq!(shell.pending(), "steer first\n\nsteer second");
-        assert!(shell.debug_snapshot().contains("Interrupted"));
-        let context = agent.session().context().unwrap();
-        assert!(!context.iter().any(|message| matches!(
-            message,
-            octet_ai::Message::User(user)
-                if user.content.iter().any(|part| matches!(
-                    part,
-                    octet_ai::UserPart::Text(text) if text.starts_with("steer ")
-                ))
-        )));
-    }
-
-    /// Drive one scripted run with a fixed event script and return its settled
-    /// outcome. The sender stays alive so the input stream remains pending
-    /// rather than signalling a close that would abort the run.
-    async fn drive_scripted_events(
-        agent: &mut octet_agent::Agent,
-        shell: &mut InteractiveShell,
-        events: Vec<Event>,
-    ) -> (HostRunOutcome, bool) {
-        use tokio_stream::wrappers::ReceiverStream;
-        let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        for event in events {
-            sender.send(Ok(event)).await.unwrap();
-        }
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut goal_deadline = None;
-        let ended = tokio::time::timeout(
-            Duration::from_secs(5),
-            drive_active_run(
-                &mut run,
-                &control,
-                shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut executable_extensions,
-                &mut false,
-                test_run_inspection(),
-                &mut goal_deadline,
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        drop(run);
-        (ended, quit)
-    }
-
-    /// Every durable user-message text in the session, in order.
-    fn delivered_user_text(agent: &octet_agent::Agent) -> Vec<String> {
-        agent
-            .session()
-            .context()
-            .unwrap()
-            .iter()
-            .filter_map(|message| match message {
-                octet_ai::Message::User(user) => Some(
-                    user.content
-                        .iter()
-                        .filter_map(|part| match part {
-                            octet_ai::UserPart::Text(text) => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<String>(),
-                ),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn full_steering_admission_restores_the_draft_without_a_shell_entry() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (_server, _workspace, mut agent) =
-            scripted_agent_with_delay(Duration::from_secs(2)).await;
-        let mut shell = InteractiveShell::test_shell();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let reservations = (0..64)
-            .map(|_| control.prepare_steer("occupied").unwrap().0)
-            .collect::<Vec<_>>();
-        let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        sender
-            .send(Ok(Event::Paste("refused steering".into())))
-            .await
-            .unwrap();
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('s'),
-                KeyModifiers::CONTROL,
-            ))))
-            .await
-            .unwrap();
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Esc,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let mut goal_deadline = None;
-
-        let ended = drive_active_run(
-            &mut run,
-            &control,
-            &mut shell,
-            &mut input,
-            &mut ticker,
-            &mut pending,
-            &mut quit,
-            None,
-            None,
-            &mut extensions,
-            &mut false,
-            test_run_inspection(),
-            &mut goal_deadline,
-        )
-        .await
-        .unwrap();
-        drop(reservations);
-        drop(run);
-
-        assert_eq!(ended, HostRunOutcome::Aborted);
-        assert_eq!(shell.pending(), "refused steering");
-        assert!(!shell.debug_snapshot().contains("Steering:"));
-        assert!(!delivered_user_text(&agent)
-            .iter()
-            .any(|text| text.contains("refused steering")),);
-    }
-
-    #[tokio::test]
-    async fn recalled_live_steering_returns_to_the_editor_without_delivery() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let (_server, _workspace, mut agent) =
-            scripted_agent_with_delay(Duration::from_secs(2)).await;
-        let mut shell = InteractiveShell::test_shell();
-        let (ended, quit) = drive_scripted_events(
-            &mut agent,
-            &mut shell,
-            vec![
-                Event::Paste("steer recalled".into()),
-                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-                // Option/Alt+Up recalls the newest retractable live steering
-                // before the provider boundary can claim it.
-                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
-                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            ],
-        )
-        .await;
-        assert_eq!(ended, HostRunOutcome::Aborted);
-        assert!(!quit);
-        assert_eq!(shell.pending(), "steer recalled");
-        assert!(!shell.debug_snapshot().contains("Steering:"));
-        assert!(
-            !delivered_user_text(&agent)
-                .iter()
-                .any(|text| text.contains("steer recalled")),
-            "a recalled submission must not also be delivered"
-        );
-    }
-
-    #[tokio::test]
-    async fn requeued_edited_live_steering_is_what_the_next_provider_request_carries() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let (_server, _workspace, mut agent) =
-            scripted_agent_with_delay(Duration::from_millis(200)).await;
-        let mut shell = InteractiveShell::test_shell();
-        let (ended, quit) = drive_scripted_events(
-            &mut agent,
-            &mut shell,
-            vec![
-                Event::Paste("original".into()),
-                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
-                Event::Paste(" edited".into()),
-                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-            ],
-        )
-        .await;
-        assert_eq!(ended, HostRunOutcome::Completed);
-        assert!(!quit);
-        let delivered = delivered_user_text(&agent);
-        assert!(
-            delivered.iter().any(|text| text == "original edited"),
-            "requeued edited steering is delivered: {delivered:?}"
-        );
-        assert!(
-            !delivered.iter().any(|text| text == "original"),
-            "the recalled draft is not delivered twice: {delivered:?}"
-        );
-        assert!(shell.pending().is_empty());
-    }
-
-    #[tokio::test]
-    async fn recalled_live_steering_is_not_double_counted_in_the_editor() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let (_server, _workspace, mut agent) =
-            scripted_agent_with_delay(Duration::from_secs(2)).await;
-        let mut shell = InteractiveShell::test_shell();
-        let (ended, _quit) = drive_scripted_events(
-            &mut agent,
-            &mut shell,
-            vec![
-                Event::Paste("alpha".into()),
-                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-                Event::Paste("beta".into()),
-                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
-                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            ],
-        )
-        .await;
-        assert_eq!(ended, HostRunOutcome::Aborted);
-        let pending = shell.pending();
-        // The recalled entry is restored once and the still-queued entry is
-        // restored once, with no duplicate append from either owner.
-        assert_eq!(pending, "alpha\n\nbeta");
-        assert_eq!(pending.matches("alpha").count(), 1);
-        assert_eq!(pending.matches("beta").count(), 1);
-        assert!(
-            !delivered_user_text(&agent)
-                .iter()
-                .any(|text| text.contains("alpha") || text.contains("beta")),
-            "recalled and aborted steering must not be delivered"
-        );
-    }
-
-    #[test]
-    fn sticky_answer_steering_is_not_retractable_while_live_steering_is() {
-        let mut shell = InteractiveShell::test_shell();
-        let answer = answer_now_input(Some("keep tools off".into()));
-        shell.queue_steering(&answer);
-        let (live, receipt) = octet_agent::PreparedSteering::new("live steer");
-        shell.queue_retractable_steering(
-            receipt,
-            "live steer".into(),
-            "live steer".into(),
-            Vec::new(),
-        );
-        shell.edit_queued_message();
-        // Joint recall takes the newest retractable steering entry only.
-        assert_eq!(shell.pending(), "live steer");
-        assert!(
-            shell
-                .debug_snapshot()
-                .contains("Steering: /answer keep tools off"),
-            "sticky /answer stays queued: {}",
-            shell.debug_snapshot()
-        );
-        // The recalled live submission is a no-op rather than a second append.
-        drop(live);
-    }
-
-    #[tokio::test]
-    async fn active_run_subagents_without_extension_owner_stays_an_unknown_command() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (_server, _workspace, mut agent) = scripted_agent().await;
-        let mut shell = InteractiveShell::test_shell();
-        let (sender, receiver) = tokio::sync::mpsc::channel(32);
-        for character in "/subagents".chars() {
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Char(character),
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-        }
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        // Keep the sender alive so the receiver remains pending rather than
-        // signalling an input close that would abort the real run.
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let mut goal_deadline = None;
-        let ended = drive_active_run(
-            &mut run,
-            &control,
-            &mut shell,
-            &mut input,
-            &mut ticker,
-            &mut pending,
-            &mut quit,
-            None,
-            None,
-            &mut executable_extensions,
-            &mut false,
-            test_run_inspection(),
-            &mut goal_deadline,
-        )
-        .await
-        .unwrap();
-        drop(run);
-
-        assert_eq!(ended, HostRunOutcome::Completed);
-        assert_eq!(
-            shell.debug_error().as_deref(),
-            Some("unknown command: /subagents"),
-            "without a octet-subagents owner the command must not open the live view"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // `/goal` applies immediately, mid-run or idle; it is never queued.
-    // -----------------------------------------------------------------------
-
-    use crate::commands::GoalCommand;
-
-    /// A real durable goal store, its driver, and an inspection that addresses
-    /// it exactly as `App` does: same store, same shared driver state, same
-    /// session key. The caller keeps the store and driver to read back the
-    /// mutation and to prove driver coherence.
-    fn goal_fixture(
-        dir: &Path,
-        session_id: &str,
-    ) -> (
-        Arc<octet_agent::DurableGoalStore>,
-        octet_agent::GoalDriver,
-        ActiveRunInspection,
-    ) {
-        let store =
-            Arc::new(octet_agent::DurableGoalStore::open(dir).expect("durable goal store fixture"));
-        let driver = octet_agent::GoalDriver::new(store.clone(), session_id);
-        let inspection =
-            test_run_inspection_with_goal(dir, store.clone(), driver.clone(), session_id);
-        (store, driver, inspection)
-    }
-
-    #[test]
-    fn goal_commands_have_no_queued_form() {
-        let mut queue = VecDeque::new();
-        for command in [
-            GoalCommand::Help,
-            GoalCommand::Status,
-            GoalCommand::Set("an objective".into()),
-            GoalCommand::Pause,
-            GoalCommand::Resume,
-            GoalCommand::Clear,
-        ] {
-            let error = queue_command(Command::Goal(command), &mut queue)
-                .expect_err("goal commands are never queued");
-            assert!(
-                error.to_string().contains("never queued"),
-                "the refusal names the defect: {error}"
-            );
-        }
-        assert!(queue.is_empty(), "no goal action was deferred: {queue:?}");
-        assert!(matches!(
-            commands::parse("/goal close the parity row"),
-            Command::Goal(GoalCommand::Set(objective)) if objective == "close the parity row"
-        ));
-    }
-
-    #[tokio::test]
-    async fn active_goal_objective_mutates_the_durable_store_without_queueing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, driver, inspection) = goal_fixture(dir.path(), "goal-session");
-        let mut shell = InteractiveShell::test_shell();
-        let (queue, quit, deadline) = run_active_command_observing_deadline(
-            &mut shell,
-            Command::Goal(GoalCommand::Set("close the goal-parity row".into())),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty(), "mid-run /goal must not queue: {queue:?}");
-        assert!(!quit);
-        let goal = store
-            .get("goal-session")
-            .expect("the fixture store stays readable")
-            .expect("the durable goal exists immediately");
-        assert_eq!(goal.objective, "close the goal-parity row");
-        assert_eq!(goal.status, octet_agent::GoalStatus::Active);
-        assert_eq!(goal.turns_used, 0, "setting an objective reserves no turn");
-        assert!(
-            deadline.is_some(),
-            "an active objective arms the same deadline an idle /goal arms"
-        );
-        let painted = shell.debug_snapshot();
-        assert!(painted.contains("goal set"), "{painted}");
-        // Driver coherence: the shared driver waits on the new objective exactly
-        // as it would after an idle `/goal`, and nothing has been reserved.
-        assert!(matches!(
-            driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
-            Ok(octet_agent::GoalDecision::Wait { .. })
-        ));
-        assert!(goal.turns_used == 0);
-    }
-
-    #[tokio::test]
-    async fn active_goal_commands_apply_while_the_run_is_still_streaming() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (server, mut started, release) = HeldApi::start(text_turn()).await;
-        let (_workspace, mut agent) =
-            scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _driver, inspection) = goal_fixture(dir.path(), "goal-session");
-        store
-            .set("goal-session", "keep the stream honest", None)
-            .expect("durable goal fixture");
-
-        let mut shell = InteractiveShell::test_shell();
-        let run_id = shell.begin_run("test");
-        let mut run = agent.prompt("initial").await.unwrap();
-        shell.set_awaiting_provider(run_id);
-        let control = run.control();
-        let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        // The objective change is typed first: it mutates no overlay, so the
-        // status report typed second still receives its Enter.
-        for command in ["/goal set streamed objective", "/goal status"] {
-            for character in command.chars() {
-                sender
-                    .send(Ok(Event::Key(KeyEvent::new(
-                        KeyCode::Char(character),
-                        KeyModifiers::NONE,
-                    ))))
-                    .await
-                    .unwrap();
-            }
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-        }
-        // Keep the sender alive so EOF cannot abort the held run.
-        let _sender = sender;
-        let mut input = ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
-        let mut pending = VecDeque::new();
-        let mut quit = false;
-        let mut made_tool_call = false;
-        let mut extensions = crate::extensions::ExecutableExtensions::default();
-        let mut goal_deadline = None;
-        // The run borrows the shell, its queue, and the deadline for the whole
-        // held turn, so the mid-run observations happen inside this block and
-        // every post-settlement assertion happens after its borrows end.
-        let ended = {
-            let drive = drive_active_run(
-                &mut run,
-                &control,
-                &mut shell,
-                &mut input,
-                &mut ticker,
-                &mut pending,
-                &mut quit,
-                None,
-                None,
-                &mut extensions,
-                &mut made_tool_call,
-                &inspection,
-                &mut goal_deadline,
-            );
-            tokio::pin!(drive);
-            tokio::select! {
-                result = &mut drive => {
-                    panic!("the held run settled before the provider request started: {result:?}")
-                }
-                result = &mut started => result.expect("the held provider request starts"),
-            }
-
-            // The provider response is still withheld, so a store mutation
-            // observed here was applied to the durable goal mid-run, while the
-            // stream was live.
-            let budget = Instant::now() + Duration::from_secs(2);
-            while store.get("goal-session").unwrap().unwrap().objective != "streamed objective" {
-                assert!(
-                    Instant::now() < budget,
-                    "the mid-run objective was never applied while kept alive"
-                );
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(10), &mut drive)
-                        .await
-                        .is_err(),
-                    "the run settled before the mid-run /goal was applied"
-                );
-            }
-            let streamed = store.get("goal-session").unwrap().unwrap();
-            assert_eq!(streamed.objective, "streamed objective");
-            assert_eq!(streamed.status, octet_agent::GoalStatus::Active);
-            assert_eq!(
-                streamed.turns_used, 0,
-                "the mid-run objective reserved no continuation turn"
-            );
-
-            release.send(true).unwrap();
-            tokio::time::timeout(Duration::from_secs(5), &mut drive)
-                .await
-                .expect("the released run settles")
-                .unwrap()
-        };
-        assert_eq!(ended, HostRunOutcome::Completed);
-        drop(run);
-        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(
-            goal_deadline.is_some(),
-            "the mid-run objective armed the continuation deadline"
-        );
-        assert!(
-            pending.is_empty(),
-            "neither goal command was queued to the idle boundary: {pending:?}"
-        );
-        assert!(!quit);
-        assert!(
-            shell.has_overlay(),
-            "the /goal status report opened mid-run and stayed open"
-        );
-        let painted = shell.debug_snapshot();
-        assert!(painted.contains("goal set"), "{painted}");
-        assert!(
-            painted.contains("streamed objective"),
-            "the notice names the objective applied mid-run: {painted}"
-        );
-    }
-
-    #[tokio::test]
-    async fn active_goal_status_reports_immediately_without_queueing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _driver, inspection) = goal_fixture(dir.path(), "goal-session");
-        store
-            .set("goal-session", "keep the stream honest", None)
-            .expect("durable goal fixture");
-        let mut shell = InteractiveShell::test_shell();
-        let (queue, quit, deadline) = run_active_command_observing_deadline(
-            &mut shell,
-            Command::Goal(GoalCommand::Status),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty(), "status is never queued: {queue:?}");
-        assert!(!quit);
-        assert!(deadline.is_none(), "status arms no deadline");
-        assert!(
-            shell.has_overlay(),
-            "the active-run status reports in the frame immediately"
-        );
-        let status = inspection
-            .goal_access()
-            .expect("addressable fixture")
-            .status_text()
-            .expect("the report reads the durable store");
-        assert!(
-            status.contains("Active goal: keep the stream honest"),
-            "the open report carries the durable goal: {status}"
-        );
-        assert_eq!(
-            store.get("goal-session").unwrap().unwrap().objective,
-            "keep the stream honest",
-            "status does not mutate the goal"
-        );
-    }
-
-    #[tokio::test]
-    async fn active_goal_pause_resume_and_clear_are_coherent_mid_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, driver, inspection) = goal_fixture(dir.path(), "goal-session");
-        store
-            .set("goal-session", "stay coherent", None)
-            .expect("durable goal fixture");
-        let mut shell = InteractiveShell::test_shell();
-
-        let (queue, _, paused_deadline) = run_active_command_observing_deadline(
-            &mut shell,
-            Command::Goal(GoalCommand::Pause),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty(), "pause is never queued: {queue:?}");
-        assert_eq!(
-            store.get("goal-session").unwrap().unwrap().status,
-            octet_agent::GoalStatus::Paused
-        );
-        assert!(
-            paused_deadline.is_none(),
-            "a paused goal disarms the continuation deadline"
-        );
-        assert_eq!(
-            driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
-            Ok(octet_agent::GoalDecision::Paused),
-            "a paused goal cannot continue the run that paused it"
-        );
-        assert!(
-            driver.fire_continuation().unwrap().is_none(),
-            "a paused goal reserves no continuation turn"
-        );
-
-        let (queue, _, resumed_deadline) = run_active_command_observing_deadline(
-            &mut shell,
-            Command::Goal(GoalCommand::Resume),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty(), "resume is never queued: {queue:?}");
-        let resumed = store.get("goal-session").unwrap().unwrap();
-        assert_eq!(resumed.status, octet_agent::GoalStatus::Active);
-        assert_eq!(
-            resumed.objective, "stay coherent",
-            "resume keeps the objective"
-        );
-        assert!(resumed_deadline.is_some(), "resume re-arms the deadline");
-        assert!(matches!(
-            driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
-            Ok(octet_agent::GoalDecision::Wait { .. })
-        ));
-
-        let (queue, _, cleared_deadline) = run_active_command_observing_deadline(
-            &mut shell,
-            Command::Goal(GoalCommand::Clear),
-            &inspection,
-        )
-        .await;
-        assert!(queue.is_empty(), "clear is never queued: {queue:?}");
-        assert!(store.get("goal-session").unwrap().is_none());
-        assert!(
-            cleared_deadline.is_none(),
-            "a cleared goal disarms the continuation deadline"
-        );
-        assert_eq!(
-            driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
-            Ok(octet_agent::GoalDecision::Inactive)
-        );
-        assert!(
-            driver.fire_continuation().unwrap().is_none(),
-            "a cleared goal reserves no continuation turn"
-        );
-        let painted = shell.debug_snapshot();
-        for expected in ["goal paused", "goal resumed", "goal cleared"] {
-            assert!(
-                painted.contains(expected),
-                "{expected:?} missing: {painted}"
-            );
-        }
-        assert!(paused_deadline.is_none());
-    }
-
-    #[tokio::test]
-    async fn unaddressable_active_goal_fails_closed_and_is_never_queued() {
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(octet_agent::DurableGoalStore::open(dir.path()).expect("store fixture"));
-        let driver = octet_agent::GoalDriver::new(store.clone(), "goal-session");
-        assert!(matches!(
-            GoalAccess::from_parts(store, driver, String::new()),
-            Err(ActiveGoalError::UnaddressableSession)
-        ));
-        let mut shell = InteractiveShell::test_shell();
-        for command in [
-            GoalCommand::Status,
-            GoalCommand::Set("never queued".into()),
-            GoalCommand::Pause,
-            GoalCommand::Resume,
-            GoalCommand::Clear,
-        ] {
-            let (queue, quit, deadline) = run_active_command_observing_deadline(
-                &mut shell,
-                Command::Goal(command),
-                test_run_inspection(),
-            )
-            .await;
-            assert!(queue.is_empty(), "the refusal is never queued: {queue:?}");
-            assert!(!quit);
-            assert!(deadline.is_none(), "no deadline can be armed");
-            let error = shell
-                .debug_error()
-                .expect("the typed reason is rendered, not a silent no-op");
-            assert!(error.starts_with("/goal failed:"), "{error}");
-            assert!(error.contains("no durable goal identity"), "{error}");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_reachable_goal_store_that_rejects_still_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _driver, inspection) = goal_fixture(dir.path(), "goal-session");
-        let mut shell = InteractiveShell::test_shell();
-        let oversized = "x".repeat(octet_agent::MAX_GOAL_OBJECTIVE_BYTES + 1);
-        let (queue, _, deadline) = run_active_command_observing_deadline(
-            &mut shell,
-            Command::Goal(GoalCommand::Set(oversized)),
-            &inspection,
-        )
-        .await;
-        assert!(
-            queue.is_empty(),
-            "a rejected goal is never queued: {queue:?}"
-        );
-        assert!(deadline.is_none(), "a rejected goal arms no deadline");
-        assert!(
-            store.get("goal-session").unwrap().is_none(),
-            "the store rejected the objective and stayed empty"
-        );
-        let error = shell.debug_error().expect("the store error is rendered");
-        assert!(error.starts_with("unable to set goal:"), "{error}");
-        assert!(error.contains("invalid goal objective"), "{error}");
-    }
-
-    /// `/goal` at idle applies the same durable mutations through the same
-    /// producer the idle dispatcher's arm calls, on a real bootstrap-built App
-    /// with a real durable store and session key.
-    #[tokio::test]
-    async fn idle_goal_commands_still_apply_the_same_durable_mutations() {
-        let (_workspace, app) = crate::compaction::tests::app_for_estimate();
-        let store = app.goal_store.clone();
-        let session_id = app.goal_session_id.clone();
-        assert!(
-            !session_id.is_empty(),
-            "the idle fixture carries a durable goal identity"
-        );
-        let mut shell = InteractiveShell::test_shell();
-        let mut goal_deadline = None;
-
-        apply_idle_goal_command(
-            &app,
-            &mut shell,
-            GoalCommand::Set("idle objective".into()),
-            &mut goal_deadline,
-        )
-        .expect("idle /goal set");
-        let goal = store
-            .get(&session_id)
-            .unwrap()
-            .expect("idle /goal writes the durable store");
-        assert_eq!(goal.objective, "idle objective");
-        assert_eq!(goal.status, octet_agent::GoalStatus::Active);
-        assert!(goal_deadline.is_some(), "idle /goal arms the deadline");
-        assert!(shell.debug_snapshot().contains("goal set"));
-
-        apply_idle_goal_command(&app, &mut shell, GoalCommand::Status, &mut goal_deadline)
-            .expect("idle /goal status");
-        assert!(
-            shell.has_overlay(),
-            "idle /goal status opens the same report"
-        );
-        assert!(store.get(&session_id).unwrap().is_some());
-
-        apply_idle_goal_command(&app, &mut shell, GoalCommand::Pause, &mut goal_deadline)
-            .expect("idle /goal pause");
-        assert_eq!(
-            store.get(&session_id).unwrap().unwrap().status,
-            octet_agent::GoalStatus::Paused
-        );
-        assert!(goal_deadline.is_none());
-
-        apply_idle_goal_command(&app, &mut shell, GoalCommand::Resume, &mut goal_deadline)
-            .expect("idle /goal resume");
-        assert_eq!(
-            store.get(&session_id).unwrap().unwrap().status,
-            octet_agent::GoalStatus::Active
-        );
-        assert!(goal_deadline.is_some());
-
-        apply_idle_goal_command(&app, &mut shell, GoalCommand::Clear, &mut goal_deadline)
-            .expect("idle /goal clear");
-        assert!(store.get(&session_id).unwrap().is_none());
-        assert!(goal_deadline.is_none());
-    }
-
-    #[derive(Default)]
-    struct RecordingLifecycle {
-        events: std::cell::RefCell<Vec<String>>,
-    }
-
-    impl RecordingLifecycle {
-        fn events(&self) -> Vec<String> {
-            self.events.borrow().clone()
-        }
-    }
-
-    impl MessageLifecycleSink for RecordingLifecycle {
-        fn message_started(&mut self, message_id: &str) {
-            self.events
-                .borrow_mut()
-                .push(format!("started:{message_id}"));
-        }
-
-        fn message_delta(&mut self, delta: &str) {
-            self.events.borrow_mut().push(format!("delta:{delta}"));
-        }
-
-        fn message_settled(&mut self, message_id: &str) {
-            self.events
-                .borrow_mut()
-                .push(format!("settled:{message_id}"));
-        }
-    }
-
-    impl DialogLifecycleSink for RecordingLifecycle {
-        fn open_dialog(&self, dialog: &str) {
-            self.events.borrow_mut().push(format!("started:{dialog}"));
-        }
-
-        fn close_dialog(&self, dialog: &str) {
-            self.events.borrow_mut().push(format!("settled:{dialog}"));
-        }
-    }
-
-    fn text_delta(text: &str) -> AgentEvent {
-        AgentEvent::OutputDelta {
-            channel: OutputChannel::Text,
-            text: text.to_owned(),
-        }
-    }
-
-    fn completed_run() -> AgentEvent {
-        AgentEvent::RunFinished {
-            head: EntryId("entry-1".to_owned()),
-            reason: octet_agent::FinishReason::Completed,
-        }
-    }
-
-    #[test]
-    fn assistant_message_lifecycle_brackets_one_message_per_text_turn() {
-        let mut lifecycle = AssistantMessageLifecycle::default();
-        let mut sink = RecordingLifecycle::default();
-        lifecycle.observe(&mut sink, &text_delta(""));
-        assert!(sink.events().is_empty(), "an empty delta opens nothing");
-        lifecycle.observe(&mut sink, &text_delta("Hel"));
-        lifecycle.observe(
-            &mut sink,
-            &AgentEvent::OutputDelta {
-                channel: OutputChannel::Reasoning,
-                text: "hidden reasoning".to_owned(),
-            },
-        );
-        lifecycle.observe(&mut sink, &text_delta("lo"));
-        assert_eq!(
-            sink.events(),
-            ["started:assistant-1", "delta:Hel", "delta:lo"]
-        );
-        // Every terminal run outcome settles the open boundary exactly once.
-        lifecycle.observe(&mut sink, &completed_run());
-        lifecycle.observe(&mut sink, &completed_run());
-        assert_eq!(sink.events().len(), 4);
-        assert_eq!(
-            sink.events().last().map(String::as_str),
-            Some("settled:assistant-1")
-        );
-        // A later turn opens a fresh, still bounded identifier.
-        lifecycle.observe(&mut sink, &text_delta("again"));
-        assert_eq!(
-            sink.events().last().map(String::as_str),
-            Some("delta:again")
-        );
-        assert!(sink.events().contains(&"started:assistant-2".to_owned()));
-    }
-
-    #[test]
-    fn assistant_message_lifecycle_keeps_one_boundary_across_provider_retry() {
-        let mut lifecycle = AssistantMessageLifecycle::default();
-        let mut sink = RecordingLifecycle::default();
-        lifecycle.observe(&mut sink, &text_delta("partial"));
-        lifecycle.observe(
-            &mut sink,
-            &AgentEvent::ProviderRetry {
-                attempt: 1,
-                max_attempts: 3,
-                delay: Duration::from_millis(1),
-                error: "stream reset".to_owned(),
-            },
-        );
-        lifecycle.observe(&mut sink, &text_delta("final"));
-        assert_eq!(
-            sink.events(),
-            ["started:assistant-1", "delta:partial", "delta:final"]
-        );
-        lifecycle.settle(&mut sink);
-        assert_eq!(
-            sink.events().last().map(String::as_str),
-            Some("settled:assistant-1")
-        );
-    }
-
-    #[test]
-    fn assistant_message_lifecycle_forwards_each_delta_verbatim() {
-        let mut lifecycle = AssistantMessageLifecycle::default();
-        let mut sink = RecordingLifecycle::default();
-        for index in 0..64 {
-            lifecycle.observe(&mut sink, &text_delta(&format!("t{index}")));
-        }
-        let events = sink.events();
-        assert_eq!(events[0], "started:assistant-1");
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.starts_with("delta:"))
-                .count(),
-            64,
-            "the producer forwards every increment; the host owns coalescing"
-        );
-        assert!(
-            !events.iter().any(|event| event.starts_with("settled:")),
-            "no notification per delta is issued before the terminal boundary"
-        );
-    }
-
-    #[tokio::test]
-    async fn present_host_dialog_settles_once_on_every_outcome() {
-        let sink = RecordingLifecycle::default();
-        let value = present_host_dialog(&sink, "confirm", async { Ok::<_, anyhow::Error>(true) })
-            .await
-            .expect("approved dialog");
-        assert!(value);
-        assert_eq!(sink.events(), ["started:confirm", "settled:confirm"]);
-        let refused = present_host_dialog(&sink, "input", async {
-            Err::<Option<String>, _>(anyhow::anyhow!("dismissed"))
-        })
-        .await;
-        assert!(refused.is_err());
-        assert_eq!(
-            sink.events(),
-            [
-                "started:confirm",
-                "settled:confirm",
-                "started:input",
-                "settled:input",
-            ]
-        );
-    }
-}
+mod tests;

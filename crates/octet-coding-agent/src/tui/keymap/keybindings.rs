@@ -693,7 +693,9 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("app.session.toggleSort", &["ctrl+s"], "Toggle session sort mode"),
     ("app.session.search", &["ctrl+f"], "Search session transcripts for the query"),
     ("app.session.rename", &["ctrl+r"], "Rename session"),
-    ("app.session.delete", &["ctrl+d"], "Delete session"),
+    // Not ctrl+d: that is the close key on every surface, so it never reaches
+    // the picker. Many keyboards (every Mac laptop) lack a forward Delete key.
+    ("app.session.delete", &["ctrl+x"], "Delete session"),
     ("app.session.deleteNoninvasive", &["ctrl+backspace"], "Delete session when query is empty"),
     ("app.models.save", &["ctrl+s"], "Save model selection"),
     ("app.models.enableAll", &["ctrl+a"], "Enable all models"),
@@ -833,6 +835,15 @@ mod tests {
             KeybindingsManager::with_platform("linux", false, BTreeMap::new())
                 .matches(&escape, "app.interrupt")
         );
+    }
+
+    #[test]
+    fn session_delete_default_is_not_the_close_key() {
+        let manager = KeybindingsManager::with_platform("linux", false, BTreeMap::new());
+        let ctrl = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+        assert!(manager.matches(&ctrl('x'), "app.session.delete"));
+        assert!(!manager.matches(&ctrl('d'), "app.session.delete"));
+        assert!(crate::tui::keymap::is_close_key(&ctrl('d')));
     }
 
     #[test]

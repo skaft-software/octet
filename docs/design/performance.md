@@ -129,6 +129,40 @@ five-client interactive replay remains outstanding. Report these boundaries
 alongside improvements; no end-to-end constant-time or all-open-code linearity
 claim is supported.
 
+## Scroll and resize work boundary
+
+Octet uses the v0.8.1 canonical Pi clear/replay policy, not the generic library's
+optional saved-snapshot policy. Dimension changes and canonical changes above
+the old viewport emit `ED 2`/`ED 3` and rebuild the complete native document inside
+one synchronized frame, including cursor restoration. Ordinary appends and
+visible-row diffs are unchanged; overlays and disclosure do not unconditionally
+force replay. Terminal-owned resume eagerly materializes the complete branch.
+The bounded PageUp/`--mouse app` semantic viewport is a separate ownership mode,
+not a substitute for complete canonical native history.
+
+Resize notifications settle after 75 ms of quiet with a 150 ms maximum delay;
+composer edits/readiness changes bypass settling. Height-only changes keep
+wrapped block caches. A changed resize epoch forces replay even after an
+away-and-back resize, including final and suspend flushes. Threaded visual
+anchors are promoted using the old renderer layout before width reflow.
+Production-factory continuous VT regressions check every saved and live marker
+after height, width, and away-and-back resize, coalesced output, and historical
+insertion; separate tests cover layout reuse and semantic reading positions.
+
+Post-paint animation visibility uses the renderer's actual native seam and sparse
+active-heading offsets from revision-fenced completed-frame geometry, not a
+monotonic pre-write estimate. A tall-progress → short-result regression checks
+visible `Working` self-waking without resize or more semantic notifications. This
+closes that reproduced freeze path, not every freeze or physical-terminal journey.
+
+Complete structural rebuilds scale **wire replay and replay-output allocation**
+with history and can reset the native reading position. Width reflow, canonical
+frame construction, semantic source mapping, image-bearing full-component
+fallbacks, and retrospective layout can also depend on history. No constant
+live-grid repair bound or saved-snapshot product guarantee is claimed. Keep
+physical-terminal reflow, selection, paint smoothness, and long-duration
+qualification separate from library and PTY evidence.
+
 ## Visual stability is separate from throughput
 
 Streaming regressions also record actual shell/renderer ANSI/vt100 frames. They
@@ -213,6 +247,28 @@ supply these timings. Missing timings remain missing. These clocks include work
 before the observer sees a delta and do not expose exact provider headers or
 terminal paint. See [benchmark methods](../benchmarks/README.md).
 
+### TUI output throughput
+
+The completion line prefers a matching native server generation count/duration.
+Without that, it shows a separately labeled robust decode estimate or explicit
+unavailability, never the E2E average. `/status` keeps request-to-completion E2E
+throughput separate from the decode estimate and native server observation.
+
+The receive-side reader runs ahead of terminal/agent polling with bounded event
+and byte admission; cancellation aborts it, and saturation suppresses estimates.
+A usage-calibrated median long-baseline fit of visible output progress excludes
+request/prefill and completion-tail time and corrects the first chunk's token
+mass. Hidden reasoning usage is excluded, and an unknown reasoning split cannot
+be assigned to answer-text time. Burst coalescing and slope dispersion reject
+unresolvable timing rather than claiming infinite decode speed.
+
+These are estimates under a token-density/arrival-cadence assumption. A stable
+fit cannot identify arbitrary proxy buffering, hidden GPU stages, preemption or
+speculative execution. Native generation is not automatically GPU-active time
+or post-first-token TPOT. See the unreleased
+[inference measurement contract](../inference-metrics.md) for the algorithm,
+thresholds, coverage and qualification limits.
+
 ## Startup attribution (opt-in)
 
 `OCTET_STARTUP_TRACE=1` emits monotonic phase boundaries to stderr without
@@ -221,7 +277,12 @@ putting timing text on the TUI. `process.enter` is after Tokio runtime creation;
 `--models` scope and resume selector resolution. Catalog phases separate base,
 selected-route, Codex credential/inventory, and deferred fleet work;
 `session.resolve`, `session.replay`, `app.build`, `history.hydrate`, and
-`frame.ready` cover later readiness. Differences between adjacent phase times
+`frame.ready` cover later readiness. Extension startup additionally brackets
+`extensions.digest` (manifest/source hashing) and `extensions.handshake`
+(process launch and initialize), with counters for catalog entries, hashed
+files/bytes, and eligible handshakes. Disabled or untrusted entries do not
+hash their source trees. `history.hydrate` reports replayed messages and its
+configured tail budget. Differences between adjacent phase times
 attribute *in-process* work, not process spawn, a physical keypress, or terminal
 paint. Measure spawn-to-first-editable-frame and input-to-PTY separately with a
 PTY; record cold/warm caches, selected route, resumed route, custom inventory,
@@ -276,6 +337,38 @@ unchanged-marker rewrite as the dominant part of that phase on this host, not
 HTTP-client construction; it does not show a first-frame speedup or characterize
 an extension-enabled/credentialed launch. The script prints the per-trial
 samples and uses an intentionally credential-free environment.
+
+## Complete startup and resume work
+
+Many-model custom override merging indexes the first exact `api_name` and
+tracks emitted names without repeated catalog scans. Discovery ordering,
+duplicates, configured metadata precedence and authoritative discovered limits
+remain unchanged. Model-scope membership is indexed without changing ordered
+patterns or the first reasoning suffix. Globs still match and sort candidates.
+
+Finished history uses one canonical Markdown parse per materialized block rather
+than provisional streaming stabilization and another final parse. Copy and
+colored-surface rendering reuse that committed document. Hydration still visits
+every accepted item; it skips replacement tracking for rows that have never been
+cached, tracks the moving active subagent summary within a batch, and bulk-builds
+initial/reset persistent publication trees. Ordinary publication retains shared
+unchanged branches. Native startup still paints the full branch, not a tail-only
+shortcut; session decoding, validation, recovery and saved prompt colors are
+unchanged.
+
+Already-normalized terminal frames borrow their bytes, and disabled write logging
+retains no duplicate diagnostics payload. Auto-background detection begins without
+waiting before cold startup work and consumes an arrived reply before ready layout;
+explicit appearances remain authoritative and absent replies cannot hold readiness.
+The ordinary bounded post-ready probe handling remains.
+
+Deterministic regressions cover canonical render/copy parity, chunked CRLF,
+4K-model index work and 1K/10K/100K-block bookkeeping/publication budgets. The
+[offline PTY comparison](../benchmarks/startup-resume-2026-10-02/README.md) separately
+records complete history-ready frames. `history.hydrate` → `frame.ready` excludes
+renderer materialization, layout and terminal writes; do not present its reduction
+as an equivalent end-to-end resume speedup. Full native replay still has
+history-sized layout and output cost.
 
 ## Agent-turn request copy audit
 

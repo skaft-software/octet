@@ -4,10 +4,11 @@
 //! service containers, or lifecycle callbacks — those can be added as new
 //! `ExtensionHost` methods later without breaking the [`Extension`] trait.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
+use crate::cache_warmer::{CacheWarmingAction, CacheWarmingDecision};
 use crate::events::AgentEvent;
 use crate::input::UserInput;
 use crate::tool::{Tool, ToolContext, ToolError};
@@ -179,6 +180,133 @@ pub enum ProviderRetryAdvice {
 pub trait ProviderRetryHook: Send + Sync {
     /// Advises on the single retry under consideration.
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice;
+}
+
+/// Read-only economics and owner identity for one due cache refresh.
+///
+/// No prompt, provider credentials, transport, or mutable session is exposed.
+#[derive(Clone, Debug)]
+pub struct CacheWarmingDecisionContext {
+    /// The host's current decision and cost estimates.
+    pub decision: CacheWarmingDecision,
+    /// Host-selected model identity, without transport configuration.
+    pub model: ModelId,
+    /// Host-derived durable session owner.
+    pub resource_owner: String,
+}
+
+/// Optional advice before each due, independently eligible cache refresh.
+///
+/// The host invokes hooks in registration order; the last returned action wins.
+/// `None`, failure, or timeout leaves the preceding decision unchanged. Advice
+/// cannot widen refresh deadlines, budgets, cancellation, or replay eligibility.
+#[async_trait::async_trait]
+pub trait CacheWarmingDecisionHook: Send + Sync {
+    /// Return `warm`, `stop`, or no opinion on this single refresh.
+    async fn cache_warming_decision(
+        &self,
+        context: &CacheWarmingDecisionContext,
+    ) -> Option<CacheWarmingAction>;
+}
+
+/// Host-derived identity for one effective provider-context preparation.
+///
+/// These values fence a projection to the session branch and advertised tool
+/// snapshot the host is preparing. They do not grant permission to mutate the
+/// session or execute a tool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderContextProjectionContext {
+    /// Durable resource owner of the request being prepared.
+    pub resource_owner: String,
+    /// Host session identity, independent of provider cache affinity.
+    pub session_id: String,
+    /// Durable active-branch anchor observed before preparation.
+    pub head: Option<crate::session::EntryId>,
+    /// Revision of the host-policed advertised tool snapshot.
+    pub tool_generation: u64,
+}
+
+/// Proposed replacement of only the model-visible context of a request.
+///
+/// The canonical session is not rewritten. Tools, route, credentials, output
+/// caps and transport configuration cannot be replaced through this value.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderContextProjection {
+    /// Complete effective message history, using canonical roles.
+    pub messages: Vec<octet_ai::Message>,
+    /// Complete effective system prompt; `None` explicitly clears it.
+    pub system: Option<String>,
+}
+
+/// Run-owned service for authoritative private session appends while a context
+/// hook is pending. Implementations own a bounded typed queue, not a writer.
+/// Dropping the service must revoke its grants and refuse all unclaimed leaves.
+/// A persistence receipt may report success only after the supplied Session
+/// has durably committed the append. This is not an event/broadcast service.
+pub trait ProviderContextSessionWait: Send {
+    /// Optional guard-owned process hook future. It must own its pinned lease
+    /// and request snapshot, never borrow the owning Session or expose a writer.
+    fn projection_future(
+        &mut self,
+        _request: &octet_ai::Request,
+        _context: &ProviderContextProjectionContext,
+    ) -> Option<
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Option<ProviderContextProjection>, String>>
+                    + Send
+                    + 'static,
+            >,
+        >,
+    > {
+        None
+    }
+
+    /// Borrow-free readiness; an empty queue must remain pending.
+    fn ready(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+    /// Consume one admitted leaf on the sole Session owner. The implementation
+    /// must validate its activation/owner/namespace/operation binding before
+    /// claiming a commit and resolve rejected leaves without reporting success.
+    fn consume_next(
+        &mut self,
+        session: &mut crate::Session,
+        context: &ProviderContextProjectionContext,
+    ) -> Result<(), String>;
+}
+
+/// Context preparation before provider planning, admission and request freeze.
+///
+/// Hooks run in registration order against the last validated effective
+/// request. `Ok(None)` leaves that request unchanged. A failure must abort
+/// preparation, not silently fall back to potentially stale canonical context.
+/// The caller owns cancellation, deadlines, request-size bounds, and canonical
+/// role/tool-pair validation before any projection reaches the next hook or
+/// provider. Persistence acknowledgements must precede activation of durable
+/// projection state; this hook does not itself supply a persistence service. The native driver may activate the optional
+/// run-owned `begin_session_wait` service; process-backed projection dispatch must
+/// use its guard-owned future instead of an unbound foreground RPC.
+#[async_trait::async_trait]
+pub trait ProviderContextHook: Send + Sync {
+    /// Activate an optional bounded append service for this exact preparation.
+    /// The host calls this synchronously before polling the hook. A process
+    /// adapter may publish its grant only after returning a real consumer here;
+    /// it must not offer synchronous append through the foreground event queue.
+    /// Pure native projection hooks need no append service.
+    fn begin_session_wait(
+        &self,
+        _session: &crate::Session,
+        _context: &ProviderContextProjectionContext,
+    ) -> Result<Option<Box<dyn ProviderContextSessionWait>>, String> {
+        Ok(None)
+    }
+
+    /// Propose a model-visible context without changing execution authority.
+    async fn project_context(
+        &self,
+        request: &octet_ai::Request,
+        context: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String>;
 }
 
 /// Optional API 0.4 replacement for local parent-model summarization.
@@ -452,9 +580,12 @@ pub(crate) struct RegisteredPersistenceMetadataHook {
 
 #[derive(Default)]
 struct DynamicToolRegistry {
-    static_names: BTreeSet<String>,
+    static_names: HashSet<String>,
     groups: Vec<DynamicToolGroup>,
     reservations: Vec<DynamicToolReservationEntry>,
+    // Updated at catalog publication/removal, never by per-tool registration.
+    dynamic_names: HashSet<String>,
+    reserved_names: HashSet<String>,
     next_reservation: u64,
     ready: bool,
     ready_changed: Arc<Notify>,
@@ -463,6 +594,23 @@ struct DynamicToolRegistry {
     /// `None` publishes the full host-policed surface; `Some` publishes only
     /// the intersection of these names with that surface.
     active_names: Option<BTreeSet<String>>,
+}
+
+impl DynamicToolRegistry {
+    fn refresh_name_index(&mut self) {
+        self.dynamic_names = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.tools)
+            .map(|tool| tool.definition().name)
+            .collect();
+        self.reserved_names = self
+            .reservations
+            .iter()
+            .flat_map(|reservation| &reservation.names)
+            .cloned()
+            .collect();
+    }
 }
 
 struct DynamicToolGroup {
@@ -595,6 +743,7 @@ impl DynamicToolRegistration {
             owner: self.owner.clone(),
             names,
         });
+        state.refresh_name_index();
         Ok(DynamicToolReservation {
             id,
             owner: self.owner.clone(),
@@ -615,6 +764,7 @@ impl DynamicToolRegistration {
         registry
             .reservations
             .retain(|reservation| reservation.owner != self.owner);
+        registry.refresh_name_index();
         if registry.groups.len() != previous_len {
             registry.revision = registry.revision.saturating_add(1);
         }
@@ -675,6 +825,7 @@ impl DynamicToolReservation {
                 .sort_by(|left, right| left.owner.cmp(&right.owner));
         }
         registry.reservations.swap_remove(index);
+        registry.refresh_name_index();
         registry.revision = revision;
         Ok((registry.revision, published))
     }
@@ -691,6 +842,7 @@ impl Drop for DynamicToolReservation {
         registry
             .reservations
             .retain(|reservation| reservation.id != self.id || reservation.owner != self.owner);
+        registry.refresh_name_index();
     }
 }
 
@@ -745,6 +897,8 @@ pub struct ExtensionHost {
     pub(crate) observers: Vec<Arc<dyn EventObserver>>,
     pub(crate) tool_call_hooks: Vec<Arc<dyn ToolCallHook>>,
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
+    pub(crate) cache_warming_decision_hooks: Vec<Arc<dyn CacheWarmingDecisionHook>>,
+    pub(crate) provider_context_hooks: Vec<Arc<dyn ProviderContextHook>>,
     pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub(crate) duplicate_compaction_strategy: bool,
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
@@ -760,6 +914,8 @@ impl Default for ExtensionHost {
             observers: Vec::new(),
             tool_call_hooks: Vec::new(),
             provider_retry_hooks: Vec::new(),
+            cache_warming_decision_hooks: Vec::new(),
+            provider_context_hooks: Vec::new(),
             compaction_strategy: None,
             duplicate_compaction_strategy: false,
             persistence_metadata_hooks: Vec::new(),
@@ -792,16 +948,13 @@ impl ExtensionHost {
             .dynamic_tools
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // `static_names` is the shared registry's conflict set: it also holds
+        // names reserved for later host tools and tools installed by other
+        // hosts cloned from this one (every native delegation child), so it
+        // cannot decide what this host already installed.
         if self.tools.iter().any(|t| t.definition().name == name)
-            || dynamic
-                .groups
-                .iter()
-                .flat_map(|group| &group.tools)
-                .any(|registered| registered.definition().name == name)
-            || dynamic
-                .reservations
-                .iter()
-                .any(|reservation| reservation.names.contains(&name))
+            || dynamic.dynamic_names.contains(&name)
+            || dynamic.reserved_names.contains(&name)
         {
             self.duplicate_tools.push(name);
         } else {
@@ -819,16 +972,7 @@ impl ExtensionHost {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for name in names {
-            if dynamic
-                .groups
-                .iter()
-                .flat_map(|group| &group.tools)
-                .any(|tool| tool.definition().name == name)
-                || dynamic
-                    .reservations
-                    .iter()
-                    .any(|reservation| reservation.names.contains(name))
-            {
+            if dynamic.dynamic_names.contains(name) || dynamic.reserved_names.contains(name) {
                 self.duplicate_tools.push(name.to_owned());
             } else {
                 dynamic.static_names.insert(name.to_owned());
@@ -872,6 +1016,19 @@ impl ExtensionHost {
     /// Register a non-authoritative provider-retry advisory hook.
     pub fn provider_retry_hook(&mut self, hook: impl ProviderRetryHook + 'static) {
         self.provider_retry_hooks.push(Arc::new(hook));
+    }
+
+    /// Register cache-refresh advice in deterministic invocation order.
+    /// The last hook returning an action wins, within the host's existing limits.
+    pub fn cache_warming_decision_hook(&mut self, hook: impl CacheWarmingDecisionHook + 'static) {
+        self.cache_warming_decision_hooks.push(Arc::new(hook));
+    }
+
+    /// Register effective provider-context preparation in deterministic order.
+    ///
+    /// Registration alone does not negotiate or advertise a subprocess feature.
+    pub fn provider_context_hook(&mut self, hook: impl ProviderContextHook + 'static) {
+        self.provider_context_hooks.push(Arc::new(hook));
     }
 
     /// Register the one active local-compaction strategy. Competing providers
@@ -936,6 +1093,7 @@ impl ExtensionHost {
         for group in &mut dynamic.groups {
             group.tools.retain(|tool| keep(&tool.definition().name));
         }
+        dynamic.refresh_name_index();
         dynamic.revision = dynamic.revision.saturating_add(1);
     }
 
@@ -956,6 +1114,7 @@ impl ExtensionHost {
         for group in &mut dynamic.groups {
             group.tools.retain(|tool| keep(&tool.definition().name));
         }
+        dynamic.refresh_name_index();
         dynamic.policy = Some(keep);
         dynamic.revision = dynamic.revision.saturating_add(1);
     }
@@ -976,6 +1135,8 @@ impl ExtensionHost {
         scoped.observers = self.observers.clone();
         scoped.tool_call_hooks = self.tool_call_hooks.clone();
         scoped.provider_retry_hooks = self.provider_retry_hooks.clone();
+        scoped.cache_warming_decision_hooks = self.cache_warming_decision_hooks.clone();
+        scoped.provider_context_hooks = self.provider_context_hooks.clone();
         scoped.compaction_strategy = self.compaction_strategy.clone();
         scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();
@@ -1107,11 +1268,7 @@ impl ExtensionHost {
 
     /// Returns the exact provider schemas currently registered, in wire order.
     pub fn tool_definitions(&self) -> Vec<ToolDef> {
-        self.tool_snapshot()
-            .1
-            .iter()
-            .map(|tool| tool.definition())
-            .collect()
+        crate::tool_composition::advertised_surface(&self.tool_snapshot().1)
     }
 }
 
@@ -1121,6 +1278,122 @@ mod tests {
     use crate::effect::ToolEffect;
     use crate::tool::{ToolContext, ToolError, ToolOutput};
     use octet_ai::ToolDef;
+
+    struct CacheOpinion {
+        index: usize,
+        action: Option<CacheWarmingAction>,
+        observed: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheWarmingDecisionHook for CacheOpinion {
+        async fn cache_warming_decision(
+            &self,
+            context: &CacheWarmingDecisionContext,
+        ) -> Option<CacheWarmingAction> {
+            assert_eq!(context.resource_owner, "cache-owner");
+            assert_eq!(context.model, ModelId("cache-model".into()));
+            self.observed.lock().unwrap().push(self.index);
+            self.action
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_warming_hooks_preserve_registration_order_and_child_scoping() {
+        use crate::cache_warmer::CacheWarmingPhase;
+
+        let mut host = ExtensionHost::new();
+        assert!(host.cache_warming_decision_hooks.is_empty());
+        host.tool(NamedTool("read"));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (index, action) in [
+            Some(CacheWarmingAction::Stop),
+            None,
+            Some(CacheWarmingAction::Warm),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            host.cache_warming_decision_hook(CacheOpinion {
+                index,
+                action,
+                observed: Arc::clone(&observed),
+            });
+        }
+        let cloned = host.clone();
+        let (scoped, _) = host
+            .scoped_tool_snapshot(&BTreeSet::from(["read".into()]))
+            .unwrap();
+        for inherited in [&cloned, &scoped] {
+            assert_eq!(inherited.cache_warming_decision_hooks.len(), 4);
+            for (original, inherited) in host
+                .cache_warming_decision_hooks
+                .iter()
+                .zip(&inherited.cache_warming_decision_hooks)
+            {
+                assert!(Arc::ptr_eq(original, inherited));
+            }
+        }
+        let context = CacheWarmingDecisionContext {
+            decision: CacheWarmingDecision {
+                phase: CacheWarmingPhase::Idle,
+                warm_cost_microdollars: 100,
+                miss_cost_microdollars: 1_000,
+                continuation_probability: 0.15,
+                expected_savings_microdollars: 50,
+                economics_available: true,
+                action: CacheWarmingAction::Warm,
+            },
+            model: ModelId("cache-model".into()),
+            resource_owner: "cache-owner".into(),
+        };
+        let mut action = context.decision.action;
+        for hook in &scoped.cache_warming_decision_hooks {
+            if let Some(opinion) = hook.cache_warming_decision(&context).await {
+                action = opinion;
+            }
+        }
+        assert_eq!(*observed.lock().unwrap(), [0, 1, 2, 3]);
+        assert_eq!(action, CacheWarmingAction::Warm);
+    }
+
+    struct ContextHook;
+
+    #[async_trait::async_trait]
+    impl ProviderContextHook for ContextHook {
+        async fn project_context(
+            &self,
+            _request: &octet_ai::Request,
+            _context: &ProviderContextProjectionContext,
+        ) -> Result<Option<ProviderContextProjection>, String> {
+            Err("fixture refuses an unbound preparation".into())
+        }
+    }
+
+    #[test]
+    fn provider_context_hooks_preserve_registration_order_and_child_scoping() {
+        let mut host = ExtensionHost::new();
+        assert!(host.provider_context_hooks.is_empty());
+        host.tool(NamedTool("read"));
+        for _ in 0..3 {
+            host.provider_context_hook(ContextHook);
+        }
+        let cloned = host.clone();
+        let (scoped, _) = host
+            .scoped_tool_snapshot(&BTreeSet::from(["read".into()]))
+            .unwrap();
+        for inherited in [&cloned, &scoped] {
+            assert_eq!(inherited.provider_context_hooks.len(), 3);
+            for (original, inherited) in host
+                .provider_context_hooks
+                .iter()
+                .zip(&inherited.provider_context_hooks)
+            {
+                assert!(Arc::ptr_eq(original, inherited));
+            }
+        }
+    }
 
     struct NoMetadata;
 
@@ -1217,6 +1490,42 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["read".to_owned(), "search".to_owned(), "write".to_owned()])
         );
+    }
+
+    #[test]
+    fn static_duplicate_index_tracks_dynamic_removal_and_policy_filtering() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        let dynamic = host
+            .dynamic_tools("extension", vec![named_tool("search")])
+            .unwrap();
+        host.tool(NamedTool("search"));
+        assert_eq!(host.duplicate_tools, ["search"]);
+        dynamic.remove();
+        host.tool(NamedTool("search"));
+        assert_eq!(host.tools.len(), 2);
+        host.retain_tools(|name| name != "search");
+        host.tool(NamedTool("search"));
+        assert_eq!(host.tools.len(), 2);
+        assert_eq!(host.duplicate_tools, ["search"]);
+    }
+
+    #[test]
+    fn reserved_names_and_sibling_hosts_do_not_make_host_tools_duplicates() {
+        let mut host = ExtensionHost::new();
+        host.reserve_tool_names(["spawn_agent"]);
+        host.tool(NamedTool("spawn_agent"));
+        assert!(host.duplicate_tools.is_empty());
+
+        // Native delegation children are clones of one template host and so
+        // share its dynamic registry; each still installs its own tools.
+        let template = ExtensionHost::new();
+        let mut first = template.clone();
+        first.tool(NamedTool("spawn_agent"));
+        let mut second = template.clone();
+        second.tool(NamedTool("spawn_agent"));
+        assert!(second.duplicate_tools.is_empty());
+        assert_eq!(second.tools.len(), 1);
     }
 
     #[test]

@@ -1,18 +1,33 @@
 # octet-mcp
 
-**Distribution: 0.8.1.** This bundle requires exactly octet 0.8.1.
+**Source candidate distribution: 0.8.2.** This bundle needs exactly octet 0.8.2.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.1 release record](../../docs/releases/v0.8.1.md) for signed assets and
-public-install evidence.
+[0.8.2 candidate record](../../docs/releases/v0.8.2.md) for availability and
+remaining qualification. 0.8.2 assets are not published; use the reviewed
+source-checkout route below until publication is approved.
 
-Connect explicitly configured [MCP](https://modelcontextprotocol.io/) tool servers
-to octet. Start with a local stdio server you have reviewed and installed
-separately. The bridge never discovers or installs server software for you.
+Connect explicitly configured [MCP](https://modelcontextprotocol.io/) tool
+servers to octet. Start with a local stdio server you've reviewed and installed
+yourself. The bridge never discovers or installs server software for you.
 
 ## Connect a local server
 
-Put this in `~/.octet/mcp.json`, replacing the executable and working-directory
-paths with your reviewed local paths. Protect the file with `chmod 600`.
+In octet, open `/extensions`, choose **octet-mcp** (choosing a disabled
+extension enables it first), and pick **Add a server**. The guided form asks for
+a name, the command that starts the server, its arguments, any environment
+variables (hidden as you type) and a display name. It then shows the complete
+command and asks before it adds and starts the server. Nothing is written if you
+cancel or the result fails the same trust and schema checks as a launch.
+
+Each server then has its own entry in that menu: **Show details**, **Refresh
+tools**, **Restart** (or **Start**), **Stop**, **Enable** or **Disable**,
+**Edit** and **Remove** (confirmed first). Changes apply at once, and only the
+edited server restarts. Servers from a trusted project file are listed with
+their lifecycle actions only, so edit them in the project.
+
+The menu writes `~/.octet/mcp.json` as a private (`0600`) file. You can also
+write it yourself, replacing the executable and working-directory paths with
+your reviewed local paths, and protect it with `chmod 600`:
 
 ```json
 {
@@ -32,8 +47,8 @@ paths with your reviewed local paths. Protect the file with `chmod 600`.
 }
 ```
 
-With [octet 0.8.1](../../docs/installation.md), Python 3.9+
-on `PATH`, and verified matching published assets, the catalog path is:
+With [octet 0.8.2](../../docs/installation.md), Python 3.9+ on `PATH`, and
+verified matching published assets, the catalog path is:
 
 ```console
 octet extension install octet-mcp
@@ -41,31 +56,25 @@ octet extension install octet-mcp
 octet --enable-extension octet-mcp
 ```
 
-A reviewed source checkout remains an alternative; add
+A reviewed source checkout is still an alternative: add
 `--extension-dir ./extensions` when launching from the repository root.
-Installation and discovery are inert; the bridge stays disabled until explicitly
-enabled. Default full access (`unsafe_host`) implicitly trusts the selected
+Installation and discovery are inert, and the bridge stays disabled until you
+enable it. Default full access (`unsafe_host`) implicitly trusts the selected
 extension without persisting a grant. `--trust-extension` and source-bound
 `trusted_extensions` grants are optional and never enable it. `--safe-mode`
 removes implicit trust and blocks startup even with explicit grants: executable
-processes still require `unsafe_host`. This does not change MCP server trust or
-tool-call policy. If the configuration file is absent, it stays healthy with zero
-servers.
-
-Inspect and manage the connection in any frontend:
-
-```text
-/mcp status
-/mcp list
-/mcp show local-example
-/mcp refresh local-example
-/mcp restart local-example
-/mcp stop local-example
-```
+processes still need `unsafe_host`. That doesn't change MCP server trust or
+tool-call policy. If the config file is missing, the bridge stays healthy with
+zero servers.
 
 Refresh rereads the tool catalog without relaunching. Restart replaces the
-connection; stop removes its tools and closes it. `/mcp snapshot` returns the
-same semantic state used by the TUI and Serve.
+connection. Stop removes the server's tools and closes it.
+
+The web UI has no options menu yet. There the same actions run as the `/mcp`
+command: `status`, `list`, `show <server>`, `refresh [server]`,
+`restart <server>`, `stop <server>`, `add stdio`, `add http`, `edit <server>`,
+`enable <server>`, `disable <server>` and `remove <server>`. `/mcp snapshot`
+returns the same state the TUI and Serve show.
 
 ## Connect a desktop server
 
@@ -76,9 +85,9 @@ non-secret session names a server descriptor asks for, and only because the
 bundle declares them in its manifest.
 
 Copy `config.cua-driver.example.json`, point `command` at your installed
-`cua-driver`, and set `enabled` to `true` once you have granted the driver's own
+`cua-driver`, and set `enabled` to `true` once you've granted the driver's own
 OS permissions. The example keeps two deliberate defaults: the server ships
-**disabled**, and `confirmUnknownTools` is on so any call the driver does not
+**disabled**, and `confirmUnknownTools` is on, so any call the driver doesn't
 mark `readOnly` waits for your explicit approval.
 
 ```json
@@ -96,74 +105,100 @@ mark `readOnly` waits for your explicit approval.
 Two independent approvals gate each name: the host forwards only the manifest's
 declared names, and the bridge forwards only what this descriptor lists. A name
 outside the allowlist, a duplicate, a remote descriptor that names one, or a
-value that is not set on the bridge process is a startup error, not a silent
-downgrade. Explicit `env` values still win over an inherited name. Credential-
-like names such as `SSH_AUTH_SOCK` and provider tokens are never inheritable.
+value that isn't set on the bridge process is a startup error, not a silent
+downgrade. Explicit `env` values still win over an inherited name.
+Credential-like names such as `SSH_AUTH_SOCK` and provider tokens are never
+inheritable.
 
 `confirmUnknownTools` is a cooperative prompt on top of host policy, not a
 sandbox. An unavailable surface, a declined or cancelled answer, or a failed
 request denies the call rather than assuming approval, so headless and RPC
-frontends stay fail-closed. Confirmations are asked per call and only for tools
+frontends stay fail-closed. Confirmations are asked per call, and only for tools
 without an exact `readOnlyHint: true`.
 
 The bundled `skills/cua-driver/SKILL.md` documents observation, background
 delivery, the agent cursor, and the credential and confirmation boundaries. The
-driver itself is separate third-party software that octet does not install,
-vendor, or start.
+driver itself is separate third-party software that octet doesn't install,
+vendor or start.
 
 ## Trust and limitations
 
 A local server runs with your OS authority. Neither configuration nor tool
-approval is a sandbox. Server trust does not approve every tool: only an exact,
-uncontradicted JSON `readOnlyHint: true` gets read-only classification. Unknown
-or destructive calls require host policy. The working-tree coding host binds
-`mcp.tool.call` to the active owner, process generation, published tool identity,
-and exact arguments: full access (`unsafe_host`) permits these calls, including
-mutations. Controlled policies deny them and still block extension startup;
-enabling an extension alone is not authorization. Unrecognized policy operations
-remain denied. This adapter is a source change, not a claim about the published
-`0.7.6` host, which denies these calls.
-Calls are never automatically replayed after an ambiguous failure; cancellation
-does not promise rollback.
+approval is a sandbox. Trusting a server doesn't approve every tool: only an
+exact, uncontradicted JSON `readOnlyHint: true` counts as read-only. Unknown or
+destructive calls need host policy. The working-tree coding host binds
+`mcp.tool.call` to the active owner, process generation, published tool identity
+and exact arguments. Full access (`unsafe_host`) permits these calls, including
+mutations. Controlled policies deny them and still block extension startup,
+because enabling an extension alone isn't authorization. Unrecognized policy
+operations stay denied. This adapter is a source change, not a claim about the
+published `0.7.6` host, which denies these calls. Calls are never replayed
+automatically after an ambiguous failure, and cancelling doesn't promise a
+rollback.
 
-Server descriptions, schemas, logs, and results are untrusted data. The server
-gets only a small non-secret environment allowlist, the reviewed session names it
-explicitly requests through `inheritEnv`, and explicit `env` values, not ambient
-provider tokens or dotenv files. Keep secrets out of labels and
+Server descriptions, schemas, logs and results are untrusted data. The server
+gets a small non-secret environment allowlist, the reviewed session names it
+explicitly requests through `inheritEnv`, and your explicit `env` values, not
+ambient provider tokens or dotenv files. Keep secrets out of labels and
 arguments.
 
-**Remote Streamable HTTP is blocked by default and unsafe for production,
-privileged networks, or sensitive credentials.** Its process-owner-only
-experimental switch is not a safety qualification. The [nine-defect remediation
+**Remote Streamable HTTP is blocked by default, and unsafe for production,
+privileged networks or sensitive credentials.** Its process-owner-only
+experimental switch isn't a safety qualification. The [nine-defect remediation
 record and remaining closure gates](REFERENCE.md#known-streamable-http-defects)
-describe the tested safeguards and outstanding qualification work. The supported
-remote surface stays deliberately narrow: one exact URL with no
-redirects/proxies/cookies, one negotiated session, static extension-scoped
-credentials only, and an optional permanent GET stream for a server that declares
-a change notification. A remote descriptor may name one `OCTET_MCP_*` environment
-variable that the bridge reads per request and never logs, echoes, or stores. The
-stock runtime has no credential broker and no OAuth flow: `CredentialProvider`
-adapters must be composed explicitly, and OAuth/browser authorization stays
-policy-gated because the extension API has no host-brokered authorization
-primitive. Legacy SSE authorization, resources, prompts, sampling, elicitation,
-and ambient discovery are unsupported.
+describe the tested safeguards and the outstanding qualification work.
+
+<details>
+<summary>What the remote surface supports</summary>
+
+The supported remote surface stays deliberately narrow: one exact URL with no
+redirects, proxies or cookies, one negotiated session, static extension-scoped
+credentials only, and an optional permanent GET stream for a server that
+declares a change notification. A remote descriptor may name one `OCTET_MCP_*`
+environment variable that the bridge reads per request and never logs, echoes or
+stores. The stock runtime has no credential broker and no OAuth flow.
+`CredentialProvider` adapters must be composed explicitly, and OAuth or browser
+authorization stays policy-gated, because the extension API has no host-brokered
+authorization primitive. Legacy SSE authorization, resources, prompts, sampling,
+elicitation and ambient discovery are unsupported.
+
+</details>
 
 ## Reference
 
-The bundle requires exactly octet `0.8.1` and uses API `0.4`. The following
-is a retained bundled-runtime contract, not a general SDK authoring guide.
+The bundle needs exactly octet `0.8.2` and uses API `0.4`. What follows is a
+retained bundled-runtime contract, not a general SDK authoring guide.
 
-- <a id="security-and-authority"></a>[Security and authority](REFERENCE.md#security-and-authority).
-  - <a id="experimental-streamable-http-gate"></a>[Experimental Streamable HTTP gate](REFERENCE.md#experimental-streamable-http-gate).
-  - <a id="known-streamable-http-defects"></a>[Known Streamable HTTP defects](REFERENCE.md#known-streamable-http-defects).
-- <a id="requirements-and-installation"></a>[Requirements and installation](REFERENCE.md#requirements-and-installation).
-- <a id="configuration"></a>[Configuration](REFERENCE.md#configuration): strict file validation and schema.
-    - <a id="desktop-session-environment-and-tool-confirmation"></a>[Desktop session environment and tool confirmation](REFERENCE.md#desktop-session-environment-and-tool-confirmation).
-  - <a id="streamable-http-configuration"></a>[Streamable HTTP configuration](REFERENCE.md#streamable-http-configuration).
-  - <a id="digest-pinned-trusted-project-configuration"></a>[Digest-pinned trusted project configuration](REFERENCE.md#digest-pinned-trusted-project-configuration).
-  - <a id="enforced-default-bounds"></a>[Enforced default bounds](REFERENCE.md#enforced-default-bounds).
-  - <a id="streamable-http-framing-and-recovery"></a>[Streamable HTTP framing and recovery](REFERENCE.md#streamable-http-framing-and-recovery), subject to the remaining closure gates.
-- <a id="catalogs-calls-and-results"></a>[Catalogs, calls, and results](REFERENCE.md#catalogs-calls-and-results): epochs, cancellation, schemas, and media.
-- <a id="lifecycle-health-and-recovery"></a>[Lifecycle, health, and recovery](REFERENCE.md#lifecycle-health-and-recovery).
-- <a id="tui-and-serve-presentation"></a>[TUI and Serve presentation](REFERENCE.md#tui-and-serve-presentation): owner-fenced state, not a separate manager.
-- <a id="tests"></a>[Tests](REFERENCE.md#tests): documented fixtures, not live remote-transport qualification.
+- <a id="security-and-authority"></a>[Security and
+  authority](REFERENCE.md#security-and-authority).
+  - <a id="experimental-streamable-http-gate"></a>[Experimental Streamable HTTP
+    gate](REFERENCE.md#experimental-streamable-http-gate).
+  - <a id="known-streamable-http-defects"></a>[Known Streamable HTTP
+    defects](REFERENCE.md#known-streamable-http-defects).
+- <a id="requirements-and-installation"></a>[Requirements and
+  installation](REFERENCE.md#requirements-and-installation).
+- <a id="configuration"></a>[Configuration](REFERENCE.md#configuration): strict
+  file validation and schema.
+    - <a id="desktop-session-environment-and-tool-confirmation"></a>[Desktop
+      session environment and tool
+      confirmation](REFERENCE.md#desktop-session-environment-and-tool-confirmation).
+  - <a id="streamable-http-configuration"></a>[Streamable HTTP
+    configuration](REFERENCE.md#streamable-http-configuration).
+  - <a id="digest-pinned-trusted-project-configuration"></a>[Digest-pinned
+    trusted project
+    configuration](REFERENCE.md#digest-pinned-trusted-project-configuration).
+  - <a id="enforced-default-bounds"></a>[Enforced default
+    bounds](REFERENCE.md#enforced-default-bounds).
+  - <a id="streamable-http-framing-and-recovery"></a>[Streamable HTTP framing
+    and recovery](REFERENCE.md#streamable-http-framing-and-recovery), subject to
+    the remaining closure gates.
+- <a id="catalogs-calls-and-results"></a>[Catalogs, calls, and
+  results](REFERENCE.md#catalogs-calls-and-results): epochs, cancellation,
+  schemas and media.
+- <a id="lifecycle-health-and-recovery"></a>[Lifecycle, health, and
+  recovery](REFERENCE.md#lifecycle-health-and-recovery).
+- <a id="tui-and-serve-presentation"></a>[TUI and Serve
+  presentation](REFERENCE.md#tui-and-serve-presentation): owner-fenced state,
+  not a separate manager.
+- <a id="tests"></a>[Tests](REFERENCE.md#tests): documented fixtures, not live
+  remote-transport qualification.

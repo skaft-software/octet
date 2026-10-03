@@ -140,6 +140,18 @@ impl OrdinarySurfaceLifecycle {
         }
     }
 
+    pub(crate) fn native_state(&self, now: Instant) -> (&'static str, Option<&str>) {
+        let Some(status) = self.status().filter(|status| status.visible_at(now)) else {
+            return ("ready", None);
+        };
+        let state = match self {
+            Self::Loading(_) => "loading",
+            Self::RecoverableError(_) => "error",
+            _ => "ready",
+        };
+        (state, Some(&status.text))
+    }
+
     pub(crate) fn is_loading(&self) -> bool {
         matches!(self, Self::Loading(_))
     }

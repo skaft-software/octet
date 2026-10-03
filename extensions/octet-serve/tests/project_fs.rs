@@ -1,6 +1,9 @@
 //! Standalone integration coverage for root-confined project filesystem operations.
 
 #[allow(dead_code)]
+#[path = "../src/ignored_paths.rs"]
+mod ignored_paths;
+#[allow(dead_code)]
 #[path = "../src/fs.rs"]
 mod project_fs;
 #[allow(dead_code)]
@@ -917,4 +920,73 @@ fn oversized_path_overflow_stops_search_but_unrelated_truncation_and_exact_cap_d
     assert!(overflow.hits.iter().all(|hit| hit.line == Some(1)));
     assert_eq!(overflow.scanned_bytes, 100 * 7);
     assert_eq!(project_fs::take_file_system_work().search_file_reads, 100);
+}
+
+/// Issue #459: build output, dependencies, VCS state and hidden directories
+/// dominate a real project's bytes. Search never opens them, like the `@`
+/// picker's index, while `.github` stays searchable.
+#[test]
+fn search_skips_generated_vcs_and_hidden_directories() {
+    let fixture = Fixture::new(|root| {
+        for directory in [
+            "src",
+            "node_modules/pkg",
+            "target/debug",
+            ".git/objects",
+            ".cache",
+            "dist",
+            ".github/workflows",
+        ] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for path in [
+            "src/app.rs",
+            "node_modules/pkg/index.js",
+            "target/debug/build.log",
+            ".git/objects/packed",
+            ".cache/entry",
+            "dist/bundle.js",
+            ".github/workflows/ci.yml",
+        ] {
+            fs::write(root.join(path), "needle\n").unwrap();
+        }
+    });
+    project_fs::take_file_system_work();
+    let result =
+        ProjectFileSystem::search(&fixture.registry, &fixture.project_id, "needle").unwrap();
+    assert_eq!(
+        result
+            .hits
+            .iter()
+            .map(|hit| hit.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![".github/workflows/ci.yml", "src/app.rs"]
+    );
+    assert!(!result.truncated);
+    let work = project_fs::take_file_system_work();
+    assert_eq!(work.search_file_reads, 2);
+    assert_eq!(
+        work.search_directories, 4,
+        "only the root, src, .github and .github/workflows are opened"
+    );
+}
+
+/// Issue #459: non-ASCII text used to be matched case-sensitively while ASCII
+/// text was not. The reported line and snippet still come from the original.
+#[test]
+fn search_folds_case_in_non_ascii_text_and_reports_the_original_line() {
+    let fixture = Fixture::new(|root| {
+        fs::write(
+            root.join("notes.md"),
+            "first line\nDer Straßenname ÜBER den Fluss\n",
+        )
+        .unwrap();
+    });
+    for query in ["über", "ÜBER", "straßENNAME"] {
+        let result =
+            ProjectFileSystem::search(&fixture.registry, &fixture.project_id, query).unwrap();
+        assert_eq!(result.hits.len(), 1, "{query}");
+        assert_eq!(result.hits[0].line, Some(2), "{query}");
+        assert_eq!(result.hits[0].snippet, "Der Straßenname ÜBER den Fluss");
+    }
 }

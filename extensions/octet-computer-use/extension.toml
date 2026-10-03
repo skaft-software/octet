@@ -1,7 +1,7 @@
 name = "octet-computer-use"
-version = "0.8.1"
+version = "0.8.2"
 api_version = "0.4"
-requires_octet = "=0.8.1"
+requires_octet = "=0.8.2"
 description = "Native computer use through Cua Driver with window-scoped cursor feedback and Octet's effect-confirmation policy"
 
 [entrypoint]
@@ -10,6 +10,8 @@ command = "extension.py"
 [capabilities]
 # Provisioning installs the MIT-licensed `cua-driver` distribution from the
 # configured package index into octet-owned state under ~/.octet/computer-use.
+# Default macOS setup also installs Cua's verified signed host from its tagged
+# release under that same root, without replacing a global application.
 # The driver is then launched as a child process to read the desktop and to act
 # on it, which necessarily requires filesystem and process authority.
 filesystem = "unrestricted"
@@ -19,7 +21,11 @@ network = true
 # reviewed, non-secret session variables. None is a credential, and none is
 # forwarded unless the host and the bundle both declare it. The bundle strips
 # everything else, so provider tokens and arbitrary ambient variables never
-# reach the child.
+# reach the child. The desktop-identity names (XDG_CURRENT_DESKTOP,
+# XDG_SESSION_DESKTOP, DESKTOP_SESSION, KDE_FULL_SESSION) and compositor IPC
+# names (HYPRLAND_INSTANCE_SIGNATURE, SWAYSOCK) let the Linux driver pick its
+# GNOME, KDE, Hyprland, or Sway route and give launched apps their desktop
+# identity. XDG_STATE_HOME locates the driver's own state.
 environment = [
   "DISPLAY",
   "WAYLAND_DISPLAY",
@@ -30,6 +36,13 @@ environment = [
   "XDG_CONFIG_HOME",
   "DBUS_SESSION_BUS_ADDRESS",
   "XAUTHORITY",
+  "XDG_CURRENT_DESKTOP",
+  "XDG_SESSION_DESKTOP",
+  "DESKTOP_SESSION",
+  "XDG_STATE_HOME",
+  "KDE_FULL_SESSION",
+  "HYPRLAND_INSTANCE_SIGNATURE",
+  "SWAYSOCK",
   "APPDATA",
   "LOCALAPPDATA",
   "USERPROFILE",
@@ -57,7 +70,14 @@ tools = [
   "computer_use_end_session",
   "computer_use_jev_status",
   "computer_use_jev_choose",
+  "computer_use_jev_use_status",
+  "computer_use_jev_use_cancel",
+  "computer_use_jev_use_setup",
+  "computer_use_jev_use_run",
+  "computer_use_jev_use_choose",
 ]
 commands = ["computer-use"]
 ui = ["status"]
+hooks = ["session_end"]
 confirmations = true
+menu = true

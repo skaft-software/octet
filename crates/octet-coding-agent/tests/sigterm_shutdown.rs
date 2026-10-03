@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! OS-boundary SIGTERM, process-tree, and terminal-restoration probes.
+
+#![cfg(unix)]
 
 use std::fs::File;
 use std::io::{Read, Write};
