@@ -53,13 +53,54 @@ Keep `Request.reasoning` at the original baseline. Use
 it never mutates the baseline. `validate_responses_input` checks actual advertised
 wire efforts, route authority and adjacency before transport. On/budgets/Ultra
 are not wire update efforts. Off is accepted only where `none` is advertised.
-Invalid raw items fail rather than being discarded.
+Invalid raw items fail rather than being discarded. Raw update items may also
+contain the specification's optional `id` (string or null), which is preserved
+verbatim in replay; it grants no additional control authority.
 
 Updates cannot accompany automatic context management. Standalone compact
 histories require the independently declared
 `compact_reasoning_effort_updates` authority; Lite/V2 alone does not qualify it.
 A host must persist the baseline and ordered updates, and change the baseline
 only when its durable context-window policy explicitly establishes a new one.
+
+## Native steering
+
+The host sends text-only `response.steer` events after `response.created`, on
+the same connection, using only `type`, `previous_response_id`, and `input`.
+Accepted input is queued, not applied; the successor's `response.created` is
+the commit point. Automatic successors inherit settings and must not be
+replaced with an extra `response.create`. Required client tool results return
+on the same socket in one explicit continuation per parent, without resending
+accepted steering or rerunning completed tools.
+
+Accepted/pending events require a submission ID. A `response.steer.failed`
+rejection before allocation may omit `steer.id` or return null; correlate it
+against an unacknowledged submission's parent and echoed input. Failure after
+acceptance uses the accepted ID. Bounded failure events allow the largest admitted
+input to be echoed, including JSON escaping. Unknown pending reasons leave input
+queued; they do not alone authorize an explicit continuation. Automatic context
+management is rejected before dispatch on both opening and explicit continuation.
+Disconnects remain ambiguous, never an implicit rejection or replay grant.
+
+## Contract sources and route limits
+
+The public [steering guide](https://developers.openai.com/api/docs/guides/steering)
+and [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning)
+define these independent controls. OpenAI's generated Python SDK at
+`becc1d20eed83c1b8d85e15dc131a372d9dc7813` supplies the exact schemas for
+[steering requests](https://github.com/openai/openai-python/blob/becc1d20eed83c1b8d85e15dc131a372d9dc7813/src/openai/types/responses/response_steer_event_param.py),
+[failures](https://github.com/openai/openai-python/blob/becc1d20eed83c1b8d85e15dc131a372d9dc7813/src/openai/types/responses/response_steer_failed_event.py),
+[pending reasons](https://github.com/openai/openai-python/blob/becc1d20eed83c1b8d85e15dc131a372d9dc7813/src/openai/types/responses/response_steer_pending_event.py),
+and [configuration updates](https://github.com/openai/openai-python/blob/becc1d20eed83c1b8d85e15dc131a372d9dc7813/src/openai/types/responses/response_configuration_update_item_param_param.py).
+
+These public contracts do not establish native steering on Octet's existing
+Codex backend route. It remains queued-only pending independently verified
+route/account authority ([issue #470](https://github.com/skaft-software/octet/issues/470));
+positive Codex reasoning-update inventory does not enable steering. The newer
+[Sign in with ChatGPT inference flow](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+explicitly uses the public API rather than backend-api endpoints; it is not
+qualification of the existing Codex route or authorization to reuse its login
+credentials on a different endpoint.
 
 ## Response boundaries and sampling
 

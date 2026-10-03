@@ -60,7 +60,14 @@ fn update_reasoning(item: &ResponsesItem) -> Result<Option<ReasoningConfig>, cra
         .get("reasoning")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(invalid)?;
-    if object.len() != 2 || reasoning.len() != 1 {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "type" | "id" | "reasoning"))
+        || object
+            .get("id")
+            .is_some_and(|id| !id.is_null() && !id.is_string())
+        || reasoning.len() != 1
+    {
         return Err(invalid());
     }
     let effort = reasoning

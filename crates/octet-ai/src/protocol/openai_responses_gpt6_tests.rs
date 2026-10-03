@@ -266,6 +266,59 @@ fn ordered_updates_preserve_baseline_and_effective_reasoning() {
 }
 
 #[test]
+fn ordered_updates_preserve_optional_spec_ids_without_changing_baseline() {
+    let model = model();
+    for id in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!("cfg_1")),
+    ] {
+        let mut item =
+            serde_json::json!({"type":"configuration_update","reasoning":{"effort":"high"}});
+        if let Some(id) = id {
+            item["id"] = id;
+        }
+        let input =
+            ResponsesInput::new(vec![ResponsesItem::new(item.clone()).unwrap(), user_item()]);
+        // Opaque session replay must preserve the optional ID as well as effort.
+        let input: ResponsesInput =
+            serde_json::from_value(serde_json::to_value(input).unwrap()).unwrap();
+        let mut req = request();
+        assert_eq!(
+            input.effective_reasoning(&req.reasoning).unwrap(),
+            ReasoningConfig::Effort(crate::ReasoningEffort::High)
+        );
+        req.responses = Some(crate::ResponsesOptions::full_replay(input));
+        let body: serde_json::Value =
+            serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["input"][0], item);
+    }
+}
+
+#[test]
+fn ordered_updates_reject_malformed_ids_and_extra_controls() {
+    let model = model();
+    for extra in [
+        serde_json::json!({"id": 123}),
+        serde_json::json!({"id": false}),
+        serde_json::json!({"id": {}}),
+        serde_json::json!({"temperature": 0.7}),
+    ] {
+        let mut item =
+            serde_json::json!({"type":"configuration_update","reasoning":{"effort":"high"}});
+        item.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let input = ResponsesInput::new(vec![ResponsesItem::new(item).unwrap(), user_item()]);
+        assert!(input.effective_reasoning(&request().reasoning).is_err());
+        assert!(
+            crate::validate_responses_input(&model, &input, &request().reasoning, false).is_err()
+        );
+    }
+}
+
+#[test]
 fn updates_reject_unsupported_efforts_adjacency_and_unqualified_compact() {
     let mut model = model();
     let baseline = request().reasoning;
