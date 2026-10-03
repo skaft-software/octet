@@ -2,8 +2,9 @@
 //!
 //! A TSP program writes APC messages to its own stdout and reads replies and
 //! events from its stdin. Tern advertises itself with `TERM_PROGRAM=tern`, so a
-//! client can start optimistically against the full v1 vocabulary and refine
-//! itself from the terminal's `hello` reply.
+//! client can start optimistically against the full v1 kind vocabulary and refine
+//! itself from the terminal's `hello` reply. Optional features require explicit
+//! advertisement in that reply.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -43,6 +44,7 @@ pub struct TernClient {
     dark: bool,
     reduce_motion: bool,
     kinds: Vec<String>,
+    features: Vec<String>,
     _raw: Option<tty::RawGuard>,
 }
 
@@ -85,6 +87,7 @@ impl TernClient {
                 .iter()
                 .map(|k| (*k).to_owned())
                 .collect(),
+            features: Vec::new(),
             _raw: None,
         };
         client.write(
@@ -164,6 +167,11 @@ impl TernClient {
         self.kinds.iter().any(|k| k == kind.as_str())
     }
 
+    /// Whether the latest `hello` advertises a feature (false before negotiation).
+    pub fn supports_feature(&self, feature: &str) -> bool {
+        self.features.iter().any(|supported| supported == feature)
+    }
+
     fn write<T: serde::Serialize>(&mut self, verb: Verb, value: &T) -> io::Result<()> {
         let encoded = frame::encode_json(verb, value, self.limit)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -189,6 +197,7 @@ impl TernClient {
             self.reduce_motion = reduce;
         }
         self.kinds = hello.kinds.clone();
+        self.features = hello.features.clone().unwrap_or_default();
     }
 
     /// Send the pending keyboard focus to `id` (`None` clears it).
@@ -402,6 +411,51 @@ mod tests {
         client.reset_surface("test");
         assert_eq!(client.frame_ops_now("test", Vec::new()).unwrap(), 1);
     }
+    #[test]
+    fn features_require_advertisement_in_the_latest_hello() {
+        let mut client = TernClient::with_writer("test", None, io::sink()).unwrap();
+        assert!(!client.supports_feature("scroll"));
+        assert!(!client.supports_feature("unknown"));
+
+        let mut hello: HelloReply = serde_json::from_value(serde_json::json!({
+            "v": 1,
+            "term": "tern",
+            "kinds": [],
+            "features": ["scroll", "other"]
+        }))
+        .unwrap();
+        client.observe(&Incoming::Reply(Reply::Hello(hello.clone())));
+        assert!(client.supports_feature("scroll"));
+        assert!(client.supports_feature("other"));
+        assert!(!client.supports_feature("Scroll"));
+        assert!(!client.supports_feature("unknown"));
+
+        hello.features = Some(vec!["other".into()]);
+        client.apply_hello(&hello);
+        assert!(!client.supports_feature("scroll"));
+        assert!(client.supports_feature("other"));
+
+        hello.features = Some(vec!["scroll".into()]);
+        client.apply_hello(&hello);
+        assert!(client.supports_feature("scroll"));
+        hello.features = Some(Vec::new());
+        client.apply_hello(&hello);
+        assert!(!client.supports_feature("scroll"));
+
+        hello.features = Some(vec!["scroll".into()]);
+        client.apply_hello(&hello);
+        assert!(client.supports_feature("scroll"));
+        let hello_without_features = serde_json::from_value(serde_json::json!({
+            "v": 1,
+            "term": "tern",
+            "kinds": []
+        }))
+        .unwrap();
+        client.observe(&Incoming::Reply(Reply::Hello(hello_without_features)));
+        assert!(!client.supports_feature("scroll"));
+        assert!(!client.supports_feature("other"));
+    }
+
     #[test]
     fn native_blob_headers_and_bodies_cannot_inject_escape_sequences() {
         let mut client = TernClient::with_writer("test", None, io::sink()).unwrap();

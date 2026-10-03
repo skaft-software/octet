@@ -35,6 +35,10 @@ const SUBAGENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from
 pub(crate) struct SecretInputBuffer(Vec<u8>);
 
 impl SecretInputBuffer {
+    pub(crate) fn byte_len(&self) -> usize {
+        self.0.len()
+    }
+
     pub(crate) fn push(&mut self, character: char) {
         let mut encoded = [0; 4];
         let bytes = character.encode_utf8(&mut encoded).as_bytes();
@@ -46,12 +50,9 @@ impl SecretInputBuffer {
 
     pub(crate) fn extend_paste(&mut self, pasted: &str) {
         let pasted = pasted.trim_end_matches(['\r', '\n']);
-        let remaining = MAX_SECRET_INPUT_BYTES.saturating_sub(self.0.len());
-        let mut end = pasted.len().min(remaining);
-        while end > 0 && !pasted.is_char_boundary(end) {
-            end -= 1;
+        if self.0.len().saturating_add(pasted.len()) <= MAX_SECRET_INPUT_BYTES {
+            self.0.extend_from_slice(pasted.as_bytes());
         }
-        self.0.extend_from_slice(&pasted.as_bytes()[..end]);
     }
 
     pub(crate) fn backspace(&mut self) {
@@ -76,9 +77,25 @@ impl Drop for SecretInputBuffer {
     }
 }
 
-/// Give one extension command exclusive ownership of terminal input. Secret
-/// answers never enter the ordinary editor or rendered frame; non-secret setup
-/// values use the same temporary composer surface and are echoed while typed.
+#[cfg(test)]
+mod temporary_input_tests {
+    use super::{SecretInputBuffer, MAX_SECRET_INPUT_BYTES};
+
+    #[test]
+    fn secret_over_limit_paste_is_rejected_atomically() {
+        let mut value = SecretInputBuffer::default();
+        value.extend_paste("original");
+        value.extend_paste(&"🦀".repeat(MAX_SECRET_INPUT_BYTES));
+        assert_eq!(value.take().as_slice(), b"original");
+        value.extend_paste(&"a".repeat(MAX_SECRET_INPUT_BYTES));
+        value.push('雪');
+        assert_eq!(value.take().len(), MAX_SECRET_INPUT_BYTES);
+    }
+}
+
+/// Give one extension command exclusive ownership of terminal input. Secrets
+/// remain host-private; ordinary values use a separate bounded editor shared
+/// by raw and native input without changing the parent draft or chips.
 pub async fn extension_input_picker<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -87,10 +104,11 @@ pub async fn extension_input_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    shell.set_tool_input_prompt(Some(request.prompt.clone()));
+    use sexy_tui_rs::TextEditAction;
+
+    shell.begin_tool_input(&request.prompt, request.secret);
     shell.render();
     let mut value = SecretInputBuffer::default();
-    let mut overflowed = false;
     loop {
         let next = tokio::select! {
             biased;
@@ -100,18 +118,23 @@ where
         let event = match next {
             Some(Ok(event)) => event,
             Some(Err(error)) => {
-                shell.set_tool_input_prompt(None);
+                shell.end_tool_input();
                 shell.render();
                 return Err(error.into());
             }
             None => {
-                shell.set_tool_input_prompt(None);
+                shell.end_tool_input();
                 shell.render();
                 return Ok(None);
             }
         };
+        let event = if request.secret {
+            event
+        } else {
+            shell.tool_input_event(&event)
+        };
         if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
-            shell.set_tool_input_prompt(None);
+            shell.end_tool_input();
             shell.request_close();
             shell.render();
             return Ok(None);
@@ -119,28 +142,46 @@ where
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match key.code {
-                    KeyCode::Enter if overflowed => {
-                        // Never return a silently truncated credential. Clear the
-                        // rejected input, then let the user paste a fresh value.
+                    KeyCode::Enter if shell.tool_input_overflowed() => {
+                        // Rejected input is never submitted, even after a later edit.
                         value = SecretInputBuffer::default();
-                        overflowed = false;
+                        shell.clear_tool_input_value();
                     }
                     KeyCode::Enter => {
-                        let bytes = value.take();
-                        let answer = String::from_utf8(bytes)
-                            .map_err(|_| anyhow::anyhow!("extension input was not valid UTF-8"))?;
-                        shell.set_tool_input_prompt(None);
+                        let answer = if request.secret {
+                            // All buffer mutations accept valid UTF-8 scalars/paste.
+                            String::from_utf8(value.take()).expect("secret input is valid UTF-8")
+                        } else {
+                            shell
+                                .end_tool_input()
+                                .expect("ordinary request owns an editor")
+                        };
+                        if request.secret {
+                            shell.end_tool_input();
+                        }
                         shell.render();
                         return Ok(Some(answer));
                     }
                     KeyCode::Esc => {
-                        shell.set_tool_input_prompt(None);
+                        shell.end_tool_input();
                         shell.render();
                         return Ok(None);
                     }
-                    KeyCode::Backspace => value.backspace(),
+                    KeyCode::Backspace if request.secret => value.backspace(),
+                    KeyCode::Backspace => shell.edit_tool_input(TextEditAction::Backspace),
+                    KeyCode::Delete if !request.secret => {
+                        shell.edit_tool_input(TextEditAction::Delete)
+                    }
+                    KeyCode::Left if !request.secret => shell.edit_tool_input(TextEditAction::Left),
+                    KeyCode::Right if !request.secret => {
+                        shell.edit_tool_input(TextEditAction::Right)
+                    }
+                    KeyCode::Home if !request.secret => shell.edit_tool_input(TextEditAction::Home),
+                    KeyCode::End if !request.secret => shell.edit_tool_input(TextEditAction::End),
+                    KeyCode::Up if !request.secret => shell.edit_tool_input(TextEditAction::Up),
+                    KeyCode::Down if !request.secret => shell.edit_tool_input(TextEditAction::Down),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        shell.set_tool_input_prompt(None);
+                        shell.end_tool_input();
                         shell.render();
                         return Ok(None);
                     }
@@ -149,36 +190,34 @@ where
                             KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
                         ) =>
                     {
-                        overflowed |= value.0.len().saturating_add(character.len_utf8())
-                            > MAX_SECRET_INPUT_BYTES;
-                        value.push(character)
+                        if request.secret {
+                            if value.0.len().saturating_add(character.len_utf8())
+                                > MAX_SECRET_INPUT_BYTES
+                            {
+                                shell.mark_tool_input_overflow();
+                            }
+                            value.push(character);
+                        } else {
+                            shell.edit_tool_input(TextEditAction::Char(character));
+                        }
                     }
                     _ => {}
                 }
             }
             Event::Paste(pasted) => {
-                overflowed |= value
-                    .0
-                    .len()
-                    .saturating_add(pasted.trim_end_matches(['\r', '\n']).len())
-                    > MAX_SECRET_INPUT_BYTES;
-                value.extend_paste(&pasted);
+                let pasted = pasted.trim_end_matches(['\r', '\n']);
+                if request.secret {
+                    if value.0.len().saturating_add(pasted.len()) > MAX_SECRET_INPUT_BYTES {
+                        shell.mark_tool_input_overflow();
+                    }
+                    value.extend_paste(pasted);
+                } else {
+                    shell.edit_tool_input(TextEditAction::Paste(pasted.to_owned()));
+                }
             }
             Event::Resize(columns, rows) => shell.set_size(columns, rows),
             _ => {}
         }
-        let shown = if overflowed {
-            format!(
-                "{} [input exceeds 4 KiB; Enter to clear, Esc to cancel]",
-                request.prompt
-            )
-        } else if request.secret {
-            request.prompt.clone()
-        } else {
-            let entered = std::str::from_utf8(&value.0).unwrap_or_default();
-            format!("{} {}", request.prompt, entered)
-        };
-        shell.set_tool_input_prompt(Some(shown));
         shell.render();
     }
 }

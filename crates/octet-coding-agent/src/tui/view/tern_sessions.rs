@@ -4,7 +4,7 @@ use octet_tern::wire::{Kind, Node, Props, Span};
 use serde_json::json;
 use std::time::SystemTime;
 
-use super::{sanitize_ordinary_surface_cell, PickerScope, PickerState, ShellState};
+use super::{sanitize_ordinary_surface_cell, tern_controls, PickerScope, PickerState, ShellState};
 
 pub(super) fn decorate(
     shell: &ShellState,
@@ -32,7 +32,7 @@ pub(super) fn decorate(
                 "when":super::panel_render::session_age(session.modified, now)}})
     }).collect::<Vec<_>>();
     let selected_session = selected.and_then(|index| picker.active_rows().get(index));
-    let preview = selected_session.map(|session| {
+    let mut preview = selected_session.map(|session| {
         let mut facts = vec![
             json!({"k":"Session","v":[{"t":safe(&session.id),"s":"dim mono"}]}),
             json!({"k":"Messages","v":session.message_count.to_string()}),
@@ -59,23 +59,130 @@ pub(super) fn decorate(
     } else {
         "All workspaces"
     };
+    let mut strip = Vec::new();
+    let mut unavailable = Vec::new();
+    for (id, title, binding, on) in [
+        (
+            "workspace",
+            scope.to_owned(),
+            "tui.input.tab",
+            picker.scope == PickerScope::All,
+        ),
+        (
+            "sort",
+            format!("Sort: {}", picker.sort.label()),
+            "app.session.toggleSort",
+            false,
+        ),
+        (
+            "named",
+            "Named only".to_owned(),
+            "app.session.toggleNamedFilter",
+            picker.named_only,
+        ),
+        (
+            "paths",
+            "Paths".to_owned(),
+            "app.session.togglePath",
+            picker.show_path,
+        ),
+    ] {
+        if tern_controls::key(shell, binding).is_some() {
+            strip.push(json!({"id":id,"label":format!("{title} · {}", tern_controls::label(shell, binding)),"on":on}));
+        } else {
+            // Strip items have no disabled prop. Keep unavailable controls as
+            // plain text, not native strip items that can emit a click action.
+            unavailable.push(format!("{title} unavailable"));
+        }
+    }
+    if !unavailable.is_empty() {
+        preview.push(Node::new(
+            "panel.session.unavailable",
+            Kind::Text,
+            Props::new()
+                .set("text", unavailable.join(" · "))
+                .set("wrap", "word"),
+        ));
+    }
+    let mut confirm = tern_controls::picker_action(
+        shell,
+        "confirm",
+        "Resume",
+        "tui.select.confirm",
+        selected_session.is_some(),
+    );
+    confirm["primary"] = json!(true);
+    let search = tern_controls::picker_action(
+        shell,
+        "search",
+        "Search text",
+        "app.session.search",
+        !picker.filter.trim().is_empty(),
+    );
+    let rename = tern_controls::picker_action(
+        shell,
+        "rename",
+        "Rename",
+        "app.session.rename",
+        selected_session.is_some(),
+    );
+    let mut delete = tern_controls::picker_action(
+        shell,
+        "delete",
+        "Delete",
+        "app.session.delete",
+        selected_session.is_some() && !selected_session.is_some_and(current),
+    );
+    delete["danger"] = json!(true);
+    let mut cancel =
+        tern_controls::picker_action(shell, "cancel", "Close", "tui.select.cancel", true);
+    cancel["end"] = json!(true);
     let props = props.set("title", "Sessions").set("subtitle", scope).set("icon", "session")
         .set("subtitle", format!("{scope} · {}", picker.sort.label())).set("noun", "sessions").set("placeholder", "Search sessions…")
         .set("items", catalogue).set("size", "lg").set("preview", if shell.size.0 < 80 {"below"} else {"side"})
         .set("current", picker.active_rows().iter().enumerate().filter(|(_, session)| current(session)).map(|(index, _)| index.to_string()).collect::<Vec<_>>())
         .set("columns", json!([{"id":"messages","head":"Messages","format":"num","priority":2},{"id":"when","head":"Updated","format":"time","priority":1}]))
-        .set("strip", json!({"items":[
-            {"id":"workspace","label":scope,"on":picker.scope == PickerScope::All},
-            {"id":"sort","label":format!("Sort: {}", picker.sort.label())},
-            {"id":"named","label":"Named only","on":picker.named_only},
-            {"id":"paths","label":"Paths","on":picker.show_path}
-        ]}))
-        .set("actions", json!([
-            {"id":"confirm","label":"Resume","keys":["enter"],"primary":true,"disabled":selected_session.is_none()},
-            {"id":"search","label":"Search text","keys":["ctrl+f"],"disabled":picker.filter.trim().is_empty()},
-            {"id":"rename","label":"Rename","keys":["ctrl+r"],"disabled":selected_session.is_none()},
-            {"id":"delete","label":"Delete","keys":["ctrl+x"],"danger":true,"disabled":selected_session.is_none() || selected_session.is_some_and(current)},
-            {"id":"cancel","label":"Close","keys":["esc"],"end":true}
-        ]));
+        .set("strip", json!({"items":strip}))
+        .set("actions", vec![confirm, search, rename, delete, cancel]);
     (props, preview)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::keymap::keybindings::KeybindingsManager;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn session_footer_resolves_keys_and_strip_omits_unbound_controls() {
+        let mut shell = ShellState::default();
+        shell.native_keys = Some(KeybindingsManager::with_platform(
+            "linux",
+            false,
+            BTreeMap::from([
+                ("tui.select.confirm".into(), vec!["ctrl+y".into()]),
+                ("tui.select.cancel".into(), Vec::new()),
+                ("app.session.rename".into(), Vec::new()),
+                ("app.session.toggleSort".into(), Vec::new()),
+            ]),
+        ));
+        let picker = PickerState::new(Vec::new(), None);
+        let (props, preview) = decorate(&shell, &picker, Props::new(), None);
+        let props = props.as_map();
+        let actions = props["actions"].as_array().unwrap();
+        assert_eq!(actions[0]["keys"], json!(["ctrl+y"]));
+        assert_eq!(actions[0]["disabled"], true);
+        assert_eq!(actions[2]["label"], "Rename unavailable");
+        assert_eq!(actions[2]["disabled"], "No keybinding");
+        assert!(actions[2].get("keys").is_none());
+        assert_eq!(actions[4]["label"], "Close unavailable");
+        assert!(props["strip"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["id"] != "sort"));
+        assert!(serde_json::to_string(&preview)
+            .unwrap()
+            .contains("Sort: Recent unavailable"));
+    }
 }

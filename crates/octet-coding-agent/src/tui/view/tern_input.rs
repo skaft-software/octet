@@ -8,10 +8,7 @@ use octet_tern::frame::Incoming;
 use octet_tern::wire::Event;
 
 use super::renderer_runtime::SharedState;
-use super::{
-    invalidate_editor_autocomplete, normal_editor_focused, request_file_index_scan,
-    InteractiveShell,
-};
+use super::{invalidate_editor_autocomplete, request_file_index_scan, InteractiveShell};
 use crate::tui::keymap::keybindings::{normalize_key_id, KeybindingsManager};
 
 pub(crate) type Handler = Arc<dyn Fn(Incoming) -> Option<InputEvent> + Send + Sync>;
@@ -28,9 +25,21 @@ pub(super) struct Mailbox {
     /// another app or overlay (screen recording, space switch).
     pub(super) focus_resync: u64,
     pub(super) accepting_input: bool,
+    pub(super) scroll_supported: bool,
+    pub(super) scroll: VecDeque<octet_tern::wire::ScrollBy>,
 }
 
 impl InteractiveShell {
+    /// Only advertise-native navigation enters the native writer's bounded
+    /// queue. The renderer owns credit admission and the actual frame write.
+    pub(super) fn request_native_scroll(&self, by: octet_tern::wire::ScrollBy, count: usize) {
+        let mut mailbox = self.state.native().lock().expect("native mailbox poisoned");
+        if mailbox.accepting_input && mailbox.scroll_supported {
+            let count = count.min(512usize.saturating_sub(mailbox.scroll.len()));
+            mailbox.scroll.extend(std::iter::repeat_n(by, count));
+        }
+    }
+
     pub(crate) fn tern_input_handler(&self) -> Handler {
         self.state
             .native()
@@ -99,6 +108,9 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             if sf == super::tern::SURFACE && id.starts_with("completion.") =>
         {
             let mut shell = state.borrow_mut();
+            if !super::tern::editor_focused(&shell) {
+                return None;
+            }
             let completion = super::tern_completion::Completion::capture(&shell)?;
             if id != &completion.id {
                 return None;
@@ -128,10 +140,16 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
                 && matches!(act.as_str(), "close" | "cancel") =>
         {
             let shell = state.borrow();
-            let current = if id.starts_with("report.") {
+            let report = id.starts_with("report.");
+            let current = if report {
                 shell.overlay.is_some()
+                    && shell.panel.is_none()
+                    && shell.tool_input_prompt.is_none()
+                    && !shell.extension_ui.remote_fullscreen_overlay
             } else {
-                shell.panel.is_some() || shell.tool_input_prompt.is_some()
+                // A temporary request has its own prompt epoch, never the last
+                // panel's cancellation authority.
+                shell.panel.is_some() && shell.tool_input_prompt.is_none()
             };
             if !current
                 || id
@@ -142,7 +160,11 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
                         } else {
                             "modal"
                         },
-                        shell.panel_epoch
+                        if report {
+                            shell.overlay_epoch
+                        } else {
+                            shell.panel_epoch
+                        }
                     )
             {
                 return None;
@@ -154,7 +176,12 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             if sf == super::tern::SURFACE =>
         {
             let mut shell = state.borrow_mut();
-            if id != &format!("panel.{}", shell.panel_epoch) {
+            if id != &super::tern_picker::id(&shell)
+                || !shell
+                    .panel
+                    .as_ref()
+                    .is_some_and(super::tern_picker::interactive)
+            {
                 return None;
             }
             super::tern_picker::select(&mut shell, item)?;
@@ -168,11 +195,17 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             sf, id, act, value, ..
         }) if sf == super::tern::SURFACE && id.starts_with("panel.") => {
             let mut shell = state.borrow_mut();
-            if !super::tern_picker::owns_action(&shell, id)
-                || !shell
-                    .panel
-                    .as_ref()
-                    .is_some_and(super::tern_picker::interactive)
+            if !super::tern_picker::owns_action(&shell, id) {
+                return None;
+            }
+            if matches!(act.as_str(), "cancel" | "close") {
+                drop(shell);
+                return bound_key(state, "tui.select.cancel");
+            }
+            if !shell
+                .panel
+                .as_ref()
+                .is_some_and(super::tern_picker::interactive)
             {
                 return None;
             }
@@ -201,6 +234,8 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
                     "rename" if session => "app.session.rename",
                     "delete" if session => "app.session.delete",
                     "confirm" => "tui.select.confirm",
+                    "up" => "tui.select.up",
+                    "down" => "tui.select.down",
                     "cancel" | "close" => "tui.select.cancel",
                     _ => return None,
                 },
@@ -216,7 +251,9 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             len,
         }) if sf == super::tern::SURFACE && id.starts_with("panel.") => {
             let mut shell = state.borrow_mut();
-            if id != &format!("panel.{}", shell.panel_epoch) {
+            if id != &super::tern_picker::id(&shell)
+                && id != &format!("{}.filter", super::tern_picker::id(&shell))
+            {
                 return None;
             }
             let filter = super::tern_picker::filter(&shell)?;
@@ -241,9 +278,40 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             text,
             cursor,
             len,
+        }) if sf == super::tern::SURFACE && id.starts_with("prompt.") => {
+            super::tern_prompt::edit(&mut state.borrow_mut(), id, *from, *to, text, *cursor, *len);
+            None
+        }
+        Incoming::Event(Event::Action {
+            sf, id, act, value, ..
+        }) if sf == super::tern::SURFACE && id.starts_with("prompt.") => {
+            if value.is_some() {
+                return None;
+            }
+            let shell = state.borrow();
+            let binding = super::tern_prompt::action(&shell, id, act)?;
+            if shell.tool_input_editor.is_none() && binding == "tui.select.cancel" {
+                // Secret controls belong to the private raw-input owner, not
+                // ordinary picker bindings (which may be printable characters).
+                return Some(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                )));
+            }
+            drop(shell);
+            bound_key(state, binding)
+        }
+        Incoming::Event(Event::Edit {
+            sf,
+            id,
+            from,
+            to,
+            text,
+            cursor,
+            len,
         }) if sf == super::tern::SURFACE && id == "composer.editor" => {
             let mut shell = state.borrow_mut();
-            if !normal_editor_focused(&shell) || shell.startup_pending {
+            if !super::tern::editor_focused(&shell) || shell.startup_pending {
                 return None;
             }
             let source = shell.editor.text();
@@ -284,7 +352,7 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
         }
         Incoming::Event(Event::Action { sf, id, act, .. }) if sf == super::tern::SURFACE => {
             let shell = state.borrow();
-            if !normal_editor_focused(&shell) || shell.startup_pending {
+            if !super::tern::editor_focused(&shell) || shell.startup_pending {
                 return None;
             }
             let binding = match (id.as_str(), act.as_str()) {
@@ -329,7 +397,7 @@ fn utf16_boundary(text: &str, offset: usize) -> Option<usize> {
     (utf16 == offset).then_some(text.len())
 }
 
-fn key_event(key: &str) -> Option<KeyEvent> {
+pub(super) fn key_event(key: &str) -> Option<KeyEvent> {
     let key = normalize_key_id(key);
     let (prefix, base) = if key.ends_with("++") {
         (&key[..key.len() - 2], "+")

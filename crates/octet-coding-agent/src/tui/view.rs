@@ -1221,6 +1221,10 @@ pub(crate) struct ShellState {
     render_threaded: bool,
     rendered_animation_addressability: HashMap<u64, bool>,
     panel_epoch: u64,
+    /// Independent ownership fence for sequential transient reports.
+    overlay_epoch: u64,
+    /// Render-owned snapshot of the frontend's resolved native controls.
+    native_keys: Option<crate::tui::keymap::keybindings::KeybindingsManager>,
     pending_panel_document_top: Option<usize>,
     painted_panel: Option<renderer_geometry::PanelRenderReceipt>,
     painted_report: Option<renderer_geometry::ReportRenderReceipt>,
@@ -1358,6 +1362,11 @@ pub(crate) struct ShellState {
     /// Ephemeral tool-owned prompt rendered in place of the editor. Secret
     /// keystrokes never enter `editor` or any transcript/session structure.
     pub(crate) tool_input_prompt: Option<String>,
+    /// Identity of one exclusive request; edits never change this fence.
+    pub(crate) tool_input_epoch: u64,
+    /// Ordinary temporary input only. Secrets remain in the picker driver.
+    pub(crate) tool_input_editor: Option<TextEditor>,
+    pub(crate) tool_input_overflowed: bool,
     /// Durable request to leave the interactive frontend. Exclusive picker and
     /// lifecycle loops set this so the owning outer loop can finish in-flight
     /// cleanup before exiting.
@@ -1654,17 +1663,81 @@ fn navigate_prompt_history(state: &mut ShellState, action: &EditAction) -> bool 
 }
 
 impl ShellState {
+    pub(crate) fn begin_tool_input(&mut self, prompt: &str, secret: bool) {
+        self.tool_input_epoch = self.tool_input_epoch.saturating_add(1);
+        self.tool_input_prompt = Some(sanitize_for_terminal(prompt));
+        self.tool_input_editor = (!secret).then(TextEditor::new);
+        self.tool_input_overflowed = false;
+        self.tool_input_revision = self.tool_input_revision.saturating_add(1);
+    }
+
+    pub(crate) fn end_tool_input(&mut self) -> Option<String> {
+        let answer = self
+            .tool_input_editor
+            .take()
+            .map(|mut editor| editor.take_text());
+        self.tool_input_prompt = None;
+        self.tool_input_overflowed = false;
+        self.tool_input_revision = self.tool_input_revision.saturating_add(1);
+        answer
+    }
+
+    pub(crate) fn edit_tool_input(&mut self, action: sexy_tui_rs::TextEditAction) {
+        use sexy_tui_rs::TextEditAction;
+        let Some(editor) = self.tool_input_editor.as_mut() else {
+            return;
+        };
+        let inserted = match &action {
+            TextEditAction::Char(character) if !character.is_control() => character.len_utf8(),
+            TextEditAction::Paste(text) => {
+                if text
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+                {
+                    return;
+                }
+                TextEditor::normalize_paste(text).len()
+            }
+            TextEditAction::Char(_) => return,
+            TextEditAction::Newline => 1,
+            _ => 0,
+        };
+        if editor.text().len().saturating_add(inserted) > 4096 {
+            self.tool_input_overflowed = true;
+            self.tool_input_revision = self.tool_input_revision.saturating_add(1);
+            return;
+        }
+        if editor.apply(action, usize::from(self.size.0).max(1)) {
+            self.tool_input_revision = self.tool_input_revision.saturating_add(1);
+        }
+    }
+
     /// Borrow the one app-owned safe display map and generic visual layout for
     /// the current composer source and chrome-aware text cell width.
     pub(crate) fn composer_editor_projection(
         &self,
         geometry: ComposerEditorGeometry,
     ) -> Ref<'_, ComposerEditorProjection> {
-        let (source, text, cursor) = match &self.tool_input_prompt {
+        let tool_display = self.tool_input_prompt.as_ref().map(|prompt| {
+            let mut shown = prompt.clone();
+            if let Some(editor) = &self.tool_input_editor {
+                shown.push('\n');
+                shown.push_str(editor.text());
+            }
+            if self.tool_input_overflowed {
+                shown.push_str("\nInput exceeds 4 KiB; Enter to clear, Esc to cancel");
+            }
+            shown
+        });
+        let (source, text, cursor) = match &tool_display {
             Some(prompt) => (
                 ComposerEditorSource::ToolPrompt(self.tool_input_revision),
                 prompt.as_str(),
-                prompt.len(),
+                self.tool_input_editor
+                    .as_ref()
+                    .map_or(prompt.len(), |editor| {
+                        self.tool_input_prompt.as_ref().unwrap().len() + 1 + editor.cursor()
+                    }),
             ),
             None => (
                 ComposerEditorSource::Draft(self.editor.text_revision()),
@@ -3390,6 +3463,14 @@ impl InteractiveShell {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("workspace file index scan did not complete");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_keybindings(
+        &mut self,
+        bindings: crate::tui::keymap::keybindings::KeybindingsManager,
+    ) {
+        self.input_dispatch.bindings = bindings;
     }
 
     #[cfg(test)]
@@ -5556,19 +5637,65 @@ impl InteractiveShell {
         self.state.borrow().editor.text().to_owned()
     }
 
+    /// Start an exclusive request without touching the parent draft or chips.
+    pub(crate) fn begin_tool_input(&mut self, prompt: &str, secret: bool) {
+        self.close_transcript_navigation();
+        self.state.borrow_mut().begin_tool_input(prompt, secret);
+    }
+
+    pub(crate) fn end_tool_input(&mut self) -> Option<String> {
+        self.state.borrow_mut().end_tool_input()
+    }
+
+    pub(crate) fn tool_input_overflowed(&self) -> bool {
+        self.state.borrow().tool_input_overflowed
+    }
+
+    pub(crate) fn mark_tool_input_overflow(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.tool_input_overflowed = true;
+        state.tool_input_revision = state.tool_input_revision.saturating_add(1);
+    }
+
+    pub(crate) fn clear_tool_input_value(&mut self) {
+        let mut state = self.state.borrow_mut();
+        if state.tool_input_editor.is_some() {
+            state.tool_input_editor = Some(TextEditor::new());
+        }
+        state.tool_input_overflowed = false;
+        state.tool_input_revision = state.tool_input_revision.saturating_add(1);
+    }
+
+    pub(crate) fn edit_tool_input(&mut self, action: sexy_tui_rs::TextEditAction) {
+        self.state.borrow_mut().edit_tool_input(action);
+    }
+
+    /// Normalize request controls through the same resolved selection bindings.
+    /// Editor/draft ownership stays with the temporary input loop.
+    pub(crate) fn tool_input_event(
+        &self,
+        event: &crossterm::event::Event,
+    ) -> crossterm::event::Event {
+        self.panel_event(event)
+    }
+
     pub fn set_tool_input_prompt(&mut self, prompt: Option<String>) {
         if prompt.is_some() {
             self.close_transcript_navigation();
         }
         let mut state = self.state.borrow_mut();
-        state.tool_input_prompt = prompt.map(|prompt| {
-            sanitize_for_terminal(&prompt)
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_owned()
-        });
-        state.tool_input_revision = state.tool_input_revision.saturating_add(1);
+        match prompt {
+            Some(prompt) if state.tool_input_prompt.is_none() => {
+                state.begin_tool_input(&prompt, true)
+            }
+            Some(prompt) => {
+                state.tool_input_prompt = Some(sanitize_for_terminal(&prompt));
+                state.tool_input_revision = state.tool_input_revision.saturating_add(1);
+            }
+            None => {
+                state.end_tool_input();
+            }
+        }
     }
 
     pub fn set_input_modalities(&mut self, modalities: ModalitySet) {
@@ -5641,6 +5768,14 @@ impl InteractiveShell {
     }
 
     pub fn scroll(&mut self, direction: i16) {
+        self.request_native_scroll(
+            if direction < 0 {
+                octet_tern::wire::ScrollBy::PageUp
+            } else {
+                octet_tern::wire::ScrollBy::PageDown
+            },
+            1,
+        );
         self.state.borrow().transcript_scroll_activity();
         if direction < 0 {
             let should_materialize = {
@@ -5684,6 +5819,14 @@ impl InteractiveShell {
 
     /// Scroll the transcript in small, trackpad-friendly increments.
     pub fn scroll_lines(&mut self, direction: i16) {
+        self.request_native_scroll(
+            if direction < 0 {
+                octet_tern::wire::ScrollBy::LineUp
+            } else {
+                octet_tern::wire::ScrollBy::LineDown
+            },
+            usize::from(direction.unsigned_abs()),
+        );
         self.state.borrow().transcript_scroll_activity();
         if direction < 0 {
             let should_materialize = {
@@ -5736,6 +5879,7 @@ impl InteractiveShell {
     /// Explicit End/jump-to-live action. It preserves the draft and composer
     /// focus because it mutates only transcript viewport state.
     pub fn jump_to_tail(&mut self) {
+        self.request_native_scroll(octet_tern::wire::ScrollBy::End, 1);
         self.state.borrow().transcript_scroll_activity();
         self.state.borrow_mut().jump_to_tail();
     }
@@ -6080,6 +6224,7 @@ impl InteractiveShell {
         let text = Arc::from(sanitize_for_terminal(&text));
         let mut state = self.state.borrow_mut();
         state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay_epoch = state.overlay_epoch.wrapping_add(1);
         state.overlay = Some(ShellOverlay::Text(text));
     }
 
@@ -6088,6 +6233,7 @@ impl InteractiveShell {
         self.reset_input_interaction();
         let mut state = self.state.borrow_mut();
         state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay_epoch = state.overlay_epoch.wrapping_add(1);
         state.overlay = Some(ShellOverlay::Report(ReportOverlay {
             surface,
             body,
@@ -6165,6 +6311,7 @@ impl InteractiveShell {
         self.close_transcript_navigation();
         let mut state = self.state.borrow_mut();
         state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay_epoch = state.overlay_epoch.wrapping_add(1);
         state.overlay = Some(ShellOverlay::Text(
             styled_extension_output(&state.theme, title, &text).into(),
         ));
@@ -6206,6 +6353,7 @@ impl InteractiveShell {
     pub fn show_styled_overlay_text(&mut self, text: String) {
         let mut state = self.state.borrow_mut();
         state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay_epoch = state.overlay_epoch.wrapping_add(1);
         state.overlay = Some(ShellOverlay::Text(text.into()));
     }
 
@@ -6224,6 +6372,7 @@ impl InteractiveShell {
 
     pub fn close_overlay(&mut self) {
         let mut state = self.state.borrow_mut();
+        state.overlay_epoch = state.overlay_epoch.wrapping_add(1);
         state.overlay = None;
         state.extension_ui.remote_fullscreen_overlay = state
             .extension_ui
@@ -7785,9 +7934,11 @@ mod terminal_text;
 pub(crate) mod tern;
 mod tern_agents;
 mod tern_completion;
+mod tern_controls;
 mod tern_images;
 pub(crate) mod tern_input;
 mod tern_picker;
+pub(crate) mod tern_prompt;
 mod tern_sessions;
 mod tern_theme;
 mod tern_welcome;

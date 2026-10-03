@@ -10,6 +10,56 @@ use crossterm::event::{KeyEvent, KeyModifiers};
 use tokio_stream::wrappers::ReceiverStream;
 
 #[tokio::test]
+async fn secret_typing_and_host_enter_ignore_remapped_or_disabled_picker_keys() {
+    use crate::tui::keymap::keybindings::KeybindingsManager;
+    use std::collections::BTreeMap;
+    for confirm in [vec!["y".into()], Vec::new()] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.test_set_keybindings(KeybindingsManager::with_platform(
+            "linux",
+            false,
+            BTreeMap::from([
+                ("tui.select.confirm".into(), confirm),
+                ("tui.select.cancel".into(), vec!["n".into()]),
+                ("tui.select.down".into(), vec!["j".into()]),
+            ]),
+        ));
+        shell.prefill_editor("parent draft".into());
+        let request = ExtensionInputRequest {
+            parent_request_id: 0,
+            prompt: "Fixture secret".into(),
+            secret: true,
+        };
+        let mut input = futures_util::stream::iter([
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('n'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+        ]);
+        assert_eq!(
+            extension_input_picker(&mut shell, &mut input, &request)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("ynj")
+        );
+        assert_eq!(shell.pending(), "parent draft");
+    }
+}
+
+#[tokio::test]
 async fn secret_input_paste_never_enters_the_composer_or_transcript() {
     let mut shell = InteractiveShell::test_shell();
     shell.extension_set_editor("draft kept intact".into());

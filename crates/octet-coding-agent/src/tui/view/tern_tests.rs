@@ -92,7 +92,25 @@ fn composer_uses_native_layout_hooks_with_octet_controls_and_no_rows() {
     surface.flush(&shell.state).unwrap();
     let projection = &surface.sent;
     let composer = find_node(&projection.dock, "composer").unwrap();
-    assert_eq!(composer.p.as_ref().unwrap().as_map()["role"], "omp.editor");
+    assert_eq!(composer.k, Kind::Col);
+    let props = composer.p.as_ref().unwrap().as_map();
+    for removed in ["role", "head", "frame", "border"] {
+        assert!(
+            !props.contains_key(removed),
+            "borderless composer: {removed}"
+        );
+    }
+    assert_eq!(composer.c.as_ref().unwrap()[0].id, "composer.rule");
+    assert_eq!(
+        find_node(&projection.dock, "composer.rule").unwrap().k,
+        Kind::Rule
+    );
+    walk(&projection.dock, &mut |node| {
+        assert_ne!(
+            node.p.as_ref().and_then(|props| props.as_map().get("role")),
+            Some(&json!("omp.editor"))
+        );
+    });
     assert!(find_node(&projection.dock, "composer.context").is_some());
     assert!(projection.layer.iter().any(|node| node.k == Kind::Overlay));
     walk(&projection.dock, &mut |node| {
@@ -155,7 +173,7 @@ fn streaming_materializes_source_and_only_patches_the_retained_leaf() {
 }
 
 #[test]
-fn assistant_replies_are_labelled_cards_not_default_prose() {
+fn assistant_replies_are_unboxed_prose_with_a_direct_retained_markdown_leaf() {
     let (shell, mut surface, _) = setup(2);
     shell.state.borrow_mut().model_display = "Sonnet 4.5".into();
     shell
@@ -168,28 +186,25 @@ fn assistant_replies_are_labelled_cards_not_default_prose() {
     let identity = shell.state.borrow().transcript_commit_ids[0];
     let group = find_node(&surface.sent.main, &id(identity, "assistant.group")).unwrap();
     assert_eq!(group.p.as_ref().unwrap().as_map()["role"], "omp.assistant");
-    let card = find_node(&surface.sent.main, &id(identity, "assistant")).unwrap();
-    // A labelled custom-message card, like omp's replies, instead of a bare
-    // `md` node that Tern renders with its default prose look.
-    assert_eq!(card.k, Kind::Card);
-    let props = card.p.as_ref().unwrap().as_map();
-    assert_eq!(props["role"], "octet.assistant");
-    assert_eq!(props["frame"], "card");
-    assert_eq!(props["head"][0]["t"], "Sonnet 4.5");
-    // Reader typography requires the Markdown leaf directly below the native
-    // assistant hook, even inside the labelled card's body wrapper.
-    let native_body = find_node(&surface.sent.main, &id(identity, "assistant.body")).unwrap();
-    assert_eq!(native_body.k, Kind::Col);
+    let assistant = find_node(&surface.sent.main, &id(identity, "assistant")).unwrap();
+    assert_eq!(assistant.k, Kind::Col);
+    assert_eq!(group.c.as_ref().unwrap()[0].id, assistant.id);
+    let props = assistant.p.as_ref().unwrap().as_map();
+    assert_eq!(props["role"], "omp.assistant");
+    for removed in ["head", "frame", "border"] {
+        assert!(!props.contains_key(removed), "unboxed reply: {removed}");
+    }
+    assert_eq!(assistant.c.as_ref().unwrap().len(), 1);
     assert_eq!(
-        native_body.p.as_ref().unwrap().as_map()["role"],
-        "omp.assistant"
-    );
-    assert_eq!(
-        native_body.c.as_ref().unwrap()[0].id,
+        assistant.c.as_ref().unwrap()[0].id,
         id(identity, "assistant.md")
     );
-    // Streaming still lives on the single Markdown leaf, so a growing reply
-    // patches one node instead of re-sending the card.
+    assert!(find_node(&surface.sent.main, &id(identity, "assistant.body")).is_none());
+    walk(std::slice::from_ref(group), &mut |node| {
+        assert_ne!(node.k, Kind::Card)
+    });
+    assert!(!serde_json::to_string(group).unwrap().contains("Sonnet 4.5"));
+    // Streaming still lives on the direct Markdown leaf.
     let body = find_node(&surface.sent.main, &id(identity, "assistant.md")).unwrap();
     assert_eq!(body.k, Kind::Md);
     assert_eq!(body.p.as_ref().unwrap().as_map()["stream"], true);
@@ -621,9 +636,31 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
     let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
     let props = tool.p.as_ref().unwrap().as_map();
-    assert_eq!(props["collapsed"], false);
-    assert_eq!(props["collapsible"], false);
-    assert_eq!(props["target"], command);
+    assert!(!props.contains_key("collapsed"));
+    assert!(!props.contains_key("collapsible"));
+    assert_eq!(tool.k, Kind::Row);
+    assert_eq!(props["role"], "octet.command");
+    assert!(props.get("target").is_none());
+    let command_leaf = find_node(&surface.sent.main, &id(identity, "command"))
+        .unwrap()
+        .clone();
+    assert_eq!(command_leaf.k, Kind::Code);
+    let command_props = command_leaf.p.as_ref().unwrap().as_map();
+    assert_eq!(
+        command_props["text"].as_str().unwrap().as_bytes(),
+        command.as_bytes()
+    );
+    assert_eq!(command_props["wrap"], true);
+    assert_eq!(command_props["numbers"], false);
+    assert_eq!(
+        find_node(&surface.sent.main, &id(identity, "command.label"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["spans"][1]["t"],
+        " · running"
+    );
     assert!(!output.last_frame().to_string().contains("line1"));
     ack(&shell, 1);
     {
@@ -640,7 +677,7 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     // output child mounted — the completion must not paint one expanded
     // frame before the terminal hides it.
     let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
-    assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], false);
+    assert!(!tool.p.as_ref().unwrap().as_map().contains_key("collapsed"));
     assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
     let ops = output.last_frame()["ops"].clone();
     let ops = ops.as_array().unwrap();
@@ -648,7 +685,18 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
         !ops.iter().any(|op| op[1] == id(identity, "out")),
         "collapsed output must never have been mounted: {ops:?}"
     );
-    assert_eq!(tool.p.as_ref().unwrap().as_map()["meta"], json!(["1.2s"]));
+    let label = find_node(&surface.sent.main, &id(identity, "command.label")).unwrap();
+    let spans = &label.p.as_ref().unwrap().as_map()["spans"];
+    assert_eq!(spans[1]["t"], " · done");
+    assert_eq!(spans[2]["t"], " · 1.2s");
+    assert_eq!(
+        find_node(&surface.sent.main, &id(identity, "command")).unwrap(),
+        &command_leaf
+    );
+    assert!(
+        !ops.iter().any(|op| op[1] == id(identity, "command")),
+        "completion retains full command bytes"
+    );
     assert!(
         !ops.iter()
             .any(|op| op[0] == "set" && op[1] == id(identity, "out")),
@@ -692,6 +740,12 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
                 state.touch_block(index);
             }
             surface.flush(&shell.state).unwrap();
+            let command = find_node(&surface.sent.main, &id(identity, "command")).unwrap();
+            assert_eq!(command.k, Kind::Code);
+            let command_props = command.p.as_ref().unwrap().as_map();
+            assert_eq!(command_props["text"], "git diff");
+            assert_eq!(command_props["wrap"], true);
+            assert_eq!(command_props["numbers"], false);
             let leaf = find_node(&surface.sent.main, &id(identity, "out")).unwrap();
             assert_eq!(leaf.k, Kind::Text);
             let props = leaf.p.as_ref().unwrap().as_map();
@@ -739,11 +793,13 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
         }
         surface.flush(&shell.state).unwrap();
         let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
-        assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], false);
-        assert_eq!(
-            tool.p.as_ref().unwrap().as_map()["meta"],
-            json!(["command failed"])
-        );
+        assert!(!tool.p.as_ref().unwrap().as_map().contains_key("collapsed"));
+        assert_eq!(tool.k, Kind::Row);
+        let label = find_node(&surface.sent.main, &id(identity, "command.label")).unwrap();
+        let spans = &label.p.as_ref().unwrap().as_map()["spans"];
+        assert_eq!(spans[1]["t"], " · error");
+        assert_eq!(spans[1]["s"], "error");
+        assert_eq!(spans[2]["t"], " · command failed");
         let leaf = find_node(&surface.sent.main, &id(identity, "out")).unwrap();
         assert_eq!(leaf.k, Kind::Text);
         assert_eq!(
@@ -760,15 +816,13 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
             .unwrap();
         surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
-        assert_eq!(
-            find_node(&surface.sent.main, &id(identity, "tool"))
-                .unwrap()
-                .p
-                .as_ref()
-                .unwrap()
-                .as_map()["collapsed"],
-            false
-        );
+        assert!(!find_node(&surface.sent.main, &id(identity, "tool"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()
+            .contains_key("collapsed"));
         shell.state.borrow_mut().verbose_tools = false;
         surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
@@ -808,31 +862,43 @@ fn local_shell_is_summary_only_during_execution_and_after_success_or_failure() {
     let ids = shell.state.borrow().transcript_commit_ids.clone();
     // Neither running nor failed local shell output is mounted while collapsed.
     assert!(find_node(&surface.sent.main, &id(ids[running], "out")).is_none());
-    assert_eq!(
-        find_node(&surface.sent.main, &id(ids[running], "shell"))
-            .unwrap()
-            .p
-            .as_ref()
-            .unwrap()
-            .as_map()["collapsed"],
-        false
-    );
+    assert!(!find_node(&surface.sent.main, &id(ids[running], "shell"))
+        .unwrap()
+        .p
+        .as_ref()
+        .unwrap()
+        .as_map()
+        .contains_key("collapsed"));
     // The failure's exit code stays visible in its summary.
-    assert_eq!(
-        find_node(&surface.sent.main, &id(ids[done], "shell"))
-            .unwrap()
+    assert!(!find_node(&surface.sent.main, &id(ids[done], "shell"))
+        .unwrap()
+        .p
+        .as_ref()
+        .unwrap()
+        .as_map()
+        .contains_key("collapsed"));
+    assert!(find_node(&surface.sent.main, &id(ids[done], "out")).is_none());
+    for index in [running, done] {
+        let rail = find_node(&surface.sent.main, &id(ids[index], "shell")).unwrap();
+        assert_eq!(rail.k, Kind::Row);
+        assert!(!rail
             .p
             .as_ref()
             .unwrap()
-            .as_map()["collapsed"],
-        false
-    );
-    assert!(find_node(&surface.sent.main, &id(ids[done], "out")).is_none());
-    let failed = find_node(&surface.sent.main, &id(ids[done], "shell")).unwrap();
-    assert_eq!(
-        failed.p.as_ref().unwrap().as_map()["meta"],
-        json!(["exit 1"])
-    );
+            .as_map()
+            .contains_key("collapsible"));
+        let command = find_node(&surface.sent.main, &id(ids[index], "command")).unwrap();
+        assert_eq!(command.k, Kind::Code);
+        let props = command.p.as_ref().unwrap().as_map();
+        assert_eq!(props["text"], "cargo test");
+        assert_eq!(props["wrap"], true);
+        assert_eq!(props["numbers"], false);
+    }
+    let failed = find_node(&surface.sent.main, &id(ids[done], "command.label")).unwrap();
+    let spans = &failed.p.as_ref().unwrap().as_map()["spans"];
+    assert_eq!(spans[1]["t"], " · error");
+    assert_eq!(spans[1]["s"], "error");
+    assert_eq!(spans[2]["t"], " · exit 1");
     shell.state.borrow_mut().verbose_tools = true;
     ack(&shell, 1);
     surface.flush(&shell.state).unwrap();
@@ -940,7 +1006,7 @@ fn user_prompt_is_a_native_card_tern_sizes_at_any_width() {
         assert_eq!(card.k, Kind::Card, "{cols}");
         let props = card.p.as_ref().unwrap().as_map();
         assert_eq!(props["tone"], "user");
-        assert_eq!(props["role"], "octet.user");
+        assert_eq!(props["role"], "omp.user");
         let body = find_node(&surface.sent.main, &id(identity, "user.body")).unwrap();
         assert_eq!(body.k, Kind::Md, "{cols}");
         let text = body.p.as_ref().unwrap().as_map()["text"].as_str().unwrap();
@@ -950,37 +1016,61 @@ fn user_prompt_is_a_native_card_tern_sizes_at_any_width() {
 }
 
 #[test]
-fn native_picker_carries_totals_focus_and_match_hits() {
+fn ordinary_picker_is_a_compact_sheet_with_filter_full_selection_and_option_count() {
     let (mut shell, mut surface, _) = setup(2);
     shell.open_panel(Panel::SelectList {
         surface: OrdinarySurfaceMetadata::new("Select model"),
         items: vec!["claude-opus".into(), "gpt-5".into()],
-        descriptions: vec![None, None],
+        descriptions: vec![Some("Full selected model detail λ🙂".into()), None],
         selected: 0,
         filter: "op".into(),
         action: PanelAction::SelectModel(Vec::new()),
     });
     surface.flush(&shell.state).unwrap();
-    let picker = surface
-        .sent
-        .layer
-        .iter()
-        .find(|node| node.k == Kind::Picker)
-        .expect("native picker");
-    let props = picker.p.as_ref().unwrap().as_map();
+    let panel = super::super::tern_picker::id(&shell.state.borrow());
+    assert_eq!(surface.sent.focus.as_deref(), Some(panel.as_str()));
+    let sheet = find_node(&surface.sent.layer, &format!("{panel}.sheet")).unwrap();
+    assert_eq!(sheet.k, Kind::Overlay);
+    let props = sheet.p.as_ref().unwrap().as_map();
+    assert_eq!(props["modal"], true);
+    assert_eq!(props["size"], "md");
+    walk(&surface.sent.layer, &mut |node| {
+        assert_ne!(node.k, Kind::Picker)
+    });
+    let filter = find_node(&surface.sent.layer, &format!("{panel}.filter")).unwrap();
+    assert_eq!(filter.k, Kind::Editor);
+    assert_eq!(filter.p.as_ref().unwrap().as_map()["text"], "op");
+    assert_eq!(filter.p.as_ref().unwrap().as_map()["maxLines"], 1);
+    let list = find_node(&surface.sent.layer, &panel).unwrap();
+    assert_eq!(list.k, Kind::List);
     assert_eq!(
-        props["total"], 2,
-        "total is the catalogue, not the filter result"
+        list.p.as_ref().unwrap().as_map()["selected"],
+        format!("{panel}.item.0")
     );
-    assert_eq!(props["noun"], "results");
-    assert_eq!(props["focus"], "list");
-    assert_eq!(props["cursor"], 2, "search caret tracks the filter length");
+    assert_eq!(list.c.as_ref().unwrap().len(), 1);
+    let item = &list.c.as_ref().unwrap()[0];
+    assert_eq!(item.k, Kind::Item);
+    assert_eq!(item.p.as_ref().unwrap().as_map()["label"], "claude-opus");
+    for (suffix, expected) in [
+        ("selected", "claude-opus"),
+        ("detail", "Full selected model detail λ🙂"),
+        ("count", "1 of 2 options"),
+    ] {
+        let node = find_node(&surface.sent.layer, &format!("{panel}.{suffix}")).unwrap();
+        assert_eq!(node.p.as_ref().unwrap().as_map()["spans"][0]["t"], expected);
+        if suffix != "count" {
+            assert_eq!(node.p.as_ref().unwrap().as_map()["wrap"], "word");
+        }
+    }
     assert_eq!(
-        props["hits"]["0"],
-        json!([[7, 9]]),
-        "provider-agnostic hit range"
+        find_node(&surface.sent.layer, &format!("{panel}.confirm.key"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["keys"],
+        json!(["enter"])
     );
-    assert_eq!(props["actions"][0]["keys"][0], "enter");
 }
 
 #[test]
@@ -1098,23 +1188,32 @@ fn welcome_owns_its_layout_and_avoids_omp_logo_overrides() {
         shell.state.borrow_mut().size = (cols, 40);
         surface.flush(&shell.state).unwrap();
         let welcome = find_node(&surface.sent.main, "welcome").unwrap();
-        assert_eq!(welcome.k, Kind::Col);
+        assert_eq!(welcome.k, Kind::Row);
         let props = welcome.p.as_ref().unwrap().as_map();
         assert_eq!(props["role"], "octet.welcome");
         assert_eq!(props["align"], "center");
-        assert_eq!(props["gap"], "lg");
-        let grid = find_node(&surface.sent.main, "welcome.grid").unwrap();
-        let props = grid.p.as_ref().unwrap().as_map();
-        assert_eq!(props["gap"], "lg");
+        assert_eq!(props["gap"], "sm");
         assert_eq!(props["wrap"], true);
-        let brand = find_node(&surface.sent.main, "welcome.brand").unwrap();
-        assert_eq!(brand.p.as_ref().unwrap().as_map()["gap"], "lg");
+        let children = welcome.c.as_ref().unwrap();
+        assert_eq!(children.len(), 6);
+        assert!(children.iter().all(|node| node.c.is_none()));
+        assert!(find_node(&surface.sent.main, "welcome.grid").is_none());
+        assert!(find_node(&surface.sent.main, "welcome.brand").is_none());
+        for node in children.iter().filter(|node| node.k == Kind::Text) {
+            assert_eq!(node.p.as_ref().unwrap().as_map()["wrap"], "word");
+            assert!(!node.p.as_ref().unwrap().as_map()["spans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|span| span["t"].as_str().unwrap().contains('\n')));
+        }
         let mark = find_node(&surface.sent.main, "welcome.byte").unwrap();
         let props = mark.p.as_ref().unwrap().as_map();
         assert_eq!(mark.k, Kind::Image);
         assert_eq!(props["role"], "octet.welcome.logo");
-        assert_eq!(props["w"], 128);
-        assert_eq!(props["h"], 64);
+        assert_eq!(props["w"], 40);
+        assert_eq!(props["h"], 20);
+        assert_eq!(props["alt"], "octet byte mark: 01101111");
         assert!(!serde_json::to_string(welcome)
             .unwrap()
             .contains("omp.welcome"));
@@ -1145,15 +1244,59 @@ fn welcome_uploads_identical_hashed_bytes_once_and_replays_after_eviction() {
         blobs[0].params["id"],
         format!("{:x}", Sha256::digest(&bytes))
     );
-    let svg = String::from_utf8(bytes).unwrap();
-    assert!(svg.contains(r#"viewBox="0 0 96 48""#));
-    assert_eq!(svg.matches("<rect ").count(), 8);
-    assert_eq!(svg.matches(r#"y="24" width="12" height="24""#).count(), 2);
-    assert_eq!(svg.matches(r#"y="0" width="12" height="48""#).count(), 6);
+    assert_eq!(blobs[0].params["mime"], "image/png");
+    assert!(bytes.len() < 4096);
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    // Exercise the existing independent image decoder through its public media boundary.
+    let image = octet_ai::types::ImageMedia {
+        source: octet_ai::types::ImageSource::Inline(bytes::Bytes::from(bytes.clone())),
+        media_type: Some(mime::IMAGE_PNG),
+        detail: None,
+    };
+    octet_ai::media::prepare_user_image(
+        &image,
+        octet_ai::media::ImageInputLimits {
+            max_width: 256,
+            max_height: 128,
+            max_bytes: 4096,
+        },
+    )
+    .unwrap();
+    assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 256);
+    assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 128);
+    let mut compressed = Vec::new();
+    let mut offset = 8;
+    while offset < bytes.len() {
+        let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        if &bytes[offset + 4..offset + 8] == b"IDAT" {
+            compressed.extend_from_slice(&bytes[offset + 8..offset + 8 + len]);
+        }
+        offset += len + 12;
+    }
+    let mut pixels = Vec::new();
+    io::Read::read_to_end(
+        &mut flate2::read::ZlibDecoder::new(compressed.as_slice()),
+        &mut pixels,
+    )
+    .unwrap();
+    assert_eq!(pixels.len(), 128 * (1 + 256 * 4));
+    for y in 0..128 {
+        assert_eq!(pixels[y * (1 + 256 * 4)], 0);
+        for x in 0..256 {
+            let alpha = pixels[y * (1 + 256 * 4) + 1 + x * 4 + 3];
+            let expected = if b"01101111"[x / 32] == b'0' && y < 64 {
+                0
+            } else {
+                255
+            };
+            assert_eq!(alpha, expected, "eight-bar silhouette at ({x}, {y})");
+        }
+    }
     let mark = find_node(&surface.sent.main, "welcome.byte").unwrap();
     let props = mark.p.as_ref().unwrap().as_map();
-    assert_eq!(props["w"], 128);
-    assert_eq!(props["h"], 64);
+    assert_eq!(props["w"], 40);
+    assert_eq!(props["h"], 20);
+    assert_eq!(props["blob"], blobs[0].params["id"]);
     surface.flush(&shell.state).unwrap();
     assert_eq!(output.blobs().len(), 1);
     surface
@@ -1168,10 +1311,15 @@ fn welcome_uploads_identical_hashed_bytes_once_and_replays_after_eviction() {
         output.blobs()[0].params["id"],
         output.blobs()[1].params["id"]
     );
+    assert_eq!(
+        output.blobs()[0],
+        output.blobs()[1],
+        "eviction replays the exact addressed PNG bytes"
+    );
 }
 
 #[test]
-fn native_transcript_and_composer_share_a_wider_responsive_measure() {
+fn native_transcript_and_composer_share_the_rail_responsive_measure() {
     let (shell, mut surface, _) = setup(8);
     {
         let mut state = shell.state.borrow_mut();
@@ -1182,12 +1330,12 @@ fn native_transcript_and_composer_share_a_wider_responsive_measure() {
         shell.state.borrow_mut().size = (cols, 40);
         surface.flush(&shell.state).unwrap();
         for node in &surface.sent.main {
-            assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], "144ch");
+            assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], "96ch");
             assert!(node.p.as_ref().unwrap().as_map().get("min").is_none());
         }
         let dock = find_node(&surface.sent.dock, "dock.content").unwrap();
         let composer = find_node(dock.c.as_deref().unwrap(), "composer").unwrap();
-        assert_eq!(composer.p.as_ref().unwrap().as_map()["max"]["w"], "144ch");
+        assert_eq!(composer.p.as_ref().unwrap().as_map()["max"]["w"], "96ch");
     }
 }
 
@@ -1221,6 +1369,7 @@ fn model_preview_carries_only_bounded_public_facts() {
         },
     });
     surface.flush(&shell.state).unwrap();
+    assert_eq!(surface.sent.layer[0].k, Kind::Picker);
     let json = serde_json::to_string(&surface.sent.layer).unwrap();
     assert!(json.contains("Cache read / M"));
     assert!(json.contains("2026-01"));
@@ -1255,6 +1404,7 @@ fn session_picker_keeps_preview_actions_loading_and_host_selection() {
     picker.surface.lifecycle = OrdinarySurfaceLifecycle::loading("all workspaces");
     shell.open_panel(Panel::SessionPicker { picker });
     surface.flush(&shell.state).unwrap();
+    assert_eq!(surface.sent.layer[0].k, Kind::Picker);
     let props = surface.sent.layer[0].p.as_ref().unwrap().as_map();
     assert_eq!(props["noun"], "sessions");
     assert_eq!(props["state"], "loading");
@@ -1327,10 +1477,10 @@ fn session_picker_keeps_preview_actions_loading_and_host_selection() {
 }
 
 #[test]
-fn native_agent_uses_authoritative_telemetry_and_terminal_clocks() {
+fn native_agents_keep_one_retained_transcript_with_authoritative_live_token_lines() {
     use super::super::SubagentActivityView;
-    let (shell, mut surface, _) = setup(2);
-    let child = octet_agent::DelegationTelemetryChild {
+    let (shell, mut surface, output) = setup(8);
+    let mut child = octet_agent::DelegationTelemetryChild {
         child_id: "child".into(),
         task_name: "Inspect".into(),
         profile: Some("explore".into()),
@@ -1358,35 +1508,135 @@ fn native_agent_uses_authoritative_telemetry_and_terminal_clocks() {
         ),
         session: None,
     };
-    shell.state.borrow_mut().subagent_activity = Some(SubagentActivityView {
+    let snapshot = |child| SubagentActivityView {
         status_label: "1 running".into(),
         telemetry: vec![child],
         ..Default::default()
-    });
+    };
+    shell
+        .state
+        .borrow_mut()
+        .set_subagent_activity(snapshot(child.clone()));
+    assert_eq!(shell.state.borrow().transcript.len(), 1);
+    let identity = shell.state.borrow().transcript_commit_ids[0];
+    let root_id = id(identity, "subagents");
+    let tokens_id = id(identity, "subagents.worker0.tokens");
     surface.flush(&shell.state).unwrap();
     let dock = find_node(&surface.sent.dock, "dock.content").unwrap();
     assert!(dock.p.as_ref().unwrap().as_map().get("role").is_none());
     for node in dock.c.as_ref().unwrap() {
-        assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], "144ch");
+        assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], "96ch");
     }
-    let node = find_node(&surface.sent.dock, "subagent.child").unwrap();
-    assert_eq!(node.k, Kind::Agent);
-    let props = node.p.as_ref().unwrap().as_map();
-    assert_eq!(props["stats"]["tokens"], 180); // no double-counted reasoning or streamed estimates
-    assert_eq!(props["stats"]["cost"], 0.0025);
-    assert_eq!(props["stats"]["age"], 1200);
-    assert_eq!(props["tool"]["name"], "read");
+    walk(&surface.sent.dock, &mut |node| {
+        assert_ne!(node.k, Kind::Agent);
+        assert!(!node.id.contains("subagent"), "no duplicate dock roster");
+    });
+    let transcript = find_node(&surface.sent.main, &root_id).unwrap();
+    assert_eq!(transcript.k, Kind::Row);
+    assert_eq!(
+        transcript.p.as_ref().unwrap().as_map()["role"],
+        "octet.subagents"
+    );
+    let tokens = find_node(&surface.sent.main, &tokens_id).unwrap();
+    // Input includes the three authoritative categories, not total/reasoning;
+    // streamed output is explicitly estimated instead of double-counted.
+    assert_eq!(
+        tokens.p.as_ref().unwrap().as_map()["spans"][0]["t"],
+        "· ↑130 ↓~60"
+    );
+    assert_eq!(
+        find_node(&surface.sent.main, &id(identity, "subagents.worker0.name"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["spans"][0]["t"],
+        "Inspect"
+    );
+    assert!(find_node(&surface.sent.main, &id(identity, "subagents.stop")).is_some());
+    walk(std::slice::from_ref(transcript), &mut |node| {
+        assert!(matches!(node.k, Kind::Row | Kind::Col | Kind::Text));
+        let props = node.p.as_ref().unwrap().as_map();
+        for forbidden in ["model", "cost", "stats", "prompt", "tool", "age", "took"] {
+            assert!(
+                !props.contains_key(forbidden),
+                "private inspector fact: {forbidden}"
+            );
+        }
+    });
+    let serialized = serde_json::to_string(transcript).unwrap();
+    for private in ["using_tool", "explore", "read", "0.0025"] {
+        assert!(
+            !serialized.contains(private),
+            "private inspector fact: {private}"
+        );
+    }
+    let mut retained_ids = Vec::new();
+    walk(std::slice::from_ref(transcript), &mut |node| {
+        retained_ids.push(node.id.clone())
+    });
+    child.estimated_output_tokens = Some(65);
+    child.cost_microdollars = None;
     shell
         .state
         .borrow_mut()
-        .subagent_activity
-        .as_mut()
-        .unwrap()
-        .telemetry[0]
-        .cost_microdollars = None;
+        .set_subagent_activity(snapshot(child.clone()));
     surface.flush(&shell.state).unwrap();
-    let node = find_node(&surface.sent.dock, "subagent.child").unwrap();
-    assert!(node.p.as_ref().unwrap().as_map()["stats"]
-        .get("cost")
+    assert_eq!(shell.state.borrow().transcript.len(), 1);
+    assert_eq!(shell.state.borrow().transcript_commit_ids[0], identity);
+    let transcript = find_node(&surface.sent.main, &root_id).unwrap();
+    let mut updated_ids = Vec::new();
+    walk(std::slice::from_ref(transcript), &mut |node| {
+        updated_ids.push(node.id.clone())
+    });
+    assert_eq!(updated_ids, retained_ids);
+    assert_eq!(
+        find_node(&surface.sent.main, &tokens_id)
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["spans"][0]["t"],
+        "· ↑130 ↓~65"
+    );
+    let frame = output.last_frame();
+    let ops = frame["ops"].as_array().unwrap();
+    assert!(ops.iter().any(|op| op[0] == "set" && op[1] == tokens_id));
+    assert!(!ops
+        .iter()
+        .any(|op| matches!(op[0].as_str(), Some("add" | "del" | "move"))));
+    // Settlement preserves the orchestration identity but removes live detail.
+    child.state = "completed".into();
+    child.estimated_output_tokens = None;
+    shell
+        .state
+        .borrow_mut()
+        .set_subagent_activity(snapshot(child));
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(shell.state.borrow().transcript.len(), 1);
+    assert_eq!(shell.state.borrow().transcript_commit_ids[0], identity);
+    let settled = find_node(&surface.sent.main, &root_id).unwrap();
+    walk(std::slice::from_ref(settled), &mut |node| {
+        assert!(!node.id.contains(".worker"));
+        assert!(!node.id.ends_with(".stop"));
+    });
+    assert!(serde_json::to_string(settled)
+        .unwrap()
+        .contains("1 completed"));
+    let marker = find_node(&surface.sent.main, &id(identity, "subagents.marker")).unwrap();
+    assert_eq!(
+        marker.p.as_ref().unwrap().as_map()["spans"][0]["s"],
+        "success"
+    );
+    assert!(marker.p.as_ref().unwrap().as_map()["spans"][0]
+        .get("fx")
         .is_none());
+    assert!(!output.last_frame()["ops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|op| matches!(op[0].as_str(), Some("add" | "del")) && op[1] == root_id));
 }
+
+#[path = "tern_rail_tests.rs"]
+mod rail;

@@ -2569,7 +2569,7 @@ impl ActiveToolInteraction {
                 });
             }
             ActiveToolRequest::Input(request, _) => {
-                shell.set_tool_input_prompt(Some(request.prompt.clone()))
+                shell.begin_tool_input(&request.prompt, request.secret)
             }
         }
     }
@@ -2599,12 +2599,31 @@ impl ActiveToolInteraction {
                 true
             }
             ActiveToolRequest::Input(request, secret) => {
-                match event {
+                use sexy_tui_rs::TextEditAction;
+
+                let event = if request.secret {
+                    event.clone()
+                } else {
+                    shell.tool_input_event(event)
+                };
+                match &event {
                     Event::Key(key)
                         if key.kind == KeyEventKind::Press && key.code == KeyCode::Enter =>
                     {
-                        request.respond(secret.take());
-                        shell.set_tool_input_prompt(None);
+                        if shell.tool_input_overflowed() {
+                            *secret = Default::default();
+                            shell.clear_tool_input_value();
+                            return false;
+                        }
+                        let answer = shell.end_tool_input();
+                        let bytes = if request.secret {
+                            secret.take()
+                        } else {
+                            answer
+                                .expect("ordinary tool input has an editor")
+                                .into_bytes()
+                        };
+                        request.respond(bytes);
                         return true;
                     }
                     Event::Key(key)
@@ -2613,27 +2632,70 @@ impl ActiveToolInteraction {
                                 || (key.code == KeyCode::Char('c')
                                     && key.modifiers.contains(KeyModifiers::CONTROL))) =>
                     {
+                        *secret = Default::default();
+                        shell.end_tool_input();
                         request.cancel();
-                        shell.set_tool_input_prompt(None);
                         shell.notice("interactive command input cancelled");
                         return true;
                     }
                     Event::Key(key)
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                     {
-                        match key.code {
-                            KeyCode::Backspace => secret.backspace(),
-                            KeyCode::Char(character)
-                                if !key.modifiers.intersects(
-                                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                                ) =>
-                            {
-                                secret.push(character)
+                        if request.secret {
+                            match key.code {
+                                KeyCode::Backspace => secret.backspace(),
+                                KeyCode::Char(character)
+                                    if !key.modifiers.intersects(
+                                        KeyModifiers::CONTROL
+                                            | KeyModifiers::ALT
+                                            | KeyModifiers::SUPER,
+                                    ) =>
+                                {
+                                    if secret.byte_len().saturating_add(character.len_utf8()) > 4096
+                                    {
+                                        shell.mark_tool_input_overflow();
+                                    }
+                                    secret.push(character);
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                        } else {
+                            let action = match key.code {
+                                KeyCode::Backspace => Some(TextEditAction::Backspace),
+                                KeyCode::Delete => Some(TextEditAction::Delete),
+                                KeyCode::Left => Some(TextEditAction::Left),
+                                KeyCode::Right => Some(TextEditAction::Right),
+                                KeyCode::Up => Some(TextEditAction::Up),
+                                KeyCode::Down => Some(TextEditAction::Down),
+                                KeyCode::Home => Some(TextEditAction::Home),
+                                KeyCode::End => Some(TextEditAction::End),
+                                KeyCode::Char(character)
+                                    if !key.modifiers.intersects(
+                                        KeyModifiers::CONTROL
+                                            | KeyModifiers::ALT
+                                            | KeyModifiers::SUPER,
+                                    ) =>
+                                {
+                                    Some(TextEditAction::Char(character))
+                                }
+                                _ => None,
+                            };
+                            if let Some(action) = action {
+                                shell.edit_tool_input(action);
+                            }
                         }
                     }
-                    Event::Paste(paste) => secret.extend_paste(paste),
+                    Event::Paste(paste) => {
+                        if request.secret {
+                            let bytes = paste.trim_end_matches(['\r', '\n']).len();
+                            if secret.byte_len().saturating_add(bytes) > 4096 {
+                                shell.mark_tool_input_overflow();
+                            }
+                            secret.extend_paste(paste);
+                        } else {
+                            shell.edit_tool_input(TextEditAction::Paste(paste.clone()));
+                        }
+                    }
                     Event::Resize(columns, rows) => shell.set_size(*columns, *rows),
                     _ => {}
                 }
@@ -10159,3 +10221,7 @@ async fn run_interactive_once(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "interactive/tests/active_tool_input_tests.rs"]
+mod active_tool_input_tests;
