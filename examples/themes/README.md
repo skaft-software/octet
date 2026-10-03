@@ -10,9 +10,9 @@
   theme: compact rail chrome with model-coloured prompt stripes, dark/light
   fills, a quiet amber UI accent, a borderless shaded composer, and a themed
   splash with compact geometry.
-- [`Still.toml`](Still.toml) (`Still`) is a calm, contained theme: centered
-  reading width, soft user and composer fills, compact unboxed tool activity,
-  model-adaptive prompt chevrons, and reasoning hidden by default.
+- [`Still.toml`](Still.toml) (`Still`) is a calm, full-width theme: soft user and
+  composer fills, quiet activity summaries for exploration, edits, web, MCP, and
+  computer use, plus model-adaptive prompt chevrons.
 
 `Cards` and `Still` are compiled into every release, so they need no copy. They
 appear in `/theme` after the terminal-appearance choices and work with

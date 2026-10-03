@@ -161,8 +161,10 @@ composer. A quiet band distinguishes user prompts. One extra breathing cell
 before transcript markers aligns prompt, activity, and prose text. Prose and
 tool activity remain unboxed, with compact adjacent rows and monochrome dots.
 Consecutive reads, searches, and commands share an exploration summary;
-consecutive edits and writes show a distinct-file count. `Ctrl+O` reveals
-all underlying file paths, commands, and failures. Its
+consecutive edits and writes show a distinct-file count. Web searches and fetches,
+MCP calls, and computer-use actions each get their own quiet summary; delegation
+keeps its existing subagent presentation. `Ctrl+O` reveals individual paths,
+commands, calls, and failures. Its
 `model.use_lab_color = "true"` token keeps the prompt chevron and composer
 marker model-adaptive, and `splash_model_adaptive` with `splash_compact` give
 it the compact 16x4 startup mark shaded from the active model family. The dark
