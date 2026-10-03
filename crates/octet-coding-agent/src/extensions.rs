@@ -11,6 +11,9 @@
 pub mod serve;
 
 mod mutation_resources;
+pub(crate) mod remote_ui;
+
+use octet_agent::extension_remote_ui::{ExtensionRemoteUiOperation, EXTENSION_FEATURE_REMOTE_UI};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
@@ -32,7 +35,7 @@ use octet_agent::extension_process::{
     ExtensionLifecycleEvent, ExtensionLifecycleOutcome, ExtensionManifest,
     ExtensionMessageInjection, ExtensionPolicy, ExtensionPolicyEvaluationResponse,
     ExtensionProcess, ExtensionRequestFailure, ExtensionRequestId, ExtensionRequestOutcome,
-    ExtensionRuntimeConfig, ExtensionRuntimeSharing, ExtensionSessionEntryOperation,
+    ExtensionRuntimeConfig, ExtensionRuntimeSharing, ExtensionResourceOwner, ExtensionSessionEntryOperation,
     ExtensionSessionLifecycleReceiver, ExtensionSessionLifecycleRequest,
     ExtensionSessionLifecycleService, ExtensionSource, ExtensionStatusContribution,
     ExtensionTerminalInput, ExtensionTerminalOperation, ExtensionTerminalResize, ExtensionTrust,
@@ -162,6 +165,9 @@ const MAX_HOST_REQUEST_TOOL_NAMES: usize = 64;
 const HOST_REQUEST_QUEUE_CAPACITY: usize = 64;
 const CONTROLLED_EXTENSION_START_DIAGNOSTIC: &str = "executable extensions were not started: safe mode/controlled policies deny extension process startup even with explicit trust; full access (unsafe_host) is required and should be used only inside OS-level isolation";
 static NEXT_EXTENSION_RUN_ID: AtomicU64 = AtomicU64::new(1);
+// The process owns one interactive terminal. Retained workspace-service
+// generations must keep waking the same consumer across App/session rebuilds.
+static INTERACTIVE_REMOTE_UI_WAKE: std::sync::OnceLock<Arc<tokio::sync::Notify>> = std::sync::OnceLock::new();
 
 /// The active-session driver is dispatched only by the interactive idle loop.
 /// Other frontends must not advertise an operation they cannot settle safely.
@@ -532,6 +538,17 @@ pub trait ExtensionConfirmationHandler {
         Box::pin(std::future::pending())
     }
 
+    /// Interactive commands lend the same shell/input owner to the fleet drain.
+    /// Other frontends retain the bounded cancellation-only behavior.
+    fn command_shell(&mut self) -> Option<&mut InteractiveShell> { None }
+
+    fn wait_for_command_event<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
+        Box::pin(async move { self.wait_for_cancel().await?; Ok(None) })
+    }
+
+    /// Apply an unfocused command-loop event. True requests cancellation.
+    fn command_event(&mut self, _event: Event) -> bool { false }
+
     /// Receive one bounded, request-scoped extension command progress event.
     ///
     /// Implementations must treat this as transient presentation only; it is
@@ -570,6 +587,12 @@ where
     fn wait_for_cancel<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
         self.inner.wait_for_cancel()
     }
+
+    fn command_shell(&mut self) -> Option<&mut InteractiveShell> { self.inner.command_shell() }
+    fn wait_for_command_event<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
+        self.inner.wait_for_command_event()
+    }
+    fn command_event(&mut self, event: Event) -> bool { self.inner.command_event(event) }
 
     fn progress(&mut self, extension: &str, progress: &ToolProgress) {
         self.inner.progress(extension, progress);
@@ -902,6 +925,7 @@ fn host_request_operation_name(operation: &HostRequestOperation) -> &'static str
         HostRequestOperation::Shortcut { .. } => "shortcuts",
         HostRequestOperation::ActiveTools { .. } => "active_tools",
         HostRequestOperation::Terminal(_) => "terminal_handoff",
+        HostRequestOperation::RemoteUi { .. } => "remote_ui",
         HostRequestOperation::ContextSnapshot(operation) => match operation {
             ExtensionContextOperation::SessionManager => "session_manager",
             ExtensionContextOperation::PendingMessages => "pending_messages",
@@ -919,6 +943,7 @@ fn host_request_feature(operation: &HostRequestOperation) -> &'static str {
         HostRequestOperation::Shortcut { .. } => EXTENSION_FEATURE_SHORTCUTS,
         HostRequestOperation::ActiveTools { .. } => EXTENSION_FEATURE_ACTIVE_TOOLS,
         HostRequestOperation::Terminal(_) => EXTENSION_FEATURE_TERMINAL_HANDOFF,
+        HostRequestOperation::RemoteUi { .. } => EXTENSION_FEATURE_REMOTE_UI,
         HostRequestOperation::ContextSnapshot(ExtensionContextOperation::SystemPrompt) => {
             EXTENSION_FEATURE_SYSTEM_PROMPT_READ
         }
@@ -1105,6 +1130,7 @@ fn validate_host_request(
         // The handoff carries no payload: the host mints the grant and reports
         // the size it left the terminal in, so there is nothing to bound here.
         HostRequestOperation::Terminal(_) => Ok(()),
+        HostRequestOperation::RemoteUi { operation, .. } => operation.validate(),
         // Read-only snapshots take no caller payload; the reply is bounded at
         // the point the host composes it.
         HostRequestOperation::ContextSnapshot(_) => Ok(()),
@@ -1942,6 +1968,9 @@ pub struct ExecutableExtensions {
     /// The one foreground terminal grant the host can cede, or `None` while the
     /// host still owns its own raw terminal.
     terminal_arbiter: TerminalGrantArbiter,
+    remote_ui: remote_ui::RemoteUi,
+    remote_ui_wake: Option<Arc<tokio::sync::Notify>>,
+    command_dialog_process: Option<(String, u64)>,
     dynamic_shortcuts: Vec<RegisteredDynamicShortcut>,
     shortcut_tasks: Vec<JoinHandle<()>>,
     event_drain_cursor: usize,
@@ -1964,6 +1993,10 @@ pub struct ExecutableExtensions {
     resource_owner: Option<String>,
     session_started_at: Instant,
     session_lifecycle_started: bool,
+    // UI hooks must run while the foreground shell can answer reverse requests,
+    // never inside the blocking application bootstrap.
+    pending_session_hook_starts: Vec<(ExtensionProcess, String)>,
+    session_hook_start_tasks: Vec<JoinHandle<()>>,
     last_lifecycle_outcome: Option<ExtensionLifecycleOutcome>,
     /// Stable host-created mutation identities already delivered to hooks.
     /// Keeping this outside process generations prevents reload/restart paths
@@ -2197,6 +2230,7 @@ enum HostRequestOperation {
         names: Vec<String>,
     },
     Terminal(ExtensionTerminalOperation),
+    RemoteUi { owner: ExtensionResourceOwner, operation: ExtensionRemoteUiOperation },
     /// A read-only foreground context snapshot. `SystemPrompt` is resolved by
     /// the product loop that owns the agent; the other operations resolve
     /// against the live shell and the cached host state.
@@ -2423,6 +2457,9 @@ impl Default for ExecutableExtensions {
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),
             terminal_arbiter: TerminalGrantArbiter::default(),
+            remote_ui: remote_ui::RemoteUi::default(),
+            remote_ui_wake: None,
+            command_dialog_process: None,
             dynamic_shortcuts: Vec::new(),
             shortcut_tasks: Vec::new(),
             event_drain_cursor: 0,
@@ -2441,6 +2478,8 @@ impl Default for ExecutableExtensions {
             resource_owner: None,
             session_started_at: Instant::now(),
             session_lifecycle_started: false,
+            pending_session_hook_starts: Vec::new(),
+            session_hook_start_tasks: Vec::new(),
             last_lifecycle_outcome: None,
             seen_post_mutation_ids: VecDeque::new(),
             pending_post_mutation_rescans: VecDeque::new(),
@@ -2467,6 +2506,7 @@ pub struct ExtensionBackgroundUpdates {
 }
 
 enum ExtensionBackgroundUpdate {
+    Diagnostics(Vec<String>),
     Renderer {
         update: Option<ExtensionToolRenderUpdate>,
         diagnostic: Option<String>,
@@ -2694,6 +2734,11 @@ impl ExecutableExtensions {
             .cloned()
             .collect::<Vec<_>>();
 
+        // One wake/consumer binding for the complete interactive fleet. Plain,
+        // print, RPC, and native hosts never advertise remote UI success.
+        let remote_ui_wake = (matches!(&config.mode, Mode::Interactive)
+            && crate::tui::terminal::TerminalCapabilities::detect(config.color, config.plain).interactive)
+            .then(|| INTERACTIVE_REMOTE_UI_WAKE.get_or_init(|| Arc::new(tokio::sync::Notify::new())).clone());
         let event_bus = Arc::new(ExtensionEventBus::default());
         let (session_lifecycle_service, session_lifecycle_receiver) =
             if active_session_lifecycle_enabled(config)
@@ -2746,6 +2791,7 @@ impl ExecutableExtensions {
                 let subagents_tool_available =
                     model.spec.capabilities.tools && config.tool_available("subagent_spawn");
                 let extension_flag_values = config.extension_flag_values.clone();
+                let remote_ui_wake = remote_ui_wake.clone();
                 let owner = session.resource_owner_key();
                 let startable_names = startable
                     .iter()
@@ -2760,6 +2806,7 @@ impl ExecutableExtensions {
                         .activate_eager(startable_names, |entry| {
                             let mut runtime = ExtensionRuntimeConfig::new(workspace.clone());
                             runtime.host_state = state.clone();
+                            runtime.remote_ui = remote_ui_wake.clone();
                             runtime.flag_values = extension_flag_values
                                 .get(&entry.descriptor.manifest.name)
                                 .cloned()
@@ -2945,6 +2992,7 @@ impl ExecutableExtensions {
         extensions.summaries = summaries;
         extensions.diagnostics.extend(diagnostics);
         extensions.event_bus = Some(event_bus);
+        extensions.remote_ui_wake = remote_ui_wake;
         extensions.session_lifecycle_service = session_lifecycle_service;
         extensions.session_lifecycle_receiver = session_lifecycle_receiver;
         extensions.session_id = host_state.session_id.clone();
@@ -3220,7 +3268,12 @@ impl ExecutableExtensions {
             }
         }
         if let Some(resource_owner) = self.resource_owner.clone() {
-            let processes = self.processes.clone();
+            let (ui_processes, processes): (Vec<_>, Vec<_>) = self.processes.iter().cloned()
+                .partition(|process| self.remote_ui_wake.is_some()
+                    && process.supports_feature(EXTENSION_FEATURE_REMOTE_UI));
+            self.pending_session_hook_starts.extend(ui_processes.into_iter()
+                .filter(|process| process.declares_session_hooks())
+                .map(|process| (process, resource_owner.clone())));
             match block_on_runtime(async move {
                 start_session_hooks_all(&processes, &resource_owner).await
             }) {
@@ -3649,6 +3702,7 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
+        self.cancel_session_hook_starts();
         if self.session_lifecycle_started {
             let outcome = ExtensionLifecycleOutcome::Completed;
             if let Some(resource_owner) = self.resource_owner.clone() {
@@ -4084,6 +4138,10 @@ impl ExecutableExtensions {
         let execution_context =
             extension_execution_context(&process, self.resource_owner.as_deref());
         let mut events = process.subscribe();
+        self.command_dialog_process = Some((extension_name.clone(), process.health_snapshot().generation));
+        let remote_ui_wake = self.remote_ui_wake();
+        let mut frontend_tick = tokio::time::interval(Duration::from_millis(50));
+        frontend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let output: anyhow::Result<_> = async {
             let legacy_uncorrelated = process.api_version() == EXTENSION_API_VERSION_0_1;
             let (request_started, started) = tokio::sync::oneshot::channel();
@@ -4101,12 +4159,17 @@ impl ExecutableExtensions {
             ));
             let mut events_open = true;
             let result = loop {
+                if let Some(shell) = confirmations.command_shell() {
+                    for message in self.drain_events_for_shell(shell) { shell.notice(message); }
+                    if self.sync_semantic_ui(shell) { shell.render(); }
+                }
                 // The cancellation future and confirmation UI borrow the same
                 // frontend. Keep the select in its own scope so cancellation
                 // is dropped before a confirmation prompt borrows it again.
                 let mut command_progress = None;
+                let mut command_input = None;
                 let event = {
-                    let cancellation = confirmations.wait_for_cancel();
+                    let cancellation = confirmations.wait_for_command_event();
                     tokio::pin!(cancellation);
                     tokio::select! {
                         result = &mut execution => break result?,
@@ -4122,15 +4185,32 @@ impl ExecutableExtensions {
                             None
                         },
                         event = events.recv(), if events_open && operation.is_some() => Some(event),
-                        cancelled = &mut cancellation => {
-                            cancelled.with_context(|| format!(
-                                "cancellation UI failed for extension {extension_name:?}"
-                            ))?;
-                            cancellation_token.cancel();
-                            anyhow::bail!("extension command {name:?} cancelled");
+                        incoming = &mut cancellation => {
+                            command_input = Some(incoming.with_context(|| format!(
+                                "command input failed for extension {extension_name:?}"
+                            ))?);
+                            None
                         }
+                        _ = remote_ui::notified(&remote_ui_wake) => None,
+                        _ = frontend_tick.tick() => None,
                     }
                 };
+                if let Some(incoming) = command_input {
+                    let cancelled = match incoming {
+                        None => true,
+                        Some(event) => {
+                            let consumed = confirmations.command_shell().is_some_and(|shell| {
+                                self.route_remote_ui_event(shell, &event)
+                            });
+                            !consumed && confirmations.command_event(event)
+                        }
+                    };
+                    if cancelled {
+                        cancellation_token.cancel();
+                        anyhow::bail!("extension command {name:?} cancelled");
+                    }
+                    continue;
+                }
                 if let Some(progress) = command_progress {
                     confirmations.progress(&extension_name, &progress);
                     continue;
@@ -4209,6 +4289,12 @@ impl ExecutableExtensions {
             Ok::<_, anyhow::Error>(result)
         }
         .await;
+        self.command_dialog_process = None;
+        if let Some(shell) = confirmations.command_shell() {
+            for message in self.drain_events_for_shell(shell) { shell.notice(message); }
+            self.sync_semantic_ui(shell);
+            shell.render();
+        }
         confirmations.finish_progress(&extension_name);
         let output = output?;
         self.enqueue_contexts(&extension_name, output.context);
@@ -4222,7 +4308,11 @@ impl ExecutableExtensions {
                 .iter()
                 .map(|notification| format_notification(name, notification)),
         );
-        blocks.extend(self.drain_events());
+        if let Some(shell) = confirmations.command_shell() {
+            blocks.extend(self.drain_events_for_shell(shell));
+        } else {
+            blocks.extend(self.drain_events());
+        }
         Ok(Some(blocks.join("\n")))
     }
 
@@ -4654,6 +4744,7 @@ commands = ["subagents"]
         let mut updates = ExtensionBackgroundUpdates::default();
         while let Ok(update) = self.background_rx.try_recv() {
             match update {
+                ExtensionBackgroundUpdate::Diagnostics(messages) => self.diagnostics.extend(messages),
                 ExtensionBackgroundUpdate::Renderer { update, diagnostic } => {
                     self.diagnostics.extend(diagnostic);
                     updates.rendered_tools.extend(update);
@@ -4675,7 +4766,32 @@ commands = ["subagents"]
         updates
     }
 
+    fn cancel_session_hook_starts(&mut self) {
+        self.pending_session_hook_starts.clear();
+        for task in self.session_hook_start_tasks.drain(..) {
+            task.abort();
+        }
+    }
+
+    fn schedule_session_hook_starts(&mut self) {
+        self.session_hook_start_tasks.retain(|task| !task.is_finished());
+        for (process, owner) in self.pending_session_hook_starts.drain(..) {
+            let tx = self.background_tx.clone();
+            self.session_hook_start_tasks.push(tokio::spawn(async move {
+                // The process owns its bounded request deadline. The shell is
+                // free to service ui/open while this hook awaits its result.
+                if let Err(error) = process.start_session_hook_binding(owner).await {
+                    let _ = tx.send(ExtensionBackgroundUpdate::Diagnostics(vec![format!(
+                        "warning: extension {:?} session_start hook failed: {error}",
+                        process.descriptor().manifest.name,
+                    )])).await;
+                }
+            }));
+        }
+    }
+
     fn cancel_background_work(&mut self) {
+        self.cancel_session_hook_starts();
         for task in self.renderer_tasks.drain(..) {
             task.abort();
         }
@@ -5057,6 +5173,7 @@ commands = ["subagents"]
         // owner. Isolated lifecycle processes are stopped below; shared and
         // legacy processes never receive this service.
         self.deactivate_session_lifecycle_driver();
+        self.remote_ui.revoke("the foreground extension binding ended");
         self.cancel_background_work();
         self.settle_session_lifecycle().await;
         for process in &self.processes {
@@ -5556,6 +5673,8 @@ commands = ["subagents"]
             footer,
             working,
             hidden_thinking_label,
+            remote: remote_ui::Projection::default(),
+            remote_fullscreen_overlay: false,
         }
     }
 
@@ -5858,7 +5977,12 @@ commands = ["subagents"]
         };
         let owner_is_foreground =
             host_request_owner_is_foreground(owner.as_ref(), self.resource_owner.as_deref());
-        if !owner_is_foreground {
+        let remote_owner_valid = !matches!(&operation, HostRequestOperation::RemoteUi { owner, .. }
+            if owner.extension_instance_id != process.extension_instance_id()
+                || owner.process_generation != generation
+                || !process.is_running()
+                || process.health_snapshot().generation != generation);
+        if !owner_is_foreground || !remote_owner_valid {
             self.refuse_host_request(
                 process,
                 request_id,
@@ -6124,6 +6248,21 @@ commands = ["subagents"]
                 ),
                 HostRequestOperation::ContextSnapshot(operation) => {
                     self.apply_context_snapshot_in_shell(shell, operation)
+                }
+                HostRequestOperation::RemoteUi { owner, operation } => {
+                    // Re-fence the complete owner immediately before mounting.
+                    if self.resource_owner.as_deref() != Some(owner.session_id.as_str())
+                        || owner.extension_instance_id != pending.process.extension_instance_id()
+                        || owner.process_generation != pending.generation
+                    {
+                        ExtensionRequestOutcome::Failed(ExtensionRequestFailure::NotForegroundOwner,
+                            "remote UI owner is no longer foreground".into())
+                    } else {
+                        match self.remote_ui.apply(pending.process.clone(), owner, operation, shell, self.terminal_arbiter.active().is_some()) {
+                            Ok(result) => ExtensionRequestOutcome::Ok(result),
+                            Err((failure, detail)) => ExtensionRequestOutcome::Failed(failure, detail),
+                        }
+                    }
                 }
             };
             self.queue_host_request_response(
@@ -6511,6 +6650,10 @@ commands = ["subagents"]
         };
         match operation {
             ExtensionTerminalOperation::Acquire => {
+                if !self.remote_ui.is_empty() || shell.remote_ui_input_blocked() {
+                    return ExtensionRequestOutcome::Failed(ExtensionRequestFailure::InvalidRequest,
+                        "terminal handoff conflicts with a remote component or host input owner".into());
+                }
                 // Read the size the host is leaving behind, then hand the tty
                 // over: the answer is the last thing the host does here.
                 let (columns, rows) = shell.terminal_dimensions();
@@ -6586,6 +6729,8 @@ commands = ["subagents"]
     /// Revoke before dropping or replacing this binding. Reconciliation alone
     /// cannot find the old grant after a replacement App owns a fresh arbiter.
     pub fn revoke_terminal_grant_for_shell(&mut self, shell: &mut InteractiveShell, reason: &str) {
+        self.remote_ui.revoke(reason);
+        shell.set_remote_ui(self.remote_ui.projection());
         if let Some(revoked) = self.terminal_arbiter.revoke_if(|_| false) {
             self.restore_revoked_terminal_grant(shell, revoked, reason);
         }
@@ -6634,14 +6779,44 @@ commands = ["subagents"]
         self.terminal_arbiter.active().is_some()
     }
 
+    pub(crate) fn remote_ui_wake(&self) -> Option<Arc<tokio::sync::Notify>> {
+        self.remote_ui_wake.clone()
+    }
+
+    fn sync_remote_ui(&mut self, shell: &mut InteractiveShell) -> bool {
+        for error in self.remote_ui.reconcile(self.resource_owner.as_deref(), shell.terminal_dimensions()) {
+            shell.error(error);
+        }
+        for process in &self.processes {
+            for frame in process.take_remote_ui_frames() {
+                self.remote_ui.accept_frame(process, frame);
+            }
+        }
+        let changed = shell.set_remote_ui(self.remote_ui.projection());
+        if changed { shell.render(); }
+        changed
+    }
+
+    /// Focused keys never reach the composer, keymap shortcuts, or passive
+    /// terminal-input observers. Reconcile before routing after every wake.
+    pub(crate) fn route_remote_ui_event(&mut self, shell: &mut InteractiveShell, event: &Event) -> bool {
+        if let Event::Resize(columns, rows) = event { shell.set_size(*columns, *rows); }
+        self.sync_remote_ui(shell);
+        let consumed = self.remote_ui.route_input(shell, event);
+        if consumed && shell.set_remote_ui(self.remote_ui.projection()) { shell.render(); }
+        consumed
+    }
+
     /// Drain extension events while an interactive shell owns the editor. This
     /// is deliberately separate from the generic event drain so headless hosts
     /// never accidentally grant an editor lease.
     pub fn drain_events_for_shell(&mut self, shell: &mut InteractiveShell) -> Vec<String> {
+        self.schedule_session_hook_starts();
         let messages = self.drain_events_inner(true);
         self.drain_editor_requests_into_shell(shell);
         self.drain_host_requests_into_shell(shell);
         self.reconcile_terminal_grant_for_shell(shell);
+        self.sync_remote_ui(shell);
         messages
     }
 
@@ -6885,6 +7060,10 @@ commands = ["subagents"]
                     // `context/model` until that lands, so no extension is left
                     // waiting today; the arm keeps the drain exhaustive, matching
                     // the agent crate's own `ModelViewRequested` arm.
+                    Ok(ExtensionEvent::RemoteUiRequested { request_id, generation, owner, operation }) => {
+                        self.admit_host_request(process.clone(), &name, request_id, generation,
+                            Some(owner.clone()), HostRequestOperation::RemoteUi { owner, operation }, interactive);
+                    }
                     Ok(ExtensionEvent::ModelViewRequested { .. }) => {}
                     Ok(ExtensionEvent::AutocompleteRegistered {
                         request_id,
@@ -6965,7 +7144,8 @@ commands = ["subagents"]
                         request,
                         ..
                     }) => {
-                        if process.as_ref().is_some_and(|process| {
+                        if self.command_dialog_process.as_ref() == Some(&(name.clone(), generation))
+                            || process.as_ref().is_some_and(|process| {
                             process.confirmation_answered(&request_id, generation)
                         }) {
                             remaining -= 1;
@@ -6999,7 +7179,8 @@ commands = ["subagents"]
                         request,
                         ..
                     }) => {
-                        if process
+                        if self.command_dialog_process.as_ref() == Some(&(name.clone(), generation))
+                            || process
                             .as_ref()
                             .is_some_and(|process| process.input_answered(&request_id, generation))
                         {

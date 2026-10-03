@@ -1,0 +1,23 @@
+name = "octet-pi-compat"
+version = "0.1.0"
+api_version = "0.4"
+description = "Optional reviewed Pi factories; configure entrypoints explicitly before activation"
+
+[entrypoint]
+command = "node"
+args = ["--input-type=module", "--eval", "await import(process.env.OCTET_EXTENSION_DIR + '/runner.mjs')"]
+
+# No factories are configured by default. Review before local configure/setup.
+# Trusted factories retain normal OS authority; these declarations are not a sandbox.
+[capabilities]
+filesystem = "unrestricted"
+process = true
+network = true
+
+[contributes]
+tools = []
+commands = []
+hooks = []
+tool_renderers = []
+notifications = true
+confirmations = true

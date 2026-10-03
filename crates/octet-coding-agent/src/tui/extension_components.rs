@@ -19,6 +19,7 @@
 //! can be validated before they reserve screen state.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Wire bound: component id bytes.
 pub const MAX_COMPONENT_ID_BYTES: usize = 64;
@@ -132,7 +133,7 @@ pub struct ComponentRegion {
     /// Region width of the last accepted render, if any.
     pub width: Option<u16>,
     /// Last rendered lines (may be stale until the render round-trip lands).
-    pub lines: Vec<String>,
+    pub lines: Arc<Vec<String>>,
 }
 
 /// The per-extension component surface. One instance per extension process
@@ -230,11 +231,20 @@ impl ExtensionComponentSurface {
             MAX_RENDER_LINE_BYTES,
             "component render",
         )?;
+        let mut bytes = 0usize;
+        for line in &lines {
+            bytes += line.len();
+            if bytes > octet_agent::extension_remote_ui::MAX_EXTENSION_REMOTE_UI_FRAME_BYTES {
+                return Err(ComponentSurfaceError::BoundsExceeded("component frame exceeds 512 KiB".into()));
+            }
+            octet_agent::extension_remote_ui::validate_remote_ui_line(line)
+                .map_err(ComponentSurfaceError::BoundsExceeded)?;
+        }
         match self.components.get_mut(id) {
             Some(region) => {
-                let changed = region.width != Some(width) || region.lines != lines;
+                let changed = region.width != Some(width) || region.lines.as_ref() != &lines;
                 region.width = Some(width);
-                region.lines = lines;
+                region.lines = Arc::new(lines);
                 Ok(changed)
             }
             None => Err(ComponentSurfaceError::BoundsExceeded(format!(
@@ -408,9 +418,20 @@ impl ExtensionComponentSurface {
                 WidgetContent::Component(id) => self
                     .components
                     .get(id)
-                    .map(|region| (key.clone(), region.lines.clone())),
+                    .map(|region| (key.clone(), region.lines.as_ref().clone())),
             })
             .collect()
+    }
+
+    /// Release a cached region without retaining an unmounted component.
+    pub(crate) fn remove_component(&mut self, id: &str) {
+        self.components.remove(id);
+        self.invalidated.retain(|pending| pending != id);
+        self.pending_renders.retain(|(pending, _)| pending != id);
+        self.widgets.retain(|_, (content, _)| !matches!(content, WidgetContent::Component(component) if component == id));
+        for slot in [&mut self.header, &mut self.footer, &mut self.editor_component] {
+            if slot.as_deref() == Some(id) { *slot = None; }
+        }
     }
 
     /// Component ids whose regions should be dropped for a generation reset.
@@ -524,8 +545,7 @@ pub struct TuiMouseWireEvent {
 
 /// Map one crossterm mouse event into pi's normalized shape with local
 /// coordinates for the region at `(origin_x, origin_y)` sized
-/// `(width, height)`. crossterm coordinates are 1-based cell coordinates;
-/// pi's are zero-based (`tui.ts:24`).
+/// `(width, height)`. Both crossterm and pi use zero-based cell coordinates.
 pub fn mouse_wire_event(
     event: &crossterm::event::MouseEvent,
     origin: (u16, u16),
@@ -539,18 +559,18 @@ pub fn mouse_wire_event(
         Kind::Up(button) => ("release", button_name(button), None),
         Kind::Drag(button) => ("drag", button_name(button), None),
         Kind::Moved => ("move", "none", None),
-        Kind::ScrollDown => ("wheel", "none", Some(-1)),
-        Kind::ScrollUp => ("wheel", "none", Some(1)),
+        Kind::ScrollDown => ("wheel", "none", Some(1)),
+        Kind::ScrollUp => ("wheel", "none", Some(-1)),
         Kind::ScrollLeft => ("wheel", "none", Some(0)),
         Kind::ScrollRight => ("wheel", "none", Some(0)),
     };
     TuiMouseWireEvent {
         kind: kind.to_owned(),
         button: button_name.to_owned(),
-        x: event.column.saturating_sub(origin_x).saturating_sub(1),
-        y: event.row.saturating_sub(origin_y).saturating_sub(1),
-        screen_x: event.column.saturating_sub(1),
-        screen_y: event.row.saturating_sub(1),
+        x: event.column.saturating_sub(origin_x),
+        y: event.row.saturating_sub(origin_y),
+        screen_x: event.column,
+        screen_y: event.row,
         width,
         height,
         shift: event
@@ -800,17 +820,17 @@ mod tests {
         let wire = mouse_wire_event(&event, (3, 2), (20, 5));
         assert_eq!(wire.kind, "wheel");
         assert_eq!(wire.button, "none");
-        assert_eq!(wire.x, 6);
-        assert_eq!(wire.y, 1);
-        assert_eq!(wire.screen_x, 9);
-        assert_eq!(wire.screen_y, 3);
+        assert_eq!(wire.x, 7);
+        assert_eq!(wire.y, 2);
+        assert_eq!(wire.screen_x, 10);
+        assert_eq!(wire.screen_y, 4);
         assert_eq!(wire.width, 20);
         assert_eq!(wire.height, 5);
-        assert_eq!(wire.wheel_delta, Some(1));
+        assert_eq!(wire.wheel_delta, Some(-1));
         assert!(wire.shift);
         let json = serde_json::to_string(&wire).unwrap();
-        assert!(json.contains("\"screenX\":9"));
-        assert!(json.contains("\"wheelDelta\":1"));
+        assert!(json.contains("\"screenX\":10"));
+        assert!(json.contains("\"wheelDelta\":-1"));
         let press = mouse_wire_event(
             &MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -823,7 +843,7 @@ mod tests {
         );
         assert_eq!(press.kind, "press");
         assert_eq!(press.button, "left");
-        assert_eq!(press.x, 0);
-        assert_eq!(press.y, 0);
+        assert_eq!(press.x, 1);
+        assert_eq!(press.y, 1);
     }
 }

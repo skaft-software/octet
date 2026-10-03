@@ -236,7 +236,7 @@ fn inherited_delegation_provenance() -> octet_agent::DelegationOrchestrationProv
     )
 }
 
-fn emulated_shell(
+pub(crate) fn emulated_shell(
     theme: OctetTheme,
     width: u16,
     height: u16,
@@ -291,6 +291,8 @@ fn emulated_shell_with_mode(
             render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: application_viewport,
+            remote_mouse_capture: false,
+            remote_keyboard_events: false,
             terminal_ceded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             herdr: crate::herdr::PaneReporter::disabled(),
         },

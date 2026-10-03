@@ -1134,6 +1134,9 @@ pub struct ShellExtensionUi {
     pub footer: Vec<ShellExtensionUiLine>,
     pub working: Option<ShellExtensionWorking>,
     pub hidden_thinking_label: Option<String>,
+    /// Validated cached components are UI-only, separate from semantic text.
+    pub(crate) remote: crate::extensions::remote_ui::Projection,
+    pub(crate) remote_fullscreen_overlay: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3248,6 +3251,8 @@ pub struct InteractiveShell {
     render_tx: Arc<Mutex<Option<SyncSender<RenderCommand>>>>,
     render_thread: Option<JoinHandle<()>>,
     capture_mouse: bool,
+    remote_mouse_capture: bool,
+    remote_keyboard_events: bool,
     /// Shared with the one input stream: while set, the host reads no raw bytes
     /// because an extension grant owns the terminal.
     terminal_ceded: Arc<AtomicBool>,
@@ -3313,6 +3318,8 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(Some(render_tx))),
             render_thread: Some(render_thread),
             capture_mouse,
+            remote_mouse_capture: false,
+            remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             herdr: crate::herdr::PaneReporter::detect(),
         })
@@ -3370,6 +3377,8 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: false,
+            remote_mouse_capture: false,
+            remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             // Renderer tests must never report to a real Herdr pane, even when
             // the test process inherits one.
@@ -5169,13 +5178,65 @@ impl InteractiveShell {
     /// Replace the complete host-projected semantic extension UI. The caller
     /// owns stale-generation filtering; this shell only retains data and keeps
     /// all terminal rendering/theme decisions host-side.
-    pub fn set_extension_ui(&mut self, ui: ShellExtensionUi) -> bool {
+    pub fn set_extension_ui(&mut self, mut ui: ShellExtensionUi) -> bool {
         let mut state = self.state.borrow_mut();
+        ui.remote = state.extension_ui.remote.clone();
+        ui.remote_fullscreen_overlay = state.extension_ui.remote_fullscreen_overlay;
         if state.extension_ui == ui {
             return false;
         }
         state.extension_ui = ui;
         true
+    }
+
+    /// Install one immutable cached remote UI projection. No extension callback
+    /// runs on the renderer; fullscreen rows use the existing transient overlay.
+    pub(crate) fn set_remote_ui(&mut self, projection: crate::extensions::remote_ui::Projection) -> bool {
+        use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
+        let mut state = self.state.borrow_mut();
+        if state.extension_ui.remote == projection { return false; }
+        let had_fullscreen = state.extension_ui.remote.mount(Placement::Fullscreen).is_some();
+        let header_changed = state.extension_ui.remote.mount(Placement::Header) != projection.mount(Placement::Header)
+            || (projection.mount(Placement::Header).is_some() && state.extension_ui.remote.components != projection.components);
+        state.extension_ui.remote = projection;
+        let fullscreen = state.extension_ui.remote.mount(Placement::Fullscreen);
+        let has_fullscreen = fullscreen.is_some();
+        let capture = fullscreen.is_some_and(|mount| mount.mouse_capture);
+        let keyboard_events = has_fullscreen || state.extension_ui.remote.mount(Placement::Editor).is_some();
+        if had_fullscreen && !has_fullscreen && state.extension_ui.remote_fullscreen_overlay {
+            state.overlay = None;
+        }
+        if !had_fullscreen || !has_fullscreen {
+            state.extension_ui.remote_fullscreen_overlay = has_fullscreen;
+        }
+        remote_ui::refresh_fullscreen_overlay(&mut state);
+        if header_changed { state.invalidate_transcript(); }
+        drop(state);
+        if self.remote_keyboard_events != keyboard_events {
+            if self.render_thread.is_some() {
+                if let Err(error) = OctetTerminal::set_remote_ui_keyboard_events(keyboard_events) {
+                    self.state.borrow_mut().error = Some(format!("remote keyboard event reporting failed: {error}"));
+                }
+            }
+            self.remote_keyboard_events = keyboard_events;
+        }
+        if self.remote_mouse_capture != capture {
+            if self.render_thread.is_some() {
+                if let Err(error) = OctetTerminal::set_mouse_capture(self.capture_mouse || capture) {
+                    self.state.borrow_mut().error = Some(format!("remote mouse capture failed: {error}"));
+                }
+            }
+            self.remote_mouse_capture = capture;
+        }
+        true
+    }
+
+    /// Approval/picker/search/tool input ownership always takes priority.
+    pub(crate) fn remote_ui_input_blocked(&self) -> bool {
+        let state = self.state.borrow();
+        state.startup_pending || state.panel.is_some() || state.tool_input_prompt.is_some()
+            || state.transcript_search_active()
+            || (state.overlay.is_some() && !state.extension_ui.remote_fullscreen_overlay)
     }
 
     /// Snapshot the normal host editor for a bounded extension handoff.
@@ -5792,13 +5853,17 @@ impl InteractiveShell {
         self.close_transcript_navigation();
         self.reset_input_interaction();
         let text = Arc::from(sanitize_for_terminal(&text));
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text));
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Text(text));
     }
 
     fn show_report(&mut self, surface: OrdinarySurfaceMetadata, body: ReportBody) {
         self.close_transcript_navigation();
         self.reset_input_interaction();
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Report(ReportOverlay {
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Report(ReportOverlay {
             surface,
             body,
             scroll_from_top: 0,
@@ -5856,6 +5921,7 @@ impl InteractiveShell {
     pub fn show_extension_output(&mut self, command: &str, text: String) {
         self.close_transcript_navigation();
         let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
         state.overlay = Some(ShellOverlay::Text(
             styled_extension_output(&state.theme, command, &text).into(),
         ));
@@ -5895,7 +5961,9 @@ impl InteractiveShell {
     /// Show picker output that already contains octet-generated foreground SGR.
     #[allow(dead_code)]
     pub fn show_styled_overlay_text(&mut self, text: String) {
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text.into()));
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Text(text.into()));
     }
 
     pub fn show_status_text_with_telemetry(&mut self, text: String) {
@@ -5912,7 +5980,11 @@ impl InteractiveShell {
     }
 
     pub fn close_overlay(&mut self) {
-        self.state.borrow_mut().overlay = None;
+        let mut state = self.state.borrow_mut();
+        state.overlay = None;
+        state.extension_ui.remote_fullscreen_overlay = state.extension_ui.remote
+            .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Fullscreen).is_some();
+        remote_ui::refresh_fullscreen_overlay(&mut state);
     }
 
     pub fn has_overlay(&self) -> bool {
@@ -5938,7 +6010,8 @@ impl InteractiveShell {
             {
                 return OverlayInputResult::Consumed;
             }
-            state.overlay = None;
+            drop(state);
+            self.close_overlay();
             return OverlayInputResult::Closed;
         }
         let (maximum, page_rows) = if state.render_threaded {
@@ -5998,7 +6071,8 @@ impl InteractiveShell {
             close = true;
         }
         if close {
-            state.overlay = None;
+            drop(state);
+            self.close_overlay();
             OverlayInputResult::Closed
         } else {
             OverlayInputResult::Consumed
@@ -7403,7 +7477,20 @@ mod reasoning_render;
 mod renderer_geometry;
 mod renderer_model;
 mod renderer_runtime;
-mod shell_chrome;
+#[path = "view/shell_chrome.rs"]
+mod builtin_shell_chrome;
+mod remote_ui;
+// Keep the built-in implementation unchanged; compose cached remote regions at
+// the existing shell chrome seam rather than introducing another renderer.
+mod shell_chrome {
+    pub(super) use super::builtin_shell_chrome::{
+        append_chrome, append_viewport_chrome, render_startup_surface,
+        shell_chrome_rows, ShellChrome,
+    };
+    #[cfg(test)]
+    pub(super) use super::builtin_shell_chrome::responsive_identity;
+    pub(super) use super::remote_ui::shell_chrome;
+}
 mod startup_update;
 mod status_telemetry;
 mod surface_frame;
@@ -7419,8 +7506,42 @@ mod transcript_history;
 mod transcript_hydration;
 mod transcript_render;
 mod transcript_selection;
-mod viewport;
-mod welcome_card;
+#[path = "view/viewport.rs"]
+mod builtin_viewport;
+mod viewport {
+    pub(super) use super::builtin_viewport::*;
+    use super::{remote_ui, renderer_runtime::ShellFrameState, ShellState};
+    use std::time::Instant;
+    use sexy_tui_rs::FrameUpdate;
+
+    fn remote_rows(state: &ShellState, width: u16) -> Option<Vec<String>> {
+        if !state.extension_ui.remote_fullscreen_overlay || state.panel.is_some() || state.tool_input_prompt.is_some() { return None; }
+        remote_ui::fullscreen_overlay(&state.extension_ui.remote, width, state.size.1)
+            .map(|text| text.split('\n').map(str::to_owned).collect())
+    }
+    pub(super) fn overlay_lines(state: &ShellState, width: u16, max_rows: usize) -> Vec<String> {
+        remote_rows(state, width).unwrap_or_else(|| super::builtin_viewport::overlay_lines(state, width, max_rows))
+    }
+    pub(super) fn render_shell_viewport_at(state: &ShellState, width: u16, now: Instant) -> Vec<String> {
+        remote_rows(state, width).unwrap_or_else(|| super::builtin_viewport::render_shell_viewport_at(state, width, now))
+    }
+    pub(super) fn render_shell_viewport_update(state: &ShellState, width: u16, now: Instant, frame: &mut ShellFrameState) -> FrameUpdate {
+        if let Some(replacement) = remote_rows(state, width) {
+            let reanchor_viewport = !frame.overlay_active || frame.width != width || frame.height != state.size.1;
+            frame.overlay_active = true;
+            frame.width = width;
+            frame.height = state.size.1;
+            return FrameUpdate { stable_prefix: 0, replacement, pinned: None, resize_replay: None, reanchor_viewport, rebuild_scrollback: false };
+        }
+        super::builtin_viewport::render_shell_viewport_update(state, width, now, frame)
+    }
+}
+#[path = "view/welcome_card.rs"]
+mod builtin_welcome_card;
+mod welcome_card {
+    pub(super) use super::builtin_welcome_card::{restart_welcome_animation, welcome_animating};
+    pub(super) use super::remote_ui::render_welcome_card;
+}
 
 #[cfg(test)]
 mod changelog_tests;
@@ -7434,7 +7555,7 @@ mod startup_readiness_tests;
 #[path = "view/subagent_stability_tests.rs"]
 mod subagent_stability_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod extension_handoff_tests {

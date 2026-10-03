@@ -10,8 +10,9 @@ This scanner reads local files without running package code, starting a model,
 or changing either setup. It always runs dry, even without `--dry-run`; it is
 not an apply command or an extension-compatibility promise. Inventory, portable
 setup import/restore, and [native provider support](providers.md) are separate
-capabilities. **Pi extension execution is not supported** in the local RC; the
-former bridge and its `octet pi` command family have been removed.
+capabilities. The former bridge and its `octet pi` command family remain removed.
+A separate, explicitly configured [optional Pi adapter](pi-compatibility.md) can
+load reviewed factories; migration commands neither install nor start it.
 
 ## Current command
 
@@ -79,12 +80,17 @@ restore applies only to imported setup data, not extension execution.
 
 <a id="plan-preflight-and-publish-a-compatible-extension"></a>
 
-## Pi extension execution is not supported
+<a id="pi-extension-execution-is-not-supported"></a>
+
+## Optional extension execution is separate
 
 The former install/plan/preflight/publish/list/rollback workflow is no longer
 available. Do not use inventory results to execute Pi package code, auto-enable
-an extension, or infer trust. Review portable resources and explicitly port any
-needed tools to [octet's bounded extension API](extensions.md).
+an extension, or infer trust. The [optional Pi adapter](pi-compatibility.md) uses
+explicitly reviewed entrypoints and normal octet enablement/trust. Its bounded
+API support and measured qualification are independent of scanner categories.
+Uncovered behavior still needs an explicitly scoped port to
+[octet's extension API](extensions.md).
 
 ## Scanner reference
 
@@ -105,7 +111,7 @@ becomes a diagnostic; one bad package does not stop the rest.
 | --- | --- |
 | `direct` | Pi skills or Markdown prompts have a deterministic octet resource path; the scanner does not copy them. |
 | `replace` | Reserved for an exact package/version/source-hash native replacement recipe. No replacement recipes ship. |
-| `bridge` | Retained scanner classification against its pinned historical profile. There is no shipping Pi bridge; review for a native port, not unchanged execution. |
+| `bridge` | Retained scanner classification against its pinned historical profile, not qualification for the optional Pi adapter or permission for unchanged execution. |
 | `native_port` | Uses a known Pi `0.84.4` mutation/registration requiring an explicitly scoped native port or redesign; no future host primitive is promised. |
 | `manual` | Arbitrary Pi TUI/editor components, custom providers, or deep session/compaction internals need redesign. Pi JSON themes also need manual conversion to octet's different semantic schema. |
 | `blocked` | Could not resolve/read/parse completely, or uses names outside the pinned Pi `0.84.4` public profile. |
@@ -170,7 +176,7 @@ fallback; no current scanner invocation silently starts model use.
 
 - <a id="migration-architecture"></a>[Migration architecture](#deliberate-compatibility-boundary).
 - <a id="deterministic-scannercompiler"></a>[Deterministic scanner/compiler](#scanner-reference).
-- <a id="compatibility-process"></a>[Removed compatibility process](#pi-extension-execution-is-not-supported).
+- <a id="compatibility-process"></a>[Separate optional compatibility process](pi-compatibility.md).
 - <a id="exact-recipes"></a>[Exact recipes](https://github.com/orgs/skaft-software/projects/5): none ship; see [classification](#classification).
 - <a id="agentic-fallback"></a>[Agentic fallback](https://github.com/orgs/skaft-software/projects/5): not an implemented automatic migration path.
 - <a id="product-promise"></a>[Current scope](#deliberate-compatibility-boundary) and [project](https://github.com/orgs/skaft-software/projects/5).

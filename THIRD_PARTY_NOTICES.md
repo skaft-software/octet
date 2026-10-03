@@ -20,6 +20,19 @@ port of Pi's TUI architecture.
 - License: MIT
 - [License text](third_party/licenses/PI-MIT.txt)
 
+The optional `extensions/octet-pi-compat` package uses the pinned
+`@earendil-works/pi-tui` 0.80.10 MIT-licensed component/utilities library inside
+its separate Node process. It does not install, import, or execute Pi's
+coding-agent runtime. Node, jiti, TypeBox, and these Pi libraries are not
+required by the ordinary Rust binary or native executable extensions.
+
+Acceptance tests can load original third-party extensions from explicitly
+supplied paths; those sources and assets are not bundled into octet. In
+particular, `badlogic/pi-doom` declares GPL-2.0, and its shareware WAD retains
+its own distribution terms. Ben Vinegar's `pi-stuff` drawing extension and
+`pi-agent-extensions` retain their upstream MIT notices. Keep those notices
+with separately installed packages; compatibility does not relicense them.
+
 ## grok-mermaid and grok-build
 
 The terminal flowchart layout and label cleanup in
