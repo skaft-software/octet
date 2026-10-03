@@ -45,6 +45,7 @@ pub mod error;
 pub mod faux;
 pub mod host_transport;
 pub mod images;
+pub mod inference;
 mod json_repair;
 pub mod media;
 pub mod model_metadata;
@@ -103,6 +104,12 @@ pub use faux::{
     FauxToolCall,
 };
 pub use host_transport::{HostStreamModel, HostStreamTransport};
+pub use inference::{
+    ClientInferenceMetrics, ClientTimingScope, DecodeEstimate, DecodeEstimateUnavailable,
+    InferenceMetrics, ReportedTimingUnit, ServerGenerationMetrics, ServerTimingSource,
+    ServerTimingUnavailable,
+};
+
 pub use images::{
     GeneratedImage, ImageApi, ImageCancellation, ImageGenerationOptions, ImageGenerationRequest,
     ImageGenerationResponse, ImageInput, ImageModality, ImageModel, ImageModelCatalog,
@@ -142,8 +149,8 @@ pub use types::{
     ConstrainedSamplingStrict, Endpoint, EndpointId, EndpointTransport, GrammarVariants,
     ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message, Modality, ModalitySet,
     ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode, OpenAiChatRuntimeProfile,
-    OutputFormat, OutputModalities, Protocol, ProviderMediaRef, ProviderPartMetadata,
-    ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
+    OutputFormat, OutputModalities, PromptCacheLifetimes, Protocol, ProviderMediaRef,
+    ProviderPartMetadata, ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
     ReasoningEffortBudgets, ReasoningMode, ReasoningPart, ReasoningState, ReasoningStateKind,
     Request, RequestBodyEncoding, RequestRuntime, Response, ResponsesFeatures,
     ResponsesRuntimeProfile, ServiceTier, SessionAffinityFormat, StopReason,

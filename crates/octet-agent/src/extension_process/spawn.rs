@@ -166,6 +166,11 @@ pub(super) async fn spawn_connection(
 
     let pending = Arc::new(StdMutex::new(HashMap::new()));
     let issued_resource_owners = Arc::new(StdMutex::new(HashSet::new()));
+    let remote_ui = Arc::new(RemoteUiMailbox::new(
+        (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4)
+            .then(|| config.remote_ui.clone())
+            .flatten(),
+    ));
     let pending_changed = Arc::new(Notify::new());
     let child_requests = Arc::new(StdMutex::new(HashMap::new()));
     let child_work_slots = Arc::new(Semaphore::new(MAX_CHILD_WORKERS));
@@ -220,6 +225,7 @@ pub(super) async fn spawn_connection(
         Arc::clone(&draining),
         Arc::clone(&pending),
         Arc::clone(&pending_changed),
+        Arc::clone(&remote_ui),
         Arc::clone(&health),
         events.clone(),
         Arc::clone(&child),
@@ -236,6 +242,7 @@ pub(super) async fn spawn_connection(
         stdout,
         Arc::clone(&pending),
         Arc::clone(&issued_resource_owners),
+        Arc::clone(&remote_ui),
         Arc::clone(&pending_changed),
         Arc::clone(&closed),
         Arc::clone(&draining),
@@ -294,6 +301,7 @@ pub(super) async fn spawn_connection(
         child,
         pending,
         issued_resource_owners,
+        remote_ui,
         pending_changed,
         child_requests,
         next_id: AtomicU64::new(1),
@@ -334,7 +342,10 @@ pub(super) async fn spawn_connection(
     });
     artifact_guard.disarm();
     let offered_host_services = OfferedHostServices {
+        remote_ui: config.remote_ui.is_some(),
         agent_sessions: config.agent_sessions,
+        tool_composition: config.tool_composition
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         session_lifecycle: session_lifecycle.is_some(),
         approvals: config.approvals,
         secrets: config.secret_broker.is_some()
@@ -361,6 +372,23 @@ pub(super) async fn spawn_connection(
             .contains(&ExtensionHook::CompactionStrategy)
     {
         optional_features.push(EXTENSION_FEATURE_COMPACTION_STRATEGY.to_owned());
+    }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CacheWarmingDecision)
+    {
+        optional_features.push(EXTENSION_FEATURE_CACHE_WARMING_DECISION.to_owned());
+    }
+    if offered_host_services.tool_composition {
+        optional_features.push(EXTENSION_FEATURE_TOOL_COMPOSITION.to_owned());
+    }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && offered_host_services.remote_ui
+    {
+        optional_features.push(EXTENSION_FEATURE_REMOTE_UI.to_owned());
     }
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());

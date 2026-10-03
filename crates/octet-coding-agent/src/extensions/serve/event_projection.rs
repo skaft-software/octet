@@ -39,11 +39,28 @@ pub(super) async fn project_agent_event(
                 .send(event(EventPayload::ContextUpdated { context }))
                 .await
                 .map_err(|_| ServiceError::Unavailable)?;
-            crate::output::stderr!("warning: provider usage and cost are uncertain; displayed numeric usage is a known subtotal, not a complete total.");
+            crate::output::stderr!(
+                "warning: provider usage and cost are uncertain; displayed numeric usage is a known subtotal, not a complete total."
+            );
             persisted?;
         }
+        AgentEvent::CacheWarmed {
+            cost,
+            extension_override,
+            ..
+        } => {
+            // The durable ledger is mirrored by sync_session_usage on settle.
+            // This auxiliary operation creates no assistant/turn/context item.
+            if plan.config.show_cache_miss_notices {
+                crate::output::stderr_line(crate::commands::cache_warmed_notice(
+                    cost,
+                    extension_override,
+                ));
+            }
+        }
         AgentEvent::TurnStarted => {}
-        AgentEvent::ProviderLifecycle { .. }
+        AgentEvent::ProviderInference { .. }
+        | AgentEvent::ProviderLifecycle { .. }
         | AgentEvent::ProviderWaitingForNetwork { .. }
         | AgentEvent::ProviderOperationRetry { .. } => {
             // Serve's durable item protocol intentionally has no endpoint-status
@@ -429,7 +446,7 @@ pub(super) async fn project_tool_progress(
                 .await
                 .map_err(|_| ServiceError::Unavailable)?;
         }
-        ToolProgress::SessionEvent(_, _) => {}
+        ToolProgress::SessionEvent(_, _) | ToolProgress::SessionMetadataEvent(_, _) => {}
     }
     Ok(())
 }

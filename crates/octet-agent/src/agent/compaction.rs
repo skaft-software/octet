@@ -457,6 +457,7 @@ impl CompactionContext<'_> {
         // it into a durable handoff.
         validate_compaction_summary_part(&text)?;
         CompletionAttributes::usage(&response.usage)
+            .with_inference(response.inference.as_ref())
             .with_uncertainty(self.session.has_uncertain_usage())
             .record(&summary_request_guard.span);
         summary_request_guard.finish(false);

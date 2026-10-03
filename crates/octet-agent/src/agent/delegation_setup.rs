@@ -133,6 +133,7 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             max_session_tokens: self.max_session_tokens,
             max_session_cost_microdollars: self.max_session_cost_microdollars,
+            cache_warming_mode: self.cache_warmer.mode_control(),
             provider_retries_enabled: self.provider_retries_enabled,
             max_network_wait: self.max_network_wait,
             tool_schema_budget_bytes: self.tool_schema_budget_bytes,

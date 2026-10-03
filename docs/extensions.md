@@ -79,6 +79,31 @@ other API version negotiates this replacement hook.
 
 </details>
 
+## Tool composition
+
+The optional first-party [octet-codemode](../extensions/octet-codemode/README.md)
+bundle runs Pi's pinned offline QuickJS/WASM runtime (Node 22.19+). It adds
+single-shot JavaScript batching/chaining/filtering of the host's existing tools,
+not a new model, shell, filesystem or network authority. The guest cannot access
+Node APIs; the trusted launcher remains an ordinary OS process subject to the
+extension trust rules below.
+
+Enable explicitly with `--enable-extension octet-codemode`. Startup flags
+`--codemode-mode on|only` and `--codemode-inline-budget 0..16000` control
+presentation, not policy. The default `on` preserves ordinary direct tools;
+`only` keeps them in a separate frozen nested registry. Excluded/disabled tools
+stay unavailable in either mode. `/codemode status` and the menu are read-only
+help surfaces.
+
+Embedders opt into the generic API `0.4` `tool_composition_v1` service through
+`ExtensionRuntimeConfig.tool_composition`; it defaults false. The coding host
+offers it to enabled trusted API `0.4` processes. The host binds dispatch only
+to live model-tool parents, preserving schema validation, effects, approvals,
+hooks, cancellation, session budgets, private durable receipts and branch-store
+ancestry. Commands, hooks, stale/foreign parents and recursive compositions
+cannot use it. See the [wire contract](extensions/PROTOCOL-REFERENCE.md#225-compositioncontext-compositioncall-compositionstore-api-04-feature-tool_composition_v1)
+for declarations, limits and secure oversized JSON transport.
+
 ## Kernel boundary
 
 The host owns model conversations, sessions and tool-result persistence,
@@ -158,7 +183,7 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, SDK source packages and five executable
+names or imports. The local host, SDK source packages and six executable
 bundles have distribution version **0.8.2**. That doesn't select an extension
 API or publish SDK registries. Catalog installation needs version-matched
 published assets: see [installation](installation.md) and the [release
@@ -320,6 +345,43 @@ Neither event is assistant output. See the [recovery
 boundary](tools.md#recovery-and-security).
 
 </details>
+
+### Cache-warming decision advice (API 0.4)
+
+API `0.4` manifests may declare `hooks = ["cache_warming_decision"]` and
+negotiate the matching optional feature. It is offered only to declarations on
+API `0.4`, not on frozen `0.1`, retained `0.2`, or canonical `0.3`.
+
+Before every due refresh, `hook/run` supplies a content-free payload:
+
+```json
+{"decision":{"phase":"idle","warm_cost_microdollars":100,"miss_cost_microdollars":1000,"continuation_probability":0.15,"expected_savings_microdollars":50,"economics_available":true,"action":"stop"},"model":"cache-model"}
+```
+
+`phase` is `streaming` or `idle`; costs and signed expected savings are in
+microdollars. The separate execution context carries the host-issued resource
+owner, instance and process-generation fence. No prompt, credentials, provider
+endpoint, or mutable session is disclosed. Return
+`{"cache_warming_decision": "warm"}` or `{"cache_warming_decision": "stop"}`;
+an absent or null field is no opinion. Other hook dispositions, prompt contributions and notifications do
+not control a refresh.
+
+Hooks run in registration order; the **last returned action wins**. Invalid
+responses, remote failures, stale generations and no opinion leave the preceding
+host/hook decision unchanged. The process adapter caps each wait at 200 ms; the
+host also enforces one aggregate hook budget capped by the original refresh
+deadline. Advice cannot enable an off, unsupported or ineligible refresh,
+expand any spending/attempt budget, override cancellation, or authorize provider
+replay. Keep handlers fast and local: the host alone performs provider I/O.
+
+Native Rust extensions register `CacheWarmingDecisionHook` through
+`ExtensionHost::cache_warming_decision_hook`; the read-only
+`CacheWarmingDecisionContext` contains the typed `decision`, `model` and durable
+`resource_owner`. The Python SDK offers `@ext.cache_warming_decision`, returning
+`"warm"`, `"stop"` or `None`, plus typed payload/result models. See the
+[SDK recipe](../sdk/python/README.md#cache-warming-decision-advice-api-04) and
+[local example](../examples/extensions/cache-warming/README.md). This is bounded
+advice, not Pi ABI compatibility or ownership of the cache scheduler.
 
 ### Declared API `0.3` session hooks
 

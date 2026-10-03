@@ -208,10 +208,47 @@ impl ExtensionProcess {
     }
 
     /// Updates the session/model/skill snapshot attached to future calls and
-    /// future reload initialization. Existing child state changes only when a
-    /// typed request is made or the process reloads.
+    /// future reload initialization. Negotiated API 0.4 remote UI owners also
+    /// receive a bounded `context/updated {resource_owner, host}` replacement.
     pub fn set_host_state(&self, state: ExtensionHostState) {
-        *write_std_lock(&self.inner.host_state) = state;
+        let replaced_session;
+        {
+            let mut current = write_std_lock(&self.inner.host_state);
+            if *current == state {
+                return;
+            }
+            replaced_session = current.session_id != state.session_id;
+            *current = state.clone();
+        }
+        let connection = read_std_lock(&self.inner.connection);
+        let protocol = read_std_lock(&connection.protocol);
+        if protocol.version != EXTENSION_API_VERSION_0_4
+            || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
+            || !connection_is_usable(&connection)
+            || connection.draining.load(Ordering::Acquire)
+        {
+            return;
+        }
+        drop(protocol);
+        if replaced_session {
+            for surface_id in connection.remote_ui.surface_ids() {
+                let _ = connection.queue_notification(methods::UI_CLOSED,
+                    serde_json::json!({"surface_id":surface_id,"reason":"foreground owner replaced"}));
+            }
+            connection.remote_ui.clear();
+            lock_std_mutex(&connection.issued_resource_owners).clear();
+            return;
+        }
+        // Only already-admitted UI owners receive retained context updates.
+        // The bounded surface map supplies at most sixteen distinct owners.
+        for owner in connection.remote_ui.owners() {
+            if lock_std_mutex(&connection.issued_resource_owners).contains(&owner) {
+                let _ = connection.queue_notification(
+                    methods::CONTEXT_UPDATED,
+                    serde_json::json!({"resource_owner": owner, "host": state}),
+                );
+            }
+        }
     }
 
     /// Returns whether the current process transport is open.
@@ -263,20 +300,18 @@ impl ExtensionProcess {
         context
     }
 
-    /// Returns whether this API `0.3` process declared the paired typed
-    /// `session_start` and `session_end` lifecycle hooks.
+    /// Returns whether this process declared host-owned session hooks. Canonical
+    /// API 0.3 requires the pair; API 0.4 may declare either hook independently.
     pub fn declares_session_hooks(&self) -> bool {
-        self.api_version() == EXTENSION_API_VERSION_0_3
-            && self
-                .inner
-                .contributions
-                .hooks
-                .contains(&ExtensionHook::SessionStart)
-            && self
-                .inner
-                .contributions
-                .hooks
-                .contains(&ExtensionHook::SessionEnd)
+        let hooks = &self.inner.contributions.hooks;
+        match self.api_version() {
+            EXTENSION_API_VERSION_0_3 => {
+                hooks.contains(&ExtensionHook::SessionStart)
+                    && hooks.contains(&ExtensionHook::SessionEnd)
+            }
+            EXTENSION_API_VERSION_0_4 => hooks.iter().any(|hook| hook.is_session_hook()),
+            _ => false,
+        }
     }
 
     /// Starts one declared, owner-scoped session-hook binding exactly once.
@@ -409,6 +444,14 @@ impl ExtensionProcess {
         &self,
         binding: &ActiveSessionHookBinding,
     ) -> Result<(), ExtensionRuntimeError> {
+        if !self
+            .inner
+            .contributions
+            .hooks
+            .contains(&ExtensionHook::SessionStart)
+        {
+            return Ok(());
+        }
         let params = api_v03::SessionHookParams::SessionStart {
             payload: api_v03::SessionStart {
                 binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
@@ -433,8 +476,25 @@ impl ExtensionProcess {
                 duration_ms: session_hook_duration_millis(binding.started_at.elapsed()),
             },
         };
-        self.dispatch_session_hook(endpoint, &binding.session_id, params)
-            .await
+        let result = if self
+            .inner
+            .contributions
+            .hooks
+            .contains(&ExtensionHook::SessionEnd)
+        {
+            self.dispatch_session_hook(endpoint, &binding.session_id, params)
+                .await
+        } else {
+            Ok(())
+        };
+        let owner = ExtensionResourceOwner {
+            session_id: binding.session_id.clone(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: endpoint.generation,
+        };
+        endpoint.connection.remote_ui.discard_owner(&owner);
+        lock_std_mutex(&endpoint.connection.issued_resource_owners).remove(&owner);
+        result
     }
 
     pub(super) async fn dispatch_session_hook(
@@ -449,13 +509,21 @@ impl ExtensionProcess {
         let params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let params = api_v03::parse_session_hook_params(params).map_err(api_v03_protocol_error)?;
-        let params = serde_json::to_value(params)
+        let mut params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let resource_owner = ExtensionResourceOwner {
             session_id: session_id.to_owned(),
             extension_instance_id: self.inner.instance_id.clone(),
             process_generation: endpoint.generation,
         };
+        let canonical =
+            read_std_lock(&endpoint.connection.protocol).version == EXTENSION_API_VERSION_0_3;
+        if !canonical {
+            let mut context = self.execution_context();
+            context.resource_owner = Some(resource_owner.clone());
+            params["context"] = serde_json::to_value(context)
+                .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        }
         let result = endpoint
             .connection
             .request_lifecycle(
@@ -465,14 +533,20 @@ impl ExtensionProcess {
                 resource_owner,
             )
             .await?;
-        let result = api_v03::parse_session_hook_result(result).map_err(api_v03_protocol_error)?;
-        api_v03::validate_disposition(&result.disposition).map_err(api_v03_protocol_error)?;
-        if result.disposition.kind != "continue" {
+        let continued = if canonical {
+            let result =
+                api_v03::parse_session_hook_result(result).map_err(api_v03_protocol_error)?;
+            api_v03::validate_disposition(&result.disposition).map_err(api_v03_protocol_error)?;
+            result.disposition.kind == "continue"
+        } else {
+            let result: ExtensionHookOutput = serde_json::from_value(result).map_err(|error| {
+                ExtensionRuntimeError::Protocol(format!("invalid session hook response: {error}"))
+            })?;
+            result.disposition == ExtensionHookDisposition::Continue
+        };
+        if !continued {
             let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
-                message: format!(
-                    "session hook returned non-veto disposition `{}`; ignored",
-                    result.disposition.kind
-                ),
+                message: "session hook returned a non-veto disposition; ignored".into(),
             });
         }
         Ok(())
@@ -861,7 +935,7 @@ impl ExtensionProcess {
     ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
         if hook.is_session_hook() {
             return Err(ExtensionRuntimeError::Protocol(
-                "session_start and session_end are host-owned API 0.3 lifecycle hooks".into(),
+                "session_start and session_end are host-owned API 0.3/0.4 lifecycle hooks".into(),
             ));
         }
         if !self.inner.contributions.hooks.contains(&hook) {
@@ -1133,6 +1207,142 @@ impl ExtensionProcess {
             methods::UI_TERMINAL_INPUT,
             &input,
         )
+    }
+
+    /// Takes at most one latest validated frame per surface from the current
+    /// generation. Frames never pass through the broadcast/model event stream.
+    pub fn take_remote_ui_frames(&self) -> Vec<ExtensionRemoteUiFrame> {
+        let connection = read_std_lock(&self.inner.connection);
+        if !connection_is_usable(&connection) || connection.draining.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        connection.remote_ui.take_frames()
+    }
+
+    /// Tests whether an admitted open or active surface still belongs to this
+    /// owner. Frontends use this on wake to restore UI after request cancellation
+    /// even when the extension's generation itself remains healthy.
+    pub fn remote_ui_surface_is_current(
+        &self,
+        owner: &ExtensionResourceOwner,
+        surface_id: &str,
+    ) -> bool {
+        let connection = read_std_lock(&self.inner.connection);
+        connection_is_usable(&connection)
+            && !connection.draining.load(Ordering::Acquire)
+            && owner.process_generation == connection.generation
+            && owner.extension_instance_id == self.inner.instance_id
+            && connection.remote_ui.contains(owner, surface_id)
+    }
+
+    /// Queues focused input without waiting for extension rendering or stdin IO.
+    pub fn notify_remote_ui_key(
+        &self,
+        key: ExtensionRemoteUiKey,
+    ) -> Result<(), ExtensionRuntimeError> {
+        key.validate()
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        self.remote_ui_notification_owner(&connection, &key.surface_id)?;
+        Self::queue_remote_ui_notification(&connection, methods::UI_KEY, &key)
+    }
+
+    /// Queues normalized mouse input only for an admitted fullscreen capture
+    /// lease, without touching the terminal or waiting for extension rendering.
+    pub fn notify_remote_ui_mouse(
+        &self,
+        mouse: ExtensionRemoteUiMouse,
+    ) -> Result<(), ExtensionRuntimeError> {
+        mouse
+            .validate()
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        let owner = self.remote_ui_notification_owner(&connection, &mouse.surface_id)?;
+        connection
+            .remote_ui
+            .validate_mouse(&owner, &mouse)
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        Self::queue_remote_ui_notification(&connection, methods::UI_MOUSE, &mouse)
+    }
+
+    /// Invalidates cached old-size frames and queues the host's new geometry.
+    pub fn notify_remote_ui_resize(
+        &self,
+        resize: ExtensionRemoteUiResize,
+    ) -> Result<(), ExtensionRuntimeError> {
+        resize
+            .validate()
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        let owner = self.remote_ui_notification_owner(&connection, &resize.surface_id)?;
+        // Host geometry is authoritative even if bounded delivery is refused.
+        connection.remote_ui.resize(&owner, &resize);
+        Self::queue_remote_ui_notification(&connection, methods::UI_RESIZE, &resize)
+    }
+
+    /// Discards the surface immediately; host restoration never waits for the
+    /// best-effort bounded observation to reach the extension.
+    pub fn notify_remote_ui_closed(
+        &self,
+        closed: ExtensionRemoteUiClosed,
+    ) -> Result<(), ExtensionRuntimeError> {
+        closed
+            .validate()
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        let owner = self.remote_ui_notification_owner(&connection, &closed.surface_id)?;
+        connection.remote_ui.close(&owner, &closed.surface_id);
+        Self::queue_remote_ui_notification(&connection, methods::UI_CLOSED, &closed)
+    }
+
+    fn remote_ui_notification_owner(
+        &self,
+        connection: &ProcessConnection,
+        surface_id: &str,
+    ) -> Result<ExtensionResourceOwner, ExtensionRuntimeError> {
+        if !connection_is_usable(connection) || connection.draining.load(Ordering::Acquire) {
+            return Err(ExtensionRuntimeError::Closed(
+                "remote UI generation is unavailable".into(),
+            ));
+        }
+        let protocol = read_std_lock(&connection.protocol);
+        if protocol.version != EXTENSION_API_VERSION_0_4
+            || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
+            || !connection.remote_ui.is_bound()
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "remote UI was not negotiated".into(),
+            ));
+        }
+        let owner = connection
+            .remote_ui
+            .host_owner(surface_id)
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        if owner.process_generation != connection.generation
+            || owner.extension_instance_id != self.inner.instance_id
+            || !lock_std_mutex(&connection.issued_resource_owners).contains(&owner)
+        {
+            return Err(ExtensionRuntimeError::Closed(
+                "remote UI owner is stale".into(),
+            ));
+        }
+        Ok(owner)
+    }
+
+    fn queue_remote_ui_notification<T: Serialize>(
+        connection: &ProcessConnection,
+        method: &str,
+        params: &T,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let params = serde_json::to_value(params)
+            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        if connection.queue_notification(method, params) {
+            Ok(())
+        } else {
+            Err(ExtensionRuntimeError::Closed(format!(
+                "unable to queue `{method}` notification"
+            )))
+        }
     }
 
     /// Delivers one observer-only terminal resize event.

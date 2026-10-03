@@ -290,6 +290,11 @@ impl ModelCatalog {
         self.models.values().map(|m| m.as_ref())
     }
 
+    /// Returns the registered endpoint, without requiring a model binding.
+    pub fn endpoint(&self, id: &EndpointId) -> Option<&Endpoint> {
+        self.endpoints.get(id).map(Arc::as_ref)
+    }
+
     /// Returns whether an endpoint with this id is registered.
     pub fn has_endpoint(&self, id: &EndpointId) -> bool {
         self.endpoints.contains_key(id)
@@ -367,6 +372,10 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
         || !spec.preset.thinking_level_map.is_empty())
         && spec.capabilities.reasoning.is_none())
         || spec.api_name.is_empty()
+        || [spec.cache.prompt_cache.short, spec.cache.prompt_cache.long]
+            .into_iter()
+            .flatten()
+            .any(|seconds| !(1..=86_400).contains(&seconds))
         || spec.capabilities.deferred_tool_loading
         || !spec.capabilities.input_modalities.is_valid()
         || !spec.capabilities.output_modalities.is_valid()

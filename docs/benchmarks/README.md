@@ -102,6 +102,33 @@ extension-enabled benchmark. Use the PTY driver in
 [v0.7.4-local](v0.7.4-local/README.md) for the credential-free core frame
 boundary, and qualify extensions separately before claiming their startup cost.
 
+## Complete startup and native-history resume
+
+[`scripts/bench-startup-resume.py`](../../scripts/bench-startup-resume.py) compares
+prebuilt binaries in Unix PTYs with credential-free disposable homes, manual
+model inventories, and synthetic session parent chains. It never submits an
+inference request. Each cell excludes one warmup, then alternates binary order:
+
+```sh
+python3 scripts/bench-startup-resume.py /path/to/before/octet target/release/octet \
+  --trials 9 --models 1 100 1000 --turns 0 1000 5000 > /tmp/startup-resume.jsonl
+python3 -m unittest discover -s scripts/tests -p 'test_bench_*.py'
+```
+
+`--turns` counts user/assistant pairs. `ready_frame_ms` measures spawn through
+receipt of the synchronized ready-frame fence, including **all** native history,
+not just the composer or the in-process `frame.ready` trace. Every historical
+marker must occur once in order. Trials also verify application-handled composer
+editing, successful shutdown, and restored terminal modes. The final JSONL record
+contains executable hashes, environment/dimensions, raw phase timestamps and
+per-trial timings; preceding records report each completed cell. A failed
+correctness check aborts the campaign, not a successful sample.
+
+These are warm-file-cache, extension-free offline PTY measurements, not emulator
+paint, live provider admission, peak memory, or arbitrary-session guarantees.
+See [the retained local comparison](startup-resume-2026-10-02/README.md) for the
+pinned build identities, complete results, and qualification limits.
+
 ## Systems measurements
 
 `scripts/bench-systems.py` uses only the Python standard library and real OS

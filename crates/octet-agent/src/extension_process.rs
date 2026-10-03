@@ -52,16 +52,18 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::artifact::{ArtifactId, ArtifactPublication, ArtifactSource, ArtifactStore};
+use crate::cache_warmer::CacheWarmingAction;
 use crate::delegation::{
     ExtensionAgentSessionPolicy, ExtensionDelegationService, ExtensionDelegationSpawnRequest,
 };
 use crate::effect::{EffectPolicy, ToolEffect};
 use crate::events::AgentEvent;
 use crate::extension::{
-    AssistantPersistenceContext, CompactionStrategy, DynamicToolRegistration, EventObserver,
-    Extension, ExtensionHost, PersistenceMetadataHook, PersistenceMetadataProposal,
-    PostMutationContext, PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext,
-    ProviderRetryHook, ToolCallHook,
+    AssistantPersistenceContext, CacheWarmingDecisionContext, CacheWarmingDecisionHook,
+    CompactionStrategy, DynamicToolRegistration, EventObserver, Extension, ExtensionHost,
+    PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
+    PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
+    ToolCallHook,
 };
 use crate::extension_api_v03 as api_v03;
 use crate::extension_policy::{
@@ -71,16 +73,24 @@ use crate::extension_presentation::ExtensionPresentationSnapshot;
 use crate::extension_provider::{
     ExtensionProviderOwner, ExtensionProviderRegistry, ExtensionProviderRegistryError,
 };
+use crate::extension_remote_ui::{
+    ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed, ExtensionRemoteUiFrame,
+    ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey, ExtensionRemoteUiMouse,
+    ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation, ExtensionRemoteUiResize,
+    RemoteUiChildRequest, RemoteUiMailbox, EXTENSION_FEATURE_REMOTE_UI,
+};
 use crate::extension_secret::{ExtensionSecretBroker, ExtensionSecretRequest};
 use crate::tool::{
     CancellationToken, OutputStream, ReplaySafety, Tool, ToolContext, ToolError, ToolOutput,
     ToolOutputContentPart, ToolProgressDecoration, ToolProgressSink,
 };
+use crate::tool_composition::ToolCompositionConfig;
 
 mod event_bus;
 pub use event_bus::ExtensionEventBus;
 
 mod admission;
+mod composition;
 mod connection;
 mod contributions;
 mod host_requests;
@@ -103,6 +113,7 @@ mod validation;
 
 pub use self::admission::validate_extension_flag_value;
 use self::admission::*;
+use self::composition::*;
 use self::connection::*;
 pub use self::contributions::CommandOutput;
 pub use self::contributions::ContextContribution;
@@ -255,6 +266,7 @@ pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
 pub use self::process_group::EXTENSION_FEATURE_APPROVALS;
 pub use self::process_group::EXTENSION_FEATURE_ARTIFACTS;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE;
+pub use self::process_group::EXTENSION_FEATURE_CACHE_WARMING_DECISION;
 pub use self::process_group::EXTENSION_FEATURE_COMPACTION_STRATEGY;
 pub use self::process_group::EXTENSION_FEATURE_COMPOSER;
 pub use self::process_group::EXTENSION_FEATURE_CONTENT_PARTS;
@@ -279,6 +291,7 @@ pub use self::process_group::EXTENSION_FEATURE_SHORTCUTS;
 pub use self::process_group::EXTENSION_FEATURE_SYSTEM_PROMPT_READ;
 pub use self::process_group::EXTENSION_FEATURE_TERMINAL_HANDOFF;
 pub use self::process_group::EXTENSION_FEATURE_TERMINAL_INPUT;
+pub use self::process_group::EXTENSION_FEATURE_TOOL_COMPOSITION;
 pub use self::process_group::EXTENSION_MANIFEST_FILENAME;
 pub use self::process_group::MAX_EXTENSION_AUTOCOMPLETE_ITEMS;
 pub use self::process_group::MAX_EXTENSION_AUTOCOMPLETE_TEXT_BYTES;
@@ -424,6 +437,20 @@ pub mod methods {
     pub const UI_TERMINAL_INPUT: &str = "ui/terminal-input";
     /// Host-to-extension observer-only terminal resize.
     pub const UI_RESIZE: &str = "ui/resize";
+    /// Extension request to open a cached host-rendered surface.
+    pub const UI_OPEN: &str = "ui/open";
+    /// Extension request to close its cached surface.
+    pub const UI_CLOSE: &str = "ui/close";
+    /// Extension-to-host complete cached line snapshot notification.
+    pub const UI_FRAME: &str = "ui/frame";
+    /// Host-to-extension focused normalized key notification.
+    pub const UI_KEY: &str = "ui/key";
+    /// Host-to-extension normalized fullscreen mouse notification.
+    pub const UI_MOUSE: &str = "ui/mouse";
+    /// Host-to-extension surface closure notification.
+    pub const UI_CLOSED: &str = "ui/closed";
+    /// Owner-fenced host-state replacement for retained API 0.4 UI contexts.
+    pub const CONTEXT_UPDATED: &str = "context/updated";
     /// Extension-to-host autocomplete registration request.
     pub const AUTOCOMPLETE_REGISTER: &str = "ui/autocomplete/register";
     /// Host-to-extension bounded autocomplete query.
@@ -442,6 +469,12 @@ pub mod methods {
     pub const TOOLS_REGISTER: &str = "tools/register";
     /// Extension-to-host live tool removal request.
     pub const TOOLS_UNREGISTER: &str = "tools/unregister";
+    /// Extension request for a model-tool parent's composition context.
+    pub const COMPOSITION_CONTEXT: &str = "composition/context";
+    /// Extension request to dispatch a nested call through the host tool boundary.
+    pub const COMPOSITION_CALL: &str = "composition/call";
+    /// Extension request to update the parent-scoped composition store.
+    pub const COMPOSITION_STORE: &str = "composition/store";
     /// Extension-to-host completion of an initial provider catalog batch.
     pub const PROVIDERS_COMPLETE: &str = "providers/complete";
     /// Extension-to-host atomic provider catalog registration.
@@ -576,6 +609,11 @@ impl_owner_scoped_host_request!(ToolsSetActiveRequest);
 impl_owner_scoped_host_request!(TerminalAcquireRequest);
 impl_owner_scoped_host_request!(TerminalReleaseRequest);
 impl_owner_scoped_host_request!(ContextSnapshotRequest);
+impl_owner_scoped_host_request!(ExtensionRemoteUiOpenRequest);
+impl_owner_scoped_host_request!(ExtensionRemoteUiCloseRequest);
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod remote_ui_tests;

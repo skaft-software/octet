@@ -11,6 +11,9 @@
 pub mod serve;
 
 mod mutation_resources;
+pub(crate) mod remote_ui;
+
+use octet_agent::extension_remote_ui::{ExtensionRemoteUiOperation, EXTENSION_FEATURE_REMOTE_UI};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
@@ -32,13 +35,13 @@ use octet_agent::extension_process::{
     ExtensionLifecycleEvent, ExtensionLifecycleOutcome, ExtensionManifest,
     ExtensionMessageInjection, ExtensionPolicy, ExtensionPolicyEvaluationResponse,
     ExtensionProcess, ExtensionRequestFailure, ExtensionRequestId, ExtensionRequestOutcome,
-    ExtensionRuntimeConfig, ExtensionRuntimeSharing, ExtensionSessionEntryOperation,
-    ExtensionSessionLifecycleReceiver, ExtensionSessionLifecycleRequest,
-    ExtensionSessionLifecycleService, ExtensionSource, ExtensionStartDecision,
-    ExtensionStatusContribution, ExtensionTerminalInput, ExtensionTerminalOperation,
-    ExtensionTerminalResize, ExtensionTrust, ExtensionUiContribution, ExtensionUiSurface,
-    ExtensionWidgetPlacement, ShortcutDefinition, TerminalAcquireResult, ToolRenderRequest,
-    ToolRenderSegment, DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION_0_1,
+    ExtensionResourceOwner, ExtensionRuntimeConfig, ExtensionRuntimeSharing,
+    ExtensionSessionEntryOperation, ExtensionSessionLifecycleReceiver,
+    ExtensionSessionLifecycleRequest, ExtensionSessionLifecycleService, ExtensionSource,
+    ExtensionStartDecision, ExtensionStatusContribution, ExtensionTerminalInput,
+    ExtensionTerminalOperation, ExtensionTerminalResize, ExtensionTrust, ExtensionUiContribution,
+    ExtensionUiSurface, ExtensionWidgetPlacement, ShortcutDefinition, TerminalAcquireResult,
+    ToolRenderRequest, ToolRenderSegment, DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION_0_1,
     EXTENSION_API_VERSION_0_3, EXTENSION_FEATURE_ACTIVE_TOOLS, EXTENSION_FEATURE_AGENT_SESSIONS,
     EXTENSION_FEATURE_COMPOSER, EXTENSION_FEATURE_DELEGATION_TELEMETRY,
     EXTENSION_FEATURE_DYNAMIC_TOOLS, EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
@@ -241,6 +244,10 @@ const HOST_REQUEST_QUEUE_CAPACITY: usize = 64;
 const NATIVE_HOST_EXTENSION_START_DIAGNOSTIC: &str = "executable extensions were not started: the native-host protocol reports extension discovery only and never starts extension processes";
 const CONTROLLED_EXTENSION_START_DIAGNOSTIC: &str = "enabled extensions without host authority were not started: grant host authority per source in /extensions or trusted_extensions; safe mode is not a sandbox—granted extensions run with your OS permissions outside the tool-effect broker";
 static NEXT_EXTENSION_RUN_ID: AtomicU64 = AtomicU64::new(1);
+// The process owns one interactive terminal. Retained workspace-service
+// generations must keep waking the same consumer across App/session rebuilds.
+static INTERACTIVE_REMOTE_UI_WAKE: std::sync::OnceLock<Arc<tokio::sync::Notify>> =
+    std::sync::OnceLock::new();
 
 /// The active-session driver is dispatched only by the interactive idle loop.
 /// Other frontends must not advertise an operation they cannot settle safely.
@@ -350,6 +357,9 @@ pub struct ExecutableExtensions {
     /// The one foreground terminal grant the host can cede, or `None` while the
     /// host still owns its own raw terminal.
     terminal_arbiter: TerminalGrantArbiter,
+    remote_ui: remote_ui::RemoteUi,
+    remote_ui_wake: Option<Arc<tokio::sync::Notify>>,
+    command_dialog_process: Option<(String, u64)>,
     dynamic_shortcuts: Vec<RegisteredDynamicShortcut>,
     shortcut_tasks: Vec<JoinHandle<()>>,
     event_drain_cursor: usize,
@@ -372,6 +382,10 @@ pub struct ExecutableExtensions {
     resource_owner: Option<String>,
     session_started_at: Instant,
     session_lifecycle_started: bool,
+    // UI hooks must run while the foreground shell can answer reverse requests,
+    // never inside the blocking application bootstrap.
+    pending_session_hook_starts: Vec<(ExtensionProcess, String)>,
+    session_hook_start_tasks: Vec<JoinHandle<()>>,
     last_lifecycle_outcome: Option<ExtensionLifecycleOutcome>,
     /// Stable host-created mutation identities already delivered to hooks.
     /// Keeping this outside process generations prevents reload/restart paths
@@ -422,6 +436,9 @@ impl Default for ExecutableExtensions {
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),
             terminal_arbiter: TerminalGrantArbiter::default(),
+            remote_ui: remote_ui::RemoteUi::default(),
+            remote_ui_wake: None,
+            command_dialog_process: None,
             dynamic_shortcuts: Vec::new(),
             shortcut_tasks: Vec::new(),
             event_drain_cursor: 0,
@@ -440,6 +457,8 @@ impl Default for ExecutableExtensions {
             resource_owner: None,
             session_started_at: Instant::now(),
             session_lifecycle_started: false,
+            pending_session_hook_starts: Vec::new(),
+            session_hook_start_tasks: Vec::new(),
             last_lifecycle_outcome: None,
             seen_post_mutation_ids: VecDeque::new(),
             pending_post_mutation_rescans: VecDeque::new(),

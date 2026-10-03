@@ -416,6 +416,7 @@ impl AiClient {
         overrides: crate::RequestOverrides,
         host_options: HostRequestOptions,
     ) -> Result<ResponseStream, AiError> {
+        let started = Instant::now();
         overrides
             .validate()
             .map_err(|error| crate::ConfigError::Parse(error.to_string()))?;
@@ -512,9 +513,15 @@ impl AiClient {
         };
         let open = client.stream_once(&model, req, &overrides, &host_options);
         let Some(deadline) = deadline else {
-            return open.await;
+            return open.await.map(|stream| {
+                crate::inference::measured_stream(
+                    stream,
+                    started,
+                    crate::inference::ClientTimingScope::Request,
+                )
+            });
         };
-        let mut stream = tokio::time::timeout_at(deadline, open)
+        let stream = tokio::time::timeout_at(deadline, open)
             .await
             .map_err(|_| {
                 AiError::Transport(TransportError {
@@ -523,6 +530,11 @@ impl AiClient {
                     message: "request-local opening deadline exceeded".into(),
                 })
             })??;
+        let mut stream = crate::inference::measured_stream(
+            stream,
+            started,
+            crate::inference::ClientTimingScope::Request,
+        );
         Ok(Box::pin(try_stream! {
             loop {
                 let item = tokio::time::timeout_at(deadline, stream.next()).await.map_err(|_| {
@@ -546,6 +558,7 @@ impl AiClient {
         mut req: Request,
     ) -> Result<crate::steering::SteeringSession, AiError> {
         use crate::steering::{SteeringControl, SteeringSession};
+        let started_at = Instant::now();
         let mut prepared = model.clone();
         crate::declarations::azure::apply(&mut prepared, None, &Default::default())?;
         let model = &prepared;
@@ -676,6 +689,7 @@ impl AiClient {
                 completed,
                 parts.diagnostics,
                 redactor,
+                started_at,
             ),
         })
     }
@@ -1412,6 +1426,7 @@ impl AiClient {
         overrides: crate::RequestOverrides,
         poll_after_ms: Option<u64>,
     ) -> Result<ResponseStream, AiError> {
+        let started = Instant::now();
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         Self::validate_deferred_overrides(&overrides)?;
@@ -1426,7 +1441,11 @@ impl AiClient {
                 poll_after_ms,
             )
             .await?;
-        Ok(crate::stream::guard(stream))
+        Ok(crate::inference::measured_stream(
+            crate::stream::guard(stream),
+            started,
+            crate::inference::ClientTimingScope::DeferredSubmit,
+        ))
     }
 
     /// Polls one deferred handle under a one-shot, generation-bound permit.
@@ -1444,6 +1463,7 @@ impl AiClient {
         leaf_generation: u64,
         wait_ms: Option<u64>,
     ) -> Result<ResponseStream, AiError> {
+        let started = Instant::now();
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         permit.consume(leaf_generation)?;
@@ -1464,7 +1484,11 @@ impl AiClient {
         let stream = transport
             .fetch_deferred(HostStreamModel::from(model), handle, wait_ms)
             .await?;
-        Ok(crate::stream::guard(stream))
+        Ok(crate::inference::measured_stream(
+            crate::stream::guard(stream),
+            started,
+            crate::inference::ClientTimingScope::DeferredPoll,
+        ))
     }
 
     /// Best-effort cancellation of one deferred handle.

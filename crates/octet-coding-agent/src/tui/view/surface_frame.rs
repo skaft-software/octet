@@ -323,10 +323,14 @@ pub(super) fn event_margin_marker_with_frame(
         TranscriptBlock::Reasoning(reasoning) if collapsed_reasoning && markers_enabled => {
             Some(status_shimmer_frame.map_or_else(
                 || theme.model_fg(reasoning.model_lab, event_dot),
-                |_| {
+                |shimmer_frame| {
                     if reasoning.is_working_activity() && reasoning.retry_activity.is_none() {
-                        // Only the word Working shimmers; its marker stays at rest.
-                        activity_shimmer_marker(theme, reasoning, 0, 0, event_dot)
+                        // Only the word Working shimmers, and the sweep enters
+                        // before its margin dot: sharing the status frame lets
+                        // the band cross the dot first, so the dot blinks with
+                        // the other activity markers and still holds its rest
+                        // colour on the parked frames.
+                        activity_shimmer_marker(theme, reasoning, shimmer_frame, 0, event_dot)
                     } else {
                         theme.model_fg(reasoning.model_lab, event_dot)
                     }

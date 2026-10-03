@@ -27,6 +27,15 @@ The first three share one agent loop, providers, sessions, safety policy and
 cancellation. Print mode still has tools, so add [tool limits](tools.md) if you
 want none. Plain and print send readiness diagnostics to stderr.
 
+[Cache warming](cache-warming.md) defaults to `streaming`; `idle` also runs while
+the retained host waits for input, without delaying input, reload or shutdown.
+Refresh usage is billed to the session, never the current assistant turn or its
+cache-hit/throughput/context metrics. `show_cache_miss_notices = true` in user
+config opts into brief ordinary cache-miss/refresh notices (default `false`).
+`/session`, `/cache` and `/cache-warming` show scheduler state, expected savings,
+miss penalty and refresh costs even with notices off. Plain/print notices stay
+on stderr, and print stdout stays response-only.
+
 The startup card says `permissions: full access` in bold red by default. With
 `--safe-mode` it says `safe mode` (blue in the default theme) and octet asks
 before running bash or changing files. Neither is a sandbox.
@@ -175,10 +184,11 @@ shows.
   └ Verifying the implementation (ctrl+o to expand)
 ```
 
-Reasoning and activity dots keep a solid, fixed-size glyph while their
-foreground pulses with the label sweep. Tool and shell dots turn green on
-success or red on failure, and assistant-response dots stay steady. To change
-the level, see [Selecting reasoning](providers.md#reasoning).
+Reasoning and activity dots keep a solid, fixed-size glyph. The `Working` dot
+shares the label's phase and blinks as the shimmer crosses it, then returns to
+its resting colour. The `Thinking` dot keeps its model colour. Tool and shell
+dots turn green on success or red on failure, and assistant-response dots stay
+steady. To change the level, see [Selecting reasoning](providers.md#reasoning).
 
 <details>
 <summary>Shimmer details</summary>

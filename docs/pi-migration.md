@@ -6,13 +6,13 @@ Inspect your Pi setup before importing anything:
 octet migrate pi --dry-run
 ```
 
-The scanner reads local files only. It doesn't run package code, start a model
-or change either setup. It always runs dry, even without `--dry-run`, so it
-isn't an apply command or an extension-compatibility promise. Inventory,
-portable setup import and restore, and [native provider support](providers.md)
-are separate capabilities. **Pi extension execution is not supported** in the
-local release candidate: the former bridge and its `octet pi` command family
-have been removed.
+This scanner reads local files without running package code, starting a model,
+or changing either setup. It always runs dry, even without `--dry-run`; it is
+not an apply command or an extension-compatibility promise. Inventory, portable
+setup import/restore, and [native provider support](providers.md) are separate
+capabilities. The former bridge and its `octet pi` command family remain removed.
+A separate, explicitly configured [optional Pi adapter](pi-compatibility.md) can
+load reviewed factories; migration commands neither install nor start it.
 
 ## Current command
 
@@ -80,12 +80,17 @@ Restore applies only to imported setup data, not to extension execution.
 
 <a id="plan-preflight-and-publish-a-compatible-extension"></a>
 
-## Pi extension execution is not supported
+<a id="pi-extension-execution-is-not-supported"></a>
 
-The former install, plan, preflight, publish, list and rollback workflow is
-gone. Don't use inventory results to run Pi package code, enable an extension
-automatically or infer trust. Review portable resources and explicitly port any
-tools you need to [octet's bounded extension API](extensions.md).
+## Optional extension execution is separate
+
+The former install/plan/preflight/publish/list/rollback workflow is no longer
+available. Do not use inventory results to execute Pi package code, auto-enable
+an extension, or infer trust. The [optional Pi adapter](pi-compatibility.md) uses
+explicitly reviewed entrypoints and normal octet enablement/trust. Its bounded
+API support and measured qualification are independent of scanner categories.
+Uncovered behavior still needs an explicitly scoped port to
+[octet's extension API](extensions.md).
 
 ## Scanner reference
 
@@ -112,12 +117,12 @@ effects.
 
 | Path | Meaning |
 | --- | --- |
-| `direct` | Pi skills or Markdown prompts that have a deterministic octet resource path. The scanner doesn't copy them. |
-| `replace` | Reserved for an exact package, version and source-hash native replacement recipe. No replacement recipes ship. |
-| `bridge` | A retained scanner classification against its pinned historical profile. There's no shipping Pi bridge, so review it for a native port, not for unchanged execution. |
-| `native_port` | Uses a known Pi `0.84.4` mutation or registration that needs an explicitly scoped native port or a redesign. No future host primitive is promised. |
-| `manual` | Arbitrary Pi TUI and editor components, custom providers, or deep session and compaction internals need redesign. Pi JSON themes also need manual conversion to octet's different semantic schema. |
-| `blocked` | Couldn't be fully resolved, read or parsed, or uses names outside the pinned Pi `0.84.4` public profile. |
+| `direct` | Pi skills or Markdown prompts have a deterministic octet resource path; the scanner does not copy them. |
+| `replace` | Reserved for an exact package/version/source-hash native replacement recipe. No replacement recipes ship. |
+| `bridge` | Retained scanner classification against its pinned historical profile, not qualification for the optional Pi adapter or permission for unchanged execution. |
+| `native_port` | Uses a known Pi `0.84.4` mutation/registration requiring an explicitly scoped native port or redesign; no future host primitive is promised. |
+| `manual` | Arbitrary Pi TUI/editor components, custom providers, or deep session/compaction internals need redesign. Pi JSON themes also need manual conversion to octet's different semantic schema. |
+| `blocked` | Could not resolve/read/parse completely, or uses names outside the pinned Pi `0.84.4` public profile. |
 
 Unsupported calls are never silently classified as no-ops.
 
@@ -178,23 +183,13 @@ inventory.
 
 ## Project and earlier section links
 
-Future migration work is tracked in the
-[project](https://github.com/orgs/skaft-software/projects/5), not promised by
-these commands. Model-assisted porting isn't an automatic fallback. No current
-scanner invocation silently starts model use.
+Future migration work is tracked in the [project](https://github.com/orgs/skaft-software/projects/5),
+not promised by these commands. Model-assisted porting is not an automatic
+fallback; no current scanner invocation silently starts model use.
 
-- <a id="migration-architecture"></a>[Migration
-  architecture](#deliberate-compatibility-boundary).
-- <a id="deterministic-scannercompiler"></a>[Deterministic
-  scanner/compiler](#scanner-reference).
-- <a id="compatibility-process"></a>[Removed compatibility
-  process](#pi-extension-execution-is-not-supported).
-- <a id="exact-recipes"></a>[Exact
-  recipes](https://github.com/orgs/skaft-software/projects/5): none ship. See
-  [classification](#classification).
-- <a id="agentic-fallback"></a>[Agentic
-  fallback](https://github.com/orgs/skaft-software/projects/5): not an
-  implemented automatic migration path.
-- <a id="product-promise"></a>[Current
-  scope](#deliberate-compatibility-boundary) and
-  [project](https://github.com/orgs/skaft-software/projects/5).
+- <a id="migration-architecture"></a>[Migration architecture](#deliberate-compatibility-boundary).
+- <a id="deterministic-scannercompiler"></a>[Deterministic scanner/compiler](#scanner-reference).
+- <a id="compatibility-process"></a>[Separate optional compatibility process](pi-compatibility.md).
+- <a id="exact-recipes"></a>[Exact recipes](https://github.com/orgs/skaft-software/projects/5): none ship; see [classification](#classification).
+- <a id="agentic-fallback"></a>[Agentic fallback](https://github.com/orgs/skaft-software/projects/5): not an implemented automatic migration path.
+- <a id="product-promise"></a>[Current scope](#deliberate-compatibility-boundary) and [project](https://github.com/orgs/skaft-software/projects/5).

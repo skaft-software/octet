@@ -224,6 +224,10 @@ pub(super) enum HostRequestOperation {
         names: Vec<String>,
     },
     Terminal(ExtensionTerminalOperation),
+    RemoteUi {
+        owner: ExtensionResourceOwner,
+        operation: ExtensionRemoteUiOperation,
+    },
     /// A read-only foreground context snapshot. `SystemPrompt` is resolved by
     /// the product loop that owns the agent; the other operations resolve
     /// against the live shell and the cached host state.
@@ -436,6 +440,7 @@ pub struct ExtensionBackgroundUpdates {
 }
 
 pub(super) enum ExtensionBackgroundUpdate {
+    Diagnostics(Vec<String>),
     Renderer {
         update: Option<ExtensionToolRenderUpdate>,
         diagnostic: Option<String>,

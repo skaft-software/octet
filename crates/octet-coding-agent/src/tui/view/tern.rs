@@ -1497,8 +1497,19 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
         spans.push(Span::new(" · "));
     }
     spans.push(Span::styled(verdict, token));
-    if let Some(rate) = outcome.tokens_per_second {
-        spans.push(Span::styled(format!(" · {rate:.1} tok/s"), "dim"));
+    if let Some(metrics) = outcome.inference.as_deref() {
+        let measurement =
+            if let Some(rate) = metrics.server.as_ref().and_then(|m| m.tokens_per_second()) {
+                format!(" · {rate:.1} tok/s generation (server-reported, last turn)")
+            } else if let Some(estimate) = &metrics.decode_estimate {
+                format!(
+                    " · ~{:.1} tok/s decode (estimated, last turn)",
+                    estimate.tokens_per_second
+                )
+            } else {
+                " · decode unavailable (last turn)".to_owned()
+            };
+        spans.push(Span::styled(measurement, "dim"));
     }
     match &outcome.outcome {
         RunOutcome::CompletedWithWarnings { warnings, .. } => {
@@ -1520,3 +1531,7 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
 #[cfg(test)]
 #[path = "tern_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tern_inference_tests.rs"]
+mod inference_tests;

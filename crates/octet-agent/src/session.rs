@@ -114,6 +114,12 @@ pub enum UsageRecordKind {
         /// Host-observed child tool calls.
         tool_call_count: u64,
     },
+    /// Usage reported by nested tools in one model-tool composition request.
+    /// This is billed session usage, never model-visible context.
+    ToolComposition {
+        /// The owning outer model tool call.
+        parent: String,
+    },
     /// A tool-free call used to produce a context-compaction summary.
     Compaction,
     /// Isolated Anthropic prompt-cache keepalive; never an assistant turn.
@@ -213,6 +219,12 @@ pub struct CacheWarmRecord {
     pub state: CacheWarmState,
     /// Wall-clock observation time.
     pub at_unix_ms: u64,
+    /// Durable request-prefix head. Absent on older experimental warm records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<EntryId>,
+    /// Whether an extension overrode the economic decision for this attempt.
+    #[serde(default)]
+    pub extension_override: bool,
 }
 
 /// Provider usage and cost recorded for one durable operation.
@@ -472,6 +484,10 @@ pub struct EntryMetadata {
     /// canonical provider-visible message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_output: Option<crate::tool::ToolOutputDetails>,
+    /// Private host-owned nested-call receipts and branch store writes.
+    /// Never provider-visible, frontend-projected or exported implicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_composition: Option<crate::tool_composition::ToolCompositionRecord>,
     /// Unix milliseconds just before the tool's effects were admitted
     /// (`null` when the call never reached the effect gate). Together with
     /// `tool_finished_unix_ms` this is the durable per-tool timing window
@@ -560,6 +576,7 @@ impl EntryMetadata {
                 .then_some(message)
             });
         }
+        self.tool_composition = self.tool_composition.filter(|record| record.valid());
         self.tool_output = self
             .tool_output
             .and_then(|details| details.into_validated().ok())
@@ -595,6 +612,7 @@ impl EntryMetadata {
             || self.display_text.is_some()
             || self.run_outcome.is_some()
             || self.tool_output.is_some()
+            || self.tool_composition.is_some()
             || self.local_synthetic_assistant
             || !self.extension_metadata.is_empty())
         .then_some(self)

@@ -21,6 +21,7 @@ pub(crate) struct DelegationRuntimeSettings {
     pub(crate) tool_schema_budget_bytes: usize,
     pub(crate) max_session_tokens: Option<u64>,
     pub(crate) max_session_cost_microdollars: Option<u64>,
+    pub(crate) cache_warming_mode: tokio::sync::watch::Sender<crate::cache_warmer::CacheWarmPolicy>,
     pub(crate) provider_retries_enabled: bool,
     pub(crate) max_network_wait: Option<Duration>,
 }

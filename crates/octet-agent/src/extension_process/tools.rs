@@ -47,7 +47,7 @@ pub(super) async fn run_catalog_updates(
                             next.retain(|definition| !removed.contains(&definition.name));
                         }
                     }
-                    validate_tool_definitions(&next, EXTENSION_API_VERSION_0_2)
+                    validate_tool_definitions_for_protocol(&next, &read_std_lock(&active.protocol))
                         .map_err(|error| error.to_string())
                         .and_then(|()| {
                             let process_tools = process.process_tools(Arc::clone(&active), &next);
@@ -341,11 +341,23 @@ impl Tool for ProcessTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             async_execution: false,
-            constrained_sampling: None,
+            constrained_sampling: self.definition.constrained_sampling.clone(),
             name: self.definition.name.clone(),
             description: self.definition.description.clone(),
             parameters: self.definition.parameters.clone(),
         }
+    }
+
+    fn composition_config(&self) -> Option<ToolCompositionConfig> {
+        let protocol = read_std_lock(&self.connection.protocol);
+        (protocol.version == EXTENSION_API_VERSION_0_4
+            && protocol.supports(EXTENSION_FEATURE_TOOL_COMPOSITION))
+        .then(|| self.definition.composition.clone())
+        .flatten()
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.definition.output_schema.clone()
     }
 
     fn replay_safety(&self) -> ReplaySafety {
@@ -476,6 +488,7 @@ impl Tool for ProcessTool {
                     | Ok(ExtensionEvent::ShortcutRequested { .. })
                     | Ok(ExtensionEvent::ActiveToolsRequested { .. })
                     | Ok(ExtensionEvent::TerminalRequested { .. })
+                    | Ok(ExtensionEvent::RemoteUiRequested { .. })
                     | Ok(ExtensionEvent::ContextSnapshotRequested { .. })
                     | Ok(ExtensionEvent::ModelViewRequested { .. }) => {}
                     Err(broadcast::error::RecvError::Closed) => events_open = false,

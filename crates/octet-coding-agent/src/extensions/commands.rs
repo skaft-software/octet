@@ -396,6 +396,11 @@ impl ExecutableExtensions {
         let execution_context =
             extension_execution_context(&process, self.resource_owner.as_deref());
         let mut events = process.subscribe();
+        self.command_dialog_process =
+            Some((extension_name.clone(), process.health_snapshot().generation));
+        let remote_ui_wake = self.remote_ui_wake();
+        let mut frontend_tick = tokio::time::interval(Duration::from_millis(50));
+        frontend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let output: anyhow::Result<_> = async {
             let legacy_uncorrelated = process.api_version() == EXTENSION_API_VERSION_0_1;
             let (request_started, started) = tokio::sync::oneshot::channel();
@@ -425,12 +430,17 @@ impl ExecutableExtensions {
                 };
             let mut events_open = true;
             let result = loop {
+                if let Some(shell) = confirmations.command_shell() {
+                    for message in self.drain_events_for_shell(shell) { shell.notice(message); }
+                    if self.sync_semantic_ui(shell) { shell.render(); }
+                }
                 // The cancellation future and confirmation UI borrow the same
                 // frontend. Keep the select in its own scope so cancellation
                 // is dropped before a confirmation prompt borrows it again.
                 let mut command_progress = None;
+                let mut command_input = None;
                 let event = {
-                    let cancellation = confirmations.wait_for_cancel();
+                    let cancellation = confirmations.wait_for_command_event();
                     tokio::pin!(cancellation);
                     tokio::select! {
                         result = &mut execution => break result?,
@@ -446,15 +456,32 @@ impl ExecutableExtensions {
                             None
                         },
                         event = events.recv(), if events_open && operation.is_some() => Some(event),
-                        cancelled = &mut cancellation => {
-                            cancelled.with_context(|| format!(
-                                "cancellation UI failed for extension {extension_name:?}"
-                            ))?;
-                            cancellation_token.cancel();
-                            anyhow::bail!("extension command {name:?} cancelled");
+                        incoming = &mut cancellation => {
+                            command_input = Some(incoming.with_context(|| format!(
+                                "command input failed for extension {extension_name:?}"
+                            ))?);
+                            None
                         }
+                        _ = remote_ui::notified(&remote_ui_wake) => None,
+                        _ = frontend_tick.tick() => None,
                     }
                 };
+                if let Some(incoming) = command_input {
+                    let cancelled = match incoming {
+                        None => true,
+                        Some(event) => {
+                            let consumed = confirmations.command_shell().is_some_and(|shell| {
+                                self.route_remote_ui_event(shell, &event)
+                            });
+                            !consumed && confirmations.command_event(event)
+                        }
+                    };
+                    if cancelled {
+                        cancellation_token.cancel();
+                        anyhow::bail!("extension command {name:?} cancelled");
+                    }
+                    continue;
+                }
                 if let Some(progress) = command_progress {
                     confirmations.progress(&extension_name, &progress);
                     continue;
@@ -533,6 +560,14 @@ impl ExecutableExtensions {
             Ok::<_, anyhow::Error>(result)
         }
         .await;
+        self.command_dialog_process = None;
+        if let Some(shell) = confirmations.command_shell() {
+            for message in self.drain_events_for_shell(shell) {
+                shell.notice(message);
+            }
+            self.sync_semantic_ui(shell);
+            shell.render();
+        }
         confirmations.finish_progress(&extension_name);
         let output = output?;
         self.enqueue_contexts(&extension_name, output.context);
@@ -546,7 +581,11 @@ impl ExecutableExtensions {
                 .iter()
                 .map(|notification| format_notification(name, notification)),
         );
-        blocks.extend(self.drain_events());
+        if let Some(shell) = confirmations.command_shell() {
+            blocks.extend(self.drain_events_for_shell(shell));
+        } else {
+            blocks.extend(self.drain_events());
+        }
         Ok(Some(blocks.join("\n")))
     }
 

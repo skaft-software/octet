@@ -337,6 +337,8 @@ impl ExecutableExtensions {
             footer,
             working,
             hidden_thinking_label,
+            remote: remote_ui::Projection::default(),
+            remote_fullscreen_overlay: false,
         }
     }
 

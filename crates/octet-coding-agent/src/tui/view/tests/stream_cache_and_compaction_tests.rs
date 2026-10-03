@@ -6,6 +6,57 @@ use super::support::*;
 use super::*;
 
 #[test]
+fn cache_warming_notice_is_opt_in_and_does_not_create_assistant_metrics() {
+    let mut shell = InteractiveShell::test_shell();
+    let event = AgentEvent::CacheWarmed {
+        usage: octet_ai::Usage {
+            cache_read_tokens: 30_000,
+            output_tokens: 1,
+            total_tokens: 30_001,
+            ..Default::default()
+        },
+        cost: Some(octet_ai::Cost {
+            total: 7,
+            total_picodollars_remainder: 5,
+            ..Default::default()
+        }),
+        extension_override: true,
+    };
+    shell.on_cache_warming_event(&event);
+    {
+        let state = shell.state.borrow();
+        assert!(state.transcript.is_empty());
+        assert!(state.last_turn_tokens_per_second.is_none());
+        assert!(!state.run.is_active());
+    }
+    shell.state.borrow_mut().show_cache_miss_notices = true;
+    shell.on_cache_warming_event(&event);
+    let state = shell.state.borrow();
+    let [TranscriptBlock::Notice(text)] = state.transcript.as_slice() else {
+        panic!("refresh must be an ordinary notice, not assistant output or a success badge");
+    };
+    assert!(
+        text.contains("Cache warmed (extension override): $0.000007000005"),
+        "{text}"
+    );
+    assert!(!state.run.is_active());
+    assert!(state.last_turn_tokens_per_second.is_none());
+}
+
+#[test]
+fn cache_warming_unknown_cost_marks_uncertainty_even_with_notices_off() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_cache_warming_event(&AgentEvent::CacheWarmed {
+        usage: Default::default(),
+        cost: None,
+        extension_override: false,
+    });
+    let state = shell.state.borrow();
+    assert!(state.usage_uncertain);
+    assert!(state.transcript.is_empty());
+}
+
+#[test]
 fn streaming_prose_diff_classification_never_searches_the_growing_first_line() {
     use super::tool_render::take_diff_classification_line_bytes;
 

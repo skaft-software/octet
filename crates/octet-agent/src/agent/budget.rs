@@ -366,7 +366,7 @@ pub(super) fn mirror_delegated_uncertainty(
     Ok(true)
 }
 
-pub(super) fn request_uncertainty_bound(
+pub(crate) fn request_uncertainty_bound(
     model: &Model,
     input_tokens: u64,
     requested_output_tokens: u64,
@@ -438,7 +438,7 @@ pub(super) fn reservation_output_tokens(
     Ok(cap.unwrap_or(requested))
 }
 
-pub(super) fn reserve_request_tokens(
+pub(crate) fn reserve_request_tokens(
     session: &Session,
     input_tokens: u64,
     output_tokens: u64,
@@ -462,7 +462,7 @@ pub(super) fn reserve_request_tokens(
     Ok(())
 }
 
-pub(super) fn reserve_request_cost(
+pub(crate) fn reserve_request_cost(
     session: &Session,
     model: &Model,
     input_tokens: u64,

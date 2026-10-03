@@ -350,8 +350,9 @@ The `Working` and `Thinking` labels share a foreground-only moving sweep, with
 monotonic status clock, so the sweep phase continues across the transition
 instead of restarting or stalling: the two labels can neither shimmer
 differently nor freeze mid-row. Retry, compaction, and the provider lifecycle
-labels keep their timer without a sweep. Activity and reasoning dots
-keep a solid glyph while their foreground pulses with the label. The known
+labels keep their timer without a sweep. The `Working` activity dot shares the
+label sweep while the `Thinking` dot keeps its model colour. Both keep a solid
+glyph. The known
 Dark/Light TrueColor and ANSI256 physical field parks briefly after crossing
 the label. Elapsed and countdown text update independently; grapheme clusters
 stay intact. ANSI16, unknown-background, reduced-motion, and no-color paths
@@ -391,10 +392,10 @@ raw provider envelopes or headers.
 Tool calls expose deterministic intent and lifecycle rows. Event-margin dots
 identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning
-and activity dots keep a solid, fixed-size glyph whose foreground pulses with
-the activity-label sweep. `Working` and `Thinking` shimmer in the foreground
-where supported, from that one shared clock; reduced-motion and no-color paths
-remain static.
+and activity dots keep a solid, fixed-size glyph. The `Working` dot shares its
+label's phase and blinks as the sweep crosses it; the `Thinking` dot keeps its
+model colour. `Working` and `Thinking` shimmer in the foreground where supported,
+from that one shared clock; reduced-motion and no-color paths remain static.
 Assistant-response dots remain steady; active tool and shell dots may pulse
 through foreground and muted tones rather than changing size.
 Successful completed event dots use green,

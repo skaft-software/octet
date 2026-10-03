@@ -30,6 +30,21 @@ pub(super) enum ParallelReadPreparation {
     Completed(Box<ParallelReadWaveExecution>),
 }
 
+pub(super) fn advertised_tool_surface(tools: &[Arc<dyn Tool>], model: &Model) -> Vec<ToolDef> {
+    let mut definitions = crate::tool_composition::advertised_surface(tools);
+    if model.responses_features().async_tools {
+        for definition in &mut definitions {
+            if tools.iter().any(|tool| {
+                tool.definition().name == definition.name
+                    && tool.concurrency() == ToolConcurrency::Parallel
+            }) {
+                definition.async_execution = true;
+            }
+        }
+    }
+    definitions
+}
+
 pub(super) fn advertised_tool_definition(tool: &dyn Tool, model: &Model) -> ToolDef {
     let mut definition = tool.definition();
     // Static parallel capability permits scheduling hints, never effects.

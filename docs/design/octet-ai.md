@@ -213,6 +213,22 @@ cancellable bounds, not a requirement to wait before cancelling a stalled reques
 
 Observed indices use a hash set and are sorted only during final assembly, keeping hostile many-part processing near-linear.
 
+## Inference observations (unreleased)
+
+`Response.inference` keeps advisory performance observations outside `Usage`.
+The shared guarded-client wrapper freezes monotonic canonical-output offsets,
+byte/event counters, gaps and completion time before downstream settlement for
+all ordinary conversation transports. A cancellation-owned bounded receive task
+isolates clocks from ordinary downstream polling; queue saturation suppresses the
+usage-calibrated robust decode estimate, not accounting or native timing.
+Native steering successors and deferred
+submit/poll operations retain distinct origins rather than fabricated E2E rates.
+Codecs retain recognized native terminal count/duration pairs with source/unit
+provenance; unsupported, invalid, provisional and conflicting server timing is
+explicitly unavailable. Optional timing cannot replace billing/accounting or
+turn a valid response into a server-speed claim. See
+[the complete measurement contract](../inference-metrics.md).
+
 ## Validation and compatibility
 
 Strict mode rejects unsupported modalities, reasoning state, tools, malformed schemas, missing/orphan tool results, invalid sampling parameters, and model-limit violations before network I/O. Lossy conversion emits bounded diagnostics and visible placeholders rather than silently changing semantic data. Explicit generation reasoning selections are validated without clamping, even in Lossy mode: silently omitting a rejected Off could enable provider-default thinking. Token budgets must leave answer room within the effective output allowance. Anthropic/Bedrock thinking also rejects incompatible sampling and forced tool choices. Product-level normalization is separate from core wire validation.

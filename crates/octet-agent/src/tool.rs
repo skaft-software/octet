@@ -55,6 +55,32 @@ pub trait Tool: Send + Sync {
     /// The definition's `name` must be unique across all registered tools.
     fn definition(&self) -> ToolDef;
 
+    /// Optional host-negotiated single-shot composition presentation.
+    /// This is not an authority grant; nested effects require fresh admission.
+    fn composition_config(&self) -> Option<crate::tool_composition::ToolCompositionConfig> {
+        None
+    }
+
+    /// Machine-readable schema of the programmatic result, when available.
+    /// Without a schema, a nested call resolves to the tool's text output.
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Whether nested execution is guaranteed not to incur metered model usage.
+    /// This is a host-code contract, never extension/model-provided metadata.
+    /// Unknown tools cannot run in composition under a hard token/cost ceiling
+    /// without authoritative pre-execution usage and pricing bounds.
+    fn composition_is_unmetered(&self) -> bool {
+        false
+    }
+
+    /// Whether to omit this tool from inline composition declarations.
+    /// It remains discoverable and callable after host policy filtering.
+    fn deferred_composition(&self) -> bool {
+        false
+    }
+
     /// Deterministically classifies the authority required by one parsed call.
     /// The default is deliberately unknown and is denied by every broker
     /// policy. Implementations are trusted host code; model-provided metadata
@@ -445,6 +471,9 @@ pub enum ToolProgress {
     /// Internal channel event to append a session entry from a tool.
     #[doc(hidden)]
     SessionEvent(Box<crate::session::EntryValue>, SessionReplyTx),
+    /// Host-only synced metadata sidecar; never forwarded to a frontend.
+    #[doc(hidden)]
+    SessionMetadataEvent(Box<crate::session::EntryMetadata>, SessionReplyTx),
 }
 
 impl std::fmt::Debug for ToolProgress {
@@ -465,6 +494,7 @@ impl std::fmt::Debug for ToolProgress {
                 .field("events", events)
                 .finish(),
             Self::SessionEvent(ev, _) => f.debug_tuple("SessionEvent").field(ev).finish(),
+            Self::SessionMetadataEvent(_, _) => f.write_str("SessionMetadataEvent"),
         }
     }
 }
@@ -496,6 +526,8 @@ pub struct ToolProgressSink {
     dropped_bytes: Arc<AtomicU64>,
     dropped_events: Arc<AtomicU64>,
     invocation: Option<crate::tools::durability::InvocationHandle>,
+    composition: Option<Arc<dyn crate::tool_composition::ToolCompositionService>>,
+    programmatic: bool,
 }
 
 impl ToolProgressSink {
@@ -508,6 +540,8 @@ impl ToolProgressSink {
             dropped_bytes: Arc::new(AtomicU64::new(0)),
             dropped_events: Arc::new(AtomicU64::new(0)),
             invocation: None,
+            composition: None,
+            programmatic: false,
         }
     }
 
@@ -529,6 +563,8 @@ impl ToolProgressSink {
             dropped_bytes: Arc::new(AtomicU64::new(0)),
             dropped_events: Arc::new(AtomicU64::new(0)),
             invocation: None,
+            composition: None,
+            programmatic: false,
         }
     }
 
@@ -538,6 +574,57 @@ impl ToolProgressSink {
     ) -> Self {
         self.invocation = Some(invocation);
         self
+    }
+
+    pub(crate) fn with_composition(
+        mut self,
+        service: Arc<dyn crate::tool_composition::ToolCompositionService>,
+    ) -> Self {
+        self.composition = Some(service);
+        self
+    }
+
+    pub(crate) fn composition_service(
+        &self,
+    ) -> Option<Arc<dyn crate::tool_composition::ToolCompositionService>> {
+        self.composition.clone()
+    }
+
+    pub(crate) fn for_nested_call(&self) -> Self {
+        let mut sink = self.clone();
+        // Nested calls must not inherit replay memos or recursive authority.
+        sink.invocation = None;
+        sink.composition = None;
+        sink.programmatic = true;
+        sink
+    }
+
+    /// Whether this is a host-dispatched programmatic call, not a model result.
+    pub fn is_programmatic(&self) -> bool {
+        self.programmatic
+    }
+
+    pub(crate) async fn forward_semantic(&self, progress: ToolProgress) {
+        let _ = self.tx.send(progress).await;
+    }
+
+    pub(crate) async fn append_metadata(
+        &self,
+        metadata: crate::session::EntryMetadata,
+    ) -> Result<crate::session::EntryId, ToolError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        // Unlike lossy progress, journaling waits for a synced acknowledgement.
+        self.tx
+            .send(ToolProgress::SessionMetadataEvent(
+                Box::new(metadata),
+                Arc::new(Mutex::new(Some(reply_tx))),
+            ))
+            .await
+            .map_err(|_| ToolError::new("composition session channel is closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| ToolError::new("composition session acknowledgement is unavailable"))?
+            .map_err(ToolError::new)
     }
 
     /// Emit a stdout or stderr chunk. Non‑blocking; drops silently when
@@ -653,7 +740,7 @@ impl ToolProgressSink {
             ToolProgress::Confirmation(_) => (0, 1),
             ToolProgress::Input(_) => (0, 1),
             ToolProgress::Dropped { .. } => (0, 0),
-            ToolProgress::SessionEvent { .. } => (0, 1),
+            ToolProgress::SessionEvent { .. } | ToolProgress::SessionMetadataEvent { .. } => (0, 1),
         };
         match self.tx.try_send(msg) {
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -964,7 +1051,7 @@ fn normalize_optional_json(value: Option<serde_json::Value>) -> Option<serde_jso
     value.filter(|value| !value.is_null())
 }
 
-fn validate_tool_detail(
+pub(crate) fn validate_tool_detail(
     field: &'static str,
     value: &serde_json::Value,
     byte_limit: usize,
@@ -1305,6 +1392,7 @@ pub struct ToolOutput {
     media_kinds: Vec<ToolOutputMediaKind>,
     content_parts: Vec<ToolOutputContentPart>,
     details: ToolOutputDetails,
+    programmatic_content: Option<serde_json::Value>,
     is_error: bool,
     delivery_commit: Option<ToolOutputCommit>,
     presentation_images_omitted: bool,
@@ -1357,6 +1445,7 @@ impl ToolOutput {
             media: Vec::new(),
             media_kinds: Vec::new(),
             details: ToolOutputDetails::default(),
+            programmatic_content: None,
             is_error: false,
             delivery_commit: None,
             presentation_images_omitted: false,
@@ -1396,6 +1485,7 @@ impl ToolOutput {
             media_kinds,
             content_parts,
             details: ToolOutputDetails::default(),
+            programmatic_content: None,
             is_error: false,
             delivery_commit: None,
             presentation_images_omitted: false,
@@ -1445,6 +1535,22 @@ impl ToolOutput {
         self.media.push(media.clone());
         self.content_parts.push(ToolOutputContentPart::Media(media));
         self
+    }
+
+    /// Attaches a bounded transient programmatic projection. It is not part
+    /// of model-visible text, durable details, progress or Debug output.
+    pub fn try_with_programmatic_content(
+        mut self,
+        value: serde_json::Value,
+    ) -> Result<Self, ToolOutputValidationError> {
+        validate_tool_detail("programmatic_content", &value, 8 * 1024 * 1024, false)?;
+        self.programmatic_content = Some(value);
+        Ok(self)
+    }
+
+    /// Returns the transient programmatic projection, if produced by this tool.
+    pub fn programmatic_content(&self) -> Option<&serde_json::Value> {
+        self.programmatic_content.as_ref()
     }
 
     /// Validates and attaches optional structured content and metadata.
@@ -1621,6 +1727,10 @@ impl ToolOutput {
         self
     }
 
+    pub(crate) fn has_delivery_commit(&self) -> bool {
+        self.delivery_commit.is_some()
+    }
+
     /// Resolve provisional work after the agent's durable tool-result boundary.
     /// `delivered` must be false when generic output limiting changed the text.
     pub(crate) fn resolve_delivery(&self, delivered: bool) {
@@ -1661,6 +1771,7 @@ impl ToolOutput {
                 })
                 .collect(),
             details: self.details.clone(),
+            programmatic_content: None,
             is_error: self.is_error,
             delivery_commit: None,
             presentation_images_omitted: false,

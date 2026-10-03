@@ -20,6 +20,26 @@ pub trait ExtensionConfirmationHandler {
         Box::pin(std::future::pending())
     }
 
+    /// Interactive commands lend the same shell/input owner to the fleet drain.
+    /// Other frontends retain the bounded cancellation-only behavior.
+    fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
+        None
+    }
+
+    fn wait_for_command_event<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
+        Box::pin(async move {
+            self.wait_for_cancel().await?;
+            Ok(None)
+        })
+    }
+
+    /// Apply an unfocused command-loop event. True requests cancellation.
+    fn command_event(&mut self, _event: Event) -> bool {
+        false
+    }
+
     /// Receive one bounded, request-scoped extension command progress event.
     ///
     /// Implementations must treat this as transient presentation only; it is
@@ -57,6 +77,18 @@ where
 {
     fn wait_for_cancel<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
         self.inner.wait_for_cancel()
+    }
+
+    fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
+        self.inner.command_shell()
+    }
+    fn wait_for_command_event<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
+        self.inner.wait_for_command_event()
+    }
+    fn command_event(&mut self, event: Event) -> bool {
+        self.inner.command_event(event)
     }
 
     fn progress(&mut self, extension: &str, progress: &ToolProgress) {

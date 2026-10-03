@@ -14,12 +14,18 @@ pub struct ExtensionRuntimeConfig {
     /// Offer the optional host-owned child model-session service. The product
     /// must bind an enabled delegation runtime before the service is usable.
     pub agent_sessions: bool,
+    /// Offer API `0.4` request-scoped tool composition. A model-tool parent
+    /// must separately supply the host dispatcher through its progress sink.
+    pub tool_composition: bool,
     /// Optional bounded API 0.3 active-session lifecycle driver. It is offered
     /// only when configured; it remains inactive until the product binds a safe
     /// interactive idle boundary. Legacy processes never retain this service.
     pub session_lifecycle: Option<ExtensionSessionLifecycleService>,
     /// Optional session-isolated data bus; never bind to workspace-shared processes.
     pub event_bus: Option<Arc<ExtensionEventBus>>,
+    /// Optional frontend wake/consumer binding for cached API 0.4 remote UI.
+    /// Without this binding the host never offers or admits `remote_ui`.
+    pub remote_ui: Option<Arc<Notify>>,
     /// Offer single-use approval redemption. A trusted frontend can issue a
     /// capability with [`ExtensionProcess::respond_to_policy_approval`].
     pub approvals: bool,
@@ -70,11 +76,13 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
                 &self.flag_values.keys().collect::<Vec<_>>(),
             )
             .field("agent_sessions", &self.agent_sessions)
+            .field("tool_composition", &self.tool_composition)
             .field(
                 "session_lifecycle_configured",
                 &self.session_lifecycle.is_some(),
             )
             .field("event_bus_configured", &self.event_bus.is_some())
+            .field("remote_ui_configured", &self.remote_ui.is_some())
             .field("approvals", &self.approvals)
             .field("secret_broker_configured", &self.secret_broker.is_some())
             .field(
@@ -107,8 +115,10 @@ impl ExtensionRuntimeConfig {
             host_state: ExtensionHostState::default(),
             flag_values: BTreeMap::new(),
             agent_sessions: false,
+            tool_composition: false,
             session_lifecycle: None,
             event_bus: None,
+            remote_ui: None,
             approvals: false,
             secret_broker: None,
             provider_registry: None,
@@ -129,7 +139,9 @@ impl ExtensionRuntimeConfig {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct OfferedHostServices {
+    pub(super) remote_ui: bool,
     pub(super) agent_sessions: bool,
+    pub(super) tool_composition: bool,
     pub(super) session_lifecycle: bool,
     pub(super) approvals: bool,
     pub(super) secrets: bool,

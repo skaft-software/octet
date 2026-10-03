@@ -113,7 +113,11 @@ async fn test_client_stream_sse_openai_chat() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     assert!(events.len() >= 4);
@@ -393,7 +397,11 @@ async fn test_client_stream_non_streaming_chat_audio() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     // Started, TextStart, TextDelta, TextEnd, MediaCompleted, Usage, Finished
@@ -511,6 +519,24 @@ async fn test_client_stream_google_generate_content() {
         response.message.content.as_slice(),
         [octet_ai::AssistantPart::Text(text)] if text == "hello"
     ));
+}
+
+fn assert_request_inference(response: &octet_ai::Response) {
+    let metrics = response
+        .inference
+        .as_ref()
+        .expect("client always measures a completed request");
+    let client = metrics.client.as_ref().unwrap();
+    assert_eq!(
+        client.scope,
+        Some(octet_ai::inference::ClientTimingScope::Request)
+    );
+    assert_eq!(client.reported_output_tokens, response.usage.output_tokens);
+    assert!(client.elapsed_ns >= client.first_event_ns.unwrap());
+    assert_eq!(
+        metrics.server_unavailable,
+        Some(octet_ai::inference::ServerTimingUnavailable::NotReported)
+    );
 }
 
 fn text_request() -> Request {
@@ -1026,6 +1052,7 @@ async fn request_local_codex_transport_controls_sse_and_cached_context() {
             )
             .await
             .unwrap();
+        assert_request_inference(&response);
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);
         match selection {
@@ -2057,7 +2084,11 @@ async fn test_client_custom_gateway_prefix_preserved() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     assert!(events
@@ -2255,4 +2286,39 @@ async fn dispatch_tracking_distinguishes_credentials_from_pending_http_headers()
         .request_may_have_been_sent());
     assert!(!credential_attempt.request_may_have_been_sent());
     assert!(!client.request_may_have_been_sent());
+}
+
+#[tokio::test]
+async fn native_server_generation_survives_the_public_http_client_boundary() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"id\":\"native-metrics\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"id\":\"native-metrics\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":150},\"timings\":{\"predicted_n\":100,\"predicted_ms\":500}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let response = AiClient::new()
+        .complete(
+            &make_test_model(&server.uri(), Protocol::OpenAiChat, false),
+            text_request(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.usage.output_tokens, 150);
+    let metrics = response.inference.unwrap();
+    let client = metrics.client.unwrap();
+    assert_eq!(client.reported_output_tokens, 150);
+    assert_eq!(client.output_events, 1);
+    assert_eq!(client.output_interval_ns(), Some(0));
+    let server = metrics.server.unwrap();
+    assert_eq!(server.tokens, 100);
+    assert_eq!(server.tokens_per_second(), Some(200.0));
+    assert_eq!(metrics.server_unavailable, None);
 }

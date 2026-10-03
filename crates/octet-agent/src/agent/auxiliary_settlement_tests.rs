@@ -65,6 +65,7 @@ fn once_finished(
         response_id: None,
         responses_output: None,
         deferred: None,
+        inference: None,
         diagnostics: Vec::new(),
     }))
 }
