@@ -53,6 +53,9 @@ const MAX_BASH_COMMAND_BYTES: usize = 128 * 1024;
 /// Spill storage is independently bounded from the model-visible head/tail.
 #[cfg(any(unix, windows))]
 const MAX_BASH_SPILL_BYTES: usize = 16 * 1024 * 1024;
+/// Independent raw prefix for nested calls; never increases the model budget.
+#[cfg(any(unix, windows))]
+const MAX_PROGRAMMATIC_STREAM_BYTES: usize = 1024 * 1024;
 
 /// One Bash-compatible shell request.
 #[derive(Deserialize)]
@@ -93,6 +96,10 @@ impl BashTool {
 
 #[async_trait::async_trait]
 impl Tool for BashTool {
+    fn composition_is_unmetered(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             async_execution: false,
@@ -128,6 +135,25 @@ impl Tool for BashTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "stdout": {"type": "string", "description": "Raw stdout decoded with UTF-8 replacement, retaining at most 1 MiB of source bytes (also bounded by the encoded JSON limit)."},
+                "stderr": {"type": "string", "description": "Raw stderr decoded with UTF-8 replacement, retaining at most 1 MiB of source bytes (also bounded by the encoded JSON limit)."},
+                "exit_code": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                "truncated_stdout": {"type": "boolean"},
+                "truncated_stderr": {"type": "boolean"},
+                "complete_stdout": {"type": "boolean"},
+                "complete_stderr": {"type": "boolean"},
+                "stdout_bytes": {"type": "integer", "minimum": 0},
+                "stderr_bytes": {"type": "integer", "minimum": 0}
+            },
+            "required": ["stdout", "stderr", "exit_code", "truncated_stdout", "truncated_stderr", "complete_stdout", "complete_stderr", "stdout_bytes", "stderr_bytes"],
+            "additionalProperties": false
+        }))
     }
 
     fn effect(
@@ -422,7 +448,7 @@ impl BashTool {
                     }
                 }
                 if status.success() {
-                    Ok(ToolOutput::new(text))
+                    successful_output(text, &out, &err, status.code())
                 } else {
                     Err(ToolError::new(format!("error nonzero_exit\n{text}")))
                 }
@@ -735,8 +761,16 @@ impl CheckpointedBashTool {
 #[cfg(any(unix, windows))]
 #[async_trait::async_trait]
 impl Tool for CheckpointedBashTool {
+    fn composition_is_unmetered(&self) -> bool {
+        self.bash.composition_is_unmetered()
+    }
+
     fn definition(&self) -> ToolDef {
         self.bash.definition()
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.bash.output_schema()
     }
 
     fn effect(
@@ -1017,7 +1051,7 @@ impl BashTool {
                     }
                 }
                 if status.success() {
-                    Ok(ToolOutput::new(text))
+                    successful_output(text, &out, &err, status.code())
                 } else {
                     Err(ToolError::new(format!("error nonzero_exit\n{text}")))
                 }
@@ -1049,6 +1083,71 @@ struct Capture {
     spill_bytes: usize,
     spill_truncated: bool,
     spill_error: bool,
+    // Separate from head/tail rendering and spill storage. Never populated for
+    // direct calls, and never published to progress or durable checkpoints.
+    programmatic: Option<ProgrammaticCapture>,
+}
+
+#[cfg(any(unix, windows))]
+#[derive(Default)]
+struct ProgrammaticCapture {
+    bytes: Vec<u8>,
+    eof: bool,
+}
+
+#[cfg(any(unix, windows))]
+impl ProgrammaticCapture {
+    fn text(&self) -> (std::borrow::Cow<'_, str>, bool) {
+        let text = String::from_utf8_lossy(&self.bytes);
+        // JSON control-character escaping can expand two 1 MiB streams past
+        // the projection's 8 MiB encoded limit. Reserve half for each stream
+        // and 1 KiB for the fixed envelope, trimming only this raw projection.
+        let budget = (8 * 1024 * 1024 - 1024) / 2;
+        let mut encoded = 2usize; // quotes
+        for (index, ch) in text.char_indices() {
+            encoded += match ch {
+                '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+                '\u{0}'..='\u{1f}' => 6,
+                ch => ch.len_utf8(),
+            };
+            if encoded > budget {
+                return (std::borrow::Cow::Owned(text[..index].to_owned()), true);
+            }
+        }
+        (text, false)
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn successful_output(
+    text: String,
+    stdout: &Capture,
+    stderr: &Capture,
+    exit_code: Option<i32>,
+) -> Result<ToolOutput, ToolError> {
+    let output = ToolOutput::new(text);
+    let (Some(out), Some(err)) = (&stdout.programmatic, &stderr.programmatic) else {
+        return Ok(output);
+    };
+    let (stdout_text, stdout_json_truncated) = out.text();
+    let (stderr_text, stderr_json_truncated) = err.text();
+    let truncated_stdout =
+        !out.eof || stdout_json_truncated || out.bytes.len() < stdout.total_bytes;
+    let truncated_stderr =
+        !err.eof || stderr_json_truncated || err.bytes.len() < stderr.total_bytes;
+    output
+        .try_with_programmatic_content(serde_json::json!({
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "exit_code": exit_code,
+            "truncated_stdout": truncated_stdout,
+            "truncated_stderr": truncated_stderr,
+            "complete_stdout": !truncated_stdout,
+            "complete_stderr": !truncated_stderr,
+            "stdout_bytes": stdout.total_bytes,
+            "stderr_bytes": stderr.total_bytes
+        }))
+        .map_err(|error| ToolError::new(error.to_string()))
 }
 
 #[cfg(any(unix, windows))]
@@ -1064,6 +1163,7 @@ impl Capture {
             spill_bytes: 0,
             spill_truncated: false,
             spill_error: false,
+            programmatic: None,
         }
     }
 
@@ -1248,13 +1348,18 @@ async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
     spill_limit: usize,
     ownership: (&str, &str),
 ) -> Capture {
+    let mut capture = Capture::empty();
+    if progress.is_programmatic() {
+        capture.programmatic = Some(ProgrammaticCapture::default());
+    }
     let Some(reader) = reader.as_mut() else {
-        return Capture::empty();
+        if let Some(raw) = &mut capture.programmatic {
+            raw.eof = true;
+        }
+        return capture;
     };
     let head_cap = budget / 2;
     let tail_cap = budget.saturating_sub(head_cap);
-
-    let mut capture = Capture::empty();
     capture.pending_spill = Some(PendingSpill {
         owner: spill::owner(ownership.0),
         scope: ownership.1.to_owned(),
@@ -1264,7 +1369,12 @@ async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf).await {
-            Ok(0) => break,
+            Ok(0) => {
+                if let Some(raw) = &mut capture.programmatic {
+                    raw.eof = true;
+                }
+                break;
+            }
             Err(_) => {
                 capture.spill_error = true;
                 break;
@@ -1277,7 +1387,12 @@ async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
                 if let Some(writer) = writer.as_mut() {
                     writer.chunk(&buf[..n]).await;
                 }
-                progress.output(stream, Bytes::copy_from_slice(&buf[..n]));
+                if let Some(raw) = &mut capture.programmatic {
+                    let take = n.min(MAX_PROGRAMMATIC_STREAM_BYTES.saturating_sub(raw.bytes.len()));
+                    raw.bytes.extend_from_slice(&buf[..take]);
+                } else {
+                    progress.output(stream, Bytes::copy_from_slice(&buf[..n]));
+                }
                 capture.total_bytes += n;
                 let mut chunk = &buf[..n];
                 if capture.head.len() < head_cap {

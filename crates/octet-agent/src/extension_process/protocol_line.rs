@@ -158,7 +158,32 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        if matches!(
+            method,
+            methods::UI_OPEN | methods::UI_CLOSE | methods::UI_FRAME
+        ) && line.len() >= DEFAULT_EXTENSION_MESSAGE_BYTES
+        {
+            if object.contains_key("id") {
+                let id = parse_child_request_id(object, method)?;
+                reject_typed_child_request(
+                    state,
+                    id,
+                    ExtensionRequestFailure::BoundsExceeded,
+                    "remote UI envelope exceeds the 1 MiB transport bound",
+                )?;
+            } else {
+                let _ = state.events.send(ExtensionEvent::Diagnostic {
+                    message: "remote UI envelope exceeds the 1 MiB transport bound".into(),
+                });
+            }
+            return Ok(());
+        }
         match method {
+            methods::COMPOSITION_CONTEXT
+            | methods::COMPOSITION_CALL
+            | methods::COMPOSITION_STORE => {
+                dispatch_composition_request(state, object, method)?;
+            }
             "bus/declare" | "bus/subscribe" | "bus/unsubscribe" | "bus/publish" if is_api_v03 => {
                 let id = parse_child_request_id(object, method)?;
                 insert_child_request(state, id.clone(), None, None)?;
@@ -313,6 +338,67 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     contribution,
                 });
             }
+            methods::UI_OPEN => {
+                let Some((request, admitted)) = admit_remote_ui_request::<
+                    ExtensionRemoteUiOpenRequest,
+                >(state, object, method, params)?
+                else {
+                    return Ok(());
+                };
+                dispatch_remote_ui_request(
+                    state,
+                    &admitted,
+                    ExtensionRemoteUiOperation::Open {
+                        surface_id: request.surface_id,
+                        title: request.title,
+                        placement: request.placement,
+                        mouse_capture: request.mouse_capture,
+                    },
+                )?;
+            }
+            methods::UI_CLOSE => {
+                let Some((request, admitted)) = admit_remote_ui_request::<
+                    ExtensionRemoteUiCloseRequest,
+                >(state, object, method, params)?
+                else {
+                    return Ok(());
+                };
+                dispatch_remote_ui_request(
+                    state,
+                    &admitted,
+                    ExtensionRemoteUiOperation::Close {
+                        surface_id: request.surface_id,
+                    },
+                )?;
+            }
+            methods::UI_FRAME => {
+                if object.contains_key("id") {
+                    let id = parse_child_request_id(object, method)?;
+                    reject_typed_child_request(
+                        state,
+                        id,
+                        ExtensionRequestFailure::InvalidRequest,
+                        "ui/frame must be a notification",
+                    )?;
+                    return Ok(());
+                }
+                let accepted = (|| {
+                    require_remote_ui(state)?;
+                    validate_remote_ui_envelope(object, false)?;
+                    let frame: ExtensionRemoteUiFrameNotification = serde_json::from_value(params)
+                        .map_err(|error| format!("invalid remote UI frame: {error}"))?;
+                    frame.validate().map_err(|(_, detail)| detail)?;
+                    validate_explicit_request_owner(state, &frame.resource_owner)
+                        .map_err(|(_, detail)| detail)?;
+                    state
+                        .remote_ui
+                        .accept(frame, state.generation)
+                        .map_err(|(_, detail)| detail)
+                })();
+                if let Err(message) = accepted {
+                    let _ = state.events.send(ExtensionEvent::Diagnostic { message });
+                }
+            }
             methods::UI_EDITOR => {
                 require_feature(state, EXTENSION_FEATURE_EDITOR_HANDOFF)?;
                 let id = parse_child_request_id(object, methods::UI_EDITOR)?;
@@ -427,7 +513,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     .ok_or_else(|| "cancel request requires id".to_owned())?;
                 let request_id: ExtensionRequestId = serde_json::from_value(id)
                     .map_err(|error| format!("invalid cancel request id: {error}"))?;
-                settle_child_request(&state.child_requests, &request_id);
+                if !cancel_composition_request(state, &request_id)? {
+                    settle_child_request(&state.child_requests, &request_id);
+                }
             }
             // API 0.3 provider catalog reverse requests. The always-running
             // protocol reader dispatches these inline, so a registration issued
@@ -758,12 +846,13 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid tool registration: {error}"),
-                        )
+                        );
                     }
                 };
-                if let Err(error) =
-                    validate_tool_definitions(&request.tools, EXTENSION_API_VERSION_0_2)
-                {
+                if let Err(error) = validate_tool_definitions_for_protocol(
+                    &request.tools,
+                    &read_std_lock(&state.protocol),
+                ) {
                     return reject_unparented_child_request(state, id, error.to_string());
                 }
                 queue_catalog_update(state, id, CatalogMutation::Register(request.tools))?;
@@ -778,7 +867,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid tool unregistration: {error}"),
-                        )
+                        );
                     }
                 };
                 if request.names.len() > MAX_DYNAMIC_EXTENSION_TOOLS {
@@ -1346,7 +1435,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid agent spawn request: {error}"),
-                        )
+                        );
                     }
                 };
                 if request.policy.model_selection.is_some() {
@@ -1389,7 +1478,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid agent message request: {error}"),
-                        )
+                        );
                     }
                 };
                 queue_agent_session_operation(
@@ -1413,7 +1502,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid agent follow-up request: {error}"),
-                        )
+                        );
                     }
                 };
                 queue_agent_session_operation(
@@ -1443,7 +1532,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid model discovery request: {error}"),
-                        )
+                        );
                     }
                 };
                 queue_agent_session_operation(
@@ -1467,7 +1556,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid agent list request: {error}"),
-                        )
+                        );
                     }
                 };
                 queue_agent_session_operation(
@@ -1488,7 +1577,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid agent wait request: {error}"),
-                        )
+                        );
                     }
                 };
                 let timeout = Duration::from_millis(
@@ -1515,7 +1604,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid agent interrupt request: {error}"),
-                        )
+                        );
                     }
                 };
                 queue_agent_session_operation(
@@ -1538,7 +1627,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                             state,
                             id,
                             format!("invalid secret lookup request: {error}"),
-                        )
+                        );
                     }
                 };
                 queue_secret_lookup(state, id, request)?;
@@ -1742,6 +1831,20 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     if let Some(request) = request {
         state.pending_changed.notify_waiters();
         cancel_children_from_reader(state, id, "parent settled");
+        state.remote_ui.settle_parent(id, reply.is_err());
+        if matches!(
+            &reply,
+            Err(PendingError::Remote {
+                code: JSON_RPC_REQUEST_CANCELLED,
+                ..
+            })
+        ) && read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_REMOTE_UI)
+        {
+            if let Some(owner) = &request.resource_owner {
+                lock_std_mutex(&state.issued_resource_owners).remove(owner);
+                state.remote_ui.discard_owner(owner);
+            }
+        }
         let _ = request.sender.send(reply);
     } else if lock_std_mutex(&state.tombstones).remove(id) {
         let _ = state.events.send(ExtensionEvent::Diagnostic {

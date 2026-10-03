@@ -76,6 +76,81 @@ fn rpc_loopback_app_with_session(uri: &str, ephemeral: bool) -> (tempfile::TempD
     (directory, app)
 }
 
+#[test]
+fn rpc_cache_warming_events_are_session_only_and_preserve_exact_cost() {
+    let (_directory, app) = crate::compaction::tests::app_for_estimate();
+    let capture = RpcCapture::default();
+    let mut output = capture.output(false);
+    let mut translator = EventTranslator::new(&app, json!({"role": "user", "content": []}));
+    translator.partial_text = "real answer in progress".into();
+    let before = translator.run_messages.clone();
+    let mut queue = QueueState::default();
+    let event = AgentEvent::CacheWarmed {
+        usage: Usage {
+            cache_read_tokens: 30_000,
+            output_tokens: 1,
+            total_tokens: 30_001,
+            ..Default::default()
+        },
+        cost: Some(Cost {
+            total: 7,
+            total_picodollars_remainder: 5,
+            ..Default::default()
+        }),
+        extension_override: true,
+    };
+    assert!(translator
+        .observe(event, &mut output, &mut queue)
+        .unwrap()
+        .is_none());
+    let frames = capture.frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["type"], "cache_warmed");
+    assert_eq!(frames[0]["cost"]["total"], 7);
+    assert_eq!(frames[0]["cost"]["total_picodollars_remainder"], 5);
+    assert_eq!(frames[0]["extensionOverride"], true);
+    assert_eq!(translator.run_messages, before);
+    assert_eq!(translator.partial_text, "real answer in progress");
+    assert!(!translator.message_started);
+    translator
+        .observe(
+            AgentEvent::CacheWarmed {
+                usage: Default::default(),
+                cost: None,
+                extension_override: false,
+            },
+            &mut output,
+            &mut queue,
+        )
+        .unwrap();
+    assert!(translator.usage_uncertain);
+}
+
+#[tokio::test]
+async fn rpc_active_cache_warming_state_uses_live_control_diagnostics() {
+    let (_directory, mut app) = rpc_loopback_app("http://127.0.0.1:9");
+    let mut translator = EventTranslator::new(&app, json!({"role": "user", "content": []}));
+    // No stream poll or provider I/O is needed to inspect a host selection.
+    let run = app.agent.prompt("inspect the active policy").await.unwrap();
+    let control = run.control();
+    control
+        .set_cache_warming_mode(octet_agent::CacheWarmMode::Off)
+        .unwrap();
+    translator.cache_warming_control = Some(control);
+    let state = active_state_value(
+        &json!({"cacheWarmingMode": "streaming", "cacheWarmingStatus": {"state": "scheduled"}}),
+        &translator,
+        &QueueState::default(),
+    );
+    assert_eq!(state["cacheWarmingMode"], "off");
+    assert_eq!(state["cacheWarmingStatus"]["state"], "inactive");
+    assert_eq!(
+        state["cacheWarmingStatus"]["reason"],
+        "cache warming disabled"
+    );
+    drop(run);
+}
+
 struct BrokenPipe;
 
 impl std::io::Write for BrokenPipe {
@@ -757,6 +832,7 @@ fn rpc_settled_turn_cost_beats_mapper_catalog_and_matches_durable_replay() {
             last_assistant_text: String::new(),
             retry_attempt: None,
             pending_retry_end: None,
+            cache_warming_control: None,
             usage_uncertain: false,
         };
         let capture = Capture::default();
@@ -850,6 +926,7 @@ fn repeated_network_waits_preserve_rpc_history_without_finite_retry_budget() {
         last_assistant_text: "COMMITTED".into(),
         retry_attempt: None,
         pending_retry_end: None,
+        cache_warming_control: None,
         usage_uncertain: false,
     };
     let mut queue = QueueState::default();

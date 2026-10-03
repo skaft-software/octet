@@ -33,6 +33,12 @@ struct ChatCompletionsResponse {
     id: String,
     choices: Vec<ChatChoice>,
     usage: ChatUsage,
+    #[serde(default)]
+    timings: crate::inference::wire::RawMetrics,
+    #[serde(default)]
+    time_info: crate::inference::wire::RawMetrics,
+    #[serde(default)]
+    x_groq: crate::inference::wire::RawMetrics,
 }
 
 #[derive(Deserialize)]
@@ -140,18 +146,109 @@ struct ChatAudioResponse {
     expires_at: u64,
 }
 
-#[derive(Deserialize)]
 pub(super) struct ChatUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
-    #[serde(default)]
+    timing: crate::inference::wire::RawMetrics,
     prompt_tokens_details: Option<ChatPromptTokensDetails>,
-    // OpenRouter and some OpenAI-compatible gateways expose this legacy
-    // top-level spelling instead of `prompt_tokens_details.cached_tokens`.
-    #[serde(default)]
     prompt_cache_hit_tokens: Option<u64>,
-    #[serde(default)]
     completion_tokens_details: Option<ChatCompletionTokensDetails>,
+}
+
+impl<'de> Deserialize<'de> for ChatUsage {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            PromptTokens,
+            CompletionTokens,
+            PromptTokensDetails,
+            PromptCacheHitTokens,
+            CompletionTokensDetails,
+            CompletionTime,
+            PromptTime,
+            QueueTime,
+            TotalTime,
+            #[serde(other)]
+            Other,
+        }
+        struct UsageVisitor;
+        impl<'de> Visitor<'de> for UsageVisitor {
+            type Value = ChatUsage;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("chat usage")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ChatUsage, A::Error> {
+                let mut prompt_tokens = None;
+                let mut completion_tokens = None;
+                let mut prompt_tokens_details = None;
+                let mut prompt_cache_hit_tokens = None;
+                let mut completion_tokens_details = None;
+                let mut timing = crate::inference::wire::RawMetrics::default();
+                while let Some(key) = map.next_key::<Field>()? {
+                    let (name, duplicate) = match key {
+                        Field::PromptTokens => (
+                            "prompt_tokens",
+                            prompt_tokens.replace(map.next_value::<u64>()?).is_some(),
+                        ),
+                        Field::CompletionTokens => (
+                            "completion_tokens",
+                            completion_tokens
+                                .replace(map.next_value::<u64>()?)
+                                .is_some(),
+                        ),
+                        Field::PromptTokensDetails => (
+                            "prompt_tokens_details",
+                            prompt_tokens_details.replace(map.next_value()?).is_some(),
+                        ),
+                        Field::PromptCacheHitTokens => (
+                            "prompt_cache_hit_tokens",
+                            prompt_cache_hit_tokens.replace(map.next_value()?).is_some(),
+                        ),
+                        Field::CompletionTokensDetails => (
+                            "completion_tokens_details",
+                            completion_tokens_details
+                                .replace(map.next_value()?)
+                                .is_some(),
+                        ),
+                        Field::CompletionTime
+                        | Field::PromptTime
+                        | Field::QueueTime
+                        | Field::TotalTime => {
+                            let name = match key {
+                                Field::CompletionTime => "completion_time",
+                                Field::PromptTime => "prompt_time",
+                                Field::QueueTime => "queue_time",
+                                _ => "total_time",
+                            };
+                            timing.set_usage_timing(name, map.next_value()?);
+                            continue;
+                        }
+                        Field::Other => {
+                            map.next_value::<IgnoredAny>()?;
+                            continue;
+                        }
+                    };
+                    // Accounting stays strict; only advisory timing is tolerant.
+                    if duplicate {
+                        return Err(Error::duplicate_field(name));
+                    }
+                }
+                Ok(ChatUsage {
+                    prompt_tokens: prompt_tokens
+                        .ok_or_else(|| Error::missing_field("prompt_tokens"))?,
+                    completion_tokens: completion_tokens
+                        .ok_or_else(|| Error::missing_field("completion_tokens"))?,
+                    timing,
+                    prompt_tokens_details: prompt_tokens_details.unwrap_or_default(),
+                    prompt_cache_hit_tokens: prompt_cache_hit_tokens.unwrap_or_default(),
+                    completion_tokens_details: completion_tokens_details.unwrap_or_default(),
+                })
+            }
+        }
+        de.deserialize_map(UsageVisitor)
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -425,7 +522,17 @@ fn decode_response_inner(
         .map(|p| crate::pricing::cost_of(p, &usage).map_err(AiError::Pricing))
         .transpose()?;
 
+    let mut server_timing = crate::inference::wire::ServerTiming::default();
+    observe_server_timing(
+        &mut server_timing,
+        &resp.timings,
+        &resp.time_info,
+        &resp.x_groq,
+        Some(&resp.usage),
+        true,
+    );
     Ok(Response {
+        inference: Some(server_timing.finish()),
         message,
         stop_reason,
         usage,
@@ -506,4 +613,46 @@ pub(super) fn map_usage(usage: &ChatUsage) -> Result<Usage, AiError> {
         reasoning_tokens: reasoning,
         total_tokens: total,
     })
+}
+
+/// Timing never changes the usage/cost map. Count and duration are taken from
+/// the same recognized envelope/frame; never combine a stale timing snapshot
+/// with a later cumulative billing count.
+pub(super) fn observe_server_timing(
+    state: &mut crate::inference::wire::ServerTiming,
+    timings: &crate::inference::wire::RawMetrics,
+    time_info: &crate::inference::wire::RawMetrics,
+    x_groq: &crate::inference::wire::RawMetrics,
+    usage: Option<&ChatUsage>,
+    terminal: bool,
+) {
+    use crate::inference::ServerTimingSource;
+    state.observe(
+        ServerTimingSource::TimingsPredicted,
+        timings,
+        None,
+        terminal,
+    );
+    state.observe(
+        ServerTimingSource::TimeInfoCompletion,
+        time_info,
+        usage.map(|u| u.completion_tokens),
+        terminal,
+    );
+    if let Some(usage) = usage {
+        state.observe(
+            ServerTimingSource::UsageCompletion,
+            &usage.timing,
+            Some(usage.completion_tokens),
+            terminal,
+        );
+    }
+    if let Some(usage) = &x_groq.usage {
+        state.observe(
+            ServerTimingSource::XGroqUsageCompletion,
+            usage,
+            None,
+            terminal,
+        );
+    }
 }

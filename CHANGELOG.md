@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- Preserve the local Working-dot shimmer patch: the sweep crosses the margin
+  dot before the label, then returns it to its resting colour.
+- Add the optional, explicitly reviewed `octet-pi-compat` Node source package and
+  API `0.4` cached remote-component transport/frontend integration. Rust owns
+  agent/session execution, terminal composition, focus, and restoration; the
+  adapter uses selected Pi TUI utilities, never Pi's coding-agent runtime.
+  Synthetic-host tests cover unchanged Doom, drawing, powerline footer, and
+  rainbow editor behavior. Actual octet binary/PTY acceptance passed Doom,
+  drawing, the footer, and terminal restoration. Native custom-editor draft
+  restoration still fails qualification; startup comparison remains unrun.
+  This is not general Pi runtime parity or a published extension bundle.
+
 - Render octet's shell natively inside Tern. In a Tern pane
   (`TERM_PROGRAM=tern`; `OCTET_TUI_TERN=0` disables, `=1` forces) octet opens a
   Tern Surface Protocol surface from its render thread and draws its transcript
@@ -34,6 +46,27 @@
   `OCTET_TUI_TERN` still applies when it is unset). `auto` (default)
   negotiates native surfaces only inside a Tern pane, `on` forces negotiation
   anywhere, and `off` always uses the terminal renderer.
+- Separate conversation inference measurements from billing: all supported
+  codecs/transports carry frozen client output timing, while recognized native
+  terminal count/duration pairs retain server source/unit provenance and
+  explicitly unavailable states. Completion prefers native generation or a
+  usage-calibrated robust streaming decode estimate, never E2E; `/status` retains
+  independent diagnostics. A bounded cancellation-owned reader isolates timing
+  from UI polling and rejects saturated/insufficient evidence. Transient agent,
+  telemetry, NDJSON/RPC and observer
+  span metrics do not alter durable accounting. Steering successors and deferred
+  operations never manufacture equivalent E2E rates. These are deterministic
+  source contracts, not live-provider speed or released-feature claims. See
+  [inference measurements](docs/inference-metrics.md).
+- Add end-to-end billable prompt-cache warming with `off`, default `streaming`,
+  and `idle` policies, user-only config, `OCTET_CACHE_WARMING`,
+  `--cache-warming`, and persisted `/cache-warming`. Interactive/plain/RPC and
+  the retained native host drive cancellation-safe idle maintenance. Refreshes
+  replay the exact request with a one-token cap, keep private output out of
+  context, and record separate session usage/cost/uncertainty. `/session` exposes
+  economic decisions and refresh spend; cache-miss/refresh notices are opt-in via
+  `show_cache_miss_notices = true` (default false). Replaces the experimental
+  synthetic-suffix warm API. Live cache-hit or savings qualification is not claimed.
 
 ## [0.8.2] - 2026-09-30
 

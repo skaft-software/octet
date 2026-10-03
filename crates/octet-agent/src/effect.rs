@@ -133,7 +133,7 @@ impl std::str::FromStr for EffectPolicy {
 /// These values are intentionally separate from model-facing [`ToolError`]
 /// wording. New codes may be added, but an existing serialized spelling is a
 /// diagnostic contract and must not be renamed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolPolicyDenialCode {
     /// A path shape or resolved target escaped workspace-only confinement.

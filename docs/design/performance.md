@@ -249,19 +249,25 @@ terminal paint. See [benchmark methods](../benchmarks/README.md).
 
 ### TUI output throughput
 
-The completion line's `tok/s E2E (last turn)` and `/status` throughput divide
-provider-reported output tokens (including reasoning) by the locally observed
-interval from `TurnStarted` to accepted `TurnFinished` for the latest attempt.
-The interval includes initial waiting, hidden thinking, network buffering, and
-local event processing/settlement. It is **not server-side generation speed**
-or a whole-task average. A retry starts a fresh interval; earlier attempts,
-retry backoff, and tool execution between turns are not aggregated into it.
-Missing request timing or zero reported output leaves the rate unavailable.
+The completion line prefers a matching native server generation count/duration.
+Without that, it shows a separately labeled robust decode estimate or explicit
+unavailability, never the E2E average. `/status` keeps request-to-completion E2E
+throughput separate from the decode estimate and native server observation.
 
-Do not divide all reported output tokens by first-visible-delta-to-completion
-time: hidden reasoning can consume most of the output budget before any text
-arrives, inflating that rate by orders of magnitude. Server-side generation
-throughput requires provider-supplied timing with matching token semantics.
+The receive-side reader runs ahead of terminal/agent polling with bounded event
+and byte admission; cancellation aborts it, and saturation suppresses estimates.
+A usage-calibrated median long-baseline fit of visible output progress excludes
+request/prefill and completion-tail time and corrects the first chunk's token
+mass. Hidden reasoning usage is excluded, and an unknown reasoning split cannot
+be assigned to answer-text time. Burst coalescing and slope dispersion reject
+unresolvable timing rather than claiming infinite decode speed.
+
+These are estimates under a token-density/arrival-cadence assumption. A stable
+fit cannot identify arbitrary proxy buffering, hidden GPU stages, preemption or
+speculative execution. Native generation is not automatically GPU-active time
+or post-first-token TPOT. See the unreleased
+[inference measurement contract](../inference-metrics.md) for the algorithm,
+thresholds, coverage and qualification limits.
 
 ## Startup attribution (opt-in)
 
@@ -331,6 +337,38 @@ unchanged-marker rewrite as the dominant part of that phase on this host, not
 HTTP-client construction; it does not show a first-frame speedup or characterize
 an extension-enabled/credentialed launch. The script prints the per-trial
 samples and uses an intentionally credential-free environment.
+
+## Complete startup and resume work
+
+Many-model custom override merging indexes the first exact `api_name` and
+tracks emitted names without repeated catalog scans. Discovery ordering,
+duplicates, configured metadata precedence and authoritative discovered limits
+remain unchanged. Model-scope membership is indexed without changing ordered
+patterns or the first reasoning suffix. Globs still match and sort candidates.
+
+Finished history uses one canonical Markdown parse per materialized block rather
+than provisional streaming stabilization and another final parse. Copy and
+colored-surface rendering reuse that committed document. Hydration still visits
+every accepted item; it skips replacement tracking for rows that have never been
+cached, tracks the moving active subagent summary within a batch, and bulk-builds
+initial/reset persistent publication trees. Ordinary publication retains shared
+unchanged branches. Native startup still paints the full branch, not a tail-only
+shortcut; session decoding, validation, recovery and saved prompt colors are
+unchanged.
+
+Already-normalized terminal frames borrow their bytes, and disabled write logging
+retains no duplicate diagnostics payload. Auto-background detection begins without
+waiting before cold startup work and consumes an arrived reply before ready layout;
+explicit appearances remain authoritative and absent replies cannot hold readiness.
+The ordinary bounded post-ready probe handling remains.
+
+Deterministic regressions cover canonical render/copy parity, chunked CRLF,
+4K-model index work and 1K/10K/100K-block bookkeeping/publication budgets. The
+[offline PTY comparison](../benchmarks/startup-resume-2026-10-02/README.md) separately
+records complete history-ready frames. `history.hydrate` → `frame.ready` excludes
+renderer materialization, layout and terminal writes; do not present its reduction
+as an equivalent end-to-end resume speedup. Full native replay still has
+history-sized layout and output cost.
 
 ## Agent-turn request copy audit
 

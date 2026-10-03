@@ -312,6 +312,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
       # Extension release bundles and their smoke-test launcher are built from
       # clean runner state for the same trust reason as the Serve runtime.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: extensions/octet-codemode/.node-version
+      - name: Verify codemode's pinned offline runtime and adapter
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          cd extensions/octet-codemode
+          python3 -m unittest discover -s tests
       - name: Package the official executable-extension catalog reproducibly
         shell: bash
         run: |

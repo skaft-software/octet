@@ -49,6 +49,7 @@ mod scroll_regressions;
 mod stream_cache_and_compaction_tests;
 mod subagent_rendering_tests;
 mod support;
+pub(crate) use support::emulated_shell;
 mod terminal_handoff_pty_tests;
 mod theme_and_chrome_tests;
 mod threaded_native_resize_tests;

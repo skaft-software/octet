@@ -20,6 +20,37 @@ port of Pi's TUI architecture.
 - License: MIT
 - [License text](third_party/licenses/PI-MIT.txt)
 
+The optional `extensions/octet-pi-compat` package uses the pinned
+`@earendil-works/pi-tui` 0.80.10 MIT-licensed component/utilities library inside
+its separate Node process. It does not install, import, or execute Pi's
+coding-agent runtime. Node, jiti, TypeBox, and these Pi libraries are not
+required by the ordinary Rust binary or native executable extensions.
+
+Acceptance tests can load original third-party extensions from explicitly
+supplied paths; those sources and assets are not bundled into octet. In
+particular, `badlogic/pi-doom` declares GPL-2.0, and its shareware WAD retains
+its own distribution terms. Ben Vinegar's `pi-stuff` drawing extension and
+`pi-agent-extensions` retain their upstream MIT notices. Keep those notices
+with separately installed packages; compatibility does not relicense them.
+
+## Pi codemode and QuickJS WASI
+
+The optional [octet-codemode](extensions/octet-codemode/README.md) extension
+vendors the published MIT `@earendil-works/pi-codemode` 1.0.0 (Copyright (c) 2025
+Mario Zechner) and `quickjs-wasi` 3.6.2 (Copyright (c) 2026 Vercel, Inc.) for
+offline QuickJS/WASM execution. This optional Node runtime is not a dependency
+of octet's Rust host. The only Pi runtime patch relocates its QuickJS import to
+the bundled relative path; optional native `.so` modules are not extracted or
+used. QuickJS-NG's separate MIT and WASI/LLVM runtime-component notices, plus
+notices for optional modules inside the original archive, are retained too.
+
+Complete licenses, original npm archives, pinned registry integrity/SHA256,
+Pi's published Git head and offline regeneration checks are retained in the
+bundle. See its [third-party notices](extensions/octet-codemode/THIRD_PARTY_NOTICES.md),
+[Pi MIT license](extensions/octet-codemode/vendor/pi-codemode/LICENSE),
+[QuickJS WASI MIT license](extensions/octet-codemode/vendor/quickjs-wasi/LICENSE),
+and [provenance](extensions/octet-codemode/vendor/PROVENANCE.json).
+
 ## grok-mermaid and grok-build
 
 The terminal flowchart layout and label cleanup in

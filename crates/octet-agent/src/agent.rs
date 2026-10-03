@@ -89,8 +89,9 @@ use crate::tools::durability::{synthesize_interruption, InvocationHandle};
 use crate::tools::{BashCheckpointPublisher, BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES};
 use crate::tools::{SummarizationRetryPolicy, SummarizationRetryScheduled};
 
-mod budget;
+pub(crate) mod budget;
 mod compaction;
+mod composition;
 mod context_estimate;
 mod control;
 mod deferred;
@@ -108,6 +109,7 @@ mod turn_loop;
 
 use self::budget::*;
 use self::compaction::*;
+use self::composition::*;
 use self::context_estimate::*;
 pub use self::control::PreparedSteering;
 pub use self::control::RunControl;
@@ -239,6 +241,7 @@ struct RunLifecycle {
 /// durably pair unresolved calls before the mutable session borrow is released.
 struct RunSessionGuard<'a> {
     session: &'a mut Session,
+    cache_warmer: &'a mut crate::cache_warmer::CacheWarmer,
     lifecycle: Arc<RunLifecycle>,
 }
 
@@ -262,6 +265,7 @@ impl Drop for RunSessionGuard<'_> {
             // Drop cannot report an I/O error, but attempting the append here
             // closes the old gap where a deliberate stream drop followed by a
             // process crash was mistaken for an unclean tool interruption.
+            let _ = self.cache_warmer.cancel(self.session, "run dropped");
             let _ = persist_pending_cancellations(self.session);
         }
     }
@@ -284,6 +288,7 @@ pub struct Agent {
     reasoning: ReasoningConfig,
     reasoning_mode: ReasoningMode,
     cache_retention: CacheRetention,
+    cache_warmer: crate::cache_warmer::CacheWarmer,
     /// Hard limit for the exact JSON schemas exposed to a provider request.
     tool_schema_budget_bytes: usize,
     /// Optional provider route used for autonomous context summaries.
@@ -376,6 +381,9 @@ impl Drop for BashOwnerLease {
 
 impl Drop for Agent {
     fn drop(&mut self) {
+        let _ = self
+            .cache_warmer
+            .cancel(&mut self.session, "agent disposed");
         if self
             .last_run_lifecycle
             .as_ref()
@@ -611,6 +619,7 @@ impl Agent {
             reasoning: config.reasoning,
             reasoning_mode: config.reasoning_mode,
             cache_retention: config.cache_retention,
+            cache_warmer: crate::cache_warmer::CacheWarmer::default(),
             tool_schema_budget_bytes: DEFAULT_TOOL_SCHEMA_BUDGET_BYTES,
             compaction_model: None,
             auto_compaction_mode: AgentCompactionMode::Local,
@@ -682,6 +691,7 @@ impl Agent {
         if self.session.has_unsettled_native_steering() {
             return Ok(None);
         }
+        let system = self.model_visible_system(true);
         let responses = match self.auto_compaction_mode {
             AgentCompactionMode::NativeResponses
                 if !self.model.responses_features().reasoning_effort_updates =>
@@ -689,18 +699,15 @@ impl Agent {
                 Some(native_responses_options(
                     &self.session,
                     &self.model,
-                    &self.system,
+                    &system,
                     self.service_tier,
                 )?)
             }
             AgentCompactionMode::NativeResponses
             | AgentCompactionMode::Local
-            | AgentCompactionMode::Disabled => durable_responses_options(
-                &self.session,
-                &self.model,
-                &self.system,
-                self.service_tier,
-            )?,
+            | AgentCompactionMode::Disabled => {
+                durable_responses_options(&self.session, &self.model, &system, self.service_tier)?
+            }
         };
         let tools: Vec<_> = self
             .extensions
@@ -711,7 +718,7 @@ impl Agent {
             .collect();
         require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
         let request = Request {
-            system: (!self.system.is_empty()).then(|| self.system.clone()),
+            system: (!system.is_empty()).then_some(system),
             messages: self.session.context()?,
             tools,
             tool_choice: ToolChoice::Auto,
@@ -735,86 +742,75 @@ impl Agent {
         Ok(Some((self.client.clone(), self.model.clone(), request)))
     }
 
-    /// Attempt one opt-in, cost-reserved Anthropic prompt-cache keepalive at a
-    /// settled idle boundary. No model output or synthetic prompt is persisted.
-    /// `Off` and unsupported/early/over-budget requests make no network call.
-    /// This API is an unscheduled library building block, not an idle timer;
-    /// the coding-agent host must opt in at an actual idle boundary.
-    pub async fn warm_prompt_cache(
+    /// Select pi's warming profile and reconcile any active timer/request.
+    /// Enabling warming waits for the next real request; resume never invents
+    /// a live provider cache from persisted history.
+    /// A failed cancellation append is reported; the requested mode still
+    /// applies and the durable Started marker keeps uncertain usage fail-closed.
+    pub fn set_cache_warming_mode(&mut self, mode: crate::CacheWarmMode) -> Result<(), AgentError> {
+        let result = self.cache_warmer.set_mode(mode, &mut self.session);
+        self.sync_delegation_runtime_settings();
+        result.map_err(Into::into)
+    }
+
+    pub(crate) fn inherit_cache_warming_mode_control(
         &mut self,
-        mode: crate::cache_warmer::CacheWarmMode,
-        policy: crate::cache_warmer::CacheWarmPolicy,
-    ) -> Result<crate::cache_warmer::CacheWarmOutcome, AgentError> {
-        use crate::cache_warmer::{reservation, CacheWarmOutcome};
-        if mode != crate::cache_warmer::CacheWarmMode::Idle
-            || !crate::cache_warmer::is_direct_anthropic(&self.model)
-            || self.cache_retention != CacheRetention::Short
-            || self.reasoning != ReasoningConfig::Off
-        {
-            return Ok(CacheWarmOutcome::Skipped);
+        control: tokio::sync::watch::Sender<crate::cache_warmer::CacheWarmPolicy>,
+    ) {
+        self.cache_warmer.inherit_mode_control(control);
+    }
+
+    /// Current warming profile (streaming by default).
+    pub fn cache_warming_mode(&self) -> crate::CacheWarmMode {
+        self.cache_warmer.mode()
+    }
+
+    /// Transient diagnostics for the current request snapshot.
+    pub fn cache_warming_status(&self) -> crate::CacheWarmingStatus {
+        self.cache_warmer
+            .status(&self.session, self.extensions.tool_snapshot().0)
+    }
+
+    /// Drive idle warming alongside input with `tokio::select!`. This future
+    /// can be dropped and recreated without restarting a pending provider call.
+    /// Only committed refresh usage or uncertainty is returned, never output.
+    pub async fn drive_cache_warming(&mut self) -> Result<AgentEvent, AgentError> {
+        use crate::cache_warmer::{CacheWarmHost, CacheWarmLimits};
+        loop {
+            let step = self.cache_warmer.next_step().await;
+            let result = self.cache_warmer.advance(
+                step,
+                CacheWarmHost {
+                    session: &mut self.session,
+                    client: &self.client,
+                    hooks: &self.extensions.cache_warming_decision_hooks,
+                    resource_owner: &self.resource_owner,
+                    tool_generation: self.extensions.tool_snapshot().0,
+                    limits: CacheWarmLimits {
+                        max_session_tokens: self.max_session_tokens,
+                        max_session_cost_microdollars: self.max_session_cost_microdollars,
+                        pending_request: None,
+                    },
+                },
+            );
+            match result {
+                Ok(Some(event)) => {
+                    let observers = ObserverDispatch {
+                        observers: self.extensions.observers.clone(),
+                        resource_owner: self.resource_owner.clone(),
+                    };
+                    notify_observers(&observers, &event);
+                    return Ok(event);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = self
+                        .cache_warmer
+                        .cancel(&mut self.session, "cache warming accounting failed");
+                    return Err(error.into());
+                }
+            }
         }
-        // Existing context estimates include system/tool schema framing and
-        // provider-reconciled prefix usage. Reserve room for the synthetic
-        // suffix independently; the suffix never enters the session.
-        let input_tokens = self
-            .request_context_estimate()?
-            .input_tokens
-            .saturating_add(256);
-        let reserved = worst_case_request_cost(&self.model, input_tokens, 1, None);
-        if reservation(
-            &self.model,
-            &self.session,
-            self.cache_retention,
-            mode,
-            policy,
-            input_tokens,
-            now_unix_millis(),
-            reserved,
-        )
-        .is_none()
-        {
-            return Ok(CacheWarmOutcome::Skipped);
-        }
-        self.ensure_request_cost_capacity(&self.model, input_tokens, 1)?;
-        reserve_request_tokens(&self.session, input_tokens, 1, self.max_session_tokens)?;
-        let (_, tools) = self.extensions.tool_snapshot();
-        let tools: Vec<_> = tools
-            .iter()
-            .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
-            .collect();
-        require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
-        let mut messages = self.session.context()?;
-        messages.push(Message::User(UserMessage {
-            content: vec![UserPart::Text("Reply with a single period.".into())],
-        }));
-        let system = self.model_visible_system(true);
-        let request = Request {
-            system: (!system.is_empty()).then_some(system),
-            messages,
-            tools,
-            tool_choice: ToolChoice::Auto,
-            max_output_tokens: Some(1),
-            temperature: None,
-            stop: Vec::new(),
-            reasoning: ReasoningConfig::Off,
-            reasoning_mode: self.reasoning_mode,
-            responses: None,
-            output_format: OutputFormat::Text,
-            output_modalities: OutputModalities::Text,
-            compatibility: CompatibilityMode::Strict,
-            cache_retention: CacheRetention::WarmShort,
-            session_id: Some(self.session_id.clone()),
-        };
-        crate::cache_warmer::dispatch(
-            &self.client,
-            &self.model,
-            &mut self.session,
-            request,
-            policy.deadline,
-            request_uncertainty_bound(&self.model, input_tokens, 1, None, CacheRetention::Short),
-        )
-        .await
-        .map_err(AgentError::from)
     }
 
     /// Read-only access to the agent's session (its entries and head).
@@ -854,6 +850,11 @@ impl Agent {
 
     /// Configure output modalities for subsequent runs.
     pub fn set_output_modalities(&mut self, output_modalities: OutputModalities) {
+        if self.output_modalities != output_modalities {
+            let _ = self
+                .cache_warmer
+                .cancel(&mut self.session, "request settings changed");
+        }
         self.output_modalities = output_modalities;
         self.sync_delegation_runtime_settings();
     }
@@ -864,6 +865,11 @@ impl Agent {
     /// starts.
     pub fn set_system_prompt(&mut self, system: impl Into<String>) {
         let system = system.into();
+        if self.system != system {
+            let _ = self
+                .cache_warmer
+                .cancel(&mut self.session, "system prompt changed");
+        }
         if let Some(binding) = &self.delegation {
             binding.update_base_system(system.clone());
         }
@@ -919,6 +925,7 @@ impl Agent {
             display_text: self.prompt_display_text.take(),
             run_outcome: None,
             tool_output: None,
+            tool_composition: None,
             tool_started_unix_ms: None,
             tool_finished_unix_ms: None,
             native_steering: None,
@@ -1155,6 +1162,7 @@ impl Agent {
     /// prompt from the tools that will actually execute.
     pub fn tool_prompt_contributions(&self) -> Vec<ToolPromptContribution> {
         let (_, tools) = self.extensions.tool_snapshot();
+        let tools = crate::tool_composition::direct_surface(&tools);
         collect_tool_prompt_contributions(tools.iter().map(|tool| tool.as_ref()))
     }
 
@@ -1169,6 +1177,7 @@ impl Agent {
             return self.system.clone();
         }
         let (_, tools) = self.extensions.tool_snapshot();
+        let tools = crate::tool_composition::direct_surface(&tools);
         let section = render_tool_prompt_section(tools.iter().map(|tool| tool.as_ref()));
         match section {
             None => self.system.clone(),
@@ -1196,6 +1205,8 @@ impl Agent {
             // owner is replaced.
             persist_pending_cancellations(&mut self.session)?;
         }
+        self.cache_warmer
+            .cancel(&mut self.session, "session changed")?;
         let resource_owner = session.resource_owner_key();
         self.bash_owner = BashOwnerLease::acquire(&resource_owner);
         self.session_id = resource_owner.clone();
@@ -1211,6 +1222,9 @@ impl Agent {
     /// Mutable access to the session for history operations between runs
     /// (checkout, manual compaction, config entries).
     pub fn session_mut(&mut self) -> &mut Session {
+        let _ = self
+            .cache_warmer
+            .cancel(&mut self.session, "conversation context changed");
         &mut self.session
     }
 
@@ -1286,6 +1300,10 @@ impl Agent {
 
     /// Changes reasoning on an idle agent, preserving qualified Responses caches.
     pub fn set_reasoning(&mut self, reasoning: ReasoningConfig) -> Result<(), AgentError> {
+        if self.reasoning != reasoning {
+            self.cache_warmer
+                .cancel(&mut self.session, "reasoning changed")?;
+        }
         require_ultra_observation(
             &reasoning,
             self.delegation.is_some() || self.ultra_observation_managed,
@@ -1315,7 +1333,24 @@ impl Agent {
     /// failed, or max-turns — is reported by exactly one
     /// [`AgentEvent::RunFinished`].
     pub async fn prompt(&mut self, input: impl Into<UserInput>) -> Result<Run<'_>, AgentError> {
-        self.prompt_with_tools(input.into(), true).await
+        self.cache_warmer.cancel(&mut self.session, "new prompt")?;
+        self.prompt_with_tools(input.into(), true, false).await
+    }
+
+    /// Begins a run with best-effort Responses WebSocket prewarming before
+    /// its first admitted provider request. Only the pre-submission durable
+    /// context is warmed, without generating or persisting an assistant turn.
+    ///
+    /// Prewarming is driven by the run stream, shares its cancellation, and
+    /// is bounded to thirty seconds (or the shorter endpoint timeout). Errors
+    /// do not prevent ordinary inference or its HTTP/SSE fallback. Non-WebSocket
+    /// routes are unchanged; an already-live connection needs no new warmup.
+    pub async fn prompt_with_responses_prewarm(
+        &mut self,
+        input: impl Into<UserInput>,
+    ) -> Result<Run<'_>, AgentError> {
+        self.cache_warmer.cancel(&mut self.session, "new prompt")?;
+        self.prompt_with_tools(input.into(), true, true).await
     }
 
     /// Begins a run whose provider requests expose no tools. This is used for
@@ -1324,7 +1359,8 @@ impl Agent {
         &mut self,
         input: impl Into<UserInput>,
     ) -> Result<Run<'_>, AgentError> {
-        self.prompt_with_tools(input.into(), false).await
+        self.cache_warmer.cancel(&mut self.session, "new prompt")?;
+        self.prompt_with_tools(input.into(), false, false).await
     }
 
     /// Declares the Agent's static tool overlay complete and releases queued
@@ -1427,6 +1463,9 @@ impl Agent {
         Err(AgentError::RunEnded)
     }
 }
+
+#[cfg(test)]
+mod composition_host_tests;
 
 #[cfg(test)]
 mod tests;

@@ -42,6 +42,12 @@ pub(super) struct ChatChunk {
     pub(super) choices: Vec<ChatChunkChoice>,
     #[serde(default)]
     pub(super) usage: Option<ChatUsage>,
+    #[serde(default)]
+    timings: crate::inference::wire::RawMetrics,
+    #[serde(default)]
+    time_info: crate::inference::wire::RawMetrics,
+    #[serde(default)]
+    x_groq: crate::inference::wire::RawMetrics,
 }
 
 /// Decode normal frames directly into their typed DTO, noticing error
@@ -63,6 +69,9 @@ impl<'de> Deserialize<'de> for ChatStreamChunk {
             Id,
             Choices,
             Usage,
+            Timings,
+            TimeInfo,
+            XGroq,
             Error,
             #[serde(other)]
             Other,
@@ -94,6 +103,9 @@ impl<'de> Deserialize<'de> for ChatStreamChunk {
                 let mut id = None;
                 let mut choices = None;
                 let mut usage = None;
+                let mut timings = None;
+                let mut time_info = None;
+                let mut x_groq = None;
                 let mut has_error = false;
                 while let Some(field) = map.next_key::<Field>()? {
                     match field {
@@ -118,6 +130,19 @@ impl<'de> Deserialize<'de> for ChatStreamChunk {
                             usage = Some(map.next_value()?);
                             continue;
                         }
+                        Field::Timings | Field::TimeInfo | Field::XGroq => {
+                            let target = match field {
+                                Field::Timings => &mut timings,
+                                Field::TimeInfo => &mut time_info,
+                                _ => &mut x_groq,
+                            };
+                            let mut value: crate::inference::wire::RawMetrics = map.next_value()?;
+                            if target.is_some() {
+                                value.mark_duplicate();
+                            }
+                            *target = Some(value);
+                            continue;
+                        }
                         // Error fields were ignored by the original DTO:
                         // their types and duplicates must remain permissive.
                         Field::Error => has_error = true,
@@ -130,6 +155,9 @@ impl<'de> Deserialize<'de> for ChatStreamChunk {
                         id: id.unwrap_or_default(),
                         choices: choices.unwrap_or_default(),
                         usage: usage.unwrap_or_default(),
+                        timings: timings.unwrap_or_default(),
+                        time_info: time_info.unwrap_or_default(),
+                        x_groq: x_groq.unwrap_or_default(),
                     },
                     has_error,
                 })
@@ -317,6 +345,29 @@ pub(crate) fn decode_stream_event(
     let chunk = decode_chat_chunk(&sse_event.data)?;
 
     let mut events = Vec::new();
+    if !chunk.id.is_empty()
+        && builder
+            .response_id
+            .as_ref()
+            .is_some_and(|expected| !expected.is_empty() && expected != &chunk.id)
+    {
+        builder.server_timing.reject_identity();
+    }
+    // Only terminal-bearing or trailing usage-only frames qualify. An earlier
+    // snapshot cannot be promoted to an authoritative completed server rate.
+    let terminal = chunk
+        .choices
+        .iter()
+        .any(|choice| choice.finish_reason.is_some())
+        || (chunk.choices.is_empty() && (chunk.usage.is_some() || chunk.x_groq.usage.is_some()));
+    super::response::observe_server_timing(
+        &mut builder.server_timing,
+        &chunk.timings,
+        &chunk.time_info,
+        &chunk.x_groq,
+        chunk.usage.as_ref(),
+        terminal,
+    );
 
     if !builder.started {
         // A chunk with an empty/absent `id` still starts the stream; the

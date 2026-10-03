@@ -29,7 +29,9 @@ A trusted project can tighten your authority limits, never relax them. If octet
 can't resolve an absolute home directory, it disables global config and
 resources and says so. It never substitutes the current directory. System-prompt
 precedence follows the same order, and an explicit empty CLI value overrides
-every lower layer.
+every lower layer. `cache_warming` and `show_cache_miss_notices` are user-only:
+trusted project config cannot override them. Cache-warming mode is never
+restored from session history. `/cache-warming MODE` persists the user choice.
 
 ## Settings
 
@@ -41,6 +43,8 @@ Defaults are marked. Other values are examples.
 | `reasoning` | `"high"` | A reasoning choice the model supports. `"off"` is an explicit preference. When it's unset, octet uses [model-aware defaults](providers.md#defaults-unreleased) after restoring the session. [Levels and budgets](providers.md#reasoning). |
 | `system_prompt` | `"You are a careful and concise reviewer."` | Replaces all composed system instructions, even with `""`. AGENTS, context and skill instructions are ignored while it's set. |
 | `cache_retention` | `"short"` | Provider prompt-cache retention. |
+| `cache_warming` | default `"streaming"` | `off`, `streaming`, or `idle`. Additional billable cache refreshes; user level only, never project/session policy. [Scheduling and limits](cache-warming.md). |
+| `show_cache_miss_notices` | default `false` | User-level opt-in notices for material cache misses and successful refreshes. Accounting and `/session` diagnostics are unconditional. |
 | `theme` | `"auto"` | `auto`, `light` or `dark`, or the file stem of a discovered TOML theme (such as `"mine"`). Auto follows the terminal background. Light and dark override detection. [Themes](themes.md). |
 | `color` | `"auto"` | Terminal color, with capability fallbacks. |
 | `mouse` | default `"auto"` | `auto`, `terminal` and `off` keep native selection and history. `app` selects the captured viewport. |
@@ -95,6 +99,7 @@ baseline. Executable sampling is separate from these resource-tree limits.
 | `OCTET_EFFECT_POLICY` | Effect profile. |
 | `OCTET_SYSTEM_PROMPT` | System-instruction replacement ([precedence](#precedence)). |
 | `OCTET_CACHE_RETENTION` | Cache retention. |
+| `OCTET_CACHE_WARMING` | `off`, `streaming`, or `idle`; overrides the user config, below `--cache-warming`. |
 | `OCTET_COLOR`, `OCTET_MOUSE`, `OCTET_THEME`, `OCTET_COLOR_SCHEME` | Terminal presentation. `OCTET_THEME` takes `auto`, `light`, `dark` or a discovered TOML theme name. `OCTET_COLOR_SCHEME` stays a background-detection override. |
 | `OCTET_TERN`, `OCTET_TUI_TERN` | Tern native rendering: `auto`, `on` or `off`. Defaults to `auto`, which negotiates native surfaces only inside a Tern pane. `OCTET_TUI_TERN` is the older spelling and is read only when `OCTET_TERN` is unset. |
 | `OCTET_SHOW_IMAGES` | `1` shows tool-result images inline. It isn't a media upload. |

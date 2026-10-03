@@ -261,9 +261,11 @@ impl Session {
     /// copied. When the selected chain crosses a compaction boundary, entries
     /// older than that boundary's `first_kept` are omitted: the fork replays
     /// from the compaction summary exactly like the source session, so the
-    /// replaced history is never copied again. The boundary's root-side entry
-    /// keeps a source-side parent that was not copied, so it is detached and
-    /// re-rooted in the destination.
+    /// replaced model history is never copied again. Private composition-store
+    /// markers are retained separately so a compacted fork inherits branch
+    /// state without bringing discarded messages back into model context.
+    /// The boundary's root-side entry is detached from its omitted source
+    /// ancestry (or linked to those retained private markers).
     ///
     /// A `None` checkpoint copies no entries at all: the destination is an
     /// empty session (for forking "before" a root message).
@@ -306,10 +308,45 @@ impl Session {
             cursor = entry.parent.as_ref();
         }
         newest_first.reverse();
+        // Compaction removes model history from a fork, not its private branch
+        // store. Keep only the host-owned Config markers in omitted ancestry;
+        // never copy discarded messages or a sibling branch to preserve state.
+        let mut store_markers = Vec::new();
+        let mut omitted = newest_first.first().and_then(|entry| entry.parent.as_ref());
+        while let Some(id) = omitted {
+            let entry = self
+                .entry(id)
+                .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
+            if matches!(
+                entry.value,
+                EntryValue::Config {
+                    model: None,
+                    reasoning: None,
+                    reasoning_mode: None
+                }
+            ) && matches!(
+                entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.tool_composition.as_ref()),
+                Some(crate::tool_composition::ToolCompositionRecord::Store { .. })
+            ) {
+                store_markers.push(entry);
+            }
+            omitted = entry.parent.as_ref();
+        }
+        store_markers.reverse();
 
         let mut destination = Session::create(path.clone())?;
         let result = (|| {
             let mut bytes = Vec::new();
+            let mut retained_parent = None;
+            for marker in store_markers {
+                let mut retained = marker.clone();
+                retained.parent = retained_parent;
+                retained_parent = Some(retained.id.clone());
+                write_json_line(&mut bytes, &SessionRecordRef::Entry(&retained))?;
+            }
             let mut remaining = newest_first.into_iter();
             if let Some(first) = remaining.next() {
                 if first.parent.is_some() {
@@ -317,7 +354,7 @@ impl Session {
                     // root-side entry from its source-side parent, which was
                     // deliberately not copied.
                     let mut detached = (*first).clone();
-                    detached.parent = None;
+                    detached.parent = retained_parent;
                     write_json_line(&mut bytes, &SessionRecordRef::Entry(&detached))?;
                 } else {
                     write_json_line(&mut bytes, &SessionRecordRef::Entry(first))?;

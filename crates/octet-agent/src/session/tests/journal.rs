@@ -44,6 +44,7 @@ fn frame_stream(prefix: &str) -> Vec<octet_ai::AssistantMessageFrame> {
             response_id: Some("resp-1".to_string()),
             responses_output: None,
             deferred: None,
+            inference: None,
             diagnostics: Vec::new(),
         }))
         .unwrap()

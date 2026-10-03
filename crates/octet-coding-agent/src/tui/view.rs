@@ -177,15 +177,15 @@ struct CompactionBlock {
 #[derive(Clone, Debug)]
 struct OutcomeBlock {
     outcome: RunOutcome,
-    /// Final provider-reported output rate captured when the run settles.
-    tokens_per_second: Option<f64>,
+    /// Frozen native timing or robust estimate, never the E2E average.
+    inference: Option<Box<octet_ai::InferenceMetrics>>,
 }
 
 impl OutcomeBlock {
-    fn new(outcome: RunOutcome, tokens_per_second: Option<f64>) -> Self {
+    fn new(outcome: RunOutcome, inference: Option<octet_ai::InferenceMetrics>) -> Self {
         Self {
             outcome,
-            tokens_per_second,
+            inference: inference.map(Box::new),
         }
     }
 }
@@ -1169,6 +1169,9 @@ pub struct ShellExtensionUi {
     pub footer: Vec<ShellExtensionUiLine>,
     pub working: Option<ShellExtensionWorking>,
     pub hidden_thinking_label: Option<String>,
+    /// Validated cached components are UI-only, separate from semantic text.
+    pub(crate) remote: crate::extensions::remote_ui::Projection,
+    pub(crate) remote_fullscreen_overlay: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1239,6 +1242,7 @@ pub(crate) struct ShellState {
     pub(crate) theme: OctetTheme,
     /// Whether this session uses explicit approval gates instead of full host access.
     pub(crate) safe_mode: bool,
+    pub(crate) show_cache_miss_notices: bool,
     /// Opt-in terminal-image mode and conservative terminal capability state.
     image_rendering: ToolImageRendering,
     /// Monotonic image IDs and the private backend payload map stay separate
@@ -1438,9 +1442,10 @@ pub(crate) struct ShellState {
     /// First-token latency of the most recently completed provider
     /// response: request opened until the first generated token.
     pub(crate) last_turn_first_token: Option<Duration>,
-    /// Total provider time of the most recently completed provider
-    /// response: request opened until the response was fully generated.
+    /// Client elapsed time for the latest measured response, not server time.
+    /// Legacy event producers use request-to-TurnFinished, including settlement.
     pub(crate) last_turn_provider_elapsed: Option<Duration>,
+    pub(crate) last_turn_inference: Option<octet_ai::inference::InferenceMetrics>,
     /// (tool name, wall time) of recently completed tool calls, most
     /// recent last. Session-scoped and bounded; powers the `/status`
     /// tool wall-time line.
@@ -2050,6 +2055,7 @@ impl ShellState {
         self.turn_requested_at = None;
         self.last_turn_first_token = None;
         self.last_turn_provider_elapsed = None;
+        self.last_turn_inference = None;
         self.turn_streamed_output_bytes = 0;
         self.turn_output_tokens_before_generation = 0;
         self.run_cost_microdollars = 0;
@@ -2150,10 +2156,13 @@ impl ShellState {
         }
         let cache = self.transcript_cache.get_mut();
         cache.dirty = true;
-        // A render is coalesced, so a hot streaming block can be touched many
-        // times before the next frame. Record it once rather than making each
-        // frame linearly scan the complete transcript for revision changes.
-        if !cache.dirty_blocks.contains(&index) {
+        // New blocks and invalidated widths are rendered with their latest
+        // revision without a dirty entry. Only deduplicate replacements for
+        // already cached rows, not every block in an unpainted hydration batch.
+        if cache.width.is_some()
+            && index < cache.block_revisions.len()
+            && !cache.dirty_blocks.contains(&index)
+        {
             cache.dirty_blocks.push(index);
         }
     }
@@ -3285,6 +3294,8 @@ pub struct InteractiveShell {
     render_tx: Arc<Mutex<Option<SyncSender<RenderCommand>>>>,
     render_thread: Option<JoinHandle<()>>,
     capture_mouse: bool,
+    remote_mouse_capture: bool,
+    remote_keyboard_events: bool,
     /// Shared with the one input stream: while set, the host reads no raw bytes
     /// because an extension grant owns the terminal.
     terminal_ceded: Arc<AtomicBool>,
@@ -3350,6 +3361,8 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(Some(render_tx))),
             render_thread: Some(render_thread),
             capture_mouse,
+            remote_mouse_capture: false,
+            remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             herdr: crate::herdr::PaneReporter::detect(),
         })
@@ -3407,6 +3420,8 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: false,
+            remote_mouse_capture: false,
+            remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             // Renderer tests must never report to a real Herdr pane, even when
             // the test process inherits one.
@@ -3795,13 +3810,8 @@ impl InteractiveShell {
                 .saturating_add(run.elapsed_at(Instant::now()));
         }
         state.close_streaming_blocks();
-        let tokens_per_second = state
-            .last_turn_tokens_per_second
-            .filter(|rate| rate.is_finite() && *rate > 0.0);
-        state.push_block(TranscriptBlock::Outcome(OutcomeBlock::new(
-            outcome,
-            tokens_per_second,
-        )));
+        let block = OutcomeBlock::new(outcome, state.last_turn_inference.clone());
+        state.push_block(TranscriptBlock::Outcome(block));
         if !state.selected_model_owns_telemetry() {
             state.clear_turn_telemetry();
         }
@@ -3840,7 +3850,33 @@ impl InteractiveShell {
         self.on_run_event(id, event);
     }
 
+    /// Session-scoped cache maintenance must never create an assistant run or
+    /// change its timing, context size, token counters, or cache effectiveness.
+    /// The owner separately refreshes exact cumulative accounting from Session.
+    pub fn on_cache_warming_event(&mut self, event: &AgentEvent) {
+        let mut state = self.state.borrow_mut();
+        match event {
+            AgentEvent::CacheWarmed {
+                cost,
+                extension_override,
+                ..
+            } => {
+                state.usage_uncertain |= cost.is_none();
+                if state.show_cache_miss_notices {
+                    state.push_block(TranscriptBlock::Notice(
+                        crate::commands::cache_warmed_notice(*cost, *extension_override),
+                    ));
+                }
+            }
+            AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
+            _ => {}
+        }
+    }
+
     pub fn on_run_event(&mut self, id: RunId, event: &AgentEvent) {
+        if matches!(event, AgentEvent::CacheWarmed { .. }) {
+            self.on_cache_warming_event(event);
+        }
         // A renderer may retain the immutable pending queue. Preparing the
         // delivered transcript text must not clone a large paste under the
         // semantic lock; queue removal and transcript insertion remain atomic.
@@ -3897,6 +3933,7 @@ impl InteractiveShell {
             }
         }
         match event {
+            AgentEvent::CacheWarmed { .. } => {}
             AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
             AgentEvent::RecoveredOutput { channel, text } => {
                 state.push_block(TranscriptBlock::Notice(format!(
@@ -3927,6 +3964,9 @@ impl InteractiveShell {
                 // provider retry. TurnFinished carries the durable assembled
                 // message; embedded callers receive the payload here directly.
             }
+            AgentEvent::ProviderInference { metrics } => {
+                state.last_turn_inference = Some(metrics.clone());
+            }
             AgentEvent::ProviderLifecycle { lifecycle } => {
                 // The run tracker accepts the event but deliberately refuses a
                 // late readiness update once real output or tool work began.
@@ -3947,6 +3987,10 @@ impl InteractiveShell {
                 }
             }
             AgentEvent::ProviderRetry { .. } | AgentEvent::CandidateRejected { .. } => {
+                state.last_turn_inference = None;
+                state.last_turn_tokens_per_second = None;
+                state.last_turn_generated_tokens = None;
+                state.last_turn_provider_elapsed = None;
                 state.discard_streaming_blocks();
                 state.open_working_status();
                 if let AgentEvent::ProviderRetry {
@@ -4108,6 +4152,7 @@ impl InteractiveShell {
                 state.last_turn_tokens_per_second = None;
                 state.last_turn_generated_tokens = None;
                 state.last_turn_provider_elapsed = None;
+                state.last_turn_inference = None;
                 state.last_turn_first_token = None;
             }
             AgentEvent::ToolStarted { id, name, args } => {
@@ -4193,7 +4238,8 @@ impl InteractiveShell {
                                 );
                             }
                         }
-                        ToolProgress::SessionEvent(..) => {}
+                        ToolProgress::SessionEvent(..) | ToolProgress::SessionMetadataEvent(..) => {
+                        }
                     }
                 }
                 if state.verbose_tools || refreshes_compact_tail {
@@ -4329,6 +4375,18 @@ impl InteractiveShell {
                         output_tokens_per_second(turn_usage.output_tokens, elapsed)
                     });
                 state.last_turn_generated_tokens = Some(turn_usage.output_tokens);
+                if let Some(metrics) = state.last_turn_inference.clone() {
+                    state.last_turn_tokens_per_second = metrics
+                        .client
+                        .as_ref()
+                        .and_then(|c| c.end_to_end_tokens_per_second());
+                    state.last_turn_provider_elapsed = metrics
+                        .client
+                        .as_ref()
+                        .map(|c| Duration::from_nanos(c.elapsed_ns));
+                    state.last_turn_generated_tokens =
+                        metrics.client.as_ref().map(|c| c.reported_output_tokens);
+                }
                 // Provider usage is authoritative at this boundary. Prompt
                 // cache buckets all occupy context, while reasoning is already
                 // a subset of output, so canonical total_tokens is exactly the
@@ -4401,19 +4459,8 @@ impl InteractiveShell {
         }
     }
 
-    /// Refresh durable session instruments outside the render loop. These
-    /// values change only at run boundaries, keeping the footer stable.
-    pub fn set_session_telemetry(
-        &mut self,
-        session: &Session,
-        cache_hit_rate_basis_points: Option<u16>,
-    ) {
-        let telemetry_model = session
-            .latest_active_checkpoint()
-            .and_then(|checkpoint| session.entry(&checkpoint.prompt))
-            .and_then(|entry| entry.metadata.as_ref())
-            .and_then(|metadata| metadata.prompt_model.as_ref())
-            .map(|model| model.0.clone());
+    /// Refresh cumulative accounting without changing assistant-turn metrics.
+    pub fn set_session_accounting(&mut self, session: &Session) {
         let session_cost_microdollars = session
             .usage_records()
             .iter()
@@ -4423,6 +4470,23 @@ impl InteractiveShell {
         state.session_cost_microdollars = session_cost_microdollars;
         state.refresh_subagent_committed_costs(session);
         state.usage_uncertain |= session.has_uncertain_usage() || session.has_unpriced_usage();
+    }
+
+    /// Refresh durable session instruments outside the render loop. These
+    /// values change only at run boundaries, keeping the footer stable.
+    pub fn set_session_telemetry(
+        &mut self,
+        session: &Session,
+        cache_hit_rate_basis_points: Option<u16>,
+    ) {
+        self.set_session_accounting(session);
+        let telemetry_model = session
+            .latest_active_checkpoint()
+            .and_then(|checkpoint| session.entry(&checkpoint.prompt))
+            .and_then(|entry| entry.metadata.as_ref())
+            .and_then(|metadata| metadata.prompt_model.as_ref())
+            .map(|model| model.0.clone());
+        let mut state = self.state.borrow_mut();
         state.telemetry_model = telemetry_model;
         state.cache_hit_rate_basis_points = state
             .selected_model_owns_telemetry()
@@ -5266,6 +5330,7 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         state.safe_mode = config.effect_policy != octet_agent::EffectPolicy::UnsafeHost;
         state.max_session_cost_microdollars = config.max_cost_microdollars;
+        state.show_cache_miss_notices = config.show_cache_miss_notices;
         drop(state);
         self.set_show_images(show_images);
     }
@@ -5282,13 +5347,84 @@ impl InteractiveShell {
     /// Replace the complete host-projected semantic extension UI. The caller
     /// owns stale-generation filtering; this shell only retains data and keeps
     /// all terminal rendering/theme decisions host-side.
-    pub fn set_extension_ui(&mut self, ui: ShellExtensionUi) -> bool {
+    pub fn set_extension_ui(&mut self, mut ui: ShellExtensionUi) -> bool {
         let mut state = self.state.borrow_mut();
+        ui.remote = state.extension_ui.remote.clone();
+        ui.remote_fullscreen_overlay = state.extension_ui.remote_fullscreen_overlay;
         if state.extension_ui == ui {
             return false;
         }
         state.extension_ui = ui;
         true
+    }
+
+    /// Install one immutable cached remote UI projection. No extension callback
+    /// runs on the renderer; fullscreen rows use the existing transient overlay.
+    pub(crate) fn set_remote_ui(
+        &mut self,
+        projection: crate::extensions::remote_ui::Projection,
+    ) -> bool {
+        use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
+        let mut state = self.state.borrow_mut();
+        if state.extension_ui.remote == projection {
+            return false;
+        }
+        let had_fullscreen = state
+            .extension_ui
+            .remote
+            .mount(Placement::Fullscreen)
+            .is_some();
+        let header_changed = state.extension_ui.remote.mount(Placement::Header)
+            != projection.mount(Placement::Header)
+            || (projection.mount(Placement::Header).is_some()
+                && state.extension_ui.remote.components != projection.components);
+        state.extension_ui.remote = projection;
+        let fullscreen = state.extension_ui.remote.mount(Placement::Fullscreen);
+        let has_fullscreen = fullscreen.is_some();
+        let capture = fullscreen.is_some_and(|mount| mount.mouse_capture);
+        let keyboard_events =
+            has_fullscreen || state.extension_ui.remote.mount(Placement::Editor).is_some();
+        if had_fullscreen && !has_fullscreen && state.extension_ui.remote_fullscreen_overlay {
+            state.overlay = None;
+        }
+        if !had_fullscreen || !has_fullscreen {
+            state.extension_ui.remote_fullscreen_overlay = has_fullscreen;
+        }
+        remote_ui::refresh_fullscreen_overlay(&mut state);
+        if header_changed {
+            state.invalidate_transcript();
+        }
+        drop(state);
+        if self.remote_keyboard_events != keyboard_events {
+            if self.render_thread.is_some() {
+                if let Err(error) = OctetTerminal::set_remote_ui_keyboard_events(keyboard_events) {
+                    self.state.borrow_mut().error =
+                        Some(format!("remote keyboard event reporting failed: {error}"));
+                }
+            }
+            self.remote_keyboard_events = keyboard_events;
+        }
+        if self.remote_mouse_capture != capture {
+            if self.render_thread.is_some() {
+                if let Err(error) = OctetTerminal::set_mouse_capture(self.capture_mouse || capture)
+                {
+                    self.state.borrow_mut().error =
+                        Some(format!("remote mouse capture failed: {error}"));
+                }
+            }
+            self.remote_mouse_capture = capture;
+        }
+        true
+    }
+
+    /// Approval/picker/search/tool input ownership always takes priority.
+    pub(crate) fn remote_ui_input_blocked(&self) -> bool {
+        let state = self.state.borrow();
+        state.startup_pending
+            || state.panel.is_some()
+            || state.tool_input_prompt.is_some()
+            || state.transcript_search_active()
+            || (state.overlay.is_some() && !state.extension_ui.remote_fullscreen_overlay)
     }
 
     /// Snapshot the normal host editor for a bounded extension handoff.
@@ -5942,13 +6078,17 @@ impl InteractiveShell {
         self.close_transcript_navigation();
         self.reset_input_interaction();
         let text = Arc::from(sanitize_for_terminal(&text));
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text));
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Text(text));
     }
 
     fn show_report(&mut self, surface: OrdinarySurfaceMetadata, body: ReportBody) {
         self.close_transcript_navigation();
         self.reset_input_interaction();
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Report(ReportOverlay {
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Report(ReportOverlay {
             surface,
             body,
             scroll_from_top: 0,
@@ -6024,6 +6164,7 @@ impl InteractiveShell {
     pub fn show_extension_output(&mut self, title: &str, text: String) {
         self.close_transcript_navigation();
         let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
         state.overlay = Some(ShellOverlay::Text(
             styled_extension_output(&state.theme, title, &text).into(),
         ));
@@ -6063,7 +6204,9 @@ impl InteractiveShell {
     /// Show picker output that already contains octet-generated foreground SGR.
     #[allow(dead_code)]
     pub fn show_styled_overlay_text(&mut self, text: String) {
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text.into()));
+        let mut state = self.state.borrow_mut();
+        state.extension_ui.remote_fullscreen_overlay = false;
+        state.overlay = Some(ShellOverlay::Text(text.into()));
     }
 
     pub fn show_status_text_with_telemetry(&mut self, text: String) {
@@ -6080,7 +6223,14 @@ impl InteractiveShell {
     }
 
     pub fn close_overlay(&mut self) {
-        self.state.borrow_mut().overlay = None;
+        let mut state = self.state.borrow_mut();
+        state.overlay = None;
+        state.extension_ui.remote_fullscreen_overlay = state
+            .extension_ui
+            .remote
+            .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Fullscreen)
+            .is_some();
+        remote_ui::refresh_fullscreen_overlay(&mut state);
     }
 
     pub fn has_overlay(&self) -> bool {
@@ -6106,7 +6256,8 @@ impl InteractiveShell {
             {
                 return OverlayInputResult::Consumed;
             }
-            state.overlay = None;
+            drop(state);
+            self.close_overlay();
             return OverlayInputResult::Closed;
         }
         let (maximum, page_rows) = if state.render_threaded {
@@ -6166,7 +6317,8 @@ impl InteractiveShell {
             close = true;
         }
         if close {
-            state.overlay = None;
+            drop(state);
+            self.close_overlay();
             OverlayInputResult::Closed
         } else {
             OverlayInputResult::Consumed
@@ -7413,6 +7565,7 @@ impl InteractiveShell {
         state.close_streaming_blocks();
         state.jump_to_tail();
         state.last_turn_usage = checkpoint_usage;
+        state.last_turn_inference = None;
         state.last_turn_tokens_per_second = None;
         state.last_turn_generated_tokens = None;
         state.turn_generation_started_at = None;
@@ -7599,6 +7752,8 @@ fn native_clipboard_writers(
 
 mod assistant_block;
 mod bash_render;
+#[path = "view/shell_chrome.rs"]
+mod builtin_shell_chrome;
 mod input_dispatch;
 mod input_overlays;
 mod native_scrollback;
@@ -7607,10 +7762,21 @@ mod outcome_render;
 mod output_window;
 mod panel_render;
 mod reasoning_render;
+mod remote_ui;
 mod renderer_geometry;
 mod renderer_model;
 mod renderer_runtime;
-mod shell_chrome;
+// Keep the built-in implementation unchanged; compose cached remote regions at
+// the existing shell chrome seam rather than introducing another renderer.
+mod shell_chrome {
+    #[cfg(test)]
+    pub(super) use super::builtin_shell_chrome::responsive_identity;
+    pub(super) use super::builtin_shell_chrome::{
+        append_chrome, append_viewport_chrome, render_startup_surface, shell_chrome_rows,
+        ShellChrome,
+    };
+    pub(super) use super::remote_ui::shell_chrome;
+}
 mod startup_update;
 mod status_telemetry;
 mod surface_frame;
@@ -7629,14 +7795,74 @@ mod tool_render;
 mod transcript_cache;
 mod transcript_navigation;
 
+#[path = "view/viewport.rs"]
+mod builtin_viewport;
 mod transcript_commit;
 mod transcript_document;
 mod transcript_history;
 mod transcript_hydration;
 mod transcript_render;
 mod transcript_selection;
-mod viewport;
-mod welcome_card;
+mod viewport {
+    pub(super) use super::builtin_viewport::*;
+    use super::{remote_ui, renderer_runtime::ShellFrameState, ShellState};
+    use sexy_tui_rs::FrameUpdate;
+    use std::time::Instant;
+
+    fn remote_rows(state: &ShellState, width: u16) -> Option<Vec<String>> {
+        if !state.extension_ui.remote_fullscreen_overlay
+            || state.panel.is_some()
+            || state.tool_input_prompt.is_some()
+        {
+            return None;
+        }
+        remote_ui::fullscreen_overlay(&state.extension_ui.remote, width, state.size.1)
+            .map(|text| text.split('\n').map(str::to_owned).collect())
+    }
+    pub(super) fn overlay_lines(state: &ShellState, width: u16, max_rows: usize) -> Vec<String> {
+        remote_rows(state, width)
+            .unwrap_or_else(|| super::builtin_viewport::overlay_lines(state, width, max_rows))
+    }
+    pub(super) fn render_shell_viewport_at(
+        state: &ShellState,
+        width: u16,
+        now: Instant,
+    ) -> Vec<String> {
+        remote_rows(state, width)
+            .unwrap_or_else(|| super::builtin_viewport::render_shell_viewport_at(state, width, now))
+    }
+    pub(super) fn render_shell_viewport_update(
+        state: &ShellState,
+        width: u16,
+        now: Instant,
+        frame: &mut ShellFrameState,
+    ) -> FrameUpdate {
+        if let Some(replacement) = remote_rows(state, width) {
+            let reanchor_viewport =
+                !frame.overlay_active || frame.width != width || frame.height != state.size.1;
+            frame.overlay_active = true;
+            frame.width = width;
+            frame.height = state.size.1;
+            return FrameUpdate {
+                stable_prefix: 0,
+                replacement,
+                pinned: None,
+                resize_replay: None,
+                reanchor_viewport,
+                rebuild_scrollback: false,
+            };
+        }
+        super::builtin_viewport::render_shell_viewport_update(state, width, now, frame)
+    }
+}
+#[path = "view/welcome_card.rs"]
+mod builtin_welcome_card;
+mod welcome_card {
+    pub(super) use super::builtin_welcome_card::{
+        restart_welcome_animation, welcome_placeholder_rows, welcome_row_budget,
+    };
+    pub(super) use super::remote_ui::render_welcome_card;
+}
 
 #[cfg(test)]
 mod changelog_tests;
@@ -7645,12 +7871,14 @@ mod ordinary_surface_contract_tests;
 #[cfg(test)]
 mod path_completion_tests;
 #[cfg(test)]
+mod resume_bookkeeping_tests;
+#[cfg(test)]
 mod startup_readiness_tests;
 #[cfg(test)]
 #[path = "view/subagent_stability_tests.rs"]
 mod subagent_stability_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod extension_handoff_tests {

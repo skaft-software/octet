@@ -115,6 +115,13 @@ impl Run<'_> {
 
 impl Drop for Run<'_> {
     fn drop(&mut self) {
+        // Serialize retained-policy changes with releasing this run's ownership.
+        // Checking channel closure alone leaves a setter/drop race.
+        *self
+            .control
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
         if !self.lifecycle.finished.load(Ordering::Acquire) {
             self.lifecycle.dropped.store(true, Ordering::Release);
             self.context.run_dropped();

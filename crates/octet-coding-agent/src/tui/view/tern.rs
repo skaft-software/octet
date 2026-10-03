@@ -569,7 +569,14 @@ fn find_node<'a>(nodes: &'a [Node], id: &str) -> Option<&'a Node> {
 fn apply_disclosure(nodes: &mut [Node], collapsed: &HashMap<String, bool>) {
     for node in nodes {
         if let Some(value) = collapsed.get(&node.id) {
-            node.p = Some(node.p.take().unwrap_or_default().set("collapsed", value));
+            if node
+                .p
+                .as_ref()
+                .and_then(|props| props.as_map().get("collapsible"))
+                != Some(&json!(false))
+            {
+                node.p = Some(node.p.take().unwrap_or_default().set("collapsed", value));
+            }
         }
         if let Some(children) = &mut node.c {
             apply_disclosure(children, collapsed);
@@ -870,9 +877,7 @@ fn block_node(
             shell.workspace.as_deref(),
             collapsed,
         )),
-        TranscriptBlock::Shell(output) => {
-            Some(shell_node(identity, output, shell.verbose_tools, collapsed))
-        }
+        TranscriptBlock::Shell(output) => Some(shell_node(identity, output, shell.verbose_tools)),
         TranscriptBlock::Notice(text) => Some(text_node(identity, text, "muted")),
         TranscriptBlock::NoticeStatus { text, tone, .. } => Some(text_node(
             identity,
@@ -1292,14 +1297,18 @@ fn tool_node(
         }
     }
 
-    // Command output is summary-only from its first frame, not expanded
-    // during execution and then collapsed on completion. Explicit disclosure
-    // still wins; captured output remains in the semantic model.
+    // Gate command output before constructing the native tree. Keep its card
+    // expanded independently: Tern ellipsizes command targets on collapsed cards.
+    // Ctrl+O owns output disclosure; captured output stays in the semantic model.
     let command_output = matches!(panel.name.as_str(), "bash" | "exec");
-    let collapsed = collapsed_overrides
-        .get(&id(index, "tool"))
-        .copied()
-        .unwrap_or(!verbose && (panel.finished || command_output));
+    let collapsed = if command_output {
+        !verbose
+    } else {
+        collapsed_overrides
+            .get(&id(index, "tool"))
+            .copied()
+            .unwrap_or(!verbose && panel.finished)
+    };
     let mut body = Vec::new();
     let compact_read = panel.name == "read"
         && panel.finished
@@ -1402,18 +1411,13 @@ fn tool_node(
             .role(format!("omp.tool.{}", panel.name))
             .set("href", &href)
             .set("frame", if compact_read { "inline" } else { "card" })
-            .set("collapsible", !compact_read)
-            .set("collapsed", !compact_read && collapsed),
+            .set("collapsible", !compact_read && !command_output)
+            .set("collapsed", !compact_read && !command_output && collapsed),
     );
     node
 }
 
-fn shell_node(
-    index: u64,
-    shell: &super::ShellOutput,
-    verbose: bool,
-    collapsed_overrides: &HashMap<String, bool>,
-) -> Node {
+fn shell_node(index: u64, shell: &super::ShellOutput, verbose: bool) -> Node {
     let status = if shell.running {
         "running"
     } else if shell.exit_code == 0 {
@@ -1425,12 +1429,9 @@ fn shell_node(
     if !shell.running && shell.exit_code != 0 {
         meta.push(Text::Plain(format!("exit {}", shell.exit_code)));
     }
-    // Local `!` commands follow the same disclosure policy from first paint.
-    // Failures retain their exit status above; scrollback requires disclosure.
-    let collapsed = collapsed_overrides
-        .get(&id(index, "shell"))
-        .copied()
-        .unwrap_or(!verbose);
+    // Local `!` commands also keep their full input visible, while output is
+    // absent from the native tree until Ctrl+O requests it.
+    let collapsed = !verbose;
     let body = if shell.output.trim().is_empty() || collapsed {
         Vec::new()
     } else {
@@ -1453,7 +1454,8 @@ fn shell_node(
         node.p
             .unwrap_or_default()
             .role("octet.tool")
-            .set("collapsed", collapsed),
+            .set("collapsible", false)
+            .set("collapsed", false),
     );
     node
 }
@@ -1497,8 +1499,20 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
         spans.push(Span::new(" · "));
     }
     spans.push(Span::styled(verdict, token));
-    if let Some(rate) = outcome.tokens_per_second {
-        spans.push(Span::styled(format!(" · {rate:.1} tok/s"), "dim"));
+    if let Some(metrics) = outcome.inference.as_deref() {
+        let rate = metrics
+            .server
+            .as_ref()
+            .and_then(|server| server.tokens_per_second())
+            .or_else(|| {
+                metrics
+                    .decode_estimate
+                    .as_ref()
+                    .map(|estimate| estimate.tokens_per_second)
+            });
+        if let Some(rate) = rate {
+            spans.push(Span::styled(format!(" · {rate:.1} tok/s"), "dim"));
+        }
     }
     match &outcome.outcome {
         RunOutcome::CompletedWithWarnings { warnings, .. } => {
@@ -1520,3 +1534,7 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
 #[cfg(test)]
 #[path = "tern_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tern_inference_tests.rs"]
+mod inference_tests;

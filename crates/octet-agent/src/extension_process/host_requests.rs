@@ -15,6 +15,13 @@ pub struct ToolDefinition {
     /// Optional API `0.2` JSON Schema for `structured_content`.
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
+    /// Optional API `0.4` request-scoped composition policy. Requires
+    /// negotiated `tool_composition_v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<ToolCompositionConfig>,
+    /// Optional API `0.4` provider-side constrained-sampling request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constrained_sampling: Option<octet_ai::ConstrainedSampling>,
 }
 
 /// API `0.2` request to add or replace extension-owned tools.

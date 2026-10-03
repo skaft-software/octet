@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
+use crate::cache_warmer::{CacheWarmingAction, CacheWarmingDecision};
 use crate::events::AgentEvent;
 use crate::input::UserInput;
 use crate::tool::{Tool, ToolContext, ToolError};
@@ -179,6 +180,33 @@ pub enum ProviderRetryAdvice {
 pub trait ProviderRetryHook: Send + Sync {
     /// Advises on the single retry under consideration.
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice;
+}
+
+/// Read-only economics and owner identity for one due cache refresh.
+///
+/// No prompt, provider credentials, transport, or mutable session is exposed.
+#[derive(Clone, Debug)]
+pub struct CacheWarmingDecisionContext {
+    /// The host's current decision and cost estimates.
+    pub decision: CacheWarmingDecision,
+    /// Host-selected model identity, without transport configuration.
+    pub model: ModelId,
+    /// Host-derived durable session owner.
+    pub resource_owner: String,
+}
+
+/// Optional advice before each due, independently eligible cache refresh.
+///
+/// The host invokes hooks in registration order; the last returned action wins.
+/// `None`, failure, or timeout leaves the preceding decision unchanged. Advice
+/// cannot widen refresh deadlines, budgets, cancellation, or replay eligibility.
+#[async_trait::async_trait]
+pub trait CacheWarmingDecisionHook: Send + Sync {
+    /// Return `warm`, `stop`, or no opinion on this single refresh.
+    async fn cache_warming_decision(
+        &self,
+        context: &CacheWarmingDecisionContext,
+    ) -> Option<CacheWarmingAction>;
 }
 
 /// Optional API 0.4 replacement for local parent-model summarization.
@@ -769,6 +797,7 @@ pub struct ExtensionHost {
     pub(crate) observers: Vec<Arc<dyn EventObserver>>,
     pub(crate) tool_call_hooks: Vec<Arc<dyn ToolCallHook>>,
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
+    pub(crate) cache_warming_decision_hooks: Vec<Arc<dyn CacheWarmingDecisionHook>>,
     pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub(crate) duplicate_compaction_strategy: bool,
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
@@ -784,6 +813,7 @@ impl Default for ExtensionHost {
             observers: Vec::new(),
             tool_call_hooks: Vec::new(),
             provider_retry_hooks: Vec::new(),
+            cache_warming_decision_hooks: Vec::new(),
             compaction_strategy: None,
             duplicate_compaction_strategy: false,
             persistence_metadata_hooks: Vec::new(),
@@ -884,6 +914,12 @@ impl ExtensionHost {
     /// Register a non-authoritative provider-retry advisory hook.
     pub fn provider_retry_hook(&mut self, hook: impl ProviderRetryHook + 'static) {
         self.provider_retry_hooks.push(Arc::new(hook));
+    }
+
+    /// Register cache-refresh advice in deterministic invocation order.
+    /// The last hook returning an action wins, within the host's existing limits.
+    pub fn cache_warming_decision_hook(&mut self, hook: impl CacheWarmingDecisionHook + 'static) {
+        self.cache_warming_decision_hooks.push(Arc::new(hook));
     }
 
     /// Register the one active local-compaction strategy. Competing providers
@@ -990,6 +1026,7 @@ impl ExtensionHost {
         scoped.observers = self.observers.clone();
         scoped.tool_call_hooks = self.tool_call_hooks.clone();
         scoped.provider_retry_hooks = self.provider_retry_hooks.clone();
+        scoped.cache_warming_decision_hooks = self.cache_warming_decision_hooks.clone();
         scoped.compaction_strategy = self.compaction_strategy.clone();
         scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();
@@ -1121,11 +1158,7 @@ impl ExtensionHost {
 
     /// Returns the exact provider schemas currently registered, in wire order.
     pub fn tool_definitions(&self) -> Vec<ToolDef> {
-        self.tool_snapshot()
-            .1
-            .iter()
-            .map(|tool| tool.definition())
-            .collect()
+        crate::tool_composition::advertised_surface(&self.tool_snapshot().1)
     }
 }
 
@@ -1135,6 +1168,85 @@ mod tests {
     use crate::effect::ToolEffect;
     use crate::tool::{ToolContext, ToolError, ToolOutput};
     use octet_ai::ToolDef;
+
+    struct CacheOpinion {
+        index: usize,
+        action: Option<CacheWarmingAction>,
+        observed: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheWarmingDecisionHook for CacheOpinion {
+        async fn cache_warming_decision(
+            &self,
+            context: &CacheWarmingDecisionContext,
+        ) -> Option<CacheWarmingAction> {
+            assert_eq!(context.resource_owner, "cache-owner");
+            assert_eq!(context.model, ModelId("cache-model".into()));
+            self.observed.lock().unwrap().push(self.index);
+            self.action
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_warming_hooks_preserve_registration_order_and_child_scoping() {
+        use crate::cache_warmer::CacheWarmingPhase;
+
+        let mut host = ExtensionHost::new();
+        assert!(host.cache_warming_decision_hooks.is_empty());
+        host.tool(NamedTool("read"));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (index, action) in [
+            Some(CacheWarmingAction::Stop),
+            None,
+            Some(CacheWarmingAction::Warm),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            host.cache_warming_decision_hook(CacheOpinion {
+                index,
+                action,
+                observed: Arc::clone(&observed),
+            });
+        }
+        let cloned = host.clone();
+        let (scoped, _) = host
+            .scoped_tool_snapshot(&BTreeSet::from(["read".into()]))
+            .unwrap();
+        for inherited in [&cloned, &scoped] {
+            assert_eq!(inherited.cache_warming_decision_hooks.len(), 4);
+            for (original, inherited) in host
+                .cache_warming_decision_hooks
+                .iter()
+                .zip(&inherited.cache_warming_decision_hooks)
+            {
+                assert!(Arc::ptr_eq(original, inherited));
+            }
+        }
+        let context = CacheWarmingDecisionContext {
+            decision: CacheWarmingDecision {
+                phase: CacheWarmingPhase::Idle,
+                warm_cost_microdollars: 100,
+                miss_cost_microdollars: 1_000,
+                continuation_probability: 0.15,
+                expected_savings_microdollars: 50,
+                economics_available: true,
+                action: CacheWarmingAction::Warm,
+            },
+            model: ModelId("cache-model".into()),
+            resource_owner: "cache-owner".into(),
+        };
+        let mut action = context.decision.action;
+        for hook in &scoped.cache_warming_decision_hooks {
+            if let Some(opinion) = hook.cache_warming_decision(&context).await {
+                action = opinion;
+            }
+        }
+        assert_eq!(*observed.lock().unwrap(), [0, 1, 2, 3]);
+        assert_eq!(action, CacheWarmingAction::Warm);
+    }
 
     struct NoMetadata;
 

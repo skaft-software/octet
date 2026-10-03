@@ -47,6 +47,111 @@ pub(super) fn reject_typed_child_request(
     delivery.map(|_| ())
 }
 
+pub(super) fn require_remote_ui(state: &ProtocolReadState) -> Result<(), String> {
+    let protocol = read_std_lock(&state.protocol);
+    if protocol.version != EXTENSION_API_VERSION_0_4
+        || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
+        || !state.remote_ui.is_bound()
+    {
+        return Err("remote UI requires explicitly negotiated API 0.4 and a bound frontend".into());
+    }
+    if state.closed.load(Ordering::Acquire) || state.draining.load(Ordering::Acquire) {
+        return Err("remote UI generation is closed or draining".into());
+    }
+    Ok(())
+}
+
+pub(super) fn validate_remote_ui_envelope(
+    object: &serde_json::Map<String, serde_json::Value>,
+    request: bool,
+) -> Result<(), String> {
+    if object.keys().any(|key| {
+        !matches!(key.as_str(), "jsonrpc" | "method" | "params") && !(request && key == "id")
+    }) {
+        return Err("remote UI envelope contains unknown fields".into());
+    }
+    Ok(())
+}
+
+pub(super) fn admit_remote_ui_request<T: OwnerScopedHostRequest>(
+    state: &ProtocolReadState,
+    object: &serde_json::Map<String, serde_json::Value>,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<Option<(T, AdmittedExtensionRequest)>, String> {
+    let id = parse_child_request_id(object, method)?;
+    if let Err(detail) = require_remote_ui(state) {
+        reject_typed_child_request(
+            state,
+            id,
+            ExtensionRequestFailure::UnsupportedFeature,
+            detail,
+        )?;
+        return Ok(None);
+    }
+    if let Err(detail) = validate_remote_ui_envelope(object, true) {
+        reject_typed_child_request(state, id, ExtensionRequestFailure::InvalidRequest, detail)?;
+        return Ok(None);
+    }
+    let Some((request, admitted)) =
+        admit_host_request::<T>(state, object, method, EXTENSION_FEATURE_REMOTE_UI, params)?
+    else {
+        return Ok(None);
+    };
+    if lock_std_mutex(&state.tombstones).contains(request.parent_request_id()) {
+        refuse_admitted_request(
+            state,
+            &admitted,
+            (
+                ExtensionRequestFailure::NotForegroundOwner,
+                "remote UI parent was cancelled".into(),
+            ),
+        )?;
+        return Ok(None);
+    }
+    if let Err(failure) = validate_explicit_request_owner(state, &admitted.owner) {
+        refuse_admitted_request(state, &admitted, failure)?;
+        return Ok(None);
+    }
+    Ok(Some((request, admitted)))
+}
+
+pub(super) fn dispatch_remote_ui_request(
+    state: &ProtocolReadState,
+    admitted: &AdmittedExtensionRequest,
+    operation: ExtensionRemoteUiOperation,
+) -> Result<(), String> {
+    let mut children = lock_std_mutex(&state.child_requests);
+    let Some(child) = children.get_mut(&admitted.request_id) else {
+        return Ok(());
+    };
+    let parent = (child.parent_request_id != 0).then_some(child.parent_request_id);
+    let reservation = state.remote_ui.reserve(
+        admitted.request_id.clone(),
+        admitted.owner.clone(),
+        operation.clone(),
+        parent,
+    );
+    match reservation {
+        Ok(reservation) => child.remote_ui = Some(reservation),
+        Err(failure) => {
+            drop(children);
+            return refuse_admitted_request(state, admitted, failure);
+        }
+    }
+    drop(children);
+    dispatch_host_request_event(state, admitted, |admitted| {
+        ExtensionEvent::RemoteUiRequested {
+            request_id: admitted.request_id.clone(),
+            generation: admitted.generation,
+            owner: admitted.owner.clone(),
+            operation,
+        }
+    })?;
+    state.remote_ui.wake();
+    Ok(())
+}
+
 /// Admits one API `0.2` owner-scoped request: parse, feature gate, body parse,
 /// then owner resolution.
 ///
@@ -310,6 +415,7 @@ pub(super) fn insert_child_request(
         state: AtomicU8::new(CHILD_ACTIVE),
         changed: Notify::new(),
         cancel_on_response_abort: StdMutex::new(None),
+        composition_cancellation: StdMutex::new(None),
     });
     match children.entry(id) {
         std::collections::hash_map::Entry::Vacant(entry) => {
@@ -317,6 +423,7 @@ pub(super) fn insert_child_request(
                 parent_request_id: parent,
                 response_state: Arc::clone(&response_state),
                 policy_intent: None,
+                remote_ui: None,
             });
         }
         std::collections::hash_map::Entry::Occupied(_) => {
@@ -337,6 +444,7 @@ pub(super) fn settle_child_request(
 ) -> bool {
     let child = lock_std_mutex(child_requests).remove(id);
     if let Some(child) = child {
+        cancel_composition_work(&child.response_state);
         child
             .response_state
             .state
@@ -435,8 +543,15 @@ pub(super) fn try_queue_child_response_line(
             Ok(ChildResponseAdmission::Queued)
         }
         Err(error) => {
-            response_state.state.store(CHILD_ACTIVE, Ordering::Release);
-            response_state.changed.notify_waiters();
+            // Do not restore a dead parent's child if queue admission loses
+            // a race with cancellation. Match the async response claim path.
+            drop(ChildResponseClaim {
+                child_requests: Arc::clone(child_requests),
+                id: id.clone(),
+                response_state,
+                admitted: false,
+                abort_cancel: None,
+            });
             Err(error)
         }
     }
@@ -488,6 +603,7 @@ pub(super) fn cancel_active_children(
                     )
                     .is_ok() =>
             {
+                cancel_composition_work(&response_state);
                 settled.push((id, response_state));
             }
             CHILD_RESPONDING => {

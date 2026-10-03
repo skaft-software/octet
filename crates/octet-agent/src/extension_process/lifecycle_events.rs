@@ -161,6 +161,17 @@ pub enum ExtensionEvent {
         /// Bounded handoff operation.
         operation: ExtensionTerminalOperation,
     },
+    /// One owner-fenced cached UI operation awaiting the foreground frontend.
+    RemoteUiRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the operation.
+        generation: u64,
+        /// Complete host-issued resource owner.
+        owner: ExtensionResourceOwner,
+        /// Validated open or close operation; frames use a separate mailbox.
+        operation: ExtensionRemoteUiOperation,
+    },
     /// One read-only context snapshot awaiting the foreground session.
     ///
     /// The child request stays registered until the frontend answers through

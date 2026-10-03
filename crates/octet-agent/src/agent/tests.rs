@@ -201,6 +201,8 @@ fn test_run_control(byte_limit: usize) -> (RunControl, mpsc::Receiver<Control>) 
     let (tx, rx) = mpsc::channel(8);
     (
         RunControl {
+            cache_warming_mode: crate::cache_warmer::CacheWarmer::default().mode_control(),
+            cache_warming_status: crate::cache_warmer::CacheWarmer::default().diagnostics(),
             reasoning_model: None,
             ultra_observed: false,
             admission: Arc::new(Mutex::new(true)),
@@ -211,6 +213,47 @@ fn test_run_control(byte_limit: usize) -> (RunControl, mpsc::Receiver<Control>) 
         },
         rx,
     )
+}
+
+#[test]
+fn run_drop_fences_cache_warming_before_releasing_the_event_stream() {
+    struct DropProbe(RunControl);
+    impl Stream for DropProbe {
+        type Item = AgentEvent;
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Pending
+        }
+    }
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            assert!(!*self.0.admission.lock().unwrap());
+            assert!(matches!(
+                self.0.set_cache_warming_mode(crate::CacheWarmMode::Off),
+                Err(AgentError::RunEnded)
+            ));
+        }
+    }
+    let (control, _receiver) = test_run_control(128);
+    // Keep the receiver alive to isolate the admission fence from channel
+    // closure, just as a concurrent setter can observe before stream drop.
+    let run = Run {
+        stream: Box::pin(DropProbe(control.clone())),
+        control: control.clone(),
+        lifecycle: Arc::new(RunLifecycle {
+            finished: AtomicBool::new(false),
+            dropped: AtomicBool::new(false),
+        }),
+        context: Arc::new(ContextTracker::default()),
+        delegation: None,
+    };
+    drop(run);
+    assert_eq!(
+        control.cache_warming_mode(),
+        crate::CacheWarmMode::Streaming
+    );
 }
 
 fn gate_candidate(text: &str) -> AssistantMessage {
@@ -375,6 +418,7 @@ impl octet_ai::HostStreamTransport for CompactionSummaryScript {
                 response_id: None,
                 responses_output: None,
                 deferred: None,
+                inference: None,
                 diagnostics: Vec::new(),
             })),
         ])))
@@ -744,6 +788,7 @@ impl octet_ai::HostStreamTransport for ToolBudgetTransport {
                 response_id: None,
                 responses_output: None,
                 deferred: None,
+                inference: None,
                 diagnostics: Vec::new(),
             })),
         ])))
@@ -997,6 +1042,7 @@ async fn natural_run_has_no_terminal_gate_summary_projection_or_evidence_collect
                     response_id: None,
                     responses_output: None,
                     deferred: None,
+                    inference: None,
                     diagnostics: Vec::new(),
                 })),
             ])))

@@ -115,6 +115,10 @@ pub struct ExtensionHookOutput {
     /// Advice accepted only for a typed `provider_retry` hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_retry: Option<ExtensionProviderRetryAdvice>,
+    /// Advisory action returned only from the API 0.4 cache-refresh hook.
+    /// Absence or null is no opinion; neither action expands host authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_warming_decision: Option<CacheWarmingAction>,
     /// Base64 PNG frames returned only from the API 0.4 compaction hook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_frames: Option<Vec<String>>,

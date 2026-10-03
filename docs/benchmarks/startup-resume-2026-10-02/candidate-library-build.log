@@ -1,0 +1,6 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling sexy-tui-rs v0.3.1 ($WORKTREE/crates/sexy-tui-rs)
+   Compiling octet-coding-agent v0.8.2 ($WORKTREE/crates/octet-coding-agent)
+    Finished `release` profile [optimized] target(s) in 7m 01s

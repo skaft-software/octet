@@ -140,8 +140,14 @@ pub const EXTENSION_FEATURE_SYSTEM_PROMPT_READ: &str = "system_prompt_read";
 /// this surface: octet owns provider transport.
 pub const EXTENSION_FEATURE_MODEL_CATALOG: &str = "model_catalog";
 
+/// API 0.4 optional, non-authoritative advice before a due cache refresh.
+pub const EXTENSION_FEATURE_CACHE_WARMING_DECISION: &str = "cache_warming_decision";
+
 /// API 0.4 host-owned local compaction replacement (vision models only).
 pub const EXTENSION_FEATURE_COMPACTION_STRATEGY: &str = "compaction_strategy";
+
+/// Optional API `0.4` request-scoped host tool composition service.
+pub const EXTENSION_FEATURE_TOOL_COMPOSITION: &str = "tool_composition_v1";
 
 pub(super) const API_0_2_REQUIRED_FEATURES: &[&str] = &[
     EXTENSION_FEATURE_REQUEST_CANCELLATION,

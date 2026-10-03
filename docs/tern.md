@@ -135,11 +135,15 @@ move the preceding history.
 The composer uses Tern's observed `omp.editor` layout with octet's native
 editor, model and effort controls, context meter, session cost, and Send/Stop.
 The welcome uploads octet's byte mark as immutable, content-addressed SVG;
-unsupported images retain the textual byte mark. Assistant prose and thinking
-use the observed `omp.assistant` / `omp.thinking` layout hooks. These `omp.*`
-roles are Tern implementation details, not portable TSP guarantees or omp
-branding. The SVG uses the brand's 2:1 pixel proportions, accounting for the
-taller cells in the ANSI mark. Transcript, welcome, composer and subagent
+unsupported images retain the textual byte mark. Its transparent column and
+wrapping row use octet-owned `octet.welcome.*` roles and explicit spacing, not
+OMP's private welcome hooks, which can override logo dimensions and animation
+when Tern updates. The image requests 128×64 logical pixels and retains the
+brand's eight contiguous, baseline-aligned bars and 2:1 proportions, accounting
+for the taller cells in the ANSI mark. Model/theme-aware colours are unchanged.
+Assistant prose and thinking still use the observed `omp.assistant` /
+`omp.thinking` layout hooks. Those `omp.*` roles are Tern implementation details,
+not portable TSP guarantees or omp branding. Transcript, welcome, composer and subagent
 chrome share a responsive `144ch` maximum width; the neutral native dock column
 keeps the roster aligned rather than spanning the pane. The character-relative
 bound scales with Tern's font and shrinks in narrow panes.
@@ -195,11 +199,13 @@ are consumed rather than replayed into a draft. Only an ambiguous opening
 Escape prefix has a short input-latency timeout. Genuine bracketed paste and
 Enter/Escape keys remain frontend input.
 
-Bash/exec tools and local `!` commands are summary-only from their first frame
-unless Ctrl+O or an explicit card disclosure requests output. Collapsed command
-bodies are not mounted or sent to Tern, including on failure; status, duration,
-and failure reason/exit code remain in the summary. Captured output is retained
-unchanged for disclosure. Verbose Bash/exec output patches one stable native
+Bash/exec tools and local `!` commands show their full, wrapping command input
+from the first frame, with no captured output mounted or sent until Ctrl+O
+requests verbose output. Their native cards stay expanded and non-collapsible
+so Tern does not ellipsize the command; output disclosure is a separate host-owned
+projection, not a native preview that paints and then clamps. This also applies
+to failures: status, duration and failure reason/exit code remain in the summary.
+Captured output is retained unchanged for Ctrl+O. Verbose Bash/exec output patches one stable native
 text leaf as chunks arrive, including partial lines, without a streaming cursor
 or switching to a diff widget when command output resembles a diff.
 

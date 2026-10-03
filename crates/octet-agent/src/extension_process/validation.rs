@@ -29,6 +29,13 @@ pub(super) fn validate_tool_definitions(
     }
     let mut schema_budget = SchemaByteBudget(MAX_TOOL_CATALOG_SCHEMA_BYTES);
     for tool in tools {
+        if let Some(sampling) = &tool.constrained_sampling {
+            serde_json::to_writer(&mut schema_budget, sampling).map_err(|_| {
+                ExtensionRuntimeError::Protocol(format!(
+                    "tool catalog aggregate schema bytes exceed {MAX_TOOL_CATALOG_SCHEMA_BYTES}"
+                ))
+            })?;
+        }
         for schema in std::iter::once(&tool.parameters).chain(tool.output_schema.iter()) {
             serde_json::to_writer(&mut schema_budget, schema).map_err(|_| {
                 ExtensionRuntimeError::Protocol(format!(
@@ -58,6 +65,7 @@ pub(super) fn validate_tool_definitions(
                 tool.name
             )));
         }
+        validate_composition_tool_definition(tool, api_version)?;
         if let Some(schema) = &tool.output_schema {
             if !matches!(
                 api_version,
@@ -75,6 +83,77 @@ pub(super) fn validate_tool_definitions(
                 ))
             })?;
         }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_tool_definitions_for_protocol(
+    tools: &[ToolDefinition],
+    protocol: &ExtensionNegotiatedProtocol,
+) -> Result<(), ExtensionRuntimeError> {
+    validate_tool_definitions(tools, &protocol.version)?;
+    if tools.iter().any(|tool| tool.composition.is_some())
+        && !protocol.supports(EXTENSION_FEATURE_TOOL_COMPOSITION)
+    {
+        return Err(ExtensionRuntimeError::Protocol(
+            "tool composition requires negotiated tool_composition_v1".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_composition_tool_definition(
+    tool: &ToolDefinition,
+    api_version: &str,
+) -> Result<(), ExtensionRuntimeError> {
+    let invalid =
+        |reason: &str| ExtensionRuntimeError::Protocol(format!("tool `{}`: {reason}", tool.name));
+    if (tool.composition.is_some() || tool.constrained_sampling.is_some())
+        && api_version != EXTENSION_API_VERSION_0_4
+    {
+        return Err(invalid(
+            "composition and constrained_sampling require API 0.4",
+        ));
+    }
+    if tool
+        .composition
+        .as_ref()
+        .is_some_and(|config| config.inline_budget > 16_000)
+    {
+        return Err(invalid("composition inline_budget must be at most 16000"));
+    }
+    if let Some(octet_ai::ConstrainedSampling::Grammar { variants }) = &tool.constrained_sampling {
+        let grammars = [
+            variants.openai_lark.as_deref(),
+            variants.openai_regex.as_deref(),
+        ];
+        if !grammars
+            .iter()
+            .flatten()
+            .any(|grammar| !grammar.trim().is_empty())
+        {
+            return Err(invalid(
+                "grammar constrained sampling needs a supported non-empty variant",
+            ));
+        }
+        if grammars
+            .iter()
+            .flatten()
+            .map(|grammar| grammar.len())
+            .sum::<usize>()
+            > 64 * 1024
+        {
+            return Err(invalid("grammar constrained sampling exceeds 64 KiB"));
+        }
+        let definition = ToolDef {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.parameters.clone(),
+            constrained_sampling: tool.constrained_sampling.clone(),
+            async_execution: false,
+        };
+        octet_ai::constrained_sampling::infer_grammar_input_property(&definition)
+            .map_err(|reason| invalid(&reason))?;
     }
     Ok(())
 }

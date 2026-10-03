@@ -131,6 +131,13 @@ only after a following top-level start proves its end. Finalization parses the
 complete display text once; therefore `finish()` equals static parsing regardless
 of chunk boundaries.
 
+For already-complete UTF-8 text, `StreamingMarkdown::from_finalized_text` creates
+that canonical document directly with one parse. It retains the exact source but
+skips provisional fence scanning, suffix stabilization and preview parsing.
+`finish()` is then idempotent and further pushes are ignored, just as after
+ordinary streaming completion. This is useful when replaying saved history into
+the same render-cache API.
+
 `StreamingRenderCache` retains committed rows at a stable width/theme revision
 and lays out only newly committed blocks plus the mutable preview.
 `render_line_update` returns the byte-identical physical-row prefix and only the

@@ -57,6 +57,69 @@ impl ProviderRetryHook for ExtensionProcess {
     }
 }
 
+// This local cap is further shortened by the Agent's aggregate hook/refresh
+// deadline. Advice never receives its own extension of a refresh deadline.
+const CACHE_WARMING_DECISION_TIMEOUT: Duration = Duration::from_millis(200);
+
+#[async_trait::async_trait]
+impl CacheWarmingDecisionHook for ExtensionProcess {
+    async fn cache_warming_decision(
+        &self,
+        context: &CacheWarmingDecisionContext,
+    ) -> Option<CacheWarmingAction> {
+        if self.api_version() != EXTENSION_API_VERSION_0_4
+            || !self
+                .inner
+                .contributions
+                .hooks
+                .contains(&ExtensionHook::CacheWarmingDecision)
+        {
+            return None;
+        }
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if !read_std_lock(&connection.protocol)
+            .features
+            .contains(EXTENSION_FEATURE_CACHE_WARMING_DECISION)
+        {
+            return None;
+        }
+        let generation = connection.generation;
+        let mut execution = self.execution_context();
+        execution.resource_owner = Some(ExtensionResourceOwner {
+            session_id: context.resource_owner.clone(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: generation,
+        });
+        let resource_owner = execution.resource_owner.clone();
+        let decision = serde_json::to_value(&context.decision).ok()?;
+        let params = serde_json::to_value(HookRequest {
+            hook: ExtensionHook::CacheWarmingDecision,
+            payload: serde_json::json!({"decision": decision, "model": context.model}),
+            context: execution,
+        })
+        .ok()?;
+        let response = connection
+            .request_with_resource_owner(
+                methods::HOOK_RUN,
+                params,
+                self.inner
+                    .config
+                    .request_timeout
+                    .min(CACHE_WARMING_DECISION_TIMEOUT),
+                resource_owner,
+            )
+            .await
+            .ok()?;
+        // Keep arbitrary remote errors and malformed response values out of
+        // diagnostics, and discard advice from a replaced process generation.
+        let output: ExtensionHookOutput = serde_json::from_value(response).ok()?;
+        if read_std_lock(&self.inner.connection).generation != generation {
+            return None;
+        }
+        output.cache_warming_decision
+    }
+}
+
 #[async_trait::async_trait]
 impl PersistenceMetadataHook for ExtensionProcess {
     async fn before_assistant_persist(
@@ -171,6 +234,16 @@ impl Extension for ExtensionProcess {
                 .contains(&ExtensionHook::CompactionStrategy)
         {
             host.compaction_strategy(self.clone());
+        }
+        if self.api_version() == EXTENSION_API_VERSION_0_4
+            && self.supports_feature(EXTENSION_FEATURE_CACHE_WARMING_DECISION)
+            && self
+                .inner
+                .contributions
+                .hooks
+                .contains(&ExtensionHook::CacheWarmingDecision)
+        {
+            host.cache_warming_decision_hook(self.clone());
         }
         if self.inner.contributions.hooks.iter().any(|hook| {
             matches!(

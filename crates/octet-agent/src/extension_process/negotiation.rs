@@ -129,6 +129,8 @@ pub(super) fn negotiate_api_v03_contributions(
             description: tool.description,
             parameters: tool.parameters,
             output_schema: tool.output_schema,
+            composition: None,
+            constrained_sampling: None,
         })
         .collect::<Vec<_>>();
     let protocol = ExtensionNegotiatedProtocol {
@@ -222,6 +224,23 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 allowed.insert(EXTENSION_FEATURE_COMPACTION_STRATEGY);
             }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::CacheWarmingDecision)
+            {
+                allowed.insert(EXTENSION_FEATURE_CACHE_WARMING_DECISION);
+            }
+            if offered_host_services.tool_composition
+                && manifest.api_version == EXTENSION_API_VERSION_0_4
+            {
+                allowed.insert(EXTENSION_FEATURE_TOOL_COMPOSITION);
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4 && offered_host_services.remote_ui
+            {
+                allowed.insert(EXTENSION_FEATURE_REMOTE_UI);
+            }
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
                 allowed.insert(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1);
@@ -262,6 +281,17 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 return Err(ExtensionRuntimeError::Protocol(
                     "compaction_strategy hook requires negotiated compaction_strategy feature"
+                        .into(),
+                ));
+            }
+            if manifest
+                .contributes
+                .hooks
+                .contains(&ExtensionHook::CacheWarmingDecision)
+                && !features.contains(EXTENSION_FEATURE_CACHE_WARMING_DECISION)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "cache_warming_decision hook requires negotiated cache_warming_decision feature"
                         .into(),
                 ));
             }
@@ -347,7 +377,7 @@ pub(super) fn negotiate_contributions_with_host_services(
     if !protocol.supports(EXTENSION_FEATURE_DYNAMIC_TOOLS) {
         ensure_same_contributions("tools", &manifest.contributes.tools, &tool_names)?;
     }
-    validate_tool_definitions(&response.tools, &manifest.api_version)?;
+    validate_tool_definitions_for_protocol(&response.tools, &protocol)?;
 
     if response.shortcuts != manifest.contributes.shortcuts {
         return Err(ExtensionRuntimeError::Protocol(

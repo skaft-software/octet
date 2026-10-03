@@ -161,6 +161,7 @@ pub(super) fn host_request_operation_name(operation: &HostRequestOperation) -> &
         HostRequestOperation::Shortcut { .. } => "shortcuts",
         HostRequestOperation::ActiveTools { .. } => "active_tools",
         HostRequestOperation::Terminal(_) => "terminal_handoff",
+        HostRequestOperation::RemoteUi { .. } => "remote_ui",
         HostRequestOperation::ContextSnapshot(operation) => match operation {
             ExtensionContextOperation::SessionManager => "session_manager",
             ExtensionContextOperation::PendingMessages => "pending_messages",
@@ -178,6 +179,7 @@ pub(super) fn host_request_feature(operation: &HostRequestOperation) -> &'static
         HostRequestOperation::Shortcut { .. } => EXTENSION_FEATURE_SHORTCUTS,
         HostRequestOperation::ActiveTools { .. } => EXTENSION_FEATURE_ACTIVE_TOOLS,
         HostRequestOperation::Terminal(_) => EXTENSION_FEATURE_TERMINAL_HANDOFF,
+        HostRequestOperation::RemoteUi { .. } => EXTENSION_FEATURE_REMOTE_UI,
         HostRequestOperation::ContextSnapshot(ExtensionContextOperation::SystemPrompt) => {
             EXTENSION_FEATURE_SYSTEM_PROMPT_READ
         }
@@ -364,6 +366,7 @@ pub(super) fn validate_host_request(
         // The handoff carries no payload: the host mints the grant and reports
         // the size it left the terminal in, so there is nothing to bound here.
         HostRequestOperation::Terminal(_) => Ok(()),
+        HostRequestOperation::RemoteUi { operation, .. } => operation.validate(),
         // Read-only snapshots take no caller payload; the reply is bounded at
         // the point the host composes it.
         HostRequestOperation::ContextSnapshot(_) => Ok(()),

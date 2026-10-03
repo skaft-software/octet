@@ -399,6 +399,196 @@ async fn stdout_uses_the_unused_stderr_capture_budget() {
 }
 
 #[tokio::test]
+async fn programmatic_bash_preserves_large_raw_streams_without_expanding_model_output() {
+    let mut f = fixture();
+    f.sandbox.max_output_bytes = 2048;
+    let stdout = format!("begin\r\n{}\r\nend\n\n", "raw stdout ".repeat(12_000));
+    let stderr = format!("warning\n{}\n\n", "raw stderr ".repeat(12_000));
+    assert!(stdout.len() > 64 * 1024);
+    assert!(stderr.len() > 64 * 1024);
+    std::fs::write(f.workspace.join("stdout.txt"), &stdout).unwrap();
+    std::fs::write(f.workspace.join("stderr.txt"), &stderr).unwrap();
+    let (progress, mut receiver) = ToolProgressSink::bounded_channel();
+    let mut ctx = f.ctx();
+    ctx.execution_scope = "bash-programmatic-raw";
+    ctx.resource_owner = "bash-programmatic-raw";
+    ctx.progress = progress.for_nested_call();
+    let out = BashTool
+        .execute(
+            json!({"command": "cat stdout.txt; cat stderr.txt >&2"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(out.text.len() <= f.sandbox.max_output_bytes);
+    assert!(out.text.contains("truncated_stdout=head:"));
+    assert!(out.text.contains("truncated_stderr=head:"));
+    assert!(
+        receiver.try_recv().is_err(),
+        "nested raw output leaked to live progress"
+    );
+    let value = out.programmatic_content().unwrap();
+    assert_eq!(value["stdout"], stdout);
+    assert_eq!(value["stderr"], stderr);
+    assert_eq!(value["exit_code"], 0);
+    assert_eq!(value["truncated_stdout"], false);
+    assert_eq!(value["truncated_stderr"], false);
+    assert_eq!(value["complete_stdout"], true);
+    assert_eq!(value["complete_stderr"], true);
+    assert_eq!(value["stdout_bytes"], stdout.len());
+    assert_eq!(value["stderr_bytes"], stderr.len());
+    let schema = BashTool.output_schema().unwrap();
+    let required = schema["required"].as_array().unwrap();
+    assert_eq!(required.len(), value.as_object().unwrap().len());
+    for key in required {
+        assert!(value.get(key.as_str().unwrap()).is_some());
+    }
+    // The raw projection is not a durable detail or a Debug field.
+    assert!(out.structured_content().is_none());
+    assert!(!format!("{out:?}").contains("programmatic_content"));
+    BashTool::release_owner("bash-programmatic-raw");
+}
+
+#[tokio::test]
+async fn programmatic_stream_cap_is_per_stream_and_truncation_is_honest() {
+    let progress = ToolProgressSink::null().for_nested_call();
+    let mut exact = Some(std::io::Cursor::new(vec![
+        b'a';
+        MAX_PROGRAMMATIC_STREAM_BYTES
+    ]));
+    let mut oversized = Some(std::io::Cursor::new(vec![
+        b'b';
+        MAX_PROGRAMMATIC_STREAM_BYTES + 17
+    ]));
+    let (out, err) = tokio::join!(
+        read_bounded_with_spill_limit(
+            &mut exact,
+            MAX_PROGRAMMATIC_STREAM_BYTES + 17,
+            &progress,
+            OutputStream::Stdout,
+            None,
+            0,
+            ("raw-cap", "out")
+        ),
+        read_bounded_with_spill_limit(
+            &mut oversized,
+            MAX_PROGRAMMATIC_STREAM_BYTES + 17,
+            &progress,
+            OutputStream::Stderr,
+            None,
+            0,
+            ("raw-cap", "err")
+        )
+    );
+    let output = successful_output("bounded text".into(), &out, &err, Some(0)).unwrap();
+    let value = output.programmatic_content().unwrap();
+    assert_eq!(
+        value["stdout"].as_str().unwrap().len(),
+        MAX_PROGRAMMATIC_STREAM_BYTES
+    );
+    assert_eq!(
+        value["stderr"].as_str().unwrap().len(),
+        MAX_PROGRAMMATIC_STREAM_BYTES
+    );
+    assert_eq!(value["truncated_stdout"], false);
+    assert_eq!(value["complete_stdout"], true);
+    assert_eq!(value["truncated_stderr"], true);
+    assert_eq!(value["complete_stderr"], false);
+    assert_eq!(value["stderr_bytes"], MAX_PROGRAMMATIC_STREAM_BYTES + 17);
+    BashTool::release_owner("raw-cap");
+}
+
+#[tokio::test]
+async fn programmatic_capture_caps_source_bytes_before_lossy_utf8_conversion() {
+    let progress = ToolProgressSink::null().for_nested_call();
+    let mut bytes = vec![b'a'; MAX_PROGRAMMATIC_STREAM_BYTES - 1];
+    bytes.extend_from_slice("€".as_bytes());
+    let mut reader = Some(std::io::Cursor::new(bytes.clone()));
+    let out = read_bounded_with_spill_limit(
+        &mut reader,
+        bytes.len(),
+        &progress,
+        OutputStream::Stdout,
+        None,
+        0,
+        ("raw-utf8", "out"),
+    )
+    .await;
+    assert_eq!(
+        out.programmatic.as_ref().unwrap().bytes.len(),
+        MAX_PROGRAMMATIC_STREAM_BYTES
+    );
+    let mut empty = None::<std::io::Cursor<Vec<u8>>>;
+    let err = read_bounded_with_spill_limit(
+        &mut empty,
+        4096,
+        &progress,
+        OutputStream::Stderr,
+        None,
+        0,
+        ("raw-utf8", "err"),
+    )
+    .await;
+    let output = successful_output("bounded text".into(), &out, &err, Some(0)).unwrap();
+    let value = output.programmatic_content().unwrap();
+    assert_eq!(
+        value["stdout"].as_str().unwrap(),
+        String::from_utf8_lossy(&bytes[..MAX_PROGRAMMATIC_STREAM_BYTES]).as_ref()
+    );
+    assert!(value["stdout"].as_str().unwrap().ends_with('\u{fffd}'));
+    assert_eq!(value["truncated_stdout"], true);
+    assert_eq!(value["complete_stdout"], false);
+    assert_eq!(value["stderr"], "");
+    assert_eq!(value["complete_stderr"], true);
+    BashTool::release_owner("raw-utf8");
+}
+
+#[tokio::test]
+async fn programmatic_json_escaping_is_bounded_and_marked_as_truncated() {
+    let progress = ToolProgressSink::null().for_nested_call();
+    let mut reader = Some(std::io::Cursor::new(vec![0; MAX_PROGRAMMATIC_STREAM_BYTES]));
+    let capture = read_bounded_with_spill_limit(
+        &mut reader,
+        MAX_PROGRAMMATIC_STREAM_BYTES,
+        &progress,
+        OutputStream::Stdout,
+        None,
+        0,
+        ("raw-json", "out"),
+    )
+    .await;
+    let output = successful_output("bounded text".into(), &capture, &capture, Some(0)).unwrap();
+    let value = output.programmatic_content().unwrap();
+    assert!(serde_json::to_vec(value).unwrap().len() <= 8 * 1024 * 1024);
+    assert!(value["stdout"].as_str().unwrap().len() < MAX_PROGRAMMATIC_STREAM_BYTES);
+    assert_eq!(value["truncated_stdout"], true);
+    assert_eq!(value["truncated_stderr"], true);
+    assert_eq!(value["complete_stdout"], false);
+    assert_eq!(value["complete_stderr"], false);
+    BashTool::release_owner("raw-json");
+}
+
+#[tokio::test]
+async fn programmatic_nonzero_exit_still_rejects_with_the_standard_tool_error() {
+    let f = fixture();
+    let mut ctx = f.ctx();
+    ctx.progress = ctx.progress.for_nested_call();
+    let error = BashTool
+        .execute(json!({"command": "printf 'oops\\n' >&2; exit 7"}), &ctx)
+        .await
+        .unwrap_err();
+    assert!(error.message.starts_with("error nonzero_exit\nexit=7"));
+    assert!(error
+        .message
+        .contains("stderr: 1 lines\noops\ncomplete_stderr=true"));
+    let direct = BashTool
+        .execute(json!({"command": "printf 'ok\\n'"}), &f.ctx())
+        .await
+        .unwrap();
+    assert!(direct.programmatic_content().is_none());
+}
+
+#[tokio::test]
 async fn cwd_is_workspace_bounded() {
     let f = fixture();
     std::fs::create_dir(f.workspace.join("sub")).unwrap();

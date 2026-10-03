@@ -263,6 +263,17 @@ pub enum AgentEvent {
     /// are known subtotals, not complete totals. Never cleared by a retry.
     ProviderUsageUncertain,
 
+    /// One cache refresh's provider usage was durably charged to the session.
+    /// Its generated response is discarded and no local tool is executed.
+    CacheWarmed {
+        /// Provider-reported refresh usage, separate from assistant turns.
+        usage: Usage,
+        /// Exact known refresh cost; absent means unpriced, never free.
+        cost: Option<Cost>,
+        /// Whether an extension changed the cost-policy decision.
+        extension_override: bool,
+    },
+
     /// Operation-scoped auxiliary recovery; never discards main-answer output.
     ProviderOperationRetry {
         /// Actual provider operation being retried.
@@ -318,7 +329,8 @@ pub enum AgentEvent {
     /// attempt, and again once a retry's replacement stream is established.
     /// The elapsed time from this event to the first
     /// [`OutputDelta`](Self::OutputDelta) of the same attempt is that
-    /// attempt's first-token latency (TTFT).
+    /// attempt's agent-observed first-output latency (legacy TTFT label), not
+    /// a server first-token or terminal-paint timestamp.
     ///
     /// Advisory only: never persisted in the session.
     TurnStarted,
@@ -332,6 +344,12 @@ pub enum AgentEvent {
     ProviderLifecycle {
         /// Bounded, credential-redacted endpoint status.
         lifecycle: ProviderLifecycle,
+    },
+    /// Attempt-scoped client observations and optional native server timing.
+    /// Advisory only; not durable assistant content or usage authority.
+    ProviderInference {
+        /// Frozen observations taken before agent settlement and UI rendering.
+        metrics: octet_ai::inference::InferenceMetrics,
     },
 
     /// A tool call was emitted by the model and host-side admission begins now.

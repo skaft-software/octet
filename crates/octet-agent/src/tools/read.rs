@@ -82,6 +82,10 @@ pub struct ReadTool;
 
 #[async_trait::async_trait]
 impl Tool for ReadTool {
+    fn composition_is_unmetered(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             async_execution: false,
@@ -119,6 +123,30 @@ impl Tool for ReadTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "Returned lines without line-number prefixes, with the same per-line display clipping as a direct read."},
+                        "path": {"type": "string"},
+                        "hash": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 0},
+                        "end_line": {"type": "integer", "minimum": 0},
+                        "total_lines": {"type": "integer", "minimum": 0},
+                        "next_offset": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+                        "truncated": {"type": "boolean", "description": "The output-byte budget omitted requested lines."},
+                        "lines_clipped": {"type": "boolean", "description": "At least one returned line exceeded the per-line display cap."}
+                    },
+                    "required": ["content", "path", "hash", "start_line", "end_line", "total_lines", "next_offset", "truncated", "lines_clipped"],
+                    "additionalProperties": false
+                },
+                {"type": "string", "description": "Payload-free image/audio summary; media remains available to the host."}
+            ]
+        }))
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
@@ -219,7 +247,7 @@ impl Tool for ReadTool {
                 scheme => {
                     return Err(ToolError::new(format!(
                         "unsupported read URL scheme `{scheme}`; use file or https"
-                    )))
+                    )));
                 }
             }
         }
@@ -964,28 +992,49 @@ fn text_output(
     let byte_budget = ctx.sandbox.max_output_bytes.saturating_sub(256).max(1024);
     let requested_end = offset.saturating_add(limit.saturating_sub(1));
     let mut body = String::new();
+    let mut content = String::new();
+    let mut lines_clipped = false;
     let mut total = 0usize;
     let mut end = offset - 1; // last included line
     let mut truncated = false;
-    for (index, line) in text.lines().enumerate() {
+    for (index, (line, source)) in text.lines().zip(text.split_inclusive('\n')).enumerate() {
         let line_number = index + 1;
         total = line_number;
         if line_number < offset || line_number > requested_end || truncated {
             continue;
         }
-        let rendered = format!("{line_number}: {}\n", clip_line(line, MAX_LINE_CHARS));
+        let clipped = clip_line(line, MAX_LINE_CHARS);
+        let rendered = format!("{line_number}: {clipped}\n");
         if !body.is_empty() && body.len() + rendered.len() > byte_budget {
             truncated = true;
             continue;
         }
         body.push_str(&rendered);
+        if ctx.progress.is_programmatic() {
+            lines_clipped |= clipped != line;
+            content.push_str(&clipped);
+            // Preserve source line endings, including CRLF and an unterminated
+            // final line, rather than copying the model's numbered rendering.
+            content.push_str(&source[line.len()..]);
+        }
         end = line_number;
     }
 
     if total == 0 {
-        return Ok(ToolOutput::new(format!(
+        let output = ToolOutput::new(format!(
             "{display_path}:0-0/0 hash={hash}\n(empty file)\ntruncated=false"
-        )));
+        ));
+        return if ctx.progress.is_programmatic() {
+            output
+                .try_with_programmatic_content(serde_json::json!({
+                    "content": "", "path": display_path, "hash": hash,
+                    "start_line": 0, "end_line": 0, "total_lines": 0,
+                    "next_offset": null, "truncated": false, "lines_clipped": false
+                }))
+                .map_err(|error| ToolError::new(error.to_string()))
+        } else {
+            Ok(output)
+        };
     }
     if offset > total {
         return Err(ToolError::new(format!(
@@ -999,7 +1048,19 @@ fn text_output(
     } else {
         format!("truncated={truncated}")
     };
-    Ok(ToolOutput::new(format!("{header}\n{body}{footer}")))
+    let output = ToolOutput::new(format!("{header}\n{body}{footer}"));
+    if ctx.progress.is_programmatic() {
+        output
+            .try_with_programmatic_content(serde_json::json!({
+                "content": content, "path": display_path, "hash": hash,
+                "start_line": offset, "end_line": end, "total_lines": total,
+                "next_offset": (end < total).then_some(end + 1),
+                "truncated": truncated, "lines_clipped": lines_clipped
+            }))
+            .map_err(|error| ToolError::new(error.to_string()))
+    } else {
+        Ok(output)
+    }
 }
 
 #[cfg(test)]

@@ -125,6 +125,17 @@ async fn gemini_current_request_tool_stream_signature_and_usage_fixture() {
         )
         .await
         .expect("Gemini current loopback fixture");
+    let metrics = response.inference.as_ref().unwrap();
+    let client = metrics.client.as_ref().unwrap();
+    assert_eq!(
+        client.scope,
+        Some(octet_ai::inference::ClientTimingScope::Request)
+    );
+    assert!(client.first_tool_arguments_ns.is_some());
+    assert_eq!(
+        metrics.server_unavailable,
+        Some(octet_ai::inference::ServerTimingUnavailable::NotReported)
+    );
 
     assert_eq!(response.response_id.as_deref(), Some("gemini-current-1"));
     assert_eq!(response.usage.input_tokens, 10);
