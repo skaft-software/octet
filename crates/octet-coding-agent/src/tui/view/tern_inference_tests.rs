@@ -1,4 +1,4 @@
-//! Completion labels must preserve inference provenance in the native UI.
+//! Native completion shows only an available rate, preferring server timing.
 
 use super::*;
 
@@ -20,7 +20,15 @@ fn native_completion_prefers_server_generation_then_estimated_decode() {
             .map(|span| span.t)
             .collect::<String>()
     };
-    assert!(text(metrics.clone()).contains("decode unavailable"));
+    assert_eq!(text(metrics.clone()), "2.0s · completed · 0 tools");
+    let without_metrics = super::super::OutcomeBlock::new(outcome.clone(), None);
+    assert_eq!(
+        outcome_parts(&without_metrics)
+            .into_iter()
+            .map(|span| span.t)
+            .collect::<String>(),
+        "2.0s · completed · 0 tools"
+    );
     metrics.decode_estimate = Some(octet_ai::DecodeEstimate {
         tokens_per_second: 100.0,
         reported_visible_tokens: 100,
@@ -29,7 +37,10 @@ fn native_completion_prefers_server_generation_then_estimated_decode() {
         relative_dispersion: 0.01,
         reasoning_tokens_excluded: 0,
     });
-    assert!(text(metrics.clone()).contains("~100.0 tok/s decode (estimated, last turn)"));
+    assert_eq!(
+        text(metrics.clone()),
+        "2.0s · completed · 0 tools · 100.0 tok/s"
+    );
     metrics.server = Some(octet_ai::ServerGenerationMetrics {
         source: octet_ai::ServerTimingSource::TimingsPredicted,
         tokens: 100,
@@ -40,7 +51,7 @@ fn native_completion_prefers_server_generation_then_estimated_decode() {
         total_ns: None,
     });
     let native = text(metrics);
-    assert!(native.contains("200.0 tok/s generation (server-reported, last turn)"));
+    assert_eq!(native, "2.0s · completed · 0 tools · 200.0 tok/s");
     assert!(!native.contains("decode"));
     assert!(!native.contains("E2E"));
 }

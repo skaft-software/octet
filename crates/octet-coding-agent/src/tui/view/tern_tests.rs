@@ -599,7 +599,8 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     use super::super::{summarize_tool, ToolPanel};
     use octet_ai::ToolCallId;
     let (shell, mut surface, output) = setup(2);
-    let args = json!({"command":"cargo test"});
+    let command = format!("printf '%s\\n' '{}'\necho done", "λ🙂 ".repeat(100));
+    let args = json!({"command":command});
     let index = shell
         .state
         .borrow_mut()
@@ -618,15 +619,11 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     let identity = shell.state.borrow().transcript_commit_ids[index];
     // Running and finished command output use the same disclosure policy.
     assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
-    assert_eq!(
-        find_node(&surface.sent.main, &id(identity, "tool"))
-            .unwrap()
-            .p
-            .as_ref()
-            .unwrap()
-            .as_map()["collapsed"],
-        true
-    );
+    let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
+    let props = tool.p.as_ref().unwrap().as_map();
+    assert_eq!(props["collapsed"], false);
+    assert_eq!(props["collapsible"], false);
+    assert_eq!(props["target"], command);
     assert!(!output.last_frame().to_string().contains("line1"));
     ack(&shell, 1);
     {
@@ -643,7 +640,7 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     // output child mounted — the completion must not paint one expanded
     // frame before the terminal hides it.
     let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
-    assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], true);
+    assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], false);
     assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
     let ops = output.last_frame()["ops"].clone();
     let ops = ops.as_array().unwrap();
@@ -660,7 +657,7 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
 }
 
 #[test]
-fn verbose_commands_patch_one_cursorless_text_leaf_and_retain_disclosure() {
+fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
     use super::super::{summarize_tool, ToolPanel};
     use octet_ai::ToolCallId;
     for name in ["bash", "exec"] {
@@ -725,6 +722,10 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_retain_disclosure() {
             }))
             .unwrap();
         surface.flush(&shell.state).unwrap();
+        // Native toggles cannot mount hidden output or truncate command input.
+        assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
+        shell.state.borrow_mut().verbose_tools = true;
+        surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
         {
             let mut state = shell.state.borrow_mut();
@@ -757,6 +758,18 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_retain_disclosure() {
                 key: None,
             }))
             .unwrap();
+        surface.flush(&shell.state).unwrap();
+        assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
+        assert_eq!(
+            find_node(&surface.sent.main, &id(identity, "tool"))
+                .unwrap()
+                .p
+                .as_ref()
+                .unwrap()
+                .as_map()["collapsed"],
+            false
+        );
+        shell.state.borrow_mut().verbose_tools = false;
         surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
         let state = shell.state.borrow();
@@ -802,7 +815,7 @@ fn local_shell_is_summary_only_during_execution_and_after_success_or_failure() {
             .as_ref()
             .unwrap()
             .as_map()["collapsed"],
-        true
+        false
     );
     // The failure's exit code stays visible in its summary.
     assert_eq!(
@@ -812,7 +825,7 @@ fn local_shell_is_summary_only_during_execution_and_after_success_or_failure() {
             .as_ref()
             .unwrap()
             .as_map()["collapsed"],
-        true
+        false
     );
     assert!(find_node(&surface.sent.main, &id(ids[done], "out")).is_none());
     let failed = find_node(&surface.sent.main, &id(ids[done], "shell")).unwrap();
@@ -1075,6 +1088,47 @@ fn thinking_sheet_routes_exact_owned_controls_and_keeps_native_list_focus() {
     shell.close_panel();
     assert!(handler(action(format!("{panel}.confirm"))).is_none());
     assert!(handler(close(format!("{panel}.sheet"))).is_none());
+}
+
+#[test]
+fn welcome_owns_its_layout_and_avoids_omp_logo_overrides() {
+    let (shell, mut surface, _) = setup(8);
+    shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+    for cols in [20, 46, 120, 240] {
+        shell.state.borrow_mut().size = (cols, 40);
+        surface.flush(&shell.state).unwrap();
+        let welcome = find_node(&surface.sent.main, "welcome").unwrap();
+        assert_eq!(welcome.k, Kind::Col);
+        let props = welcome.p.as_ref().unwrap().as_map();
+        assert_eq!(props["role"], "octet.welcome");
+        assert_eq!(props["align"], "center");
+        assert_eq!(props["gap"], "lg");
+        let grid = find_node(&surface.sent.main, "welcome.grid").unwrap();
+        let props = grid.p.as_ref().unwrap().as_map();
+        assert_eq!(props["gap"], "lg");
+        assert_eq!(props["wrap"], true);
+        let brand = find_node(&surface.sent.main, "welcome.brand").unwrap();
+        assert_eq!(brand.p.as_ref().unwrap().as_map()["gap"], "lg");
+        let mark = find_node(&surface.sent.main, "welcome.byte").unwrap();
+        let props = mark.p.as_ref().unwrap().as_map();
+        assert_eq!(mark.k, Kind::Image);
+        assert_eq!(props["role"], "octet.welcome.logo");
+        assert_eq!(props["w"], 128);
+        assert_eq!(props["h"], 64);
+        assert!(!serde_json::to_string(welcome)
+            .unwrap()
+            .contains("omp.welcome"));
+    }
+    let fallback = super::super::tern_welcome::node(&shell.state.borrow(), &Default::default());
+    let mark = find_node(std::slice::from_ref(&fallback), "welcome.byte").unwrap();
+    assert_eq!(mark.k, Kind::Text);
+    assert_eq!(
+        mark.p.as_ref().unwrap().as_map()["spans"][0]["t"],
+        "01101111"
+    );
+    assert!(!serde_json::to_string(&fallback)
+        .unwrap()
+        .contains("omp.welcome"));
 }
 
 #[test]

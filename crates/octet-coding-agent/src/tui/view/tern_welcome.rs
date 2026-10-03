@@ -52,7 +52,7 @@ impl Brand {
                 "welcome.byte",
                 Kind::Image,
                 Props::new()
-                    .role("omp.welcome.logo")
+                    .role("octet.welcome.logo")
                     .set("blob", address)
                     .set("alt", "octet byte mark: 01101111")
                     .set("w", 128)
@@ -148,21 +148,23 @@ pub(super) fn node(shell: &ShellState, brand: &Brand) -> Node {
         )
     })
     .collect();
-    Node::with_children("welcome", Kind::Card, Props::new().role("omp.welcome"), vec![
-        Node::with_children("welcome.grid", Kind::Row, Props::new().role("omp.welcome.grid").set("align", "start").set("wrap", true), vec![
-            Node::with_children("welcome.brand", Kind::Col, Props::new().role("omp.welcome.brand").set("align", "center"), vec![
-                Node::new("welcome.name", Kind::Text, Props::new().role("omp.welcome.greeting").set("text", "octet")),
+    // OMP's private welcome hooks impose their own logo size and animations.
+    // Ordinary layout nodes keep those overrides off octet's byte mark.
+    Node::with_children("welcome", Kind::Col, Props::new().role("octet.welcome").set("align", "center").set("gap", "lg"), vec![
+        Node::with_children("welcome.grid", Kind::Row, Props::new().role("octet.welcome.grid").set("align", "start").set("gap", "lg").set("wrap", true), vec![
+            Node::with_children("welcome.brand", Kind::Col, Props::new().role("octet.welcome.brand").set("align", "center").set("gap", "lg"), vec![
+                Node::new("welcome.name", Kind::Text, Props::new().role("octet.welcome.greeting").set("text", "octet")),
                 brand.mark(),
             ]),
-            Node::with_children("welcome.info", Kind::Col, Props::new().role("omp.welcome.info").set("gap", "md"), vec![
-                Node::new("welcome.version", Kind::Text, Props::new().role("omp.welcome.version").text("spans", vec![Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), "dim mono")])),
-                Node::with_children("welcome.session", Kind::Col, Props::new().role("omp.welcome.tips").set("gap", "xs"), session),
-                Node::with_children("welcome.tips", Kind::Col, Props::new().role("omp.welcome.tips").set("gap", "xs"), tips),
+            Node::with_children("welcome.info", Kind::Col, Props::new().role("octet.welcome.info").set("gap", "md"), vec![
+                Node::new("welcome.version", Kind::Text, Props::new().role("octet.welcome.version").text("spans", vec![Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), "dim mono")])),
+                Node::with_children("welcome.session", Kind::Col, Props::new().role("octet.welcome.session").set("gap", "xs"), session),
+                Node::with_children("welcome.tips", Kind::Col, Props::new().role("octet.welcome.tips").set("gap", "xs"), tips),
             ]),
         ]),
-        Node::with_children("welcome.hint", Kind::Row, Props::new().role("omp.welcome.tip").set("gap", "sm"), vec![
-            Node::new("welcome.hint.icon", Kind::Icon, Props::new().role("omp.welcome.tip-icon").set("name", "lightbulb")),
-            Node::new("welcome.hint.text", Kind::Text, Props::new().role("omp.welcome.tip-text").set("text", "Ask octet about its features or how to extend it. /changelog shows what's new.")),
+        Node::with_children("welcome.hint", Kind::Row, Props::new().role("octet.welcome.hint").set("gap", "sm"), vec![
+            Node::new("welcome.hint.icon", Kind::Icon, Props::new().role("octet.welcome.hint.icon").set("name", "lightbulb")),
+            Node::new("welcome.hint.text", Kind::Text, Props::new().role("octet.welcome.hint.text").set("text", "Ask octet about its features or how to extend it. /changelog shows what's new.")),
         ]),
     ])
 }

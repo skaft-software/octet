@@ -4,7 +4,7 @@
 
 This checkout estimates **decode cadence**, rather than labeling round-trip
 throughput as decode speed. It prefers **server-reported generation** when a
-matching native pair exists; otherwise it uses a separately labeled robust
+matching native pair exists; otherwise it uses a separate robust
 client-stream estimate. Neither authenticates pure GPU-active execution.
 Deterministic fixtures establish parsing, units, scope and propagation—not live
 provider accuracy, loaded-serving performance, or a released feature.
@@ -125,8 +125,8 @@ server total is **not network RTT**. Source and original unit accompany the
 normalized pair. Recognizing an envelope does not authenticate a server's
 assertion or imply that every endpoint/vendor/version emits it.
 
-The rate is `native counter / matching native generation duration`. It is
-labeled **server-reported generation**, not automatically post-first-token
+The rate is `native counter / matching native generation duration`. Diagnostics
+label it **server-reported generation**, not automatically post-first-token
 decode, GPU-active throughput, ITL, TPOT, or an accelerator benchmark. No `N−1`
 correction is invented: that requires a compatible first-token boundary and
 counter definition. Billing counts can include hidden reasoning or rejected
@@ -181,10 +181,12 @@ are measured normally.
 
 ## Presentation and observability
 
-- Completion shows `tok/s generation (server-reported, last turn)` when native
-  timing exists; otherwise `~tok/s decode (estimated, last turn)` or explicit
-  `decode unavailable`. E2E is no longer on the completion line or copied outcome.
-  `/status` retains E2E as a separately labeled request-throughput diagnostic.
+- Completion and copied outcomes show only `N.N tok/s` when a rate is available:
+  native generation timing first, otherwise the client-stream decode estimate.
+  When neither is available, the speed field and its separator are omitted.
+  Provenance and unavailability reasons remain in `/status` and telemetry, not
+  the completion line. E2E is never a completion-speed fallback; `/status`
+  retains it as a separately labeled request-throughput diagnostic.
 - `/status` shows client output offsets/event count/gap/tail, estimate sample
   count/window/visible-token basis/dispersion/reasoning exclusion, and server source,
   native count, normalized duration, original unit, or explicit unavailability.
@@ -215,8 +217,8 @@ response identity, byte-fragmented SSE and completed audio. Deterministic client
 clock tests separate reasoning, answer, arguments, output gaps and completion
 tail. Existing loopback transport regressions assert measurement propagation
 through every codec, WebSocket transport selections, steering and deferred scopes.
-Presentation/telemetry tests pin distinct labels, native preference, no E2E
-completion fallback, accounting independence and frozen timing despite delayed
+Presentation/telemetry tests pin compact completion rates, diagnostic provenance,
+native preference, no E2E completion fallback, accounting independence and frozen timing despite delayed
 persistence. Deterministic known-cadence fits test multi-token first batches,
 prefill offsets, packet jitter, chunk bursts, hidden reasoning exclusion and
 bounded long streams. Reader tests establish independent progress during a stalled
