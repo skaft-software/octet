@@ -220,12 +220,27 @@ use the built `octet.exe` and the checkout's `extensions` directory):
 Then, inside octet, open `/extensions`, choose octet-computer-use, and pick
 **Set up computer use** (this downloads the published `cua-driver` wheel from
 the configured package index into `%USERPROFILE%\.octet\computer-use`, and
-only when you run it), then **Check status**. The driver runs as your user; Windows needs no
-separate grant, but it cannot drive windows of elevated (administrator)
-applications from a non-elevated octet, nor the secure desktop (UAC prompts,
-the lock screen). `--safe-mode` keeps executable extensions stopped, so run
-this without it, inside a boundary you chose, and set `OCTET_CUA_CONFIRM=1`
-to approve each effectful action.
+only when you run it), then **Check status**. The live Windows probe checks
+UI Automation and window-message input availability, not macOS permission
+grants. Windows needs no separate grant, but a non-elevated octet cannot drive
+elevated (administrator) applications or the secure desktop (UAC prompts,
+the lock screen). Readiness does not guarantee that every target accepts
+background input: observe after each action and follow the driver's returned
+foreground escalation when needed.
+
+An explicit `--extension-dir` grants that reviewed source host authority even
+under `--safe-mode`; granted extension code runs with your OS permissions.
+Set `OCTET_CUA_CONFIRM=1` to approve each effectful computer-use action.
+
+**Current candidate limits.** Official 0.8.2 extension assets are unpublished.
+Replacing an installed extension (`extension update` or `install --replace`)
+is unsupported on Windows: atomic directory exchange is unavailable, and the
+previous installation stays active. Test a reviewed candidate with the explicit
+`--extension-dir` above instead of removing the existing installation. The
+observed driver 0.33.0 direct runtime reports no agent-cursor overlay; installed
+themes are not proof of a visible cursor. See the
+[PR 480 Windows qualification record](../../docs/qualification/pr480-windows-computer-use.md)
+for the tested setup path and remaining gaps.
 
 **Opt-in live smoke.** After setup, a person watching the desktop can run a
 scripted observe-act-verify pass through the same extension tools the model

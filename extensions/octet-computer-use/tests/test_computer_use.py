@@ -583,6 +583,61 @@ class PermissionProbeTests(unittest.TestCase):
         self.assertIn("did not answer", state["detail"])
 
 
+class WindowsSessionProbeTests(unittest.TestCase):
+    """Windows reports automation interfaces, not macOS TCC grants."""
+
+    AVAILABLE = {"uia": True, "post_message": True, "elevated": False,
+                 "integrity_level": "Unavailable", "integrity_level_rid": None}
+
+    def setUp(self):
+        from octet_computer_use import driver
+
+        patcher = mock.patch.object(driver.platform, "system", return_value="Windows")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _state(self, structured, *, prompt=False, raises=None, is_error=False):
+        from octet_computer_use.driver import permission_state
+
+        client = FakeClient(result={"structuredContent": structured, "isError": is_error},
+                            raises=raises)
+        return permission_state(client, prompt=prompt), client
+
+    def test_available_interfaces_are_ready_without_a_mac_permission_prompt(self):
+        for prompt in (False, True):
+            with self.subTest(prompt=prompt):
+                state, client = self._state(self.AVAILABLE, prompt=prompt)
+                self.assertEqual(state["permissions"], "granted")
+                # Windows check_permissions rejects the macOS-only prompt and
+                # probe_direct_capture arguments in supported driver releases.
+                self.assertEqual(client.calls, [("check_permissions", {})])
+                self.assertNotIn("accessibility", state)
+                self.assertNotIn("screen_recording", state)
+                self.assertIn("no separate", state["detail"])
+
+    def test_elevation_and_an_unreadable_integrity_token_are_not_os_grants(self):
+        state, _ = self._state({**self.AVAILABLE, "elevated": True})
+        self.assertEqual(state["permissions"], "granted")
+
+    def test_unavailable_interfaces_are_named(self):
+        for field, label in (("uia", "UI Automation"), ("post_message", "window-message")):
+            with self.subTest(field=field):
+                state, _ = self._state({**self.AVAILABLE, field: False})
+                self.assertEqual(state["permissions"], "denied")
+                self.assertIn(label, state["detail"])
+                self.assertNotIn("Screen Recording", state["detail"])
+
+    def test_incomplete_malformed_or_refused_probes_stay_unknown(self):
+        for payload in ({}, {"uia": True}, {"uia": "true", "post_message": "true"},
+                        {"uia": 1, "post_message": 1}, None, "not an object", ["invalid"]):
+            with self.subTest(payload=payload):
+                self.assertEqual(self._state(payload)[0]["permissions"], "unknown")
+        self.assertEqual(self._state(self.AVAILABLE, is_error=True)[0]["permissions"], "unknown")
+        state, _ = self._state(self.AVAILABLE, raises=McpError("driver gone"))
+        self.assertEqual(state["permissions"], "unknown")
+        self.assertIn("did not answer", state["detail"])
+
+
 class LinuxSessionProbeTests(unittest.TestCase):
     """Linux readiness is a reachable display session; nothing is granted."""
 
@@ -985,6 +1040,25 @@ class OptionsMenuTests(unittest.TestCase):
         self.assertIn("0.31.0", menu["detail"])
         self.assertEqual(menu["items"][0]["label"], "Set up again")
         self.assertFalse(any(item.get("recommended") for item in menu["items"]))
+
+    def test_windows_live_probe_makes_the_completed_setup_ready(self):
+        extension, computer = entrypoint.create_extension()
+        client = FakeClient(result={"structuredContent": WindowsSessionProbeTests.AVAILABLE})
+        computer._client = client
+        health = mock.Mock()
+        health.as_dict.return_value = {
+            "installed": True, "version": "0.33.0", "doctor_ok": True,
+            "permissions": "unknown", "runtime": "direct", "platform": "windows",
+        }
+        with mock.patch.object(entrypoint.platform, "system", return_value="Windows"), \
+             mock.patch.object(entrypoint.driver_module, "health", return_value=health):
+            report = computer.publish_status(prompt=True)
+            menu = self.menu(computer, extension)
+        self.assertEqual(report["permissions"], "granted")
+        self.assertEqual(menu["status"], {"state": "active", "label": "Ready"})
+        self.assertFalse(menu["items"][0].get("recommended", False))
+        self.assertIn("no separate grant", menu["detail"])
+        self.assertEqual(client.calls, [("check_permissions", {})])
 
     def test_owned_jev_use_jobs_can_be_checked_and_cancelled(self):
         from unittest import mock
