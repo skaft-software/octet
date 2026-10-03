@@ -546,6 +546,7 @@ impl AiClient {
         mut req: Request,
     ) -> Result<crate::steering::SteeringSession, AiError> {
         use crate::steering::{SteeringControl, SteeringSession};
+        crate::steering::validate_request(&req)?;
         let mut prepared = model.clone();
         crate::declarations::azure::apply(&mut prepared, None, &Default::default())?;
         let model = &prepared;
