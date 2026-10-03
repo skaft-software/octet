@@ -557,6 +557,8 @@ fn live_model_picker_refresh_preserves_filter_and_model_identity() {
         action: PanelAction::SelectGroupedModel {
             models: vec![ModelId("alpha".into()), ModelId("beta-one".into())],
             providers: vec!["one".into(), "one".into()],
+            details: Vec::new(),
+            scope: None,
         },
     });
     assert_eq!(shell.highlighted_panel_index(), Some(1));
@@ -569,6 +571,7 @@ fn live_model_picker_refresh_preserves_filter_and_model_identity() {
             ModelId("beta-one".into()),
         ],
         vec!["two".into(), "one".into(), "one".into()],
+        Vec::new(),
     ));
     assert_eq!(shell.highlighted_panel_index(), Some(2));
     let state = shell.state.borrow();

@@ -353,6 +353,7 @@ fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() 
         transport: "websocket-preferred",
         endpoint: "codex".into(),
         show_images: true,
+        cache_warming: octet_agent::CacheWarmMode::Streaming,
     };
     let text = settings_text(&surface);
     for expected in [
@@ -374,6 +375,7 @@ fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() 
         transport: "http",
         endpoint: "custom".into(),
         show_images: false,
+        cache_warming: octet_agent::CacheWarmMode::Streaming,
     };
     let text = settings_text(&empty);
     assert!(
@@ -663,6 +665,8 @@ fn app_for_status() -> (tempfile::TempDir, App) {
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,
+        cache_warming: octet_agent::CacheWarmMode::default(),
+        show_cache_miss_notices: false,
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox: SandboxPolicy {
             allow_external_paths: false,
@@ -674,6 +678,7 @@ fn app_for_status() -> (tempfile::TempDir, App) {
         color: crate::config::ColorMode::Auto,
         mouse: crate::config::MouseMode::Auto,
         plain: false,
+        tern: crate::config::TernMode::Auto,
         show_images: false,
         session_dir: directory.path().join("sessions"),
         compaction: CompactionPolicy::default(),

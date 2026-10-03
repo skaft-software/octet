@@ -182,7 +182,7 @@ impl ReportRenderReceipt {
                     styled: b,
                 },
             ) => a == b && Arc::ptr_eq(left, right),
-            (super::ReportBody::Markdown(left), super::ReportBody::Markdown(right)) => {
+            (super::ReportBody::Markdown(left, _), super::ReportBody::Markdown(right, _)) => {
                 Arc::ptr_eq(left, right)
             }
             (super::ReportBody::Context(left), super::ReportBody::Context(right)) => {
@@ -204,6 +204,8 @@ pub(super) struct RenderedGeometry {
     pub(super) viewport_rows: usize,
     pub(super) viewport_available: usize,
     pub(super) blocks: Vec<VisibleBlockGeometry>,
+    /// Only live nodes; their headings are fenced against the painted viewport.
+    pub(super) animation_block_starts: Vec<(u64, usize)>,
 }
 impl RenderedGeometry {
     pub(super) fn capture(state: &ShellState, mut fence: GeometryFence) -> Arc<Self> {
@@ -246,6 +248,16 @@ impl RenderedGeometry {
             viewport_rows,
             viewport_available: chrome.transcript_rows,
             blocks,
+            animation_block_starts: state
+                .active_event_blocks
+                .iter()
+                .filter_map(|index| {
+                    Some((
+                        *state.transcript_commit_ids.get(*index)?,
+                        *cache.block_starts.get(*index)?,
+                    ))
+                })
+                .collect(),
         })
     }
     pub(super) fn is_current(&self, state: &ShellState) -> bool {

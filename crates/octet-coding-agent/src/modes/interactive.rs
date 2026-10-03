@@ -135,6 +135,46 @@ impl<S> crate::extensions::ExtensionConfirmationHandler for InteractiveExtension
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
+        Some(self.shell)
+    }
+
+    fn wait_for_command_event<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => Ok(None),
+                event = self.input.next() => match event {
+                    Some(Ok(event)) => Ok(Some(event)),
+                    Some(Err(error)) => Err(error.into()),
+                    None => Ok(None),
+                },
+            }
+        })
+    }
+
+    fn command_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Key(key) if keymap::is_close_key(&key) => {
+                self.shell.request_close();
+                true
+            }
+            Event::Key(key) if is_ctrl_c(&key) => true,
+            Event::Resize(columns, rows) => {
+                self.shell.set_size(columns, rows);
+                self.shell.render();
+                false
+            }
+            event => {
+                let _ = handle_cancellable_wait_input(self.shell, event);
+                self.shell.render();
+                false
+            }
+        }
+    }
+
     fn wait_for_cancel<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
             loop {
@@ -238,6 +278,9 @@ pub enum PendingIdleAction {
     Logout(Option<String>),
     ChangeModel(ModelId),
     Fast(bool),
+    CacheWarming(octet_agent::CacheWarmMode),
+    /// Preference is already saved and sent to the active session owner.
+    SyncCacheWarming(octet_agent::CacheWarmMode),
     ChangeThinking(ReasoningConfig),
     ChangeThinkingLevel(ThinkingLevel),
     /// Save the active-run selection as the startup preference at the idle
@@ -292,6 +335,10 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
                 PendingIdleAction::ChangeThinking(_) | PendingIdleAction::ChangeThinkingLevel(_)
             )
             | (
+                Some(PendingIdleAction::SyncCacheWarming(_)),
+                PendingIdleAction::SyncCacheWarming(_)
+            )
+            | (
                 Some(PendingIdleAction::PersistThinkingPreference(_)),
                 PendingIdleAction::PersistThinkingPreference(_)
             )
@@ -326,11 +373,14 @@ async fn wait_for_prompt<S>(
     reload_tick: &mut Interval,
     reload_watcher: &crate::reload::ReloadWatcher,
     reload: &mut crate::reload::ReloadSupervisor,
+    mut agent: Option<&mut octet_agent::Agent>,
 ) -> anyhow::Result<Idle>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let mut scroll_dirty = false;
+    let mut cache_warming_failed = false;
+    let remote_ui_wake = executable_extensions.remote_ui_wake();
     loop {
         if shell.close_requested() {
             return Ok(Idle::Quit);
@@ -346,6 +396,9 @@ where
                     Some(Err(error)) => return Err(error.into()),
                     None => return Ok(Idle::Quit),
                 };
+                if executable_extensions.route_remote_ui_event(shell, &event) {
+                    continue;
+                }
                 // Search owns its query before any extension or clipboard
                 // admission; pasted paths/text must not become composer input.
                 if shell.intercept_transcript_input(&event) {
@@ -525,6 +578,9 @@ where
                     None => std::future::pending::<()>().await,
                 }
             } => return Ok(Idle::GoalContinuation),
+            _ = crate::extensions::remote_ui::notified(&remote_ui_wake) => {
+                if apply_extension_background(shell, executable_extensions) { shell.render(); }
+            }
             _ = extension_tick.tick() => {
                 // A modal is an in-progress interactive action, not a safe
                 // active-session replacement boundary. Keep the bounded
@@ -586,6 +642,26 @@ where
                 if reload.is_due(now) {
                     return Ok(Idle::ReloadDue);
                 }
+            }
+            warm = async {
+                match agent.as_deref_mut() {
+                    Some(agent) => agent.drive_cache_warming().await,
+                    None => std::future::pending().await,
+                }
+            }, if !cache_warming_failed => {
+                match warm {
+                    Ok(event) => shell.on_cache_warming_event(&event),
+                    Err(_) => {
+                        // Background maintenance cannot end the prompt loop,
+                        // and a persistence failure must not spin or retry.
+                        cache_warming_failed = true;
+                        shell.notice("Cache warming stopped; usage may be uncertain. See /cache-warming.");
+                    }
+                }
+                if let Some(agent) = agent.as_deref() {
+                    shell.set_session_accounting(agent.session());
+                }
+                shell.render();
             }
         }
     }
@@ -832,8 +908,7 @@ fn settle_goal(
 }
 
 fn answer_now_prompt(instruction: Option<String>) -> String {
-    const DIRECTIVE: &str =
-        "Answer now using only the evidence already gathered. Do not call tools. State any remaining uncertainty.";
+    const DIRECTIVE: &str = "Answer now using only the evidence already gathered. Do not call tools. State any remaining uncertainty.";
     instruction
         .map(|instruction| format!("{}\n\n{DIRECTIVE}", instruction.trim()))
         .unwrap_or_else(|| DIRECTIVE.to_owned())
@@ -861,6 +936,7 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
             level => PendingIdleAction::ChangeThinkingLevel(level),
         },
         Command::Thinking(None) => PendingIdleAction::PickThinking,
+        Command::CacheWarming(Some(mode)) => PendingIdleAction::CacheWarming(mode),
         Command::New => PendingIdleAction::NewSession,
         Command::Resume(id) => PendingIdleAction::ResumeSession(id),
         Command::Fork => PendingIdleAction::Fork,
@@ -1533,8 +1609,8 @@ async fn logout_custom(
 }
 
 fn show_hotkeys(shell: &mut InteractiveShell) {
-    let text = shell.hotkeys_text();
-    shell.show_report_text("Hotkeys", "Resolved user keybindings", text);
+    let text = shell.hotkeys_markdown();
+    shell.show_report_markdown("Hotkeys", "Resolved user keybindings", &text);
 }
 
 fn copy_last_assistant(shell: &mut InteractiveShell) {
@@ -1607,6 +1683,11 @@ fn active_fast_status(
 fn apply_focus_transition(shell: &mut InteractiveShell, gained: bool) {
     if !gained {
         shell.begin_transcript_selection(u16::MAX, u16::MAX, false);
+    } else {
+        // A returning window may have lost native keyboard focus while Tern
+        // kept the pane visible (no TSP `Visible` event): ask the native
+        // surface to force a frame and re-assert `composer.editor` focus.
+        shell.request_tern_focus_resync();
     }
     shell.render();
 }
@@ -1652,6 +1733,8 @@ pub struct ActiveRunInspection {
     goal: Result<GoalAccess, ActiveGoalError>,
     /// Effective `/settings` facts (defaults, theme, transport, images).
     settings: commands::SettingsSurface,
+    cache_warming_status: octet_agent::CacheWarmingStatus,
+    cache_warming_control: Option<RunControl>,
     /// The launch ordered cycling scope, rendered by `/scoped-models` mid-run.
     model_scope: Option<Vec<crate::cli::parity::ScopedModel>>,
     /// Whether the catalog holds only the routes this launch proved it needs.
@@ -1685,8 +1768,23 @@ impl ActiveRunInspection {
             service_tier: app.agent.service_tier(),
             goal: GoalAccess::from_app(app),
             settings: commands::SettingsSurface::capture(app),
+            cache_warming_status: app.agent.cache_warming_status(),
+            cache_warming_control: None,
             model_scope: app.model_scope.clone(),
         }
+    }
+
+    fn cache_warming_text(&self, session: &Session) -> String {
+        let (mode, status) = self.cache_warming_control.as_ref().map_or_else(
+            || {
+                (
+                    self.settings.cache_warming,
+                    self.cache_warming_status.clone(),
+                )
+            },
+            |control| (control.cache_warming_mode(), control.cache_warming_status()),
+        );
+        commands::cache_warming_text(mode, &status, session)
     }
 
     fn session_id(&self) -> Option<&str> {
@@ -1860,7 +1958,11 @@ where
             Ok(session) => shell.show_report_text(
                 "Session",
                 "Durable session facts",
-                commands::session_text(&session),
+                format!(
+                    "{}\n\n{}",
+                    commands::session_text(&session),
+                    inspection.cache_warming_text(&session)
+                ),
             ),
             Err(error) => shell.error(format!("session report unavailable: {error}")),
         },
@@ -1881,10 +1983,38 @@ where
             Ok(session) => shell.show_report_text(
                 "Cache",
                 "Review session cache accounting",
-                commands::cache_text(&session),
+                format!(
+                    "{}\n\n{}",
+                    commands::cache_text(&session),
+                    inspection.cache_warming_text(&session)
+                ),
             ),
             Err(error) => shell.error(format!("cache report unavailable: {error}")),
         },
+        Command::CacheWarming(None) => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Cache warming",
+                "Billable refresh policy",
+                inspection.cache_warming_text(&session),
+            ),
+            Err(error) => shell.error(format!("cache warming report unavailable: {error}")),
+        },
+        Command::CacheWarming(Some(mode)) => {
+            if let Err(error) = crate::cli::persist_cache_warming(mode) {
+                shell.error(format!("failed to save cache warming: {error}"));
+            } else {
+                if let Some(control) = &inspection.cache_warming_control {
+                    if let Err(error) = control.set_cache_warming_mode(mode) {
+                        shell.error(error.to_string());
+                    }
+                }
+                push_pending_action(queue, PendingIdleAction::SyncCacheWarming(mode));
+                shell.notice(format!(
+                    "Cache warming: {} (saved to user config)",
+                    crate::config::cache_warming_label(mode)
+                ));
+            }
+        }
         Command::Context => shell.show_report_text(
             "Context",
             "Review the estimated request context before the next turn",
@@ -2063,17 +2193,25 @@ where
                 action: PanelAction::SelectGroupedModel {
                     models: presentation.ids,
                     providers: presentation.providers,
+                    details: presentation.details,
+                    scope: None,
                 },
             });
         }
         Command::Thinking(None) => open_active_thinking(shell, inspection),
         Command::Settings(sub) => {
             match sub {
-                commands::SettingsCommand::Show => shell.show_report_text(
-                    "Settings",
-                    "Effective display and default preferences",
-                    commands::settings_text(&inspection.settings),
-                ),
+                commands::SettingsCommand::Show => {
+                    let mut settings = inspection.settings.clone();
+                    if let Some(control) = &inspection.cache_warming_control {
+                        settings.cache_warming = control.cache_warming_mode();
+                    }
+                    shell.show_report_text(
+                        "Settings",
+                        "Effective display and default preferences",
+                        commands::settings_text(&settings),
+                    );
+                }
                 commands::SettingsCommand::Transport => shell.notice(format!(
                     "transport {} (declared by the {} route; not a user preference)",
                     inspection.settings.transport, inspection.settings.endpoint,
@@ -2431,7 +2569,7 @@ impl ActiveToolInteraction {
                 });
             }
             ActiveToolRequest::Input(request, _) => {
-                shell.set_tool_input_prompt(Some(request.prompt.clone()))
+                shell.begin_tool_input(&request.prompt, request.secret)
             }
         }
     }
@@ -2461,12 +2599,31 @@ impl ActiveToolInteraction {
                 true
             }
             ActiveToolRequest::Input(request, secret) => {
-                match event {
+                use sexy_tui_rs::TextEditAction;
+
+                let event = if request.secret {
+                    event.clone()
+                } else {
+                    shell.tool_input_event(event)
+                };
+                match &event {
                     Event::Key(key)
                         if key.kind == KeyEventKind::Press && key.code == KeyCode::Enter =>
                     {
-                        request.respond(secret.take());
-                        shell.set_tool_input_prompt(None);
+                        if shell.tool_input_overflowed() {
+                            *secret = Default::default();
+                            shell.clear_tool_input_value();
+                            return false;
+                        }
+                        let answer = shell.end_tool_input();
+                        let bytes = if request.secret {
+                            secret.take()
+                        } else {
+                            answer
+                                .expect("ordinary tool input has an editor")
+                                .into_bytes()
+                        };
+                        request.respond(bytes);
                         return true;
                     }
                     Event::Key(key)
@@ -2475,27 +2632,70 @@ impl ActiveToolInteraction {
                                 || (key.code == KeyCode::Char('c')
                                     && key.modifiers.contains(KeyModifiers::CONTROL))) =>
                     {
+                        *secret = Default::default();
+                        shell.end_tool_input();
                         request.cancel();
-                        shell.set_tool_input_prompt(None);
                         shell.notice("interactive command input cancelled");
                         return true;
                     }
                     Event::Key(key)
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                     {
-                        match key.code {
-                            KeyCode::Backspace => secret.backspace(),
-                            KeyCode::Char(character)
-                                if !key.modifiers.intersects(
-                                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                                ) =>
-                            {
-                                secret.push(character)
+                        if request.secret {
+                            match key.code {
+                                KeyCode::Backspace => secret.backspace(),
+                                KeyCode::Char(character)
+                                    if !key.modifiers.intersects(
+                                        KeyModifiers::CONTROL
+                                            | KeyModifiers::ALT
+                                            | KeyModifiers::SUPER,
+                                    ) =>
+                                {
+                                    if secret.byte_len().saturating_add(character.len_utf8()) > 4096
+                                    {
+                                        shell.mark_tool_input_overflow();
+                                    }
+                                    secret.push(character);
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                        } else {
+                            let action = match key.code {
+                                KeyCode::Backspace => Some(TextEditAction::Backspace),
+                                KeyCode::Delete => Some(TextEditAction::Delete),
+                                KeyCode::Left => Some(TextEditAction::Left),
+                                KeyCode::Right => Some(TextEditAction::Right),
+                                KeyCode::Up => Some(TextEditAction::Up),
+                                KeyCode::Down => Some(TextEditAction::Down),
+                                KeyCode::Home => Some(TextEditAction::Home),
+                                KeyCode::End => Some(TextEditAction::End),
+                                KeyCode::Char(character)
+                                    if !key.modifiers.intersects(
+                                        KeyModifiers::CONTROL
+                                            | KeyModifiers::ALT
+                                            | KeyModifiers::SUPER,
+                                    ) =>
+                                {
+                                    Some(TextEditAction::Char(character))
+                                }
+                                _ => None,
+                            };
+                            if let Some(action) = action {
+                                shell.edit_tool_input(action);
+                            }
                         }
                     }
-                    Event::Paste(paste) => secret.extend_paste(paste),
+                    Event::Paste(paste) => {
+                        if request.secret {
+                            let bytes = paste.trim_end_matches(['\r', '\n']).len();
+                            if secret.byte_len().saturating_add(bytes) > 4096 {
+                                shell.mark_tool_input_overflow();
+                            }
+                            secret.extend_paste(paste);
+                        } else {
+                            shell.edit_tool_input(TextEditAction::Paste(paste.clone()));
+                        }
+                    }
                     Event::Resize(columns, rows) => shell.set_size(*columns, *rows),
                     _ => {}
                 }
@@ -2697,6 +2897,7 @@ where
         Pin<Box<dyn Future<Output = anyhow::Result<crate::update::UpdateStatus>>>>,
     > = None;
     let mut update_report_open = false;
+    let remote_ui_wake = executable_extensions.remote_ui_wake();
     let mut modal_refresh = tokio::time::interval(Duration::from_secs(1));
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -2897,6 +3098,9 @@ where
                 } else { refresh_active_subagent_list(shell, executable_extensions); }
                 shell.render();
             }
+            _ = crate::extensions::remote_ui::notified(&remote_ui_wake) => {
+                if apply_extension_background(shell, executable_extensions) { shell.render(); }
+            }
             _ = extension_tick.tick() => {
                 if apply_extension_background(shell, executable_extensions) {
                     shell.render();
@@ -2932,6 +3136,9 @@ where
                         continue;
                     }
                 };
+                if !clipboard_replay && executable_extensions.route_remote_ui_event(shell, &event) {
+                    continue;
+                }
                 if clipboard_replay {
                     // A higher-priority branch may have changed ownership since
                     // the failed read settled on the preceding select iteration.
@@ -3573,6 +3780,13 @@ where
                                 intents.clear();
                                 in_flight = None;
                             }
+                        }
+                    }
+                    if matches!(&event, AgentEvent::CacheWarmed { .. }) {
+                        // Read exact cumulative accounting without attributing
+                        // refresh traffic to assistant timing or cache metrics.
+                        if let Ok(session) = inspection.read_only_session() {
+                            shell.set_session_accounting(&session);
                         }
                     }
                     let run_finished = matches!(&event, AgentEvent::RunFinished { .. });
@@ -5422,12 +5636,9 @@ where
                 .agent
                 .open_delegated_session_reference(principal, reference)
             {
-                Ok(Some(session)) => delegated_session_text(
-                    &session,
-                    &theme,
-                    initial_width,
-                    verbose_tools,
-                )?,
+                Ok(Some(session)) => {
+                    delegated_session_text(&session, &theme, initial_width, verbose_tools)?
+                }
                 Ok(None) => format!(
                     "{}\n\nThe delegated transcript is no longer available for this parent session.",
                     fallback_detail
@@ -5456,13 +5667,9 @@ where
                     .agent
                     .open_delegated_session_reference(principal, reference)
                 {
-                    Ok(Some(session)) => delegated_session_text(
-                        &session,
-                        &theme,
-                        width,
-                        verbose_tools,
-                    )
-                    .map(Some),
+                    Ok(Some(session)) => {
+                        delegated_session_text(&session, &theme, width, verbose_tools).map(Some)
+                    }
                     Ok(None) => Ok(Some(format!(
                         "{}\n\nThe delegated transcript is no longer available for this parent session.",
                         current_fallback
@@ -6064,6 +6271,24 @@ async fn apply_pending_actions(
             },
             PendingIdleAction::Fast(enabled) => {
                 apply_fast_command(&mut app, shell, Some(enabled));
+            }
+            PendingIdleAction::CacheWarming(mode) => {
+                if let Err(error) = commands::set_cache_warming(&mut app, mode) {
+                    shell.error(format!("failed to save cache warming: {error}"));
+                } else {
+                    shell.notice(format!(
+                        "Cache warming: {} (saved to user config)",
+                        crate::config::cache_warming_label(mode)
+                    ));
+                }
+            }
+            PendingIdleAction::SyncCacheWarming(mode) => {
+                app.config.cache_warming = mode;
+                if app.agent.cache_warming_mode() != mode {
+                    if let Err(error) = app.agent.set_cache_warming_mode(mode) {
+                        shell.error(error.to_string());
+                    }
+                }
             }
             PendingIdleAction::ChangeModel(id) => {
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
@@ -7356,7 +7581,28 @@ async fn run_idle_shell_escape(
     Ok(IdleCommandOutcome::Continue(Box::new(app)))
 }
 
-async fn run_idle_command(
+fn run_idle_command<'a>(
+    app: App,
+    shell: &'a mut InteractiveShell,
+    input: &'a mut EventStream,
+    command: Command,
+    goal_deadline: &'a mut Option<Instant>,
+    reexec: Option<&'a mut crate::reexec::ReexecController>,
+    reload: &'a mut crate::reload::ReloadSupervisor,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<IdleCommandOutcome>> + 'a>> {
+    // The complete dispatcher is too large to embed in every caller's future.
+    Box::pin(run_idle_command_inner(
+        app,
+        shell,
+        input,
+        command,
+        goal_deadline,
+        reexec,
+        reload,
+    ))
+}
+
+async fn run_idle_command_inner(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
@@ -7372,7 +7618,11 @@ async fn run_idle_command(
         Command::Session => shell.show_report_text(
             "Session",
             "Durable session facts",
-            commands::session_text(app.agent.session()),
+            format!(
+                "{}\n\n{}",
+                commands::session_text(app.agent.session()),
+                commands::app_cache_warming_text(&app)
+            ),
         ),
         Command::Help(topic) => {
             shell.show_report_text(
@@ -7395,8 +7645,30 @@ async fn run_idle_command(
         Command::Cache => shell.show_report_text(
             "Cache",
             "Review session cache accounting",
-            commands::cache_text(app.agent.session()),
+            format!(
+                "{}\n\n{}",
+                commands::cache_text(app.agent.session()),
+                commands::app_cache_warming_text(&app)
+            ),
         ),
+        Command::CacheWarming(mode) => {
+            if let Some(mode) = mode {
+                if let Err(error) = commands::set_cache_warming(&mut app, mode) {
+                    shell.error(format!("failed to save cache warming: {error}"));
+                } else {
+                    shell.notice(format!(
+                        "Cache warming: {} (saved to user config)",
+                        crate::config::cache_warming_label(mode)
+                    ));
+                }
+            } else {
+                shell.show_report_text(
+                    "Cache warming",
+                    "Billable refresh policy",
+                    commands::app_cache_warming_text(&app),
+                );
+            }
+        }
         Command::Update => {
             match await_lifecycle(shell, input, "checking for updates…", async {
                 crate::update::check().await
@@ -8138,6 +8410,24 @@ async fn apply_detected_terminal_background<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    apply_detected_terminal_background_with_timeout(
+        shell,
+        input,
+        config,
+        Duration::from_millis(120),
+    )
+    .await
+}
+
+async fn apply_detected_terminal_background_with_timeout<S>(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream<S>,
+    config: &crate::config::Config,
+    timeout: Duration,
+) -> bool
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     if explicit_terminal_background_override()
         || TerminalThemeChoice::from_config(config)
             .and_then(TerminalThemeChoice::explicit_background)
@@ -8152,8 +8442,7 @@ where
         return false;
     }
     let Some((red, green, blue)) =
-        crate::tui::terminal::query_terminal_background_color(input, Duration::from_millis(120))
-            .await
+        crate::tui::terminal::query_terminal_background_color(input, timeout).await
     else {
         return false;
     };
@@ -8509,6 +8798,7 @@ async fn run_interactive_without_model(
             &mut reload_tick,
             &reload_watcher,
             &mut reload,
+            None,
         )
         .await?
         {
@@ -8696,6 +8986,7 @@ fn schedule_idle_responses_prewarm(app: &App, command: &Command) {
         command,
         Command::Changelog
             | Command::Fast(_)
+            | Command::CacheWarming(_)
             | Command::Hotkeys
             | Command::Copy
             | Command::Session
@@ -9235,6 +9526,9 @@ async fn run_interactive_once(
     let initial_prompt = config.initial_prompt.clone();
     let theme = load_theme(&config);
     let size = Arc::new(Mutex::new(crossterm::terminal::size().unwrap_or((80, 24))));
+    // Published before the frontend starts: the renderer thread and the shared
+    // input filter both read the resolved policy, and neither carries Config.
+    crate::tui::view::tern::set_policy(config.tern);
     let mut shell =
         InteractiveShell::enter_with_mouse(theme, size, config.mouse.application_owned())?;
     // Best-effort re-exec support: a host that cannot report its own executable
@@ -9249,7 +9543,9 @@ async fn run_interactive_once(
     // Live models.dev metadata refreshes off the startup path, at most every
     // six hours; later catalog builds and lookups use it once cached.
     tokio::spawn(crate::models_dev::refresh(config.offline));
-    let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
+    let mut input = EventStream::new()
+        .with_cede_flag(shell.terminal_input_parking())
+        .with_tern_handler(shell.tern_input_handler());
     if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
         && !config.plain
@@ -9260,6 +9556,16 @@ async fn run_interactive_once(
             return Ok(InteractiveExit::Finished);
         }
     }
+    // Start Auto detection without waiting. The existing input owner filters
+    // and retains the reply while catalogs, extensions and sessions initialize.
+    // Explicit appearances and no-color terminals never issue the query.
+    apply_detected_terminal_background_with_timeout(
+        &mut shell,
+        &mut input,
+        &config,
+        Duration::ZERO,
+    )
+    .await;
     // Cold/expired model inventories can require network discovery. Give the
     // terminal an input owner before that work, just as for session/extension
     // startup below. Editing is live; submission still waits for full startup.
@@ -9347,6 +9653,16 @@ async fn run_interactive_once(
         }
         startup_prompt = Some(rendered.text);
     }
+    // Consume an already-arrived Auto reply before layout. Never put a probe
+    // deadline on readiness; absent replies keep the neutral fallback and the
+    // ordinary bounded post-ready detection below.
+    apply_detected_terminal_background_with_timeout(
+        &mut shell,
+        &mut input,
+        &app.config,
+        Duration::ZERO,
+    )
+    .await;
     // One atomic ready frame. History, identity, status, extension UI and the
     // startup prompt are all installed before `finish_startup` opens the
     // branded surface, so the terminal never sees an incremental
@@ -9354,6 +9670,9 @@ async fn run_interactive_once(
     // off-screen through `OCTET_STARTUP_TRACE=1`.
     crate::app::bootstrap::startup_phase("history.hydrate");
     shell.hydrate(app.agent.session())?;
+    if let Some(notice) = commands::resumed_cache_warming_notice(&app) {
+        shell.notice(notice);
+    }
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);
@@ -9419,6 +9738,7 @@ async fn run_interactive_once(
                     &mut reload_tick,
                     &reload_watcher,
                     &mut reload,
+                    Some(&mut app.agent),
                 )
                 .await?
             }
@@ -9730,7 +10050,8 @@ async fn run_interactive_once(
                 let pane_session_id = herdr_session_id(&app);
                 // Snapshot the read-only application facts the run cannot lend
                 // out (it owns `&mut Agent`), so inspection commands still work.
-                let inspection = ActiveRunInspection::capture(&app);
+                let prior_cache_misses = commands::cache_miss_count(&app);
+                let mut inspection = ActiveRunInspection::capture(&app);
                 let mut run = {
                     let user_input = composed.into_user_input();
                     let run_result = if answer_only {
@@ -9769,6 +10090,7 @@ async fn run_interactive_once(
                 shell.set_awaiting_provider(run_id);
                 shell.render();
                 let control = run.control();
+                inspection.cache_warming_control = Some(control.clone());
                 let mut quit_requested = false;
                 let mut made_tool_call = false;
                 let ended = drive_active_run(
@@ -9788,6 +10110,9 @@ async fn run_interactive_once(
                 )
                 .await?;
                 drop(run);
+                if let Some(notice) = commands::cache_miss_notice(&app, prior_cache_misses) {
+                    shell.notice(notice);
+                }
                 if app.model.responses_features().reasoning_effort_updates {
                     app.reasoning = app.agent.reasoning().clone();
                     update_status(&mut shell, &app);
@@ -9896,3 +10221,7 @@ async fn run_interactive_once(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "interactive/tests/active_tool_input_tests.rs"]
+mod active_tool_input_tests;

@@ -209,6 +209,7 @@ text docs/extensions/PROTOCOL-REFERENCE.md
 text docs/extensions/legacy-authoring.md
 text docs/getting-started.md
 text docs/herdr.md
+text docs/inference-metrics.md
 text docs/installation.md
 text docs/instructions.md
 text docs/linux.md
@@ -268,6 +269,7 @@ text docs/subagents.md
 text docs/telemetry.md
 text docs/terminal.md
 text docs/termux.md
+text docs/tern.md
 text docs/testing/README.md
 text docs/testing/startup-frame-pty.md
 text docs/themes.md
@@ -318,6 +320,25 @@ text examples/themes/octet-default.toml
 text extensions/octet-browse/CONNECTORS.md
 text extensions/octet-browse/QUALIFICATION.md
 text extensions/octet-browse/README.md
+text extensions/octet-codemode/README.md
+text extensions/octet-pi-compat/README.md
+text scripts/bench-startup-resume.py
+text extensions/octet-codemode/THIRD_PARTY_NOTICES.md
+text extensions/octet-codemode/LICENSE
+text extensions/octet-codemode/vendor/PROVENANCE.json
+text extensions/octet-codemode/vendor/pi-codemode/LICENSE
+text extensions/octet-codemode/vendor/quickjs-wasi/LICENSE
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/ada-LICENSE-MIT
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/llvm-LICENSE.TXT
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/mbedtls-LICENSE
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/quickjs-ng-LICENSE
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-APACHE
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-APACHE-LLVM
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-MIT
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-fts-musl-fts-COPYING
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-libc-bottom-half-cloudlibc-LICENSE
+text extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-libc-top-half-musl-COPYRIGHT
 text extensions/octet-browse/REFERENCE.md
 text extensions/octet-computer-use/README.md
 text extensions/octet-mcp/README.md
@@ -357,3 +378,22 @@ text third_party/licenses/PI-MIT.txt
 text third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt
 text docs/migrations/README.md
 text docs/migrations/external-products.json
+
+# Combined RC public documentation from the stacked follow-ups.
+text docs/benchmarks/startup-resume-2026-10-02/README.md
+text docs/benchmarks/startup-resume-2026-10-02/SHA256SUMS
+text docs/benchmarks/startup-resume-2026-10-02/after-build.log
+text docs/benchmarks/startup-resume-2026-10-02/before-build.log
+text docs/benchmarks/startup-resume-2026-10-02/candidate-library-build.log
+text docs/benchmarks/startup-resume-2026-10-02/results.jsonl
+text docs/benchmarks/startup-resume-2026-10-02/source-manifest.json
+text docs/design/pi-extension-power-parity.md
+text docs/extensions/remote-ui.md
+text docs/pi-compatibility.md
+text examples/extensions/cache-warming/README.md
+text examples/extensions/cache-warming/extension.py
+text examples/extensions/cache-warming/extension.toml
+text examples/extensions/cache-warming/test_extension.py
+text sdk/python/octet_extension/cache_warming.py
+text sdk/python/tests/test_cache_warming.py
+text sdk/python/tests/test_cache_warming_bundles.py

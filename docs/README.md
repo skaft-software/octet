@@ -21,6 +21,7 @@ source builds from planned publication channels.
 - [CLI options](cli.md)
 - [Tools](tools.md)
 - [Models, providers and reasoning](providers.md)
+- [Inference measurements (unreleased)](inference-metrics.md)
 - [Images and audio](media.md)
 - [Sessions and goals](sessions.md)
 - [Session file format](session-format.md)
@@ -35,6 +36,7 @@ source builds from planned publication channels.
 - [Themes](themes.md)
 - [Shell aliases](shell-aliases.md)
 - [tmux setup](tmux.md)
+- [Tern native surfaces](tern.md)
 - [Herdr integration](herdr.md)
 - [Linux setup (Omarchy/Hyprland)](linux.md)
 - [Windows setup](windows.md)
@@ -49,15 +51,16 @@ source builds from planned publication channels.
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
+- [Optional Pi extension adapter (source preview)](pi-compatibility.md)
 - [Serve](experimental/octet-serve/README.md)
 
 ## Development
 
 - [Extension authoring](extensions.md)
 - [Extension event bus (bounded, host-mediated)](extensions/event-bus.md)
-- [Extension API 0.4 and retained wire
-  reference](extensions/API-0.4-REFERENCE.md)
-- [Native embedding: host protocol 1](sdk.md)
+- [Extension API 0.4 and retained wire reference](extensions/API-0.4-REFERENCE.md)
+- [Remote component UI (API 0.4)](extensions/remote-ui.md)
+- [Native embedding — host protocol 1](sdk.md)
 - [Examples and their compatibility status](../examples/README.md)
 - Architecture: [model clients](design/octet-ai.md), [agent
   runtime](design/octet-agent.md), [application](design/octet-coding-agent.md),

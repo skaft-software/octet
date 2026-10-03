@@ -161,6 +161,7 @@ pub(super) async fn start_and_drive_run_inner(
             .map(|metadata| metadata.title);
     projection.usage_uncertain |= app.agent.session().has_uncertain_usage();
     let run_model = app.model.clone();
+    let prior_cache_misses = crate::commands::cache_miss_count(app);
     let mut run = match app.agent.prompt(UserInput::from(input_parts)).await {
         Ok(run) => run,
         Err(_) => {
@@ -324,6 +325,9 @@ pub(super) async fn start_and_drive_run_inner(
         }
     }
     let final_context_snapshot = run.into_context_snapshot();
+    if let Some(notice) = crate::commands::cache_miss_notice(app, prior_cache_misses) {
+        crate::output::stderr_line(notice);
+    }
     app.executable_extensions
         .settle_turn(extension_turn, &outcome)
         .await;

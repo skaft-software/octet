@@ -22,8 +22,8 @@ The real-binary contract runs twice, with `--mouse auto` and `--mouse app`:
   starts;
 - the initial splash frame and the first ready frame are parsed through
   `vt100`; the visible stale rows must be gone;
-- a controlled resize to 64x12 must produce a synchronized absolute-grid repair
-  with neither `CSI 2J` nor `CSI 3J`;
+- a controlled resize to 64x12 must clear and replay the canonical frame inside
+  synchronized output, with both `CSI 2J` and `CSI 3J`;
 - Ctrl-D is the only supplied input. It must exit successfully and restore
   cursor visibility, bracketed paste, mouse modes, and termios state;
 - no primary-screen scenario may enter an alternate screen. App mouse capture
@@ -66,7 +66,7 @@ Both mouse modes also run at 48x8 and 80x8 with truecolor enabled. The composed
 VT screen must retain the permission disclosure and draft cursor row through
 typing, backspace, and bracketed paste. After the edit, a 2.35-second observation
 window must have no decorative frames and no `CSI 2J`/`CSI 3J` replay. The normal
-resize contract above requires live-row repair without clearing saved history.
+resize contract above requires synchronized canonical clear/replay.
 
 ## Isolation and safety
 
@@ -101,5 +101,5 @@ The harness first verifies that the selected binary reports `0.6.7`. It then
 prints the normalized byte/frame delta and requires lifecycle behavior that is
 unrelated to the rendering fixes (synchronized resize frames, restoration,
 alternate-screen policy, and mouse policy) to remain compatible. Startup
-clear/stale-row correction and preserving live-row resize repair intentionally
-differ from the old baseline's saved-line clear/replay policy.
+clear/stale-row correction intentionally differs from the old baseline;
+structural resize retains canonical saved-line clear/replay.

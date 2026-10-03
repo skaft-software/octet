@@ -1,0 +1,26 @@
+{
+  "api_version": "0.4",
+  "runner": "node runner.mjs --config /absolute/bridge.json",
+  "config": { "extensions": ["/absolute/reviewed/entry.ts"] },
+  "configure": "node configure.mjs --reviewed --output /absolute/extensions/octet-pi-compat <entry.ts>...; canonical Node + absolute runner; no activation/trust/HOME edits",
+  "context_updated": {
+    "method": "context/updated",
+    "params": {
+      "resource_owner": "required complete host-issued {session_id,extension_instance_id,process_generation}",
+      "host": "ExtensionHostState, including model_view; optional truthful context_usage/session_entries/using_oauth/composer_text/git_branch/active_tools snapshots"
+    },
+    "notes": "Negotiated remote_ui only. Unowned/foreign/stale updates cannot mutate retained session contexts. Ordinary hook/run context is {workspace,resource_owner,host}; payload.binding supplies the same complete triple on session hooks. Missing session entries/OAuth/composer snapshots explicitly unsupported, never invented empty data. model_view maps snake_case capacity/rate units to Pi camelCase."
+  },
+  "editor_state": "Negotiate editor_handoff; ui/editor-state {text,revision,focused} updates the active owner's real composer. Command-time composer/get refreshes from the actual host. Custom editor onChange/onSubmit use owner-safe composer/set and session/send_user_message and expose host refusal.",
+  "custom_commands": "Only fullscreen custom() detaches command/execute after first frame. Original JS handler/custom() result promise remain live until actual done(result), ui/closed, cancellation, owner replacement or shutdown. Background calls echo opening numeric parent + complete owner. Header/footer/widget setters await all openings before their request settles.",
+  "placements": ["fullscreen", "header", "footer", "above_editor", "below_editor", "editor"],
+  "surface_limit": 16,
+  "geometry": "ui/open returns positive columns/rows for placement; ui/resize uses surface_id with columns/rows; remote components never start or write a terminal",
+  "mouse": {
+    "open": "ui/open optional mouse_capture:true only for exact reviewed 1000/1002/1006 capture intent",
+    "event": "ui/mouse {surface_id,kind:press|release|drag|move|wheel,button:left|middle|right|none,x,y,modifiers,wheel_delta}; zero-based coordinates rebuilt as one-based SGR; positive wheel delta means down",
+    "notes": "Raw mouse-mode stdout writes are never forwarded. Other direct terminal control writes fail. SGR cannot represent super modifier, so that impossible conversion is explicit invalid_request. Rust owns capture/restoration."
+  },
+  "reserved_keys": ["control+g", "control+d"],
+  "acceptance": "Synthetic-host subprocess tests cover unchanged Doom WASM+WAD, installed powerline-footer 0.5.4, original Ben Vinegar /draw and original rainbow CustomEditor; Doom/footer also coexist in one Node process. Actual Rust terminal painting/PTY remains parent-owned."
+}

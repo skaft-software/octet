@@ -604,6 +604,96 @@ async fn empty_file_reads_cleanly() {
 }
 
 #[tokio::test]
+async fn programmatic_text_window_has_content_and_continuation_without_changing_text() {
+    let f = fixture();
+    let content = "alpha\r\nbeta\r\ngamma";
+    std::fs::write(f.workspace.join("a.txt"), content).unwrap();
+    let args = json!({"path": "a.txt", "offset": 2, "limit": 1});
+    let direct = ReadTool.execute(args.clone(), &f.ctx()).await.unwrap();
+    assert!(direct.programmatic_content().is_none());
+    let mut ctx = f.ctx();
+    ctx.progress = ctx.progress.for_nested_call();
+    let nested = ReadTool.execute(args, &ctx).await.unwrap();
+    assert_eq!(nested.text, direct.text);
+    assert_eq!(
+        nested.programmatic_content().unwrap(),
+        &json!({
+            "content": "beta\r\n", "path": "a.txt", "hash": content_hash(content.as_bytes()),
+            "start_line": 2, "end_line": 2, "total_lines": 3,
+            "next_offset": 3, "truncated": false, "lines_clipped": false
+        })
+    );
+    let final_line = ReadTool
+        .execute(json!({"path": "a.txt", "offset": 3}), &ctx)
+        .await
+        .unwrap();
+    let value = final_line.programmatic_content().unwrap();
+    assert_eq!(value["content"], "gamma");
+    assert!(value["next_offset"].is_null());
+    let schema = ReadTool.output_schema().unwrap();
+    let required = schema["oneOf"][0]["required"].as_array().unwrap();
+    assert_eq!(required.len(), value.as_object().unwrap().len());
+    for key in required {
+        assert!(value.get(key.as_str().unwrap()).is_some());
+    }
+}
+
+#[tokio::test]
+async fn programmatic_empty_and_media_reads_keep_their_success_shapes() {
+    let f = fixture();
+    std::fs::write(f.workspace.join("empty.txt"), "").unwrap();
+    std::fs::write(f.workspace.join("image.png"), PNG_BYTES).unwrap();
+    let mut ctx = f.ctx();
+    ctx.progress = ctx.progress.for_nested_call();
+    let empty = ReadTool
+        .execute(json!({"path": "empty.txt"}), &ctx)
+        .await
+        .unwrap();
+    let value = empty.programmatic_content().unwrap();
+    assert_eq!(value["content"], "");
+    assert_eq!(value["total_lines"], 0);
+    assert_eq!(value["start_line"], 0);
+    assert_eq!(value["end_line"], 0);
+    assert!(value["next_offset"].is_null());
+    let media = ReadTool
+        .execute(json!({"path": "image.png"}), &ctx)
+        .await
+        .unwrap();
+    assert!(media.programmatic_content().is_none());
+    assert!(media.text.contains("read=vision"));
+    assert_eq!(media.media().len(), 1);
+    assert_eq!(
+        ReadTool.output_schema().unwrap()["oneOf"][1]["type"],
+        "string"
+    );
+}
+
+#[tokio::test]
+async fn programmatic_read_reports_byte_and_line_clipping_honestly() {
+    let mut f = fixture();
+    f.sandbox.max_output_bytes = 2048;
+    let content = format!(
+        "{}\n{}",
+        "a".repeat(MAX_LINE_CHARS + 1),
+        "short\n".repeat(500)
+    );
+    std::fs::write(f.workspace.join("large.txt"), content).unwrap();
+    let mut ctx = f.ctx();
+    ctx.progress = ctx.progress.for_nested_call();
+    let out = ReadTool
+        .execute(json!({"path": "large.txt"}), &ctx)
+        .await
+        .unwrap();
+    let value = out.programmatic_content().unwrap();
+    assert_eq!(value["truncated"], true);
+    assert_eq!(value["lines_clipped"], true);
+    assert_eq!(value["end_line"], 1);
+    assert_eq!(value["next_offset"], 2);
+    assert_eq!(value["total_lines"], 501);
+    assert!(value["content"].as_str().unwrap().len() < MAX_LINE_CHARS + 100);
+}
+
+#[tokio::test]
 async fn invalid_args_are_a_tool_error() {
     let f = fixture();
     let err = ReadTool

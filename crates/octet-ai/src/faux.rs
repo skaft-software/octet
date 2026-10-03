@@ -383,6 +383,7 @@ fn deferred_events(model: &Model, handle: DeferredHandle) -> Vec<Result<StreamEv
         response_id: None,
         responses_output: None,
         deferred: Some(handle),
+        inference: None,
         diagnostics: Vec::new(),
     };
     vec![

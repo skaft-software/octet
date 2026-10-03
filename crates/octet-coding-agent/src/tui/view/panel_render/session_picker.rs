@@ -152,7 +152,7 @@ fn shorten_home_path(path: &std::path::Path) -> String {
     )
 }
 
-fn format_age(modified: SystemTime, now: SystemTime) -> String {
+pub(in crate::tui::view) fn format_age(modified: SystemTime, now: SystemTime) -> String {
     let seconds = now
         .duration_since(modified)
         .unwrap_or(Duration::ZERO)

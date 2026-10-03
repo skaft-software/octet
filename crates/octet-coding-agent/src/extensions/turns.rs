@@ -85,6 +85,7 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
+        self.cancel_session_hook_starts();
         if self.session_lifecycle_started {
             let outcome = ExtensionLifecycleOutcome::Completed;
             if let Some(resource_owner) = self.resource_owner.clone() {

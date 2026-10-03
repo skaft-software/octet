@@ -185,7 +185,7 @@ pub(super) fn filtered_indices_with_groups(
 /// them. Group counts and collapsed summaries must be measured here: measured
 /// against the already-collapsed set, every collapsed terminal group reports
 /// zero members and the reader is told nothing about the workers it hides.
-pub(super) fn searched_indices_for_action(
+pub(in crate::tui::view) fn searched_indices_for_action(
     items: &[String],
     descriptions: &[Option<String>],
     action: &PanelAction,
@@ -201,6 +201,14 @@ pub(in crate::tui::view) fn filtered_indices_for_action(
     filter: &str,
 ) -> Vec<usize> {
     let mut indices = searched_indices_for_action(items, descriptions, action, filter);
+    if let PanelAction::SelectGroupedModel {
+        providers,
+        scope: Some(scope),
+        ..
+    } = action
+    {
+        indices.retain(|index| providers.get(*index) == Some(scope));
+    }
     // Terminal subagent groups collapse behind their heading. A typed filter
     // still searches every worker, hidden groups included, so filtering for a
     // finished worker can never look like the worker disappeared.

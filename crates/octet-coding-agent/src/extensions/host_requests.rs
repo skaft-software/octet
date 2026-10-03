@@ -66,7 +66,12 @@ impl ExecutableExtensions {
         };
         let owner_is_foreground =
             host_request_owner_is_foreground(owner.as_ref(), self.resource_owner.as_deref());
-        if !owner_is_foreground {
+        let remote_owner_valid = !matches!(&operation, HostRequestOperation::RemoteUi { owner, .. }
+            if owner.extension_instance_id != process.extension_instance_id()
+                || owner.process_generation != generation
+                || !process.is_running()
+                || process.health_snapshot().generation != generation);
+        if !owner_is_foreground || !remote_owner_valid {
             self.refuse_host_request(
                 process,
                 request_id,
@@ -332,6 +337,31 @@ impl ExecutableExtensions {
                 ),
                 HostRequestOperation::ContextSnapshot(operation) => {
                     self.apply_context_snapshot_in_shell(shell, operation)
+                }
+                HostRequestOperation::RemoteUi { owner, operation } => {
+                    // Re-fence the complete owner immediately before mounting.
+                    if self.resource_owner.as_deref() != Some(owner.session_id.as_str())
+                        || owner.extension_instance_id != pending.process.extension_instance_id()
+                        || owner.process_generation != pending.generation
+                    {
+                        ExtensionRequestOutcome::Failed(
+                            ExtensionRequestFailure::NotForegroundOwner,
+                            "remote UI owner is no longer foreground".into(),
+                        )
+                    } else {
+                        match self.remote_ui.apply(
+                            pending.process.clone(),
+                            owner,
+                            operation,
+                            shell,
+                            self.terminal_arbiter.active().is_some(),
+                        ) {
+                            Ok(result) => ExtensionRequestOutcome::Ok(result),
+                            Err((failure, detail)) => {
+                                ExtensionRequestOutcome::Failed(failure, detail)
+                            }
+                        }
+                    }
                 }
             };
             self.queue_host_request_response(
@@ -721,6 +751,13 @@ impl ExecutableExtensions {
         };
         match operation {
             ExtensionTerminalOperation::Acquire => {
+                if !self.remote_ui.is_empty() || shell.remote_ui_input_blocked() {
+                    return ExtensionRequestOutcome::Failed(
+                        ExtensionRequestFailure::InvalidRequest,
+                        "terminal handoff conflicts with a remote component or host input owner"
+                            .into(),
+                    );
+                }
                 // Read the size the host is leaving behind, then hand the tty
                 // over: the answer is the last thing the host does here.
                 let (columns, rows) = shell.terminal_dimensions();
@@ -796,6 +833,8 @@ impl ExecutableExtensions {
     /// Revoke before dropping or replacing this binding. Reconciliation alone
     /// cannot find the old grant after a replacement App owns a fresh arbiter.
     pub fn revoke_terminal_grant_for_shell(&mut self, shell: &mut InteractiveShell, reason: &str) {
+        self.remote_ui.revoke(reason);
+        shell.set_remote_ui(self.remote_ui.projection());
         if let Some(revoked) = self.terminal_arbiter.revoke_if(|_| false) {
             self.restore_revoked_terminal_grant(shell, revoked, reason);
         }

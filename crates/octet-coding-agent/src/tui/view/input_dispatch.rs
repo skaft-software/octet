@@ -134,6 +134,11 @@ impl InteractiveShell {
     /// executable resource is loaded here.
     pub fn reload_keybindings(&mut self) {
         self.input_dispatch.bindings.reload();
+        {
+            let mut mailbox = self.state.native().lock().expect("native mailbox poisoned");
+            mailbox.bindings = Some(self.input_dispatch.bindings.clone());
+            mailbox.editor_resync = mailbox.editor_resync.saturating_add(1);
+        }
         self.input_dispatch.jump_forward = None;
     }
 
@@ -160,28 +165,65 @@ impl InteractiveShell {
         }
     }
 
-    /// Resolved hotkeys, not a static table that silently ignores user overrides.
-    pub fn hotkeys_text(&self) -> String {
+    /// The resolved keymap as a grouped Markdown reference: bound actions as
+    /// `keys | action` tables per area, then the unbound ids a user can assign.
+    /// It is resolved from the loaded user map, not a static table, and both
+    /// renderers typeset it, so ids never stand in for descriptions.
+    pub fn hotkeys_markdown(&self) -> String {
         let bindings = &self.input_dispatch.bindings;
-        let mut text = String::from("Keybindings (~/.octet/keybindings.json)\nCtrl+D always coordinates close. /reload applies changes.\n\n");
+        let mut groups: Vec<(&'static str, Vec<String>)> = Vec::new();
+        let mut unbound = Vec::new();
         for definition in bindings.definitions() {
             let keys = bindings.get_keys(&definition.id);
-            text.push_str(&format!(
-                "{}  {}\n",
-                definition.id,
-                if keys.is_empty() {
-                    "(unbound)".to_owned()
-                } else {
-                    keys.join(", ")
-                }
-            ));
+            if keys.is_empty() {
+                unbound.push(format!("`{}`", definition.id));
+                continue;
+            }
+            let chips = keys
+                .iter()
+                .map(|key| markdown_key_chip(key))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let row = format!(
+                "| {chips} | {} |",
+                markdown_table_cell(&definition.description)
+            );
+            let group = hotkey_group(&definition.id);
+            match groups.iter_mut().find(|(name, _)| *name == group) {
+                Some((_, rows)) => rows.push(row),
+                None => groups.push((group, vec![row])),
+            }
         }
-        for conflict in bindings.get_conflicts() {
+        let mut text = String::from(
+            "Edit `~/.octet/keybindings.json`, then `/reload`. Ctrl+D always coordinates close.\n",
+        );
+        for (name, rows) in groups {
             text.push_str(&format!(
-                "\nConflict: {}: {}",
-                conflict.key,
-                conflict.keybindings.join(", ")
+                "\n### {name}\n\n| Keys | Action |\n| --- | --- |\n"
             ));
+            for row in rows {
+                text.push_str(&row);
+                text.push('\n');
+            }
+        }
+        let conflicts = bindings.get_conflicts();
+        if !conflicts.is_empty() {
+            text.push_str("\n### Conflicts\n\n");
+            for conflict in conflicts {
+                text.push_str(&format!(
+                    "- {} is claimed by {}\n",
+                    markdown_key_chip(&conflict.key),
+                    conflict
+                        .keybindings
+                        .iter()
+                        .map(|id| format!("`{id}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        if !unbound.is_empty() {
+            text.push_str(&format!("\n### Unbound\n\n{}\n", unbound.join(" · ")));
         }
         text
     }
@@ -416,6 +458,7 @@ impl InteractiveShell {
     }
 
     fn scroll_to_top(&mut self) {
+        self.request_native_scroll(octet_tern::wire::ScrollBy::Start, 1);
         self.state.borrow().transcript_scroll_activity();
         if !self.state.borrow().run.is_active() {
             if let Err(error) = self.materialize_deferred_history() {
@@ -466,6 +509,58 @@ impl InteractiveShell {
             retain_viewport_anchor(&state);
         }
     }
+}
+
+/// The reference section a binding id belongs to, by its namespace.
+fn hotkey_group(id: &str) -> &'static str {
+    let mut parts = id.split('.');
+    match (parts.next(), parts.next()) {
+        (Some("tui"), Some("editor" | "input")) | (Some("app"), Some("editor" | "clipboard")) => {
+            "Editing"
+        }
+        (Some("tui"), Some("select")) => "Lists and pickers",
+        (Some("tui"), Some("altScreen")) => "Scrollback",
+        (Some("app"), Some("model" | "models" | "thinking")) => "Models and thinking",
+        (Some("app"), Some("session")) => "Sessions",
+        (Some("app"), Some("message")) => "Messages",
+        _ => "General",
+    }
+}
+
+/// One key id as a Markdown code chip, title-cased (`ctrl+b` → `Ctrl+B`).
+fn markdown_key_chip(key: &str) -> String {
+    let label = key
+        .split('+')
+        .map(|part| match part {
+            "pageup" => "PageUp".to_owned(),
+            "pagedown" => "PageDown".to_owned(),
+            "escape" => "Esc".to_owned(),
+            "" => "+".to_owned(),
+            _ => {
+                let mut chars = part.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+        .replace("++", "+");
+    let label = markdown_table_cell(&label);
+    if label.contains('`') {
+        format!("`` {label} ``")
+    } else {
+        format!("`{label}`")
+    }
+}
+
+/// Escape a value for a single Markdown table cell.
+fn markdown_table_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\n', " ")
 }
 
 #[cfg(test)]
@@ -536,7 +631,17 @@ mod tests {
             dispatch(&mut shell, key(KeyCode::Char('z'), KeyModifiers::CONTROL)),
             InputAction::Ignore
         );
-        assert!(shell.hotkeys_text().contains("tui.editor.undo  (unbound)"));
+        let markdown = shell.hotkeys_markdown();
+        assert!(
+            markdown.contains("### Editing\n\n| Keys | Action |"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("| `Left` `Ctrl+B` | Move cursor left |"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("tui.editor.cursorUp"), "{markdown}");
+        assert!(markdown.contains("### Unbound\n\n") && markdown.contains("`tui.editor.undo`"));
         assert_eq!(
             shell.translate_input(Some(key(KeyCode::Char('d'), KeyModifiers::CONTROL)), false),
             InputAction::Closed

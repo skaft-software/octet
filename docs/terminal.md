@@ -27,6 +27,15 @@ The first three share one agent loop, providers, sessions, safety policy and
 cancellation. Print mode still has tools, so add [tool limits](tools.md) if you
 want none. Plain and print send readiness diagnostics to stderr.
 
+[Cache warming](cache-warming.md) defaults to `streaming`; `idle` also runs while
+the retained host waits for input, without delaying input, reload or shutdown.
+Refresh usage is billed to the session, never the current assistant turn or its
+cache-hit/throughput/context metrics. `show_cache_miss_notices = true` in user
+config opts into brief ordinary cache-miss/refresh notices (default `false`).
+`/session`, `/cache` and `/cache-warming` show scheduler state, expected savings,
+miss penalty and refresh costs even with notices off. Plain/print notices stay
+on stderr, and print stdout stays response-only.
+
 The startup card says `permissions: full access` in bold red by default. With
 `--safe-mode` it says `safe mode` (blue in the default theme) and octet asks
 before running bash or changing files. Neither is a sandbox.
@@ -131,13 +140,15 @@ because portable protocols can't report its position.
 
 The renderer uses a complete retained frame, synchronized frames, and exact
 first-to-last changed-range repainting. Completions, panels, reports, and streamed
-Markdown participate in the same algorithm. Resize bursts settle before repairing
-only live rows; width changes reflow the semantic transcript, while height-only
-changes reuse its wrapping. Resize, PageUp, and historical repairs do not clear
-saved lines or replay the complete history. Already-emitted native history stays
-as snapshots; PageUp, copy, and the session contain the authoritative transcript
-when a historical result changes. The hardware composer cursor stays visible
-through panels, resizing, and renderer resumes.
+Markdown participate in the same algorithm; visible changes do not force history
+replay. Dimension changes and canonical changes above the old viewport clear and
+replay the complete native transcript, so saved and live output remain complete.
+This can reset your terminal's reading position, and replay work grows with
+history. PageUp and `--mouse app` instead use a separate bounded semantic viewport.
+Resize bursts settle after 75 ms of quiet (150 ms maximum); width changes reflow
+the transcript, while height-only changes reuse its wrapping. Away-and-back
+resizes also rebuild native history. The hardware composer cursor stays visible
+inside synchronized frames through panels, resizing, and renderer resumes.
 [Rendering details](design/octet-tui.md#terminal-guarantees).
 
 Layouts adapt between wide and narrow terminals and fall back from truecolor to
@@ -173,10 +184,11 @@ shows.
   └ Verifying the implementation (ctrl+o to expand)
 ```
 
-Reasoning and activity dots keep a solid, fixed-size glyph while their
-foreground pulses with the label sweep. Tool and shell dots turn green on
-success or red on failure, and assistant-response dots stay steady. To change
-the level, see [Selecting reasoning](providers.md#reasoning).
+Reasoning and activity dots keep a solid, fixed-size glyph. The `Working` dot
+shares the label's phase and blinks as the shimmer crosses it, then returns to
+its resting colour. The `Thinking` dot keeps its model colour. Tool and shell
+dots turn green on success or red on failure, and assistant-response dots stay
+steady. To change the level, see [Selecting reasoning](providers.md#reasoning).
 
 <details>
 <summary>Shimmer details</summary>

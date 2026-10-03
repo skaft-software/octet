@@ -34,6 +34,30 @@ changes run one at a time, even if the model batches calls.
 | Block commands | `--no-process` or `--no-shell` |
 | Turn off every tool | `--no-tools` |
 
+## Optional JavaScript composition
+
+[octet-codemode](../extensions/octet-codemode/README.md) batches and chains
+the same enabled tools in Pi's offline QuickJS/WASM guest. Explicit enablement
+and the trusted Node launcher are required; this does not weaken safe mode,
+effect policy, tool exclusions or approvals. `on` retains direct tools; `only`
+advertises composition tools while ordinary tools stay nested-only.
+
+Nested core `read` returns unnumbered bounded `content` with path/hash/line and
+continuation metadata. `search` returns ordered `matches` with path, line, text,
+context/clipping flags, `total` and `truncated`. `bash` returns independently
+bounded raw `stdout`/`stderr` (up to 1 MiB source bytes each, additionally bounded
+by JSON encoding), exit status, byte counts and completeness/truncation flags.
+Direct tool text stays unchanged. Schema-less tools resolve to text, not
+implicitly parsed JSON, and nested media/raw streams do not automatically enter
+chat. Only explicitly returned output or `text()`/`image()` is published.
+
+The host limits a parent to 256 calls and 30 seconds, with at most four safe
+observations in parallel; mutations remain exclusive. Completed effects survive
+script failure; successful store writes are private branch-scoped metadata.
+Nested model usage cannot bypass session ceilings or be priced at the chat
+model's rate. Tools without host-authoritative usage bounds are refused under
+hard ceilings. See [extension composition](extensions.md#tool-composition).
+
 <a id="authority-profiles"></a>
 
 ## Permissions

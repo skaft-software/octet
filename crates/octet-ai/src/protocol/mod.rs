@@ -356,3 +356,6 @@ pub(crate) struct HttpRequestParts {
 /// Shared, offline test harness for the codec fixture suites (design §19).
 #[cfg(test)]
 mod harness;
+
+#[cfg(test)]
+mod inference_tests;

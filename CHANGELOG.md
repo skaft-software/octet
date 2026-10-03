@@ -2,6 +2,72 @@
 
 ## [Unreleased]
 
+- Preserve the local Working-dot shimmer patch: the sweep crosses the margin
+  dot before the label, then returns it to its resting colour.
+- Add the optional, explicitly reviewed `octet-pi-compat` Node source package and
+  API `0.4` cached remote-component transport/frontend integration. Rust owns
+  agent/session execution, terminal composition, focus, and restoration; the
+  adapter uses selected Pi TUI utilities, never Pi's coding-agent runtime.
+  Synthetic-host tests cover unchanged Doom, drawing, powerline footer, and
+  rainbow editor behavior. Actual octet binary/PTY acceptance passed Doom,
+  drawing, the footer, and terminal restoration. Native custom-editor draft
+  restoration still fails qualification; startup comparison remains unrun.
+  This is not general Pi runtime parity or a published extension bundle.
+
+- Render octet's shell natively inside Tern. In a Tern pane
+  (`TERM_PROGRAM=tern`; `OCTET_TUI_TERN=0` disables, `=1` forces) octet opens a
+  Tern Surface Protocol surface from its render thread and draws its transcript
+  (prompt cards, reasoning, tool cards with native diffs, shell output,
+  outcomes, notices, compaction), composer and context meter with Tern's native
+  components, wearing the resolved octet theme as the surface palette. A live
+  surface replaces the pane's ANSI grid, so every other terminal keeps the
+  existing renderer untouched. Terminal → program TSP messages are consumed by
+  the input owner so they never reach the editor. Add `crates/octet-tern` (the
+  TSP wire schema, APC framing, tty session, theme projector, scene builders)
+  and document the protocol and mapping in `docs/tern.md`.
+- Show `/hotkeys` as grouped key/description tables with readable key names
+  (`Ctrl+B`) instead of raw binding ids; unbound ids are listed last. In Tern,
+  Markdown reports such as `/changelog` and `/hotkeys` are typeset natively.
+- Tern: draw user prompts as native cards so the fill never comes out ragged,
+  keep native rendering past the second turn (turn-usage rows no longer reuse a
+  node id), and stop a held Esc from leaking a Tern message into the editor.
+- Tern: collapse finished bash/`!` shell output to the command summary instead
+  of painting one expanded frame on completion (the completion now deletes the
+  live output child in the same frame that flips `collapsed`), keep failed
+  output visible, and re-assert `composer.editor` focus plus the draft when the
+  OS returns focus without a TSP `Visible` event (screen recording, space
+  switch). Native Markdown also caps stacked blank lines at one (code fences
+  untouched) and the welcome/composer gaps tighten from `lg`/`md` to `sm`.
+- Tern: draw follow-up assistant messages as labelled native cards (model label
+  over the projected `customMessage*` palette) instead of a bare Markdown node
+  in Tern's default prose look.
+- Add a setting to turn Tern's native TUI rendering on and off:
+  `--tern auto|on|off`, config key `tern`, env `OCTET_TERN` (the older
+  `OCTET_TUI_TERN` still applies when it is unset). `auto` (default)
+  negotiates native surfaces only inside a Tern pane, `on` forces negotiation
+  anywhere, and `off` always uses the terminal renderer.
+- Separate conversation inference measurements from billing: all supported
+  codecs/transports carry frozen client output timing, while recognized native
+  terminal count/duration pairs retain server source/unit provenance and
+  explicitly unavailable states. Completion prefers native generation or a
+  usage-calibrated robust streaming decode estimate, never E2E; `/status` retains
+  independent diagnostics. A bounded cancellation-owned reader isolates timing
+  from UI polling and rejects saturated/insufficient evidence. Transient agent,
+  telemetry, NDJSON/RPC and observer
+  span metrics do not alter durable accounting. Steering successors and deferred
+  operations never manufacture equivalent E2E rates. These are deterministic
+  source contracts, not live-provider speed or released-feature claims. See
+  [inference measurements](docs/inference-metrics.md).
+- Add end-to-end billable prompt-cache warming with `off`, default `streaming`,
+  and `idle` policies, user-only config, `OCTET_CACHE_WARMING`,
+  `--cache-warming`, and persisted `/cache-warming`. Interactive/plain/RPC and
+  the retained native host drive cancellation-safe idle maintenance. Refreshes
+  replay the exact request with a one-token cap, keep private output out of
+  context, and record separate session usage/cost/uncertainty. `/session` exposes
+  economic decisions and refresh spend; cache-miss/refresh notices are opt-in via
+  `show_cache_miss_notices = true` (default false). Replaces the experimental
+  synthetic-suffix warm API. Live cache-hit or savings qualification is not claimed.
+
 ## [0.8.2] - 2026-09-30
 
 See [release notes](docs/releases/v0.8.2.md) for candidate scope, availability,
@@ -28,11 +94,14 @@ receipt.
   credential would receive the beta headers a subscription token requires.
   `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN` are unchanged.
 
-- Preserve saved terminal history through resize, PageUp, and historical live-row
-  repairs instead of clearing and replaying the full transcript. Settle resize
-  bursts, reuse height-only wrapping, and promote threaded reading anchors before
-  width reflow. Canonical session/copy history remains authoritative; already
-  emitted native scrollback rows remain snapshots.
+- Restore complete canonical native history after dimension changes and
+  canonical mutations above the old viewport, using synchronized clear/replay
+  instead of saved snapshots that could omit accepted rows. Settle resize bursts,
+  reuse height-only wrapping, and promote threaded reading anchors before width
+  reflow. Resize epochs cover away-and-back changes and final/suspend flushes.
+  Ordinary appends and visible-row diffs are unchanged. Structural replay scales
+  with history and can reset the native reading position; PageUp/`--mouse app`
+  remain a separate bounded semantic viewport.
 
 - Keep the startup welcome static, budget it for the actual pane height, and
   reserve fresh-start composer geometry before model admission. Draft edits and
@@ -56,7 +125,9 @@ receipt.
 - Protect live cache-read, cache-write and effective reasoning prices against
   zeroing or greater-than-tenfold drops, just like input and output prices.
 - Re-anchor active status rows after history reflow so `Working` shimmer and its
-  elapsed clock continue after a narrow-to-wide resize.
+  elapsed clock continue after a narrow-to-wide resize. Use revision-fenced
+  painted viewport/active-heading geometry so visible clocks keep self-waking
+  after tall tool progress contracts, without requiring resize or more output.
 - Complete default macOS computer-use setup with a checksum- and Developer
   ID-verified signed host in octet-owned state when needed. Target cursor moves
   with the current driver's exact-window contract, and reopen setup with a fresh

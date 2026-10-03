@@ -9,6 +9,9 @@ impl ExecutableExtensions {
         let mut updates = ExtensionBackgroundUpdates::default();
         while let Ok(update) = self.background_rx.try_recv() {
             match update {
+                ExtensionBackgroundUpdate::Diagnostics(messages) => {
+                    self.diagnostics.extend(messages)
+                }
                 ExtensionBackgroundUpdate::Renderer { update, diagnostic } => {
                     self.diagnostics.extend(diagnostic);
                     updates.rendered_tools.extend(update);
@@ -30,14 +33,57 @@ impl ExecutableExtensions {
         updates
     }
 
+    pub(crate) fn remote_ui_wake(&self) -> Option<Arc<tokio::sync::Notify>> {
+        self.remote_ui_wake.clone()
+    }
+
+    fn sync_remote_ui(&mut self, shell: &mut InteractiveShell) -> bool {
+        for error in self
+            .remote_ui
+            .reconcile(self.resource_owner.as_deref(), shell.terminal_dimensions())
+        {
+            shell.error(error);
+        }
+        for process in &self.processes {
+            for frame in process.take_remote_ui_frames() {
+                self.remote_ui.accept_frame(process, frame);
+            }
+        }
+        let changed = shell.set_remote_ui(self.remote_ui.projection());
+        if changed {
+            shell.render();
+        }
+        changed
+    }
+
+    /// Focused keys never reach the composer, keymap shortcuts, or passive
+    /// terminal-input observers. Reconcile before routing after every wake.
+    pub(crate) fn route_remote_ui_event(
+        &mut self,
+        shell: &mut InteractiveShell,
+        event: &Event,
+    ) -> bool {
+        if let Event::Resize(columns, rows) = event {
+            shell.set_size(*columns, *rows);
+        }
+        self.sync_remote_ui(shell);
+        let consumed = self.remote_ui.route_input(shell, event);
+        if consumed && shell.set_remote_ui(self.remote_ui.projection()) {
+            shell.render();
+        }
+        consumed
+    }
+
     /// Drain extension events while an interactive shell owns the editor. This
     /// is deliberately separate from the generic event drain so headless hosts
     /// never accidentally grant an editor lease.
     pub fn drain_events_for_shell(&mut self, shell: &mut InteractiveShell) -> Vec<String> {
+        self.schedule_session_hook_starts();
         let messages = self.drain_events_inner(true);
         self.drain_editor_requests_into_shell(shell);
         self.drain_host_requests_into_shell(shell);
         self.reconcile_terminal_grant_for_shell(shell);
+        self.sync_remote_ui(shell);
         messages
     }
 
@@ -281,6 +327,22 @@ impl ExecutableExtensions {
                     // `context/model` until that lands, so no extension is left
                     // waiting today; the arm keeps the drain exhaustive, matching
                     // the agent crate's own `ModelViewRequested` arm.
+                    Ok(ExtensionEvent::RemoteUiRequested {
+                        request_id,
+                        generation,
+                        owner,
+                        operation,
+                    }) => {
+                        self.admit_host_request(
+                            process.clone(),
+                            &name,
+                            request_id,
+                            generation,
+                            Some(owner.clone()),
+                            HostRequestOperation::RemoteUi { owner, operation },
+                            interactive,
+                        );
+                    }
                     Ok(ExtensionEvent::ModelViewRequested { .. }) => {}
                     Ok(ExtensionEvent::AutocompleteRegistered {
                         request_id,
@@ -361,9 +423,11 @@ impl ExecutableExtensions {
                         request,
                         ..
                     }) => {
-                        if process.as_ref().is_some_and(|process| {
-                            process.confirmation_answered(&request_id, generation)
-                        }) {
+                        if self.command_dialog_process.as_ref() == Some(&(name.clone(), generation))
+                            || process.as_ref().is_some_and(|process| {
+                                process.confirmation_answered(&request_id, generation)
+                            })
+                        {
                             remaining -= 1;
                             receiver_budget -= 1;
                             continue;
@@ -395,9 +459,10 @@ impl ExecutableExtensions {
                         request,
                         ..
                     }) => {
-                        if process
-                            .as_ref()
-                            .is_some_and(|process| process.input_answered(&request_id, generation))
+                        if self.command_dialog_process.as_ref() == Some(&(name.clone(), generation))
+                            || process.as_ref().is_some_and(|process| {
+                                process.input_answered(&request_id, generation)
+                            })
                         {
                             remaining -= 1;
                             receiver_budget -= 1;

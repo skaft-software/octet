@@ -35,6 +35,10 @@ const SUBAGENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from
 pub(crate) struct SecretInputBuffer(Vec<u8>);
 
 impl SecretInputBuffer {
+    pub(crate) fn byte_len(&self) -> usize {
+        self.0.len()
+    }
+
     pub(crate) fn push(&mut self, character: char) {
         let mut encoded = [0; 4];
         let bytes = character.encode_utf8(&mut encoded).as_bytes();
@@ -46,12 +50,9 @@ impl SecretInputBuffer {
 
     pub(crate) fn extend_paste(&mut self, pasted: &str) {
         let pasted = pasted.trim_end_matches(['\r', '\n']);
-        let remaining = MAX_SECRET_INPUT_BYTES.saturating_sub(self.0.len());
-        let mut end = pasted.len().min(remaining);
-        while end > 0 && !pasted.is_char_boundary(end) {
-            end -= 1;
+        if self.0.len().saturating_add(pasted.len()) <= MAX_SECRET_INPUT_BYTES {
+            self.0.extend_from_slice(pasted.as_bytes());
         }
-        self.0.extend_from_slice(&pasted.as_bytes()[..end]);
     }
 
     pub(crate) fn backspace(&mut self) {
@@ -76,9 +77,25 @@ impl Drop for SecretInputBuffer {
     }
 }
 
-/// Give one extension command exclusive ownership of terminal input. Secret
-/// answers never enter the ordinary editor or rendered frame; non-secret setup
-/// values use the same temporary composer surface and are echoed while typed.
+#[cfg(test)]
+mod temporary_input_tests {
+    use super::{SecretInputBuffer, MAX_SECRET_INPUT_BYTES};
+
+    #[test]
+    fn secret_over_limit_paste_is_rejected_atomically() {
+        let mut value = SecretInputBuffer::default();
+        value.extend_paste("original");
+        value.extend_paste(&"🦀".repeat(MAX_SECRET_INPUT_BYTES));
+        assert_eq!(value.take().as_slice(), b"original");
+        value.extend_paste(&"a".repeat(MAX_SECRET_INPUT_BYTES));
+        value.push('雪');
+        assert_eq!(value.take().len(), MAX_SECRET_INPUT_BYTES);
+    }
+}
+
+/// Give one extension command exclusive ownership of terminal input. Secrets
+/// remain host-private; ordinary values use a separate bounded editor shared
+/// by raw and native input without changing the parent draft or chips.
 pub async fn extension_input_picker<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -87,10 +104,11 @@ pub async fn extension_input_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    shell.set_tool_input_prompt(Some(request.prompt.clone()));
+    use sexy_tui_rs::TextEditAction;
+
+    shell.begin_tool_input(&request.prompt, request.secret);
     shell.render();
     let mut value = SecretInputBuffer::default();
-    let mut overflowed = false;
     loop {
         let next = tokio::select! {
             biased;
@@ -100,18 +118,23 @@ where
         let event = match next {
             Some(Ok(event)) => event,
             Some(Err(error)) => {
-                shell.set_tool_input_prompt(None);
+                shell.end_tool_input();
                 shell.render();
                 return Err(error.into());
             }
             None => {
-                shell.set_tool_input_prompt(None);
+                shell.end_tool_input();
                 shell.render();
                 return Ok(None);
             }
         };
+        let event = if request.secret {
+            event
+        } else {
+            shell.tool_input_event(&event)
+        };
         if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
-            shell.set_tool_input_prompt(None);
+            shell.end_tool_input();
             shell.request_close();
             shell.render();
             return Ok(None);
@@ -119,28 +142,46 @@ where
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match key.code {
-                    KeyCode::Enter if overflowed => {
-                        // Never return a silently truncated credential. Clear the
-                        // rejected input, then let the user paste a fresh value.
+                    KeyCode::Enter if shell.tool_input_overflowed() => {
+                        // Rejected input is never submitted, even after a later edit.
                         value = SecretInputBuffer::default();
-                        overflowed = false;
+                        shell.clear_tool_input_value();
                     }
                     KeyCode::Enter => {
-                        let bytes = value.take();
-                        let answer = String::from_utf8(bytes)
-                            .map_err(|_| anyhow::anyhow!("extension input was not valid UTF-8"))?;
-                        shell.set_tool_input_prompt(None);
+                        let answer = if request.secret {
+                            // All buffer mutations accept valid UTF-8 scalars/paste.
+                            String::from_utf8(value.take()).expect("secret input is valid UTF-8")
+                        } else {
+                            shell
+                                .end_tool_input()
+                                .expect("ordinary request owns an editor")
+                        };
+                        if request.secret {
+                            shell.end_tool_input();
+                        }
                         shell.render();
                         return Ok(Some(answer));
                     }
                     KeyCode::Esc => {
-                        shell.set_tool_input_prompt(None);
+                        shell.end_tool_input();
                         shell.render();
                         return Ok(None);
                     }
-                    KeyCode::Backspace => value.backspace(),
+                    KeyCode::Backspace if request.secret => value.backspace(),
+                    KeyCode::Backspace => shell.edit_tool_input(TextEditAction::Backspace),
+                    KeyCode::Delete if !request.secret => {
+                        shell.edit_tool_input(TextEditAction::Delete)
+                    }
+                    KeyCode::Left if !request.secret => shell.edit_tool_input(TextEditAction::Left),
+                    KeyCode::Right if !request.secret => {
+                        shell.edit_tool_input(TextEditAction::Right)
+                    }
+                    KeyCode::Home if !request.secret => shell.edit_tool_input(TextEditAction::Home),
+                    KeyCode::End if !request.secret => shell.edit_tool_input(TextEditAction::End),
+                    KeyCode::Up if !request.secret => shell.edit_tool_input(TextEditAction::Up),
+                    KeyCode::Down if !request.secret => shell.edit_tool_input(TextEditAction::Down),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        shell.set_tool_input_prompt(None);
+                        shell.end_tool_input();
                         shell.render();
                         return Ok(None);
                     }
@@ -149,36 +190,34 @@ where
                             KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
                         ) =>
                     {
-                        overflowed |= value.0.len().saturating_add(character.len_utf8())
-                            > MAX_SECRET_INPUT_BYTES;
-                        value.push(character)
+                        if request.secret {
+                            if value.0.len().saturating_add(character.len_utf8())
+                                > MAX_SECRET_INPUT_BYTES
+                            {
+                                shell.mark_tool_input_overflow();
+                            }
+                            value.push(character);
+                        } else {
+                            shell.edit_tool_input(TextEditAction::Char(character));
+                        }
                     }
                     _ => {}
                 }
             }
             Event::Paste(pasted) => {
-                overflowed |= value
-                    .0
-                    .len()
-                    .saturating_add(pasted.trim_end_matches(['\r', '\n']).len())
-                    > MAX_SECRET_INPUT_BYTES;
-                value.extend_paste(&pasted);
+                let pasted = pasted.trim_end_matches(['\r', '\n']);
+                if request.secret {
+                    if value.0.len().saturating_add(pasted.len()) > MAX_SECRET_INPUT_BYTES {
+                        shell.mark_tool_input_overflow();
+                    }
+                    value.extend_paste(pasted);
+                } else {
+                    shell.edit_tool_input(TextEditAction::Paste(pasted.to_owned()));
+                }
             }
             Event::Resize(columns, rows) => shell.set_size(columns, rows),
             _ => {}
         }
-        let shown = if overflowed {
-            format!(
-                "{} [input exceeds 4 KiB; Enter to clear, Esc to cancel]",
-                request.prompt
-            )
-        } else if request.secret {
-            request.prompt.clone()
-        } else {
-            let entered = std::str::from_utf8(&value.0).unwrap_or_default();
-            format!("{} {}", request.prompt, entered)
-        };
-        shell.set_tool_input_prompt(Some(shown));
         shell.render();
     }
 }
@@ -1314,10 +1353,92 @@ fn model_provider_heading(catalog: &ModelCatalog, model: &octet_ai::ModelSpec) -
     }
 }
 
+/// Public presentation facts only; endpoint headers and model presets never enter TSP.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelPickerDetail {
+    pub(crate) name: String,
+    pub(crate) context: u64,
+    pub(crate) output: u64,
+    pub(crate) price: String,
+    pub(crate) cache_price: Option<String>,
+    pub(crate) input: String,
+    pub(crate) badges: Vec<String>,
+    pub(crate) source: Vec<(String, String)>,
+}
+
+fn native_model_detail(model: &octet_ai::ModelSpec) -> ModelPickerDetail {
+    use octet_ai::Modality;
+    let caps = &model.capabilities;
+    let mut badges = Vec::new();
+    if caps.reasoning.is_some() {
+        badges.push("reasoning".into());
+    }
+    if caps.input_modalities.contains(Modality::Image) {
+        badges.push("vision".into());
+    }
+    if caps.input_modalities.contains(Modality::Audio) {
+        badges.push("audio".into());
+    }
+    if caps.tools {
+        badges.push("tools".into());
+    }
+    if caps.structured_output {
+        badges.push("structured output".into());
+    }
+    let input = [(Modality::Image, "image"), (Modality::Audio, "audio")]
+        .into_iter()
+        .filter(|(modality, _)| caps.input_modalities.contains(*modality))
+        .map(|(_, label)| label)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let input = if input.is_empty() {
+        "text".into()
+    } else {
+        format!("text · {input}")
+    };
+    let metadata =
+        octet_ai::model_metadata::model_capability_metadata(&model.endpoint.0, &model.api_name);
+    let source = ["knowledge", "release_date", "last_updated", "open_weights"]
+        .into_iter()
+        .filter_map(|key| {
+            let value = metadata.as_ref()?.get(key)?;
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                serde_json::Value::Bool(value) => value.to_string(),
+                _ => return None,
+            };
+            Some((key.to_owned(), value))
+        })
+        .collect();
+    ModelPickerDetail {
+        name: model_label(model),
+        context: model.limits.context_window,
+        output: model.limits.max_output_tokens,
+        price: model.pricing.as_ref().map_or_else(
+            || "—".into(),
+            |pricing| {
+                format!(
+                    "{} · {}",
+                    compact_rate_value(pricing.input),
+                    compact_rate_value(pricing.output)
+                )
+            },
+        ),
+        cache_price: model
+            .pricing
+            .as_ref()
+            .map(|pricing| compact_rate_value(pricing.cache_read)),
+        input,
+        badges,
+        source,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelPickerPresentation {
     pub(crate) ids: Vec<ModelId>,
     pub(crate) providers: Vec<String>,
+    pub(crate) details: Vec<ModelPickerDetail>,
     pub(crate) labels: Vec<String>,
     pub(crate) descriptions: Vec<Option<String>>,
 }
@@ -1345,6 +1466,7 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
                 model_label(model),
                 model.id.clone(),
                 model_picker_metadata(model),
+                native_model_detail(model),
             )
         })
         .collect::<Vec<_>>();
@@ -1377,10 +1499,12 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
     let mut presentation = ModelPickerPresentation {
         ids: Vec::with_capacity(rows.len()),
         providers: Vec::with_capacity(rows.len()),
+        details: Vec::with_capacity(rows.len()),
         labels: Vec::with_capacity(rows.len()),
         descriptions: Vec::with_capacity(rows.len()),
     };
-    for (provider, label, id, metadata) in rows {
+    for (provider, label, id, metadata, detail) in rows {
+        presentation.details.push(detail);
         let media = if metadata.media.is_empty() {
             String::new()
         } else {
@@ -1467,6 +1591,8 @@ where
         action: PanelAction::SelectGroupedModel {
             models: presentation.ids,
             providers: presentation.providers,
+            details: presentation.details,
+            scope: None,
         },
     });
     shell.render();
@@ -1495,6 +1621,7 @@ where
                                 presentation.descriptions,
                                 presentation.ids,
                                 presentation.providers,
+                                presentation.details,
                             );
                         }
                         Ok(false) => {} // The launch identity is no longer current.
@@ -1613,6 +1740,8 @@ where
         PanelAction::SelectGroupedModel {
             models: presentation.ids.clone(),
             providers: presentation.providers,
+            details: presentation.details,
+            scope: None,
         },
     )
     .await?

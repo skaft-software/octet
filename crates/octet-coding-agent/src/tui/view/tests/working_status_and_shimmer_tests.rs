@@ -181,8 +181,12 @@ fn compaction_uses_a_timer_without_shimmer() {
     }
 }
 
+/// The `Working` sweep enters from before the margin dot, so the dot shares the
+/// label's frame: it lights as the band crosses it and then returns to its
+/// parked colour. That pulse is what makes the dot read as blinking with the
+/// other activity markers instead of sitting still for the whole run.
 #[test]
-fn working_activity_shimmers_only_the_label_not_its_margin_dot() {
+fn working_activity_shimmer_crosses_its_margin_dot() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
     shell.begin_run("codex");
@@ -201,20 +205,48 @@ fn working_activity_shimmers_only_the_label_not_its_margin_dot() {
         let marker = line.find('•').expect("working margin marker");
         line[..marker + '•'.len_utf8()].to_owned()
     };
-    let before = raw(&shell);
-    {
-        let mut state = shell.state.borrow_mut();
-        assert!(state.has_active_status_shimmer());
-        state.advance_status_shimmer_by(8);
-    }
-    let after = raw(&shell);
+    let label_after_marker = |line: &str| line[marker_prefix(line).len()..].to_owned();
 
-    assert_eq!(marker_prefix(&after), marker_prefix(&before));
-    assert_ne!(after, before, "the Working label still shimmers");
+    // Frame 0 parks the sweep before the dot, so this is the dot at rest.
+    let resting = marker_prefix(&raw(&shell));
+    let resting_label = label_after_marker(&raw(&shell));
+    let mut lit = false;
+    let mut rested_after_pulse = false;
+    let mut label_moved = false;
+    // A `Working` cycle is 19 classic frames and 12 physical ones, so 38 frames
+    // observe the pulse and its return to rest on either field.
+    for _ in 0..38 {
+        {
+            let mut state = shell.state.borrow_mut();
+            assert!(state.has_active_status_shimmer());
+            state.advance_status_shimmer();
+        }
+        let line = raw(&shell);
+        let marker = marker_prefix(&line);
+        if marker == resting {
+            rested_after_pulse = lit;
+        } else {
+            lit = true;
+        }
+        if label_after_marker(&line) != resting_label {
+            label_moved = true;
+        }
+        assert!(marker.ends_with('•'), "the dot keeps its glyph: {marker:?}");
+        assert!(
+            !marker.contains("\x1b[48;") && !marker.contains("\x1b[2m"),
+            "the dot must stay a plain foreground glyph: {marker:?}"
+        );
+        assert!(
+            !line.contains("\x1b[48;"),
+            "status shimmer must stay foreground-only"
+        );
+    }
+    assert!(lit, "the sweep must cross the Working margin dot");
     assert!(
-        !after.contains("\x1b[48;"),
-        "status shimmer must stay foreground-only"
+        rested_after_pulse,
+        "the dot must return to its rest colour once the sweep has passed"
     );
+    assert!(label_moved, "the Working label still shimmers");
 }
 
 #[test]

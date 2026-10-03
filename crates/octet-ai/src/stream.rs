@@ -219,6 +219,7 @@ pub(crate) struct ResponseBuilder {
     pub(crate) requested_service_tier: Option<crate::types::ServiceTier>,
     /// None until a codec settles pricing; Some(None) explicitly means unpriced.
     pub(crate) response_cost: Option<Option<crate::pricing::Cost>>,
+    pub(crate) server_timing: crate::inference::wire::ServerTiming,
     /// The request's exact tool-definition snapshot. `None` is reserved for
     /// direct schema-less codec fixtures; production assembly sets `Some`, even
     /// when the request has no tools, so known response tools are validated
@@ -307,6 +308,7 @@ impl ResponseBuilder {
             pricing,
             requested_service_tier: None,
             response_cost: None,
+            server_timing: Default::default(),
             tool_definitions: None,
             strict_tool_sampling: false,
             response_id: None,
@@ -917,6 +919,7 @@ impl ResponseBuilder {
             response_id: self.response_id,
             responses_output: self.responses_output,
             deferred: self.deferred,
+            inference: Some(self.server_timing.finish()),
             diagnostics: self.diagnostics,
         })
     }

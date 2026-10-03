@@ -84,7 +84,7 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
             // The warning count stays in the model for exit status and telemetry.
             RunOutcome::Completed { elapsed, .. }
             | RunOutcome::CompletedWithWarnings { elapsed, .. } => {
-                completion_text(*elapsed, " · ", outcome.tokens_per_second)
+                completion_text(*elapsed, " · ", outcome.inference.as_deref())
             }
             RunOutcome::Failed { elapsed, reason } => format!(
                 "failed · {}\n{}",

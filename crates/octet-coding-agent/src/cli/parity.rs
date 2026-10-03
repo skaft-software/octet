@@ -365,7 +365,23 @@ pub fn select_scoped_models(
     patterns: &[String],
     available: &[(String, String)],
 ) -> anyhow::Result<Vec<ScopedModel>> {
+    select_scoped_models_with_hasher(
+        patterns,
+        available,
+        std::collections::hash_map::RandomState::new(),
+    )
+}
+
+fn select_scoped_models_with_hasher<S: std::hash::BuildHasher>(
+    patterns: &[String],
+    available: &[(String, String)],
+    hash_builder: S,
+) -> anyhow::Result<Vec<ScopedModel>> {
     let mut scope: Vec<ScopedModel> = Vec::new();
+    // Match patterns case-insensitively, but retain exact model identity for
+    // membership. The vector owns ordering and the first pattern's metadata.
+    let mut selected =
+        std::collections::HashSet::with_capacity_and_hasher(available.len(), hash_builder);
     for pattern in patterns {
         let (head, reasoning) = split_pattern(pattern);
         // A literal reference resolves exactly, so a requested order is never
@@ -377,7 +393,7 @@ pub fn select_scoped_models(
                 pattern: pattern.clone(),
                 reasoning: reasoning.map(str::to_owned),
             };
-            if !scope.iter().any(|existing| existing.id == candidate.id) {
+            if selected.insert(candidate.id.clone()) {
                 scope.push(candidate);
             }
             continue;
@@ -401,7 +417,7 @@ pub fn select_scoped_models(
             continue;
         }
         for candidate in matched {
-            if !scope.iter().any(|existing| existing.id == candidate.id) {
+            if selected.insert(candidate.id.clone()) {
                 scope.push(candidate);
             }
         }
@@ -714,6 +730,99 @@ mod tests {
         assert_eq!(mixed[0].id.0, "gpt-6-astra");
         assert_eq!(model_patterns("a, b").unwrap(), vec!["a", "b"]);
         assert!(model_patterns(" ,").is_err());
+    }
+
+    #[test]
+    fn scoped_model_membership_preserves_case_identity_and_first_pattern_metadata() {
+        let available = vec![
+            ("alpha".into(), "one".into()),
+            ("alpha".into(), "two".into()),
+            ("Alpha".into(), "case".into()),
+            ("beta".into(), "one".into()),
+        ];
+        let patterns =
+            model_patterns("one/alpha:low,ONE/*:high,*:medium,two/alpha:max,case/Alpha:off")
+                .unwrap();
+        let scope = select_scoped_models(&patterns, &available).unwrap();
+        assert_eq!(
+            scope
+                .iter()
+                .map(|model| (
+                    model.id.0.as_str(),
+                    model.pattern.as_str(),
+                    model.reasoning.as_deref(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("alpha", "one/alpha:low", Some("low")),
+                ("beta", "ONE/*:high", Some("high")),
+                ("Alpha", "*:medium", Some("medium")),
+            ]
+        );
+        // Matching is case-insensitive; deduplication remains exact identity.
+        assert!(exact_model_reference("ALPHA", &available).is_none());
+    }
+
+    #[test]
+    fn many_scoped_models_have_a_linear_membership_work_budget() {
+        use std::cell::Cell;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{BuildHasher, Hasher};
+        use std::rc::Rc;
+
+        #[derive(Clone, Default)]
+        struct HashWork(Rc<Cell<usize>>);
+        struct CountedHasher(DefaultHasher, Rc<Cell<usize>>);
+        impl BuildHasher for HashWork {
+            type Hasher = CountedHasher;
+            fn build_hasher(&self) -> CountedHasher {
+                CountedHasher(DefaultHasher::new(), self.0.clone())
+            }
+        }
+        impl Hasher for CountedHasher {
+            fn finish(&self) -> u64 {
+                self.1.set(self.1.get() + 1);
+                self.0.finish()
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.write(bytes);
+            }
+        }
+
+        const COUNT: usize = 4_096;
+        let mut available = (0..COUNT)
+            .rev()
+            .map(|index| (format!("model-{index:05}"), "catalog".to_owned()))
+            .collect::<Vec<_>>();
+        for index in (0..COUNT).step_by(8) {
+            available.push((format!("model-{index:05}"), "catalog".into()));
+        }
+        let first = format!("catalog/model-{:05}:low", COUNT - 1);
+        let patterns = vec![
+            first.clone(),
+            "*:high".into(),
+            "catalog/*:medium".into(),
+            format!("catalog/model-{:05}:max", COUNT - 1),
+        ];
+        let work = HashWork::default();
+        let scope = select_scoped_models_with_hasher(&patterns, &available, work.clone()).unwrap();
+        // Count actual membership hashes instead of elapsed time. Globs still
+        // match/sort normally; overlapping matches must not scan the scope.
+        assert!(work.0.get() >= available.len());
+        assert!(
+            work.0.get() <= 2 * patterns.len() * available.len(),
+            "{} hashes",
+            work.0.get()
+        );
+        assert_eq!(scope.len(), COUNT);
+        assert_eq!(scope[0].id.0, format!("model-{:05}", COUNT - 1));
+        assert_eq!(scope[0].pattern, first);
+        assert_eq!(scope[0].reasoning.as_deref(), Some("low"));
+        for (index, model) in scope[1..].iter().enumerate() {
+            assert_eq!(model.id.0, format!("model-{index:05}"));
+            assert_eq!(model.pattern, "*:high");
+            assert_eq!(model.reasoning.as_deref(), Some("high"));
+        }
     }
 
     /// 5.7 — a literal reference resolves exactly before glob matching, so an

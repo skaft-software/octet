@@ -253,6 +253,27 @@ impl PtyOctet {
         start: (u16, bool, bool),
         fixture: StartupFixture<'_>,
     ) -> Self {
+        Self::spawn_at_with_appearance(
+            binary,
+            mode,
+            api,
+            (color, false),
+            dimensions,
+            start,
+            fixture,
+        )
+    }
+
+    fn spawn_at_with_appearance(
+        binary: &Path,
+        mode: MouseMode,
+        api: Option<&str>,
+        appearance: (bool, bool),
+        dimensions: (u16, u16),
+        start: (u16, bool, bool),
+        fixture: StartupFixture<'_>,
+    ) -> Self {
+        let (color, auto_appearance) = appearance;
         let root = tempfile::tempdir().expect("PTY test tempdir");
         // The CLI resolves the workspace physically. Give HOME the same path
         // identity, including macOS's /var -> /private/var temporary-directory
@@ -434,6 +455,13 @@ impl PtyOctet {
                         .env("COLORFGBG", "15;0");
                 }
             }
+        }
+
+        if auto_appearance {
+            // No reliable environment hint: exercise the real OSC 11 owner.
+            command
+                .env_remove("OCTET_COLOR_SCHEME")
+                .args(["--theme", "auto"]);
         }
 
         // `openpty` alone does not make the slave a controlling terminal. A
@@ -666,9 +694,7 @@ impl PrimaryTrace {
 }
 
 fn resize_frame_end(output: &[u8]) -> Option<usize> {
-    // Old explicit baselines clear/replay; Octet now repairs absolute rows.
-    synchronized_frame_end_containing(output, b"\x1b[1;1H\x1b[2K")
-        .or_else(|| synchronized_frame_end_containing(output, b"\x1b[2J"))
+    synchronized_frame_end_containing(output, b"\x1b[2J")
 }
 
 fn run_primary(binary: &Path, mode: MouseMode) -> PrimaryTrace {
@@ -1697,6 +1723,73 @@ fn real_octet_model_discovery_keeps_startup_editable() {
     }
 }
 
+/// Auto appearance should overlap a slow inventory rather than repaint the
+/// ready frame. The same input owner must retain typing around the OSC reply.
+#[test]
+fn real_octet_auto_background_probe_overlaps_model_discovery() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let api = HeldChatApi::start_for_models(true);
+    let mut octet = PtyOctet::spawn_at_with_appearance(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Auto,
+        Some(&api.url),
+        (true, true),
+        (INITIAL_COLUMNS, INITIAL_ROWS),
+        (2, false, false),
+        StartupFixture::DiscoveringModel("probe", false),
+    );
+    api.wait_for_request(&mut octet, 1);
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        count_bytes(bytes, b"\x1b]11;?\x1b\\") == 1 && nth_frame_end(bytes, 1).is_some()
+    });
+    assert_eq!(
+        terminal_attributes(octet.pty.slave.as_raw_fd()).c_lflag & (libc::ICANON | libc::ECHO),
+        0,
+    );
+    // A complete light-background reply immediately followed by actual input.
+    octet
+        .pty
+        .write_input(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\auto draftX\x7f");
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+    let mut consumed = 0;
+    await_screen(
+        &mut octet,
+        &mut parser,
+        &mut consumed,
+        "auto draft",
+        STARTUP_TIMEOUT,
+    );
+    assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+    api.release.send(()).unwrap();
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        synchronized_frame_end_containing(bytes, b"custom/probe").is_some()
+    });
+    let ready_end = synchronized_frame_end_containing(&octet.pty.output, b"custom/probe").unwrap();
+    let ready_begin = octet.pty.output[..ready_end]
+        .windows(FRAME_BEGIN.len())
+        .rposition(|bytes| bytes == FRAME_BEGIN)
+        .unwrap();
+    let ready_frame = &octet.pty.output[ready_begin..ready_end];
+    assert!(
+        count_bytes(ready_frame, b"auto draft") > 0,
+        "bootstrap lost the draft"
+    );
+    // The compiled Auto light palette's balanced muted gray (#5d5d5d),
+    // before the ready fence; the unknown-background fallback is different.
+    assert!(
+        count_bytes(ready_frame, b"38;2;93;93;93") > 0,
+        "ready frame used the fallback palette: {}",
+        visible_bytes(ready_frame)
+    );
+    assert_eq!(count_bytes(&octet.pty.output, b"\x1b]11;?\x1b\\"), 1);
+    let capture = octet.shutdown_with_input(&[3, 4]);
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    assert!(!uses_alternate_screen(&capture.output));
+}
+
 #[test]
 fn real_octet_short_pane_startup_is_static_and_keeps_the_draft_cursor() {
     let _guard = pty_test_lock()
@@ -2129,8 +2222,8 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
     consumed = octet.pty.output.len();
     assert!(parser.screen().contents().contains("draft remains local"));
     let repair_bytes = &octet.pty.output[resize_start..];
-    assert_eq!(count_bytes(repair_bytes, b"\x1b[2J"), 0);
-    assert_eq!(count_bytes(repair_bytes, b"\x1b[3J"), 0);
+    assert_eq!(count_bytes(repair_bytes, b"\x1b[2J"), 1);
+    assert_eq!(count_bytes(repair_bytes, b"\x1b[3J"), 1);
     assert!(parser.screen().contents().contains(label));
     assert_eq!(
         parser
@@ -2141,8 +2234,8 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
         1,
         "resize must retain one composer and the held activity"
     );
-    // The welcome can already be above the live viewport. Repair must not
-    // retransmit it merely to prove that canonical history is retained.
+    // Canonical replay retains the complete transcript, including rows above
+    // the old viewport, rather than silently dropping them during repair.
     octet.pty.write_input(b"\x1b");
     await_screen(
         &mut octet,
@@ -2646,7 +2739,7 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                     });
                     // Old-width frames may already be queued when the PTY
                     // resizes. Replay them, but apply the new geometry contract
-                    // from the first complete absolute-grid repair, not to those
+                    // from the first complete canonical replay, not to those
                     // in-flight frames. Every subsequent frame is still checked.
                     let resize_end =
                         resize_start + resize_frame_end(&octet.pty.output[resize_start..]).unwrap();

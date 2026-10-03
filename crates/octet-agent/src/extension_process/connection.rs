@@ -58,6 +58,7 @@ pub(super) struct ProcessConnection {
     pub(super) child: Arc<Mutex<Child>>,
     pub(super) pending: PendingRequests,
     pub(super) issued_resource_owners: IssuedResourceOwners,
+    pub(super) remote_ui: Arc<RemoteUiMailbox>,
     pub(super) pending_changed: Arc<Notify>,
     pub(super) child_requests: ChildRequests,
     pub(super) next_id: AtomicU64,
@@ -136,6 +137,7 @@ pub(super) struct PendingRequest {
     pub(super) resource_owner: Option<ExtensionResourceOwner>,
     pub(super) last_progress_sequence: Option<u64>,
     pub(super) tool_call_policy_digest: Option<[u8; 32]>,
+    pub(super) composition_files: Arc<CompositionFiles>,
 }
 
 pub(super) fn tool_call_policy_digest(tool: &str, arguments: &serde_json::Value) -> [u8; 32] {
@@ -157,6 +159,7 @@ pub(super) struct ChildRequest {
     pub(super) parent_request_id: u64,
     pub(super) response_state: Arc<ChildResponseState>,
     pub(super) policy_intent: Option<ExtensionActionIntent>,
+    pub(super) remote_ui: Option<RemoteUiChildRequest>,
 }
 
 pub(super) struct RegisteredChildRequest {
@@ -170,6 +173,7 @@ pub(super) struct ChildResponseState {
     pub(super) state: AtomicU8,
     pub(super) changed: Notify,
     pub(super) cancel_on_response_abort: StdMutex<Option<String>>,
+    pub(super) composition_cancellation: StdMutex<Option<CancellationToken>>,
 }
 
 pub(super) struct ChildResponseClaim {
@@ -213,6 +217,7 @@ impl Drop for ChildResponseClaim {
             let deferred_cancel =
                 lock_std_mutex(&self.response_state.cancel_on_response_abort).take();
             if deferred_cancel.is_some() {
+                cancel_composition_work(&self.response_state);
                 self.response_state
                     .state
                     .store(CHILD_SETTLED, Ordering::Release);
@@ -540,6 +545,7 @@ pub(super) async fn run_protocol_writer(
     draining: Arc<AtomicBool>,
     pending: PendingRequests,
     pending_changed: Arc<Notify>,
+    remote_ui: Arc<RemoteUiMailbox>,
     health: Arc<StdRwLock<ConnectionHealth>>,
     events: broadcast::Sender<ExtensionEvent>,
     child: Arc<Mutex<Child>>,
@@ -578,6 +584,7 @@ pub(super) async fn run_protocol_writer(
                 frame_limit.max_message_bytes()
             );
             closed.store(true, Ordering::Release);
+            remote_ui.clear();
             update_health(
                 &health,
                 ExtensionHealthState::Crashed,
@@ -615,6 +622,7 @@ pub(super) async fn run_protocol_writer(
             }
             Err(message) => {
                 closed.store(true, Ordering::Release);
+                remote_ui.clear();
                 update_health(
                     &health,
                     ExtensionHealthState::Crashed,
@@ -636,6 +644,7 @@ pub(super) async fn run_protocol_writer(
         }
     }
 
+    remote_ui.clear();
     if !closed.swap(true, Ordering::AcqRel) {
         let coordinated = draining.load(Ordering::Acquire);
         let state = if coordinated {
@@ -961,6 +970,7 @@ impl ProcessConnection {
                     child_interaction_progress,
                     resource_owner,
                     last_progress_sequence: None,
+                    composition_files: Arc::new(CompositionFiles::default()),
                     tool_call_policy_digest: (method == methods::TOOL_CALL)
                         .then(|| {
                             Some(tool_call_policy_digest(
@@ -1158,6 +1168,13 @@ impl ProcessConnection {
             .send(Err(PendingError::Cancelled(reason.to_owned())));
         lock_std_mutex(&self.tombstones).insert(id, self.tombstone_ttl);
         self.cancel_children(id, reason);
+        self.remote_ui.settle_parent(id, true);
+        if read_std_lock(&self.protocol).supports(EXTENSION_FEATURE_REMOTE_UI) {
+            if let Some(owner) = &request.resource_owner {
+                lock_std_mutex(&self.issued_resource_owners).remove(owner);
+                self.remote_ui.discard_owner(owner);
+            }
+        }
 
         let frame_was_admitted = request
             .frame_state
@@ -1289,12 +1306,19 @@ impl ProcessConnection {
         }
         let line = ZeroizingBytes(line);
         loop {
-            let response_state = {
+            let (response_state, remote_ui_response) = {
                 let children = lock_std_mutex(&self.child_requests);
                 let Some(child) = children.get(&id) else {
                     return Ok(ChildResponseAdmission::AlreadySettled);
                 };
-                Arc::clone(&child.response_state)
+                let remote_ui_response = child
+                    .remote_ui
+                    .as_ref()
+                    .map(|request| request.prepare_response(response.get("result")))
+                    .transpose()
+                    .map_err(ExtensionRuntimeError::Protocol)?
+                    .flatten();
+                (Arc::clone(&child.response_state), remote_ui_response)
             };
             match response_state.state.compare_exchange(
                 CHILD_ACTIVE,
@@ -1311,14 +1335,9 @@ impl ProcessConnection {
                         abort_cancel: Some((self.writer.clone(), Arc::clone(&self.frame_limit))),
                     };
                     let (completed, completion) = oneshot::channel();
-                    let admission = self.writer.send(WriterFrame {
-                        line: line.0.clone(),
-                        state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
-                        completion: Some(completed),
-                        bus_delivery: None,
-                    });
+                    let admission = self.writer.reserve();
                     tokio::pin!(admission);
-                    tokio::select! {
+                    let permit = tokio::select! {
                         biased;
                         _ = host_shutdown_requested() => return Err(
                             ExtensionRuntimeError::Closed("host is shutting down".into())
@@ -1332,10 +1351,22 @@ impl ProcessConnection {
                             "extension writer closed".into()
                         ))?,
                     };
+                    // Install remote UI geometry before making the acknowledgement
+                    // visible to the child. A reserved slot lets this commit and
+                    // terminal admission run together without an await or RPC.
+                    if let Some(response) = remote_ui_response {
+                        response.commit().map_err(ExtensionRuntimeError::Protocol)?;
+                    }
                     // Writer admission is the sole terminal outcome boundary:
                     // after this non-awaiting step cancellation cannot enqueue
                     // a competing $/cancelRequest for the same child request.
                     claim.mark_admitted();
+                    permit.send(WriterFrame {
+                        line: line.0.clone(),
+                        state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
+                        completion: Some(completed),
+                        bus_delivery: None,
+                    });
                     let completed = tokio::select! {
                         biased;
                         _ = host_shutdown_requested() => return Err(
@@ -1374,6 +1405,7 @@ impl ProcessConnection {
             return false;
         }
         read_std_lock(&self.slots).close();
+        self.remote_ui.clear();
         update_health(&self.health, ExtensionHealthState::Draining, None);
         true
     }
@@ -1522,6 +1554,8 @@ impl ProcessConnection {
 
     pub(super) async fn terminate(&self) {
         self.draining.store(true, Ordering::Release);
+        self.remote_ui.clear();
+        lock_std_mutex(&self.child_requests).clear();
         self.cancel_all_provider_streams("terminated");
         self.remove_provider_owner();
         self.kill_process_group();
@@ -1547,6 +1581,8 @@ impl ProcessConnection {
 
 impl Drop for ProcessConnection {
     fn drop(&mut self) {
+        self.remote_ui.clear();
+        lock_std_mutex(&self.child_requests).clear();
         self.remove_provider_owner();
         lock_std_mutex(&self.provider_streams).clear();
         self.process_group.terminate_now();

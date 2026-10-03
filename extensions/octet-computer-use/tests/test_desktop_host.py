@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -71,7 +72,8 @@ class DesktopHostTests(unittest.TestCase):
         self.assertEqual(app, self.paths.root / "desktop/CuaDriver.app")
         binary = app / "Contents/MacOS/cua-driver"
         self.assertEqual(binary.read_bytes(), b"test driver")
-        self.assertTrue(binary.stat().st_mode & 0o111)
+        if os.name != "nt":
+            self.assertTrue(binary.stat().st_mode & 0o111)
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(self.commands[0][:4], [
             "/usr/bin/codesign", "--verify", "--deep", "--strict",

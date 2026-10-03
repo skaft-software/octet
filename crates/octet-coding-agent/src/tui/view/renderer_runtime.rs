@@ -85,6 +85,7 @@ pub(super) struct SharedState(
     /// Shared with the shell state so a finished workspace walk is detectable
     /// without taking the state lock on every renderer wake.
     Arc<AtomicBool>,
+    Arc<Mutex<super::tern_input::Mailbox>>,
 );
 
 impl SharedState {
@@ -104,6 +105,7 @@ impl SharedState {
             Arc::new(Mutex::new(state)),
             Arc::new(Mutex::new(None)),
             file_index_ready,
+            Arc::new(Mutex::new(super::tern_input::Mailbox::default())),
         )
     }
 
@@ -113,7 +115,13 @@ impl SharedState {
         self.2.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     fn frame_written(&self) {
+        // Component-only tests have no physical terminal viewport receipt.
+        self.frame_written_at(None);
+    }
+
+    pub(super) fn frame_written_at(&self, native_viewport_top: Option<usize>) {
         let geometry = self.1.lock().expect("geometry receipt poisoned").take();
         let Some(geometry) = geometry else {
             return;
@@ -150,8 +158,24 @@ impl SharedState {
             state.painted_report = Some(report.clone());
         }
         if geometry.is_current(&state) {
+            if let Some(top) = native_viewport_top.filter(|_| !state.application_viewport_requested)
+            {
+                // A historical repair may move the physical seam backwards.
+                // Pre-write layout estimates cannot decide which clocks remain
+                // visible after Pi's differential shrink or complete replay.
+                state.native_animation_viewport_top.set(Some(top));
+                state.rendered_animation_addressability = geometry
+                    .animation_block_starts
+                    .iter()
+                    .map(|(id, start)| (*id, *start >= top))
+                    .collect();
+            }
             state.render_geometry = Some(geometry);
         }
+    }
+
+    pub(super) fn native(&self) -> &Arc<Mutex<super::tern_input::Mailbox>> {
+        &self.3
     }
 
     pub(super) fn borrow(&self) -> MutexGuard<'_, ShellState> {
@@ -414,8 +438,8 @@ fn sync_window_title(
 
 /// Flush the retained final frame, restore the process terminal, and
 /// acknowledge once. The caller re-enters with a new renderer on resume.
-fn suspend_terminal(tui: &mut TUI<'_>, acknowledged: mpsc::Sender<()>) {
-    tui.request_render();
+fn suspend_terminal(tui: &mut TUI<'_>, acknowledged: mpsc::Sender<()>, force_render: bool) {
+    tui.request_render_force(force_render);
     tui.stop();
     let _ = acknowledged.send(());
 }
@@ -510,7 +534,7 @@ pub(super) struct RenderLoopOptions {
 // The same loop is exercised with an in-memory terminal and resize probe in
 // tests, without reading/changing the test runner's physical terminal state.
 pub(super) fn render_loop_with_terminal(
-    terminal: impl sexy_tui_rs::Terminal + 'static,
+    mut terminal: impl sexy_tui_rs::Terminal + 'static,
     state: SharedState,
     size: TerminalSize,
     rx: Receiver<RenderCommand>,
@@ -523,15 +547,31 @@ pub(super) fn render_loop_with_terminal(
         alternate_screen,
     } = options;
     state.borrow_mut().render_threaded = true;
+    if super::tern::enabled() {
+        match render_native_loop(&mut terminal, &state, &size, &rx, &synchronize_size) {
+            Ok(()) => return,
+            Err(error) => {
+                // Fallback is explicit and only follows failed negotiation or
+                // protocol I/O. Resizes never create an ANSI presentation.
+                state
+                    .borrow_mut()
+                    .push_block(super::TranscriptBlock::Notice(format!(
+                        "Native Tern rendering unavailable: {error}. Using terminal rendering."
+                    )));
+                terminal.show_cursor();
+            }
+        }
+    }
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
     // policy in `native_scrollback` (not native history) decides which rows stay
     // mutable, so the same live blocks survive the renderer change.
     tui.set_alternate_screen(alternate_screen);
-    // Octet keeps saved-line snapshots; only the live grid is repaired when
-    // historical presentation changes. The generic Pi policy stays unchanged.
+    // Native history must contain the complete transcript after structural
+    // changes. Tail-only repair can discard displaced live rows and output
+    // accepted during resize, so keep Pi's canonical clear/replay policy.
+    // Removing bounded live activity alone must not clear saved lines.
     tui.set_clear_on_shrink(false);
-    tui.set_preserve_scrollback(true);
     // octet's composer uses the terminal cursor itself; unlike Pi's editor, it
     // does not paint a separate inverted cursor cell around CURSOR_MARKER.
     // Restore visibility after panels, resize repairs, and renderer resumes.
@@ -542,11 +582,12 @@ pub(super) fn render_loop_with_terminal(
     )));
     if clear_on_start {
         // A resumed renderer has no copy of the physical cursor/viewport state.
-        // Re-anchor the current grid without duplicating or clearing history.
+        // Clear and replay once rather than append a duplicate transcript.
         tui.request_render_force(true);
     }
+    let mut painted_resize_epoch = state.borrow().resize_epoch;
     tui.start();
-    state.frame_written();
+    state.frame_written_at(tui.rendered_viewport_top());
     // Startup waits for resolved session metadata; a newly resumed renderer
     // writes its title once even if the semantic name has not changed.
     let mut last_title = None;
@@ -558,7 +599,7 @@ pub(super) fn render_loop_with_terminal(
     let mut last_editor_revision = state.borrow().editor.revision();
     let mut last_startup_pending = state.borrow().startup_pending;
     let mut animations = AnimationSchedule::new();
-    let mut resize_schedule = ResizeSchedule::new(state.borrow().resize_epoch);
+    let mut resize_schedule = ResizeSchedule::new(painted_resize_epoch);
     // A suspend is decided by the coalescer but finalized here, where the
     // final frame and the terminal handback belong.
     let mut suspended: Option<mpsc::Sender<()>> = None;
@@ -596,7 +637,8 @@ pub(super) fn render_loop_with_terminal(
         }
         if let Some(RenderCommand::Suspend(reply)) = command {
             sync_window_title(&mut tui, &state, &mut last_title);
-            suspend_terminal(&mut tui, reply);
+            let resized = state.borrow().resize_epoch != painted_resize_epoch;
+            suspend_terminal(&mut tui, reply, resized);
             return;
         }
         if let Some(RenderCommand::DumpFrame(reply)) = command {
@@ -656,7 +698,8 @@ pub(super) fn render_loop_with_terminal(
         ) {
             if let Some(reply) = suspended.take() {
                 sync_window_title(&mut tui, &state, &mut last_title);
-                suspend_terminal(&mut tui, reply);
+                let resized = state.borrow().resize_epoch != painted_resize_epoch;
+                suspend_terminal(&mut tui, reply, resized);
                 return;
             }
             break;
@@ -686,8 +729,13 @@ pub(super) fn render_loop_with_terminal(
             last_startup_pending = shell.startup_pending;
         }
         sync_window_title(&mut tui, &state, &mut last_title);
-        tui.request_render();
-        state.frame_written();
+        // Dimensions alone miss an away-and-back resize whose final size is
+        // unchanged. Capture before writing so a newer resize during the paint
+        // remains pending instead of being mistaken for the rendered geometry.
+        let resize_epoch = state.borrow().resize_epoch;
+        tui.request_render_force(resize_epoch != painted_resize_epoch);
+        state.frame_written_at(tui.rendered_viewport_top());
+        painted_resize_epoch = resize_epoch;
         resize_schedule.painted();
         last_render = Some(Instant::now());
     }
@@ -695,9 +743,104 @@ pub(super) fn render_loop_with_terminal(
     // Stop (or channel closure) can overtake a coalesced Render. Publish the
     // latest semantic state before restoring the terminal, not after it.
     sync_window_title(&mut tui, &state, &mut last_title);
-    tui.request_render();
-    state.frame_written();
+    let resized = state.borrow().resize_epoch != painted_resize_epoch;
+    tui.request_render_force(resized);
+    state.frame_written_at(tui.rendered_viewport_top());
     tui.stop();
+}
+
+/// Native presentation has its own scheduler and the same lifecycle command
+/// channel. In particular it never starts TUI, enters the alternate screen,
+/// clears the grid, or paints a shadow transcript behind the native surface.
+fn render_native_loop(
+    terminal: &mut impl sexy_tui_rs::Terminal,
+    state: &SharedState,
+    size: &TerminalSize,
+    rx: &Receiver<RenderCommand>,
+    synchronize_size: &impl Fn(&SharedState, &TerminalSize) -> bool,
+) -> std::io::Result<()> {
+    let surface = super::tern::TernSurface::start()?;
+    render_native_loop_with_surface(terminal, state, size, rx, synchronize_size, surface)
+}
+
+fn render_native_loop_with_surface(
+    terminal: &mut impl sexy_tui_rs::Terminal,
+    state: &SharedState,
+    size: &TerminalSize,
+    rx: &Receiver<RenderCommand>,
+    synchronize_size: &impl Fn(&SharedState, &TerminalSize) -> bool,
+    mut surface: super::tern::TernSurface,
+) -> std::io::Result<()> {
+    struct InputGuard(Arc<Mutex<super::tern_input::Mailbox>>);
+    impl Drop for InputGuard {
+        fn drop(&mut self) {
+            self.0
+                .lock()
+                .expect("native mailbox poisoned")
+                .accepting_input = false;
+        }
+    }
+    let _input_guard = InputGuard(state.native().clone());
+    state
+        .native()
+        .lock()
+        .expect("native mailbox poisoned")
+        .accepting_input = true;
+    terminal.hide_cursor();
+    let mut last_title = None;
+    let mut last_progress = false;
+    let mut last_resize = Instant::now();
+    loop {
+        if state.file_index_ready() {
+            super::poll_file_index_scan(&mut state.borrow_mut());
+        }
+        if last_resize.elapsed() >= RESIZE_POLL_INTERVAL {
+            synchronize_size(state, size);
+            last_resize = Instant::now();
+        }
+        let (startup_pending, name, active) = {
+            let shell = state.borrow();
+            (
+                shell.startup_pending,
+                shell.session_name.clone(),
+                shell.run.is_active(),
+            )
+        };
+        if !startup_pending && last_title.as_ref() != Some(&name) {
+            terminal.set_title(
+                &name
+                    .as_deref()
+                    .map_or_else(|| "octet".into(), |name| format!("octet · {name}")),
+            );
+            last_title = Some(name);
+        }
+        if active != last_progress {
+            terminal.set_progress(active);
+            last_progress = active;
+        }
+        surface.present(state)?;
+        match rx.recv_timeout(RENDER_INTERVAL) {
+            Ok(RenderCommand::Render) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(RenderCommand::DumpFrame(reply)) => {
+                let _ = reply.send(surface.dump());
+            }
+            Ok(RenderCommand::Suspend(reply)) => {
+                surface.flush(state)?;
+                surface.close(false)?;
+                terminal.set_progress(false);
+                terminal.stop();
+                let _ = reply.send(());
+                return Ok(());
+            }
+            Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                surface.flush(state)?;
+                surface.close(true)?;
+                terminal.set_progress(false);
+                terminal.stop();
+                return Ok(());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1123,7 +1266,7 @@ mod scheduler_tests {
             RESIZE_POLL_INTERVAL,
         ));
         let reply = suspended.take().expect("suspend is handed to the owner");
-        suspend_terminal(&mut renderer, reply);
+        suspend_terminal(&mut renderer, reply, false);
         receive
             .recv_timeout(Duration::from_millis(50))
             .expect("suspend is acknowledged");

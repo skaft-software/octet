@@ -733,6 +733,7 @@ async fn test_guard_event_after_finish() {
             response_id: None,
             responses_output: None,
             deferred: None,
+            inference: None,
             diagnostics: vec![],
         })),
         Ok(StreamEvent::TextStart { index: 0 }),

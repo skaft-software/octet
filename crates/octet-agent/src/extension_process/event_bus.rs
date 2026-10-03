@@ -743,6 +743,10 @@ impl ExtensionEventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension_process::tests::{
+        insert_test_parent, protocol_read_state_for_test, test_resource_owner, wave1_error,
+        wave1_line,
+    };
     use serde_json::json;
 
     fn peer(name: &str, capacity: usize) -> (ProtocolReadState, mpsc::Receiver<WriterFrame>) {
@@ -1233,6 +1237,282 @@ mod tests {
                 "no complete stale frame: {action}"
             );
         }
+    }
+
+    fn remote_ui_test_state(
+        events: broadcast::Sender<ExtensionEvent>,
+    ) -> (ProtocolReadState, mpsc::Receiver<WriterFrame>) {
+        let (mut state, frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        state.remote_ui = Arc::new(RemoteUiMailbox::new(Some(Arc::new(Notify::new()))));
+        let mut protocol = write_std_lock(&state.protocol);
+        protocol.version = EXTENSION_API_VERSION_0_4.into();
+        protocol.features.insert(EXTENSION_FEATURE_REMOTE_UI.into());
+        drop(protocol);
+        insert_test_parent(&state, 7, Some(test_resource_owner("session")));
+        (state, frames)
+    }
+
+    fn commit_remote_ui_test_response(
+        state: &ProtocolReadState,
+        id: u64,
+        result: serde_json::Value,
+    ) {
+        let id = ExtensionRequestId::Number(id);
+        let prepared = lock_std_mutex(&state.child_requests)
+            .get(&id)
+            .unwrap()
+            .remote_ui
+            .as_ref()
+            .unwrap()
+            .prepare_response(Some(&result))
+            .unwrap()
+            .unwrap();
+        prepared.commit().unwrap();
+        settle_child_request(&state.child_requests, &id);
+    }
+
+    fn remote_ui_frame_line(revision: u64) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","method":"ui/frame","params":{
+            "resource_owner":test_resource_owner("session"),"surface_id":"demo","revision":revision,
+            "columns":80,"rows":24,"lines":["\u{1b}[38;2;255;128;0m🦀\u{1b}[0m"]
+        }})).unwrap()
+    }
+
+    #[test]
+    fn remote_ui_requires_api_v04_frontend_and_explicit_negotiation() {
+        for (version, bound, selected) in [
+            ("0.1", true, true),
+            ("0.2", true, true),
+            ("0.4", false, true),
+            ("0.4", true, false),
+        ] {
+            let (events, mut received) = broadcast::channel(8);
+            let (mut state, mut frames) = remote_ui_test_state(events);
+            write_std_lock(&state.protocol).version = version.into();
+            if !selected {
+                write_std_lock(&state.protocol).features.clear();
+            }
+            if !bound {
+                state.remote_ui = Arc::new(RemoteUiMailbox::new(None));
+            }
+            handle_protocol_line(
+                &wave1_line(
+                    100,
+                    methods::UI_OPEN,
+                    serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo"}),
+                ),
+                &state,
+            )
+            .unwrap();
+            assert_eq!(
+                wave1_error(&frames.try_recv().unwrap()),
+                (-32601, "unsupported_feature".into())
+            );
+            assert!(received.try_recv().is_err());
+        }
+        let base = r#"name = "remote-ui-negotiation"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "unused"
+"#;
+        for (version, offered, accepted) in [
+            ("0.2", true, false),
+            ("0.4", false, false),
+            ("0.4", true, true),
+        ] {
+            let manifest = ExtensionManifest::parse(&base.replace("0.4", version)).unwrap();
+            let response = InitializeResponse {
+                api_version: version.into(),
+                tools: vec![],
+                commands: vec![],
+                shortcuts: vec![],
+                tool_renderers: vec![],
+                protocol: Some(ExtensionProtocolResponse {
+                    version: version.into(),
+                    features: API_0_2_REQUIRED_FEATURES
+                        .iter()
+                        .copied()
+                        .chain([EXTENSION_FEATURE_REMOTE_UI])
+                        .map(str::to_owned)
+                        .collect(),
+                    limits: ExtensionProtocolLimits {
+                        max_concurrent_requests: 1,
+                    },
+                    lifecycle_events: vec![],
+                }),
+            };
+            assert_eq!(
+                negotiate_contributions_with_host_services(
+                    &manifest,
+                    response,
+                    1,
+                    OfferedHostServices {
+                        remote_ui: offered,
+                        ..OfferedHostServices::default()
+                    }
+                )
+                .is_ok(),
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn remote_ui_requests_are_typed_owner_fenced_and_cancel_pending_opens() {
+        let (events, mut received) = broadcast::channel(32);
+        let (state, mut frames) = remote_ui_test_state(events);
+        for (id, params, expected) in [
+            (
+                100,
+                serde_json::json!({"surface_id":"demo","title":"Demo"}),
+                "invalid_request",
+            ),
+            (
+                101,
+                serde_json::json!({"parent_request_id":"7","surface_id":"demo","title":"Demo"}),
+                "invalid_request",
+            ),
+            (
+                102,
+                serde_json::json!({"parent_request_id":7,"surface_id":"bad id","title":"Demo"}),
+                "invalid_request",
+            ),
+            (
+                103,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"\u{1b}[2J"}),
+                "invalid_request",
+            ),
+            (
+                104,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"x".repeat(129)}),
+                "bounds_exceeded",
+            ),
+            (
+                105,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo","placement":"overlay"}),
+                "invalid_request",
+            ),
+            (
+                106,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo","placement":"footer","mouse_capture":true}),
+                "invalid_request",
+            ),
+        ] {
+            handle_protocol_line(&wave1_line(id, methods::UI_OPEN, params), &state).unwrap();
+            assert_eq!(
+                wave1_error(&frames.try_recv().unwrap()),
+                (-32602, expected.into())
+            );
+        }
+        handle_protocol_line(&wave1_line(110, methods::UI_OPEN, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("foreign"),"surface_id":"demo","title":"Demo"
+        })), &state).unwrap();
+        assert!(
+            matches!(received.try_recv(), Ok(ExtensionEvent::RemoteUiRequested { owner, operation:
+            ExtensionRemoteUiOperation::Open { placement: crate::ExtensionRemoteUiPlacement::Fullscreen, .. }, .. })
+            if owner == test_resource_owner("session"))
+        );
+        handle_protocol_line(
+            br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":110}}"#,
+            &state,
+        )
+        .unwrap();
+        assert!(!state
+            .remote_ui
+            .contains(&test_resource_owner("session"), "demo"));
+        handle_protocol_line(br#"{"jsonrpc":"2.0","id":7,"result":{}}"#, &state).unwrap();
+        handle_protocol_line(&wave1_line(111, methods::UI_OPEN, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("session"),"surface_id":"demo","title":"Demo","placement":"footer"
+        })), &state).unwrap();
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ExtensionEvent::RemoteUiRequested { .. })
+        ));
+        commit_remote_ui_test_response(&state, 111, serde_json::json!({"columns":80,"rows":24}));
+        handle_protocol_line(&wave1_line(112, methods::UI_CLOSE, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("foreign"),"surface_id":"demo"
+        })), &state).unwrap();
+        assert_eq!(
+            wave1_error(&frames.try_recv().unwrap()),
+            (-32002, "not_foreground_owner".into())
+        );
+        handle_protocol_line(&wave1_line(113, methods::UI_CLOSE, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("session"),"surface_id":"demo"
+        })), &state).unwrap();
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ExtensionEvent::RemoteUiRequested {
+                operation: ExtensionRemoteUiOperation::Close { .. },
+                ..
+            })
+        ));
+        commit_remote_ui_test_response(&state, 113, serde_json::json!({}));
+        assert!(state.remote_ui.take_frames().is_empty());
+        assert!(!state
+            .remote_ui
+            .contains(&test_resource_owner("session"), "demo"));
+    }
+
+    #[tokio::test]
+    async fn remote_ui_frames_wake_latest_mailboxes_not_broadcast_and_enforce_full_boundary() {
+        let (events, mut received) = broadcast::channel(32);
+        let (mut state, _frames) = remote_ui_test_state(events);
+        let wake = Arc::new(Notify::new());
+        state.remote_ui = Arc::new(RemoteUiMailbox::new(Some(Arc::clone(&wake))));
+        handle_protocol_line(
+            &wave1_line(
+                100,
+                methods::UI_OPEN,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo"}),
+            ),
+            &state,
+        )
+        .unwrap();
+        received.try_recv().unwrap();
+        commit_remote_ui_test_response(&state, 100, serde_json::json!({"columns":80,"rows":24}));
+        tokio::time::timeout(Duration::from_millis(100), wake.notified())
+            .await
+            .unwrap();
+        for revision in 0..1000 {
+            handle_protocol_line(&remote_ui_frame_line(revision), &state).unwrap();
+        }
+        tokio::time::timeout(Duration::from_millis(100), wake.notified())
+            .await
+            .unwrap();
+        assert!(
+            received.try_recv().is_err(),
+            "accepted frames never enter the event broadcast"
+        );
+        let latest = state.remote_ui.take_frames();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].revision, 999);
+        let mut exact = remote_ui_frame_line(1000);
+        exact.resize(DEFAULT_EXTENSION_MESSAGE_BYTES - 1, b' ');
+        handle_protocol_line(&exact, &state).unwrap();
+        assert_eq!(state.remote_ui.take_frames()[0].revision, 1000);
+        exact.push(b' ');
+        handle_protocol_line(&exact, &state).unwrap();
+        assert!(state.remote_ui.take_frames().is_empty());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ExtensionEvent::Diagnostic { .. })
+        ));
+        let mut stale: serde_json::Value =
+            serde_json::from_slice(&remote_ui_frame_line(1001)).unwrap();
+        for (field, value) in [
+            ("columns", serde_json::json!(81)),
+            ("revision", serde_json::json!(999)),
+        ] {
+            stale["params"][field] = value;
+            handle_protocol_line(&serde_json::to_vec(&stale).unwrap(), &state).unwrap();
+            assert!(state.remote_ui.take_frames().is_empty());
+            received.try_recv().unwrap();
+        }
+        stale["params"]["resource_owner"]["process_generation"] = 0.into();
+        handle_protocol_line(&serde_json::to_vec(&stale).unwrap(), &state).unwrap();
+        assert!(state.remote_ui.take_frames().is_empty());
     }
 
     #[test]

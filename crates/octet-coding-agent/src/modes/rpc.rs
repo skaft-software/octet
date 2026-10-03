@@ -538,6 +538,9 @@ fn state_value(
         "isStreaming": streaming,
         "isCompacting": false,
         "usageUncertain": (app.agent.session().has_uncertain_usage() || app.agent.session().has_unpriced_usage()),
+        "cacheWarmingMode": app.agent.cache_warming_mode(),
+        "showCacheMissNotices": app.config.show_cache_miss_notices,
+        "cacheWarmingStatus": app.agent.cache_warming_status(),
         "steeringMode": settings.steering_mode,
         "followUpMode": settings.follow_up_mode,
         "sessionFile": app.agent.session().path(),
@@ -921,6 +924,7 @@ async fn drive_run(
     settings: &mut RpcSettings,
 ) -> anyhow::Result<(VecDeque<Value>, bool, HostRunOutcome)> {
     let control = run.control();
+    translator.cache_warming_control = Some(control.clone());
     control.set_steering_mode(settings.steering_mode()).await?;
     control
         .set_follow_up_mode(settings.follow_up_mode())
@@ -1166,6 +1170,8 @@ fn session_stats_value(app: &App) -> Value {
     let mut stats = session_stats_for_session(app.agent.session());
     stats["sessionId"] = json!(session_id(app));
     stats["contextUsage"] = context_usage_value(app);
+    stats["cacheWarmingMode"] = json!(app.agent.cache_warming_mode());
+    stats["cacheWarmingStatus"] = json!(app.agent.cache_warming_status());
     stats
 }
 
@@ -1574,9 +1580,22 @@ async fn run_rpc_loop(
         let inbound = if let Some(command) = deferred.pop_front() {
             RpcInput::Value(command)
         } else {
-            match input.recv().await {
-                Some(input) => input,
-                None => RpcInput::Eof,
+            let mut cache_warming_failed = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = crate::tui::terminal::wait_for_shutdown_signal() => break RpcInput::Eof,
+                    inbound = input.recv() => break inbound.unwrap_or(RpcInput::Eof),
+                    warm = app.agent.drive_cache_warming(), if !cache_warming_failed => {
+                        match warm {
+                            Ok(event) => events::emit_cache_warming_event(&event, &mut output)?,
+                            Err(_) => {
+                                cache_warming_failed = true;
+                                crate::output::stderr!("warning: cache warming stopped; usage may be uncertain. See /cache-warming.");
+                            }
+                        }
+                    }
+                }
             }
         };
         let command = match inbound {
@@ -1715,6 +1734,29 @@ async fn run_rpc_loop(
             continue;
         }
 
+        if app.config.prompt_template.is_none() {
+            if let Some(message) = command.get("message").and_then(Value::as_str) {
+                match crate::commands::handle_cache_warming_input(&mut app, message) {
+                    Ok(true) => {
+                        output.success(
+                            command_id(&command),
+                            "prompt",
+                            Some(json!({
+                                "cacheWarmingMode": app.agent.cache_warming_mode(),
+                                "cacheWarmingStatus": app.agent.cache_warming_status(),
+                            })),
+                        )?;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        command_error(&mut output, &command, error)?;
+                        continue;
+                    }
+                }
+            }
+        }
+
         let id = command_id(&command).map(str::to_owned);
         let (prompt, pending_context_count, user_message) =
             match prepare_prompt(&mut app, &command).await {
@@ -1733,7 +1775,8 @@ async fn run_rpc_loop(
         settings.registered_tools = app.agent.registered_tool_names();
         app.agent
             .set_provider_retries_enabled(settings.auto_retry_enabled);
-        let mut run = match app.agent.prompt(prompt).await {
+        let prior_cache_misses = crate::commands::cache_miss_count(&app);
+        let mut run = match app.agent.prompt_with_responses_prewarm(prompt).await {
             Ok(run) => run,
             Err(error) => {
                 output.error(
@@ -1768,6 +1811,9 @@ async fn run_rpc_loop(
         )
         .await?;
         drop(run);
+        if let Some(notice) = crate::commands::cache_miss_notice(&app, prior_cache_misses) {
+            crate::output::stderr_line(notice);
+        }
         app.executable_extensions
             .settle_turn(extension_turn, &finish)
             .await;

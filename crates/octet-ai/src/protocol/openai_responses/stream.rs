@@ -203,6 +203,8 @@ pub(super) struct ResponsesResponseItemDone {
 #[derive(Deserialize)]
 pub(super) struct ResponsesResponseCompletedBlock {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     service_tier: Option<String>,
     /// Full terminal output is the only authoritative raw replay source. Added
     /// events are intentionally not used because some servers send skeletons.
@@ -214,10 +216,14 @@ pub(super) struct ResponsesResponseCompletedBlock {
     // event without usage still decodes to a default-usage `Finished`.
     #[serde(default)]
     usage: Option<ResponsesUsageDto>,
+    #[serde(default)]
+    timings: crate::inference::wire::RawMetrics,
 }
 
 #[derive(Deserialize)]
 pub(super) struct ResponsesResponseIncompleteBlock {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     service_tier: Option<String>,
     /// Incomplete terminal responses carry the authoritative output produced
@@ -230,6 +236,8 @@ pub(super) struct ResponsesResponseIncompleteBlock {
     incomplete_details: ResponsesIncompleteDetailsDto,
     #[serde(default)]
     usage: Option<ResponsesUsageDto>,
+    #[serde(default)]
+    timings: crate::inference::wire::RawMetrics,
 }
 
 #[derive(Deserialize)]
@@ -1070,6 +1078,20 @@ pub(crate) fn decode_stream_event(
                 emit_event(&mut events, builder, StreamEvent::Usage(u))?;
             }
 
+            if response
+                .id
+                .as_ref()
+                .zip(builder.response_id.as_ref())
+                .is_some_and(|(id, expected)| id != expected)
+            {
+                builder.server_timing.reject_identity();
+            }
+            builder.server_timing.observe(
+                crate::inference::ServerTimingSource::TimingsPredicted,
+                &response.timings,
+                None,
+                true,
+            );
             settle_responses_cost(model, builder, response.service_tier.as_deref())?;
             let resp = builder.finish_mut()?;
             emit_event(&mut events, builder, StreamEvent::Finished(resp))?;
@@ -1095,6 +1117,20 @@ pub(crate) fn decode_stream_event(
                 emit_event(&mut events, builder, StreamEvent::Usage(u))?;
             }
 
+            if response
+                .id
+                .as_ref()
+                .zip(builder.response_id.as_ref())
+                .is_some_and(|(id, expected)| id != expected)
+            {
+                builder.server_timing.reject_identity();
+            }
+            builder.server_timing.observe(
+                crate::inference::ServerTimingSource::TimingsPredicted,
+                &response.timings,
+                None,
+                true,
+            );
             settle_responses_cost(model, builder, response.service_tier.as_deref())?;
             let resp = builder.finish_mut()?;
             emit_event(&mut events, builder, StreamEvent::Finished(resp))?;

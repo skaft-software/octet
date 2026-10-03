@@ -101,7 +101,7 @@ pub(super) fn prompt_cache_options(
                 ttl: Some("30m"),
             })
         }
-        CacheRetention::Short | CacheRetention::WarmShort | CacheRetention::Long => None,
+        CacheRetention::Short | CacheRetention::Long => None,
     }
 }
 

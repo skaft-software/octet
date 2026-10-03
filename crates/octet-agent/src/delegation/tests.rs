@@ -99,6 +99,7 @@ fn test_template(directory: &Path) -> DelegationTemplate {
             tool_schema_budget_bytes: crate::agent::DEFAULT_TOOL_SCHEMA_BUDGET_BYTES,
             max_session_tokens: None,
             max_session_cost_microdollars: None,
+            cache_warming_mode: crate::cache_warmer::CacheWarmer::default().mode_control(),
             provider_retries_enabled: true,
             max_network_wait: None,
         }),
@@ -3228,6 +3229,49 @@ fn extension_child_rejects_unpriced_model_before_session_creation() {
         .unwrap_err();
     assert!(error.contains("trusted model pricing"), "{error}");
     assert!(manager.state.lock().unwrap().records.is_empty());
+}
+
+#[tokio::test]
+async fn delegated_children_inherit_each_cache_warming_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager_with_core_tools(directory.path());
+    let control = manager
+        .template
+        .runtime
+        .read()
+        .unwrap()
+        .cache_warming_mode
+        .clone();
+    let mut children = Vec::new();
+    for (index, mode) in [
+        crate::CacheWarmMode::Off,
+        crate::CacheWarmMode::Streaming,
+        crate::CacheWarmMode::Idle,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        control.send_modify(|policy| policy.set_mode(mode));
+        let session =
+            Session::create(directory.path().join(format!("warm-child-{index}.jsonl"))).unwrap();
+        let child = manager
+            .build_child_agent(
+                session,
+                &AgentIdentity {
+                    id: format!("agent-warm-{index}"),
+                    path: format!("/root/warm-{index}"),
+                    depth: 1,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(child.cache_warming_mode(), mode);
+        children.push(child);
+    }
+    control.send_modify(|policy| policy.set_mode(crate::CacheWarmMode::Off));
+    for child in children {
+        assert_eq!(child.cache_warming_mode(), crate::CacheWarmMode::Off);
+    }
 }
 
 #[tokio::test]

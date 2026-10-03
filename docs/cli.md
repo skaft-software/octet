@@ -24,12 +24,14 @@ defaults that aren't listed here aren't guessed.
 | `--plain` | Chronological output, no cursor control. |
 | `--color VALUE` | Color mode, such as `auto`. Terminal capability fallbacks still apply. |
 | `--mouse auto\|terminal\|off\|app` | Default `auto`. Only `app` captures the mouse and pins the viewport from startup. |
+| `--tern auto\|on\|off` | Default `auto`: octet draws native Tern surfaces only inside a Tern pane. `on` forces negotiation anywhere, `off` always uses the terminal renderer. |
 | `--show-reasoning` | Show reasoning instead of the collapsed default. |
 | `--show-images` | Show tool-result images inline on compatible terminals. Off by default. It isn't upload permission or attachment consent. [Behavior](terminal.md#tool-evidence-and-worker-activity). |
 | `--theme NAME` | Pick the built-in `auto`, `light` or `dark`, or a discovered TOML theme by file stem. [Theme discovery](themes.md). |
 | `--model ID` | Choose the model. Overrides a resumed session's model. |
 | `--reasoning LEVEL`, `--reasoning budget=N` | Reasoning effort, or a token budget where supported. [Levels](providers.md#reasoning). |
 | `--cache-retention VALUE` | Provider cache retention, such as `short`. |
+| `--cache-warming off\|streaming\|idle` | Billable prompt-cache refresh policy; default `streaming`. Overrides `OCTET_CACHE_WARMING` and user configuration. [Details](cache-warming.md). |
 | `--max-turns N` | Limit model turns. |
 | `--workspace PATH` | Workspace root for relative tool paths and the default bash directory. |
 | `--workspace-trusted`, `--trust-workspace` | Load project config, instructions and resources. Can't relax global safety limits or grant extension trust. |
@@ -46,6 +48,14 @@ is unknown, and a known zero is different. Known total-dollar projections
 include the sub-microdollar remainder, and the exact integer cost stays in the
 session ledger. Aggregate scalar costs are known subtotals whenever usage is
 uncertain or an operation is unpriced.
+
+`/cache-warming` reports mode, scheduler/economic decisions and known refresh
+spend; `/cache-warming MODE` persists the user setting. The local command never
+becomes model input. In print/plain it reports on stderr. RPC `get_state` and
+`get_session_stats` expose `cacheWarmingMode` and `cacheWarmingStatus`;
+`get_state` also exposes `showCacheMissNotices`. RPC maintenance emits
+`cache_warmed` with `usage`, exact integer `cost`, and `extensionOverride`,
+without assistant-message or turn events. Its usage is session-only.
 
 ## Tools and limits
 
@@ -254,7 +264,7 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The five executable bundles and the separate Serve app are pinned exactly to the
+The six executable bundles and the separate Serve app are pinned exactly to the
 running host. This checkout's source manifests require `=0.8.2`, and the
 published 0.8.0 bundles require `=0.8.0`. The [0.8.2
 candidate notes](releases/v0.8.2.md) record planned distribution and remaining
@@ -268,7 +278,7 @@ octet extension update NAME
 octet extension remove NAME
 ```
 
-The executable catalog is `octet-browse`, `octet-computer-use`, `octet-mcp`,
+The executable catalog is `octet-browse`, `octet-codemode`, `octet-computer-use`, `octet-mcp`,
 `octet-subagents` and `octet-web-search`. Checksummed bundles install atomically
 under `~/.octet/extensions/<id>`, and a local update must match the managed
 package ID. Nothing runs at install: no hook, dependency setup, activation,

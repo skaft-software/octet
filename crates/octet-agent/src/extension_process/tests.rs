@@ -2,6 +2,9 @@ use super::*;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
+#[path = "cache_warming_tests.rs"]
+mod cache_warming;
+
 const VALID_MANIFEST: &str = r#"
 name = "git-tools"
 version = "0.1.0"
@@ -40,6 +43,7 @@ pub(super) fn protocol_read_state_for_test(
         ProtocolReadState {
             pending: Arc::new(StdMutex::new(HashMap::new())),
             issued_resource_owners: Arc::new(StdMutex::new(HashSet::new())),
+            remote_ui: Arc::new(RemoteUiMailbox::new(None)),
             pending_changed: Arc::new(Notify::new()),
             closed: Arc::new(AtomicBool::new(false)),
             draining: Arc::new(AtomicBool::new(false)),
@@ -95,7 +99,7 @@ pub(super) fn protocol_read_state_for_test(
     )
 }
 
-fn insert_test_parent(
+pub(super) fn insert_test_parent(
     state: &ProtocolReadState,
     id: u64,
     resource_owner: Option<ExtensionResourceOwner>,
@@ -116,11 +120,12 @@ fn insert_test_parent(
             resource_owner,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
 }
 
-fn test_resource_owner(session_id: &str) -> ExtensionResourceOwner {
+pub(super) fn test_resource_owner(session_id: &str) -> ExtensionResourceOwner {
     ExtensionResourceOwner {
         session_id: session_id.into(),
         extension_instance_id: "instance-test".into(),
@@ -128,7 +133,7 @@ fn test_resource_owner(session_id: &str) -> ExtensionResourceOwner {
     }
 }
 
-fn wave1_line(id: u64, method: &str, params: serde_json::Value) -> Vec<u8> {
+pub(super) fn wave1_line(id: u64, method: &str, params: serde_json::Value) -> Vec<u8> {
     let mut line = serde_json::to_vec(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -142,7 +147,7 @@ fn wave1_line(id: u64, method: &str, params: serde_json::Value) -> Vec<u8> {
 
 /// Contract name of one typed JSON-RPC error response, i.e. the first token
 /// of `error.message`, with the numeric code checked alongside it.
-fn wave1_error(frame: &WriterFrame) -> (i64, String) {
+pub(super) fn wave1_error(frame: &WriterFrame) -> (i64, String) {
     let value: serde_json::Value =
         serde_json::from_slice(&frame.line).expect("error JSON response");
     let code = value["error"]["code"].as_i64().expect("numeric error code");
@@ -778,7 +783,9 @@ system_prompt = {system_prompt}
     }
 
     let no_services = OfferedHostServices {
+        remote_ui: false,
         agent_sessions: false,
+        tool_composition: false,
         session_lifecycle: false,
         approvals: false,
         secrets: false,
@@ -2225,11 +2232,13 @@ fn old_operation_rejects_reused_parent_id_from_replacement_generation() {
 
 fn child_request(parent_request_id: u64, state: u8) -> ChildRequest {
     ChildRequest {
+        remote_ui: None,
         parent_request_id,
         response_state: Arc::new(ChildResponseState {
             state: AtomicU8::new(state),
             changed: Notify::new(),
             cancel_on_response_abort: StdMutex::new(None),
+            composition_cancellation: StdMutex::new(None),
         }),
         policy_intent: None,
     }
@@ -2654,6 +2663,7 @@ fn child_arriving_after_parent_cancellation_is_terminal_not_fatal() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
     lock_std_mutex(&state.pending).remove(&7);
@@ -2699,6 +2709,7 @@ fn parent_settlement_cannot_overtake_child_registration() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
     let state = Arc::new(state);
@@ -2778,6 +2789,7 @@ fn non_tool_input_is_delivered_to_an_event_consumer() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
     handle_protocol_line(
@@ -2827,6 +2839,7 @@ fn non_tool_input_fails_closed_without_an_event_consumer() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            composition_files: Arc::new(CompositionFiles::default()),
         },
     );
     handle_protocol_line(
@@ -2850,6 +2863,8 @@ fn prospective_tool_catalog_has_one_input_and_output_schema_byte_budget() {
         output_schema: Some(
             serde_json::json!({"type": "object", "description": "y".repeat(bytes)}),
         ),
+        composition: None,
+        constrained_sampling: None,
     };
     let mut catalog = Vec::new();
     for index in 0..6 {
@@ -3783,6 +3798,8 @@ fn handshake_must_exactly_match_manifest_contribution_names() {
             description: "Undeclared".into(),
             parameters: serde_json::json!({"type": "object"}),
             output_schema: None,
+            composition: None,
+            constrained_sampling: None,
         }],
         commands: vec![CommandDefinition {
             name: "checkpoint".into(),
@@ -3865,6 +3882,8 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
             description: "Echo".into(),
             parameters: serde_json::json!({"type": "object"}),
             output_schema: Some(serde_json::json!({"type": "object"})),
+            composition: None,
+            constrained_sampling: None,
         }],
         commands: vec![CommandDefinition {
             name: "checkpoint".into(),
@@ -4710,7 +4729,7 @@ hooks = ["session_start", "session_end"]
             )
             .await,
         Err(ExtensionRuntimeError::Protocol(message))
-            if message.contains("host-owned API 0.3 lifecycle hooks")
+            if message.contains("host-owned API 0.3/0.4 lifecycle hooks")
     ));
     assert!(matches!(
         process.start_session_hook_binding("session/with/a/path").await,
@@ -7171,22 +7190,22 @@ commands = ["tool"]
 #[test]
 fn menus_need_api_0_2_and_a_declared_command() {
     for (source, expected) in [
-            (
-                "name = \"legacy\"\nversion = \"0.1.0\"\napi_version = \"0.1\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\ncommands = [\"tool\"]\nmenu = true\n",
-                "require extension API 0.2",
-            ),
-            (
-                "name = \"bare\"\nversion = \"0.2.0\"\napi_version = \"0.2\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\nmenu = true\n",
-                "at least one declared command",
-            ),
-        ] {
-            match ExtensionManifest::parse(source) {
-                Err(ExtensionRuntimeError::InvalidManifest(message)) => {
-                    assert!(message.contains(expected), "{message}");
-                }
-                other => panic!("expected {expected:?}, got {other:?}"),
+        (
+            "name = \"legacy\"\nversion = \"0.1.0\"\napi_version = \"0.1\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\ncommands = [\"tool\"]\nmenu = true\n",
+            "require extension API 0.2",
+        ),
+        (
+            "name = \"bare\"\nversion = \"0.2.0\"\napi_version = \"0.2\"\n[entrypoint]\ncommand = \"x\"\n[contributes]\nmenu = true\n",
+            "at least one declared command",
+        ),
+    ] {
+        match ExtensionManifest::parse(source) {
+            Err(ExtensionRuntimeError::InvalidManifest(message)) => {
+                assert!(message.contains(expected), "{message}");
             }
+            other => panic!("expected {expected:?}, got {other:?}"),
         }
+    }
 }
 
 #[cfg(unix)]
@@ -7503,9 +7522,9 @@ command = "dynamic.py"
             diagnostics.push(format!("{event:?}"));
         }
         panic!(
-                "initial live catalog did not publish while the host was idle; health={:?}; events={diagnostics:?}",
-                process.health_snapshot()
-            );
+            "initial live catalog did not publish while the host was idle; health={:?}; events={diagnostics:?}",
+            process.health_snapshot()
+        );
     }
     assert_eq!(
         process
@@ -7651,7 +7670,7 @@ command = "test"
 /// Windows has no executable bit; a script entrypoint is launched through
 /// its interpreter instead (see `windows_script_launch`).
 #[cfg(windows)]
-fn write_executable_script(path: &Path, source: &str) {
+pub(super) fn write_executable_script(path: &Path, source: &str) {
     std::fs::write(path, source).expect("write fixture");
 }
 
@@ -7702,7 +7721,7 @@ fn python_script_detection_uses_the_extension_or_interpreter_line() {
 }
 
 #[cfg(unix)]
-fn write_executable_script(path: &Path, source: &str) {
+pub(super) fn write_executable_script(path: &Path, source: &str) {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::write(path, source).expect("write fixture");
@@ -7728,7 +7747,10 @@ command = "{command}"
     .expect("minimal manifest")
 }
 
-fn trusted_descriptor(directory: &Path, manifest: ExtensionManifest) -> DiscoveredExtension {
+pub(super) fn trusted_descriptor(
+    directory: &Path,
+    manifest: ExtensionManifest,
+) -> DiscoveredExtension {
     DiscoveredExtension {
         manifest,
         manifest_path: directory.join(EXTENSION_MANIFEST_FILENAME),

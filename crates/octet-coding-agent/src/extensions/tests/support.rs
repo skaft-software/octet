@@ -25,6 +25,8 @@ pub(in crate::extensions) fn executable_extension_config(
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,
+        cache_warming: octet_agent::CacheWarmMode::default(),
+        show_cache_miss_notices: false,
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox: crate::config::SandboxPolicy {
             allow_external_paths: false,
@@ -36,6 +38,7 @@ pub(in crate::extensions) fn executable_extension_config(
         color: crate::config::ColorMode::Auto,
         mouse: crate::config::MouseMode::Auto,
         plain: false,
+        tern: crate::config::TernMode::Auto,
         show_images: false,
         session_dir: workspace.join("sessions"),
         compaction: crate::config::CompactionPolicy::default(),

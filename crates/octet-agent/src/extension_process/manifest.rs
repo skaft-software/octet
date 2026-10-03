@@ -270,6 +270,16 @@ impl ExtensionManifest {
                 "compaction_strategy requires extension API 0.4".into(),
             ));
         }
+        if self
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CacheWarmingDecision)
+            && self.api_version != EXTENSION_API_VERSION_0_4
+        {
+            return Err(ExtensionRuntimeError::InvalidManifest(
+                "cache_warming_decision requires extension API 0.4".into(),
+            ));
+        }
         if self.api_version == EXTENSION_API_VERSION_0_1 && self.contributes.providers {
             return Err(ExtensionRuntimeError::InvalidManifest(
                 "provider catalogs require extension API 0.2 or later".into(),
@@ -494,6 +504,9 @@ pub enum ExtensionHook {
     /// Advises on a host-admitted provider retry without changing retry safety
     /// or the host retry budget.
     ProviderRetry,
+    /// Advises on one due refresh without changing deadlines, budget, or
+    /// provider replay eligibility. Available only on API 0.4.
+    CacheWarmingDecision,
     /// Replaces the parent-model local compaction call on vision routes.
     CompactionStrategy,
     /// Proposes one namespaced metadata value for a completed assistant turn

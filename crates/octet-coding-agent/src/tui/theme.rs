@@ -363,6 +363,9 @@ pub struct OctetTheme {
     layout: ThemeLayout,
     metadata: ThemeMetadata,
     source: ThemeSource,
+    // Already validated, bounded source; native palettes resolve both variants
+    // from the same snapshot, without rereading a changed file during paint.
+    native_source: Option<std::sync::Arc<str>>,
 }
 
 /// Semantic roles rendered as thinking prose. Code, diff, and syntax roles
@@ -615,6 +618,7 @@ impl OctetTheme {
                 ..ThemeMetadata::default()
             },
             source: ThemeSource::CompiledDefault,
+            native_source: None,
         }
     }
 
@@ -782,6 +786,29 @@ impl OctetTheme {
         }
     }
 
+    /// Resolve this exact theme snapshot for Tern's native RGB appearance.
+    /// Runtime model styling is applied by the native projector afterwards.
+    pub(crate) fn for_native_background(
+        &self,
+        background: TerminalBackground,
+    ) -> anyhow::Result<Self> {
+        let mut capabilities = self.capabilities;
+        if capabilities.color != ColorDepth::None {
+            capabilities.color = ColorDepth::TrueColor;
+        }
+        let Some(source) = &self.native_source else {
+            return Ok(default_theme_for(background, capabilities));
+        };
+        load_theme_source_for(
+            source,
+            "native theme snapshot",
+            self.source.clone(),
+            &self.metadata.name,
+            capabilities,
+            background,
+        )
+    }
+
     pub fn fg(&self, token: &str, text: &str) -> String {
         if let Some(style) = self.semantic_styles.get(token) {
             return self.inner.apply_style(*style, text);
@@ -870,6 +897,24 @@ impl OctetTheme {
                 .background(Color::Rgb(color.red, color.green, color.blue)),
             text,
         )
+    }
+
+    /// Native equivalent of the default prompt wash's contrast-balanced fill.
+    pub(crate) fn native_prompt_rgb(&self, source: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
+        let target = match self.background {
+            TerminalBackground::Dark => 0.10,
+            TerminalBackground::Light => 0.88,
+            TerminalBackground::Unknown => return None,
+        };
+        let color = balance_to_luminance(
+            Rgb {
+                red: source.0,
+                green: source.1,
+                blue: source.2,
+            },
+            target,
+        );
+        Some((color.red, color.green, color.blue))
     }
 
     /// Whether prompt rows are painted with each turn's stored model colour as
@@ -1431,7 +1476,9 @@ fn load_theme_source_for(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let parsed = theme_schema::parse_theme(source_text, source_name, background)?;
-    build_parsed_theme(parsed, source, fallback_name, capabilities, background)
+    let mut theme = build_parsed_theme(parsed, source, fallback_name, capabilities, background)?;
+    theme.native_source = Some(std::sync::Arc::from(source_text));
+    Ok(theme)
 }
 
 fn load_theme_path_for(

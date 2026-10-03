@@ -8591,6 +8591,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                     message: AssistantMessage { content: vec![AssistantPart::Text("R".into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn, usage: octet_ai::Usage::default(),
                     deferred: None,
+                    inference: None,
                     cost: response_cost, response_id: None, responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
@@ -8624,6 +8625,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                     stop_reason: octet_ai::StopReason::EndTurn,
                     usage: octet_ai::Usage::default(), cost: response_cost, response_id: None,
                     deferred: None,
+                    inference: None,
                     responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
@@ -12165,3 +12167,6 @@ async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
 
 #[path = "agent_run/gpt6.rs"]
 mod gpt6;
+
+#[path = "agent_run/responses_prewarm.rs"]
+mod responses_prewarm;

@@ -165,7 +165,16 @@ it may get a fallback from its historical `prompt_model`, never the currently
 selected model.
 
 `usage` kinds include assistant turns, rejected Responses turns, compaction,
-terminal gates and `delegated_agent`. A delegated record names the child, its
+terminal gates, `cache_warm` and `delegated_agent`. Cache refresh usage counts
+toward exact session totals and ceilings, never assistant-turn statistics or
+model-visible context. Separate payload-free `cache_warm` lifecycle records
+store attempt, route/model, timestamp, state, optional prefix `anchor`, and
+`extension_override`; old records default missing metadata. An unsettled
+`started` record remains uncertain on reopen. `/session` also reports the live
+user-selected warming mode, economic decision and known refresh subtotal.
+See [cache warming](cache-warming.md).
+
+A delegated record names the child, its
 turn and tool-call counts, token totals (counted separately), route and model,
 and exact cost. The child's JSONL stays the detailed transcript. A root mirror
 is written **once before the owning checkpoint**, so session cost, `/cost`,

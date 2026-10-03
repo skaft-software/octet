@@ -84,6 +84,21 @@ model-color wash. `Cards` and `Still` set it to `false`. Unknown background
 profiles are always unpainted, so `prompt_wash` never invents a fill where the
 terminal could be light, dark or custom.
 
+## Native Tern appearance
+
+Inside Tern, octet sends resolved dark and light semantic palettes and reapplies
+the active model accent on selection. Native projection uses the validated
+loaded theme snapshot, so switching models does not re-read or reinterpret
+custom theme files. The composer uses Tern's native editor layout with octet's
+controls and identity. The compiled default supplies a contrast-balanced
+model tint; `prompt_wash = false` preserves the custom user-surface fill, and
+loaded themes retain their selection fill. Stored historical prompt colors
+remain intact, but native prompt cards share the active Tern palette's tint;
+per-turn full-cell fills remain an ANSI-renderer feature. TSP owns fonts and
+widget geometry, so custom layouts and ANSI-only style flags are not exact
+cell-for-cell native contracts. See [octet in Tern](tern.md)
+for compatibility limits and protocol verification.
+
 ## Activity status contrast
 
 `Thinking` and `Working` use model-family foreground colors only, and the
@@ -120,8 +135,12 @@ contrast profile.
 <details>
 <summary>How the OSC 11 background query behaves</summary>
 
-Auto can issue one OSC 11 background query and use a neutral fallback after its
-short detection deadline. The shared input owner keeps recognizing a late reply
+Auto can issue one OSC 11 background query without waiting before model/session
+initialization. An already-arrived reply is applied before the first branded
+frame; readiness never waits for the probe. If no reply has arrived, that frame
+uses the neutral fallback and the existing short post-ready detection wait can
+update it. Explicit Light/Dark choices and no-color output skip the probe.
+The shared input owner keeps recognizing a late reply
 after that deadline, including slowly fragmented bodies once the OSC 11 header
 is recognized. Genuine typing and bracketed paste are kept. Escape and Alt+]
 stay genuine keys: an incomplete opening header has a 250 ms ambiguity timeout,

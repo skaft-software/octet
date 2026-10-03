@@ -276,7 +276,10 @@ async fn bounded_rg_framing_handles_fragmentation_final_records_and_limits() {
     let input = format!("{first}\n{{not json}}\n{second}");
     let reader = tokio::io::BufReader::with_capacity(3, std::io::Cursor::new(input.into_bytes()));
     let (results, truncated, _) = collect_rg_stdout(reader, 10, 4 * 1024).await.unwrap();
-    assert_eq!(results, vec!["a.rs:1  first", "b.rs:2  second"]);
+    assert_eq!(
+        results.iter().map(SearchLine::render).collect::<Vec<_>>(),
+        vec!["a.rs:1  first", "b.rs:2  second"]
+    );
     assert!(!truncated);
 
     let input = format!("{first}\n{second}\n");
@@ -284,7 +287,10 @@ async fn bounded_rg_framing_handles_fragmentation_final_records_and_limits() {
         collect_rg_stdout(std::io::Cursor::new(input.into_bytes()), 1, 4 * 1024)
             .await
             .unwrap();
-    assert_eq!(results, vec!["a.rs:1  first"]);
+    assert_eq!(
+        results.iter().map(SearchLine::render).collect::<Vec<_>>(),
+        vec!["a.rs:1  first"]
+    );
     assert!(truncated);
 
     let input = format!("{first}\n{second}\n");
@@ -295,7 +301,10 @@ async fn bounded_rg_framing_handles_fragmentation_final_records_and_limits() {
     )
     .await
     .unwrap();
-    assert_eq!(results, vec!["a.rs:1  first"]);
+    assert_eq!(
+        results.iter().map(SearchLine::render).collect::<Vec<_>>(),
+        vec!["a.rs:1  first"]
+    );
     assert!(truncated);
 
     let oversized = vec![b'x'; MAX_RG_EVENT_BYTES + 1];
@@ -473,6 +482,76 @@ async fn trusted_local_mode_searches_an_absolute_path() {
         .await
         .unwrap();
     assert!(out.text.contains("outside.txt:1"), "{}", out.text);
+}
+
+#[tokio::test]
+async fn programmatic_search_preserves_fields_context_and_direct_text() {
+    if !rg_available() {
+        eprintln!("skipping: rg not on PATH");
+        return;
+    }
+    let f = fixture();
+    let args = json!({"query": "AudioPayload", "path": "src/api.rs", "context": 1});
+    let direct = SearchTool.execute(args.clone(), &f.ctx()).await.unwrap();
+    assert!(direct.programmatic_content().is_none());
+    let mut ctx = f.ctx();
+    ctx.progress = ctx.progress.for_nested_call();
+    let nested = SearchTool.execute(args, &ctx).await.unwrap();
+    assert_eq!(nested.text, direct.text);
+    assert_eq!(
+        nested.programmatic_content().unwrap(),
+        &json!({
+            "matches": [
+                {"path": "src/api.rs", "line": 1, "text": "pub enum AudioPayload {", "is_context": false, "text_truncated": false},
+                {"path": "src/api.rs", "line": 2, "text": "    Inline,", "is_context": true, "text_truncated": false}
+            ],
+            "total": 1, "truncated": false
+        })
+    );
+    let empty = SearchTool
+        .execute(json!({"query": "NoSuchSymbolAnywhere"}), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(empty.text, "no matches");
+    assert_eq!(
+        empty.programmatic_content().unwrap(),
+        &json!({"matches": [], "total": 0, "truncated": false})
+    );
+    let limited = SearchTool
+        .execute(json!({"query": "AudioPayload", "max_results": 1}), &ctx)
+        .await
+        .unwrap();
+    let value = limited.programmatic_content().unwrap();
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["truncated"], true);
+    assert_eq!(value["matches"].as_array().unwrap().len(), 1);
+    let schema = SearchTool.output_schema().unwrap();
+    assert_eq!(
+        schema["required"].as_array().unwrap().len(),
+        value.as_object().unwrap().len()
+    );
+}
+
+#[tokio::test]
+async fn structured_search_fields_do_not_depend_on_rendered_separators() {
+    let path = "odd:123-456\npath.rs";
+    let text = "needle:5  value\nembedded";
+    let input = format!("{}\n", match_event(path, 7, text));
+    let (results, truncated, total) = collect_rg_stdout(std::io::Cursor::new(input), 10, 4096)
+        .await
+        .unwrap();
+    assert!(!truncated);
+    assert_eq!(total, 1);
+    let result = &results[0];
+    assert_eq!(result.path, path);
+    assert_eq!(result.line, 7);
+    assert_eq!(result.text, text);
+    assert!(!result.is_context);
+    assert!(!result.text_truncated);
+    let (clipped, _) =
+        render_match(&match_event(path, 8, &"a".repeat(MAX_LINE_CHARS + 1))).unwrap();
+    assert!(clipped.text_truncated);
+    assert!(clipped.text.len() < MAX_LINE_CHARS + 100);
 }
 
 #[tokio::test]

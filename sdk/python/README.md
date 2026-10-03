@@ -103,6 +103,47 @@ local compaction on vision routes and validates all frames before persisting a
 checkpoint. See [octet-snap-compact](../../extensions/octet-snap-compact/README.md)
 for a full renderer using the source SDK.
 
+## Cache-warming decision advice (API 0.4)
+
+Declare `hooks = ["cache_warming_decision"]` in the API `0.4` manifest. The
+host offers the matching optional feature only to that declaration. The default
+SDK feature set supports it; an explicit `supported_features` list must include
+it alongside required `request_cancellation` and `content_parts`.
+
+```python
+from typing import Optional
+from octet_extension import CacheWarmingAction, CacheWarmingDecisionPayload, Extension
+
+ext = Extension(api_version="0.4")
+
+@ext.cache_warming_decision
+def advise(payload: CacheWarmingDecisionPayload) -> Optional[CacheWarmingAction]:
+    if payload["decision"]["warm_cost_microdollars"] > 5_000:
+        return "stop"
+    return None  # Preserve the host's economics or an earlier hook's action.
+```
+
+The payload has `decision` (phase, warm/miss cost, continuation probability,
+signed expected savings, economics availability and host action) and `model`.
+Phases are `streaming` and `idle`; monetary fields use microdollars. A two-
+argument handler receives the ordinary owner-fenced execution context as its
+second argument. Prompt text, provider transport and credentials are absent.
+
+A generic `@ext.hook("cache_warming_decision")` handler may return
+`cache_warming_decision("warm")`, `cache_warming_decision("stop")`, or no
+opinion (`None`, `{}`, or a null action). The helper builds the typed wire result
+`{"cache_warming_decision": "warm"}`. Invalid actions fail closed.
+
+Before every due refresh the host invokes registered hooks in order; the last
+returned action wins. Failure, invalid output, timeout, stale generation or no
+opinion preserves the preceding decision. Each process wait is capped at 200 ms
+and is also subject to the host's aggregate hook budget and original refresh
+deadline. Advice never enables warming by itself or changes eligibility,
+spending/attempt limits, cancellation or replay safety. Keep handlers fast and
+local; provider I/O remains host-owned. API `0.1`/`0.2`/`0.3` cannot register this
+hook. See the [runnable local example](../../examples/extensions/cache-warming/README.md)
+and [host contract](../../docs/extensions.md#cache-warming-decision-advice-api-04).
+
 ## Bounded event bus
 
 `octet_extension.event_bus` carries the bounded, extension-scoped bus contract:

@@ -537,9 +537,19 @@ fn status_render_loop_working_is_animated_without_terminal_floods() {
     );
     shell.state.borrow_mut().close_activity_status("Working");
     shell.render();
-    frames.recv_timeout(Duration::from_secs(2)).unwrap();
-    // Any already-published frame may be in the observation queue at settlement.
-    frames.try_iter().for_each(drop);
+    // A queued or in-flight animation frame can precede the settlement paint.
+    // Fence quiescence on the actual screen without Working, not the next write.
+    let settlement_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let (_, _, end) = frames
+            .recv_timeout(settlement_deadline.saturating_duration_since(Instant::now()))
+            .expect("Working settlement was not painted");
+        parser.process(&bytes.lock().unwrap()[consumed..end]);
+        consumed = end;
+        if !parser.screen().contents().contains("Working") {
+            break;
+        }
+    }
     assert!(matches!(
         frames.recv_timeout(Duration::from_millis(250)),
         Err(mpsc::RecvTimeoutError::Timeout)

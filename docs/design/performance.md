@@ -131,27 +131,37 @@ claim is supported.
 
 ## Scroll and resize work boundary
 
-Octet explicitly enables the preserving Pi renderer. Structural repairs emit
-only the live viewport and do not allocate a replay-output buffer proportional
-to retained history or send `ED 2`/`ED 3`. Saved native rows remain emitted
-snapshots; session/source/copy and application-owned navigation retain canonical
-results. Initial native paint and ordinary append still emit complete history,
-including an eagerly materialized resumed branch.
+Octet uses the v0.8.1 canonical Pi clear/replay policy, not the generic library's
+optional saved-snapshot policy. Dimension changes and canonical changes above
+the old viewport emit `ED 2`/`ED 3` and rebuild the complete native document inside
+one synchronized frame, including cursor restoration. Ordinary appends and
+visible-row diffs are unchanged; overlays and disclosure do not unconditionally
+force replay. Terminal-owned resume eagerly materializes the complete branch.
+The bounded PageUp/`--mouse app` semantic viewport is a separate ownership mode,
+not a substitute for complete canonical native history.
 
 Resize notifications settle after 75 ms of quiet with a 150 ms maximum delay;
 composer edits/readiness changes bypass settling. Height-only changes keep
-wrapped block caches, and a resize epoch covers away-and-back dimensions.
-Threaded visual anchors are promoted using the old renderer layout before width
-reflow. Tests scale retained history while bounding repair bytes and verify
-semantic reading positions, saved sentinels, and Kitty placement restoration.
+wrapped block caches. A changed resize epoch forces replay even after an
+away-and-back resize, including final and suspend flushes. Threaded visual
+anchors are promoted using the old renderer layout before width reflow.
+Production-factory continuous VT regressions check every saved and live marker
+after height, width, and away-and-back resize, coalesced output, and historical
+insertion; separate tests cover layout reuse and semantic reading positions.
 
-This removes history-sized **wire replay and replay-output allocation**, not
-all history-sized work. Width reflow, canonical frame construction, semantic
-source mapping, image-bearing full-component fallbacks, and retrospective layout
-can still depend on history. Saved-row preservation does not establish native
-wheel-offset/selection behavior or GPU
-paint smoothness. Keep physical-terminal and long-duration qualification
-separate from library and PTY evidence.
+Post-paint animation visibility uses the renderer's actual native seam and sparse
+active-heading offsets from revision-fenced completed-frame geometry, not a
+monotonic pre-write estimate. A tall-progress → short-result regression checks
+visible `Working` self-waking without resize or more semantic notifications. This
+closes that reproduced freeze path, not every freeze or physical-terminal journey.
+
+Complete structural rebuilds scale **wire replay and replay-output allocation**
+with history and can reset the native reading position. Width reflow, canonical
+frame construction, semantic source mapping, image-bearing full-component
+fallbacks, and retrospective layout can also depend on history. No constant
+live-grid repair bound or saved-snapshot product guarantee is claimed. Keep
+physical-terminal reflow, selection, paint smoothness, and long-duration
+qualification separate from library and PTY evidence.
 
 ## Visual stability is separate from throughput
 
@@ -239,19 +249,25 @@ terminal paint. See [benchmark methods](../benchmarks/README.md).
 
 ### TUI output throughput
 
-The completion line's `tok/s E2E (last turn)` and `/status` throughput divide
-provider-reported output tokens (including reasoning) by the locally observed
-interval from `TurnStarted` to accepted `TurnFinished` for the latest attempt.
-The interval includes initial waiting, hidden thinking, network buffering, and
-local event processing/settlement. It is **not server-side generation speed**
-or a whole-task average. A retry starts a fresh interval; earlier attempts,
-retry backoff, and tool execution between turns are not aggregated into it.
-Missing request timing or zero reported output leaves the rate unavailable.
+The completion line prefers a matching native server generation count/duration.
+Without that, it shows a separately labeled robust decode estimate or explicit
+unavailability, never the E2E average. `/status` keeps request-to-completion E2E
+throughput separate from the decode estimate and native server observation.
 
-Do not divide all reported output tokens by first-visible-delta-to-completion
-time: hidden reasoning can consume most of the output budget before any text
-arrives, inflating that rate by orders of magnitude. Server-side generation
-throughput requires provider-supplied timing with matching token semantics.
+The receive-side reader runs ahead of terminal/agent polling with bounded event
+and byte admission; cancellation aborts it, and saturation suppresses estimates.
+A usage-calibrated median long-baseline fit of visible output progress excludes
+request/prefill and completion-tail time and corrects the first chunk's token
+mass. Hidden reasoning usage is excluded, and an unknown reasoning split cannot
+be assigned to answer-text time. Burst coalescing and slope dispersion reject
+unresolvable timing rather than claiming infinite decode speed.
+
+These are estimates under a token-density/arrival-cadence assumption. A stable
+fit cannot identify arbitrary proxy buffering, hidden GPU stages, preemption or
+speculative execution. Native generation is not automatically GPU-active time
+or post-first-token TPOT. See the unreleased
+[inference measurement contract](../inference-metrics.md) for the algorithm,
+thresholds, coverage and qualification limits.
 
 ## Startup attribution (opt-in)
 
@@ -321,6 +337,38 @@ unchanged-marker rewrite as the dominant part of that phase on this host, not
 HTTP-client construction; it does not show a first-frame speedup or characterize
 an extension-enabled/credentialed launch. The script prints the per-trial
 samples and uses an intentionally credential-free environment.
+
+## Complete startup and resume work
+
+Many-model custom override merging indexes the first exact `api_name` and
+tracks emitted names without repeated catalog scans. Discovery ordering,
+duplicates, configured metadata precedence and authoritative discovered limits
+remain unchanged. Model-scope membership is indexed without changing ordered
+patterns or the first reasoning suffix. Globs still match and sort candidates.
+
+Finished history uses one canonical Markdown parse per materialized block rather
+than provisional streaming stabilization and another final parse. Copy and
+colored-surface rendering reuse that committed document. Hydration still visits
+every accepted item; it skips replacement tracking for rows that have never been
+cached, tracks the moving active subagent summary within a batch, and bulk-builds
+initial/reset persistent publication trees. Ordinary publication retains shared
+unchanged branches. Native startup still paints the full branch, not a tail-only
+shortcut; session decoding, validation, recovery and saved prompt colors are
+unchanged.
+
+Already-normalized terminal frames borrow their bytes, and disabled write logging
+retains no duplicate diagnostics payload. Auto-background detection begins without
+waiting before cold startup work and consumes an arrived reply before ready layout;
+explicit appearances remain authoritative and absent replies cannot hold readiness.
+The ordinary bounded post-ready probe handling remains.
+
+Deterministic regressions cover canonical render/copy parity, chunked CRLF,
+4K-model index work and 1K/10K/100K-block bookkeeping/publication budgets. The
+[offline PTY comparison](../benchmarks/startup-resume-2026-10-02/README.md) separately
+records complete history-ready frames. `history.hydrate` → `frame.ready` excludes
+renderer materialization, layout and terminal writes; do not present its reduction
+as an equivalent end-to-end resume speedup. Full native replay still has
+history-sized layout and output cost.
 
 ## Agent-turn request copy audit
 

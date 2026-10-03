@@ -199,6 +199,16 @@ impl ExecutableExtensions {
             .cloned()
             .collect::<Vec<_>>();
 
+        // One wake/consumer binding for the complete interactive fleet. Plain,
+        // print, RPC, and native hosts never advertise remote UI success.
+        let remote_ui_wake = (matches!(&config.mode, Mode::Interactive)
+            && crate::tui::terminal::TerminalCapabilities::detect(config.color, config.plain)
+                .interactive)
+            .then(|| {
+                INTERACTIVE_REMOTE_UI_WAKE
+                    .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
+                    .clone()
+            });
         let event_bus = Arc::new(ExtensionEventBus::default());
         let (session_lifecycle_service, session_lifecycle_receiver) =
             if active_session_lifecycle_enabled(config)
@@ -269,6 +279,7 @@ impl ExecutableExtensions {
                 let subagents_tool_available =
                     model.spec.capabilities.tools && config.tool_available("subagent_spawn");
                 let extension_flag_values = config.extension_flag_values.clone();
+                let remote_ui_wake = remote_ui_wake.clone();
                 let owner = session.resource_owner_key();
                 let startable_names = startable
                     .iter()
@@ -288,6 +299,11 @@ impl ExecutableExtensions {
                         .activate_eager(startable_names, |entry| {
                             let mut runtime = ExtensionRuntimeConfig::new(workspace.clone());
                             runtime.host_state = state.clone();
+                            runtime.remote_ui = remote_ui_wake.clone();
+                            // Generic request-scoped composition is offered to
+                            // API 0.4 extensions. Authority is attached later,
+                            // only to live model-tool contexts, never commands.
+                            runtime.tool_composition = true;
                             runtime.flag_values = extension_flag_values
                                 .get(&entry.descriptor.manifest.name)
                                 .cloned()
@@ -479,6 +495,7 @@ impl ExecutableExtensions {
         extensions.summaries = summaries;
         extensions.diagnostics.extend(diagnostics);
         extensions.event_bus = Some(event_bus);
+        extensions.remote_ui_wake = remote_ui_wake;
         extensions.session_lifecycle_service = session_lifecycle_service;
         extensions.session_lifecycle_receiver = session_lifecycle_receiver;
         extensions.session_id = host_state.session_id.clone();
@@ -651,7 +668,17 @@ impl ExecutableExtensions {
             }
         }
         if let Some(resource_owner) = self.resource_owner.clone() {
-            let processes = self.processes.clone();
+            let (ui_processes, processes): (Vec<_>, Vec<_>) =
+                self.processes.iter().cloned().partition(|process| {
+                    self.remote_ui_wake.is_some()
+                        && process.supports_feature(EXTENSION_FEATURE_REMOTE_UI)
+                });
+            self.pending_session_hook_starts.extend(
+                ui_processes
+                    .into_iter()
+                    .filter(|process| process.declares_session_hooks())
+                    .map(|process| (process, resource_owner.clone())),
+            );
             match block_on_runtime(async move {
                 start_session_hooks_all(&processes, &resource_owner).await
             }) {
@@ -705,7 +732,35 @@ impl ExecutableExtensions {
         }
     }
 
+    pub(super) fn cancel_session_hook_starts(&mut self) {
+        self.pending_session_hook_starts.clear();
+        for task in self.session_hook_start_tasks.drain(..) {
+            task.abort();
+        }
+    }
+
+    pub(super) fn schedule_session_hook_starts(&mut self) {
+        self.session_hook_start_tasks
+            .retain(|task| !task.is_finished());
+        for (process, owner) in self.pending_session_hook_starts.drain(..) {
+            let tx = self.background_tx.clone();
+            self.session_hook_start_tasks.push(tokio::spawn(async move {
+                // The process owns its bounded request deadline. The shell is
+                // free to service ui/open while this hook awaits its result.
+                if let Err(error) = process.start_session_hook_binding(owner).await {
+                    let _ = tx
+                        .send(ExtensionBackgroundUpdate::Diagnostics(vec![format!(
+                            "warning: extension {:?} session_start hook failed: {error}",
+                            process.descriptor().manifest.name,
+                        )]))
+                        .await;
+                }
+            }));
+        }
+    }
+
     pub(super) fn cancel_background_work(&mut self) {
+        self.cancel_session_hook_starts();
         for task in self.renderer_tasks.drain(..) {
             task.abort();
         }
@@ -768,6 +823,8 @@ impl ExecutableExtensions {
         // owner. Isolated lifecycle processes are stopped below; shared and
         // legacy processes never receive this service.
         self.deactivate_session_lifecycle_driver();
+        self.remote_ui
+            .revoke("the foreground extension binding ended");
         self.cancel_background_work();
         self.settle_session_lifecycle().await;
         for process in &self.processes {

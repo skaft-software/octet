@@ -131,7 +131,7 @@ class SourceDistributionVersionTests(unittest.TestCase):
         for name in ("Cargo.lock", "extensions/octet-serve/Cargo.lock"):
             entries = re.findall(r'name = "(octet-[^"]+)"\nversion = "([^"]+)"',
                                  (self.root / name).read_text())
-            self.assertEqual(len(entries), 5 if name == "Cargo.lock" else 3)
+            self.assertEqual(len(entries), 6 if name == "Cargo.lock" else 3)
             for package, version in entries:
                 with self.subTest(path=name, package=package):
                     self.assertEqual(version, self.version)
@@ -150,7 +150,7 @@ class SourceDistributionVersionTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
                          self.version)
         self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
-        for package in ("octet-browse", "octet-computer-use", "octet-mcp", "octet-subagents", "octet-web-search"):
+        for package in ("octet-browse", "octet-codemode", "octet-computer-use", "octet-mcp", "octet-subagents", "octet-web-search"):
             manifest = (self.root / "extensions" / package / "extension.toml").read_text()
             with self.subTest(package=package):
                 self.assertIn(f'\nversion = "{self.version}"\n', manifest)
@@ -222,9 +222,11 @@ class ReleaseDocumentationTests(unittest.TestCase):
         version = re.search(r'^version = "([^"]+)"$',
                             (SCRIPTS.parent / "Cargo.toml").read_text(), re.MULTILINE).group(1)
         self.assertIn(f"/releases/tag/v{PUBLISHED_NATIVE_VERSION}", text)
-        self.assertIn(f"distribution is **{version}**", text)
+        self.assertIn(f"distribution target is **{version}**", text)
+        self.assertIn("source candidate, not a published release", text)
         self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
-        self.assertIn("npm is published at `@skaft/octet@0.8.2` (launcher plus three signed platform packages, with npm provenance); Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
+        self.assertIn(f"planned npm channel is `@skaft/octet@{version}` (launcher plus three signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
+        self.assertIn(f"**{version} is not published to npm.**", text)
 
 
 if __name__ == "__main__":
