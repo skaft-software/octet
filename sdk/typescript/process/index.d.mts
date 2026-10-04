@@ -50,17 +50,22 @@ export interface RequestContext {
   /** Ephemeral status; throws UnsupportedFeatureError if not offered by the host. */
   progress(message: string, counters?: {current?: number; total?: number; unit?: string}): Promise<void>;
 }
-export interface ToolResult { text: string; isError?: boolean; }
-export interface ToolDefinition<S extends Schema = Schema> {
+export interface ToolResult<T = unknown> { text: string; isError?: boolean; structuredContent?: T; }
+export interface ToolDefinition<S extends Schema = Schema, O extends Schema = Schema> {
   name: string;
   description: string;
   parameters: S & {readonly type: 'object'};
+  outputSchema?: O;
 }
 export interface CommandDefinition { name: string; description: string; usage?: string; }
 export declare class Extension {
   constructor(options?: {maxConcurrentRequests?: number});
-  tool<const S extends Schema>(definition: ToolDefinition<S>, handler:
-    (arguments_: InferSchema<S>, context: RequestContext) => string | ToolResult | Promise<string | ToolResult>): this;
+  tool<const S extends Schema, const O extends Schema = Schema>(definition: ToolDefinition<S, O>, handler:
+    (arguments_: InferSchema<S>, context: RequestContext) => string | ToolResult<InferSchema<O>> | Promise<string | ToolResult<InferSchema<O>>>): this;
+  /** Schema-checked structured value plus explicit model text, at most 64 KiB. */
+  typedTool<const S extends Schema, const O extends Schema>(definition: ToolDefinition<S, O> & {outputSchema: O}, handler:
+    (arguments_: InferSchema<S>, context: RequestContext) => InferSchema<O> | Promise<InferSchema<O>>,
+    project: (value: InferSchema<O>) => string): this;
   command(definition: CommandDefinition, handler:
     (arguments_: string[], context: RequestContext) => string | Promise<string>): this;
   /** Hooks are deliberately unsupported, never silently replaced with no-ops. */

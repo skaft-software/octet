@@ -49,6 +49,30 @@ function's parameter names. For a genuinely argument-free tool, explicitly use
 `{type: 'object', properties: {}, additionalProperties: false}`. Optional argument
 defaults belong in the handler (`{name = 'world'}`), not implicit wire mutation.
 
+## Typed structured output
+
+Use `typedTool` when callers need a value, not a JSON string hidden in text:
+
+```ts
+extension.typedTool({
+  name: 'square', description: 'Square a number',
+  parameters: {type: 'object', properties: {x: {type: 'number'}}, required: ['x'], additionalProperties: false},
+  outputSchema: {type: 'object', properties: {value: {type: 'number'}}, required: ['value'], additionalProperties: false},
+}, ({x}) => ({value: x * x}), result => `Square: ${result.value}`);
+```
+
+Inputs, handler output and projection arguments are inferred from the literal
+schemas. The SDK publishes `output_schema` and validates the returned value before
+emitting `structured_content`. The projection is explicit text, limited to 64 KiB;
+the structured value is bounded to 256 KiB and portable JSON. Invalid/nonfinite
+output produces an error, not successful text containing a broken value.
+`ToolError` remains an intentional domain failure and need not contain output.
+
+For lower-level control, `tool` accepts `outputSchema` and a result
+`{text, structuredContent, isError?}`. An explicit `null` is preserved; missing
+structured content is refused on a successful schema-declared result. No output
+schema means structured content is refused rather than silently untyped.
+
 ## Generate the local manifest
 
 Inside a direct child directory named `hello-tools`:
@@ -118,8 +142,9 @@ is one author source file plus a local package and generated manifest.
 - `extension.onShutdown(async ({reason}) => { /* local cleanup */ })` registers
   one bounded cleanup callback. Reasons are `shutdown` or `transport_lost`.
   It is not a model hook and does not own host cleanup.
-- Hooks, structured output schemas, media/artifacts, dynamic tools, host reverse
-  requests, flags, UI, context contributions and lifecycle subscriptions are
+- Hooks, resource-object authoring, bulk transfer, structured diagnostics,
+  media/artifacts, dynamic tools, host reverse requests, flags, UI, context
+  contributions and lifecycle subscriptions are
   **not implemented by this bounded authoring package**. Registration/manifest
   mismatches are rejected; `extension.hook(...)` throws explicitly. No no-op
   success is fabricated. The lower-level host wire remains live independently.

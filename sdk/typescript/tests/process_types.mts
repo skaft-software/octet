@@ -37,3 +37,15 @@ const value: InferSchema<typeof nested> = {inner: {ok: true}};
 void value;
 const useContext = (ctx: RequestContext) => ctx.resource_owner?.process_generation;
 void useContext;
+extension.typedTool({name: 'square', description: 'Typed result',
+  parameters: {type: 'object', properties: {x: {type: 'number'}}, required: ['x'], additionalProperties: false},
+  outputSchema: {type: 'object', properties: {value: {type: 'number'}}, required: ['value'], additionalProperties: false},
+}, ({x}) => ({value: x * x}), result => {
+  const value: number = result.value;
+  // @ts-expect-error The result projection receives its schema-inferred fields.
+  result.missing;
+  return String(value);
+});
+extension.typedTool({name: 'invalid-output', description: 'Output type check', parameters: {type: 'object'}, outputSchema: {type: 'integer'}},
+  // @ts-expect-error A string is not an integer output.
+  () => 'not a number', String);

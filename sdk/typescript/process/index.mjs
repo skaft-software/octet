@@ -43,10 +43,27 @@ export class Extension {
     this.#concurrency = concurrency;
   }
   tool(definition, handler) {
-    this.#register(this.#tools, definition, handler, ['name', 'description', 'parameters']);
+    this.#register(this.#tools, definition, handler, ['name', 'description', 'parameters', 'outputSchema']);
     const parameters = schema(definition.parameters);
-    this.#tools.set(definition.name, { definition: {name: definition.name, description: definition.description, parameters}, handler });
+    const output = own(definition, 'outputSchema') ? {output_schema: schema(definition.outputSchema, false)} : {};
+    this.#tools.set(definition.name, { definition: {name: definition.name, description: definition.description, parameters, ...output}, handler });
     return this;
+  }
+  /** Return a typed value with an explicit, bounded model-facing projection. */
+  typedTool(definition, handler, project) {
+    if (!own(definition, 'outputSchema') || typeof handler !== 'function' || typeof project !== 'function') {
+      throw new TypeError('typedTool requires outputSchema, handler, and a text projection');
+    }
+    const output = schema(definition.outputSchema, false);
+    return this.tool(definition, async (arguments_, context) => {
+      const value = await handler(arguments_, context);
+      context.throwIfCancelled();
+      json(value, 262144);
+      if (!matches(output, value)) throw new TypeError('Typed output does not match outputSchema');
+      const text = project(value);
+      if (typeof text !== 'string' || Buffer.byteLength(text) > 65536) throw new TypeError('Text projection exceeds 64 KiB');
+      return {text, structuredContent: value};
+    });
   }
   command(definition, handler) {
     this.#register(this.#commands, definition, handler, ['name', 'description', 'usage']);
@@ -277,18 +294,24 @@ class Runtime {
         else throw error;
       }
       ctx.throwIfCancelled();
-      const result = isTool ? this.toolResult(value) : this.commandResult(value);
+      const result = isTool ? this.toolResult(value, registration.definition.output_schema) : this.commandResult(value);
       await this.finish(job, result);
     } catch (error) {
       const code = job.controller.signal.aborted || error instanceof CancelledError ? -32800 : error instanceof RpcError ? error.code : -32603;
       await this.finish(job, undefined, code);
     }
   }
-  toolResult(value) {
+  toolResult(value, outputSchema) {
     if (typeof value === 'string') value = {text: value};
-    if (!object(value) || Object.keys(value).some(key => !['text', 'isError'].includes(key))) throw new RpcError(-32603);
+    if (!object(value) || Object.keys(value).some(key => !['text', 'isError', 'structuredContent'].includes(key))) throw new RpcError(-32603);
     if (typeof value.text !== 'string' || own(value, 'isError') && typeof value.isError !== 'boolean') throw new RpcError(-32603);
-    return {content: [{type: 'text', text: value.text}], is_error: value.isError ?? false};
+    const structured = own(value, 'structuredContent');
+    if (structured) {
+      json(value.structuredContent, 262144);
+      if (!outputSchema || !matches(outputSchema, value.structuredContent)) throw new RpcError(-32603);
+    } else if (outputSchema && !value.isError) throw new RpcError(-32603);
+    return {content: [{type: 'text', text: value.text}], is_error: value.isError ?? false,
+      ...(structured ? {structured_content: value.structuredContent} : {})};
   }
   commandResult(value) {
     if (typeof value !== 'string') throw new RpcError(-32603);
