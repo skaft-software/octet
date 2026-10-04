@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Fix main-screen renderer parity at empty-document Termux resize boundaries;
+  ignore an empty `TERMUX_VERSION`, preserve iTerm2 image rows without text
+  resets, and split large frame writes at UTF-8 boundaries into at most 1 MiB.
+  The write cap does not bound total frame allocation.
 - Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
   `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the
   verified immutable release assets with trusted publishing and registry
