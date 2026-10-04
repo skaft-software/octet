@@ -190,7 +190,9 @@ async fn replacement_commits_once_and_observes_real_checkpoint_then_reopens() {
     drop(agent);
     let reopened = Session::open(dir.path().join("session.jsonl")).unwrap();
     assert_eq!(reopened.head(), Some(checkpoint));
-    assert!(serialize_conversation(&reopened.context().unwrap()).contains("real extension handoff"));
+    assert!(
+        serialize_conversation(&reopened.context().unwrap()).contains("real extension handoff")
+    );
 }
 
 #[tokio::test]
@@ -218,19 +220,33 @@ async fn threshold_veto_allows_in_budget_request_without_reentering_hook() {
     agent.complete("a short next prompt").await.unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), 1);
     assert!(matches!(
-        seen[0],
-        SessionOperation::BeforeCompact {
-            reason: SessionCompactionReason::Threshold,
-            ..
-        }
+        seen.as_slice(),
+        [
+            SessionOperation::ModelTurnStart { run_id: start, turn_index: 0, .. },
+            SessionOperation::BeforeCompact {
+                reason: SessionCompactionReason::Threshold,
+                ..
+            },
+            SessionOperation::ModelTurnEnd {
+                run_id: end,
+                turn_index: 0,
+                assistant_entry,
+                tool_result_entries,
+                ..
+            },
+        ] if start == end
+            && tool_result_entries.is_empty()
+            && serde_json::to_value(agent.session.entry(&assistant_entry.id).unwrap()).unwrap()
+                == serde_json::to_value(assistant_entry).unwrap()
     ));
-    assert!(!agent
-        .session
-        .entries()
-        .iter()
-        .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
+    assert!(
+        !agent
+            .session
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
+    );
 }
 
 #[tokio::test]
@@ -243,22 +259,34 @@ async fn overflow_veto_cannot_bypass_capacity_or_dispatch_provider() {
     assert!(matches!(error, AgentError::ContextExceeded { .. }));
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert!(matches!(
-        seen.lock().unwrap()[0],
-        SessionOperation::BeforeCompact {
-            reason: SessionCompactionReason::Overflow,
-            ..
-        }
+        seen.lock().unwrap().as_slice(),
+        [
+            SessionOperation::ModelTurnStart { turn_index: 0, .. },
+            SessionOperation::BeforeCompact {
+                reason: SessionCompactionReason::Overflow,
+                ..
+            },
+        ]
     ));
+    assert!(
+        !agent
+            .session
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
+    );
 }
 
 #[tokio::test]
 async fn tree_veto_preserves_head_and_no_after_event() {
     let (mut agent, seen, calls, _dir) = agent(Action::Cancel);
     let revision = SessionSourceRevision::capture(&agent.session).unwrap();
-    assert!(agent
-        .navigate_session_tree(None, CancellationToken::default())
-        .await
-        .is_err());
+    assert!(
+        agent
+            .navigate_session_tree(None, CancellationToken::default())
+            .await
+            .is_err()
+    );
     revision.validate(&agent.session).unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert_eq!(seen.lock().unwrap().len(), 1);

@@ -7713,9 +7713,11 @@ fn run_idle_command<'a>(
     reexec: Option<&'a mut crate::reexec::ReexecController>,
     reload: &'a mut crate::reload::ReloadSupervisor,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<IdleCommandOutcome>> + 'a>> {
-    // The complete dispatcher is too large to embed in every caller's future.
+    // Keep both the dispatcher future and its large App owner off callers'
+    // stacks. Boxing only the future still leaves a separate by-value App
+    // temporary in each command branch's unoptimized poll frame.
     Box::pin(run_idle_command_inner(
-        app,
+        Box::new(app),
         shell,
         input,
         command,
@@ -7725,8 +7727,21 @@ fn run_idle_command<'a>(
     ))
 }
 
+// Lazily construct large by-value lifecycle futures in their own boxed poll
+// frame. Boxing only the dispatcher (or only App) still reserves stack slots
+// for every branch's App/future/result temporaries in unoptimized builds.
+fn boxed_idle_app_action<'a, F>(
+    app: Box<App>,
+    action: impl FnOnce(App) -> F + 'a,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<Box<App>>> + 'a>>
+where
+    F: Future<Output = anyhow::Result<App>> + 'a,
+{
+    Box::pin(async move { action(*app).await.map(Box::new) })
+}
+
 async fn run_idle_command_inner(
-    mut app: App,
+    mut app: Box<App>,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     command: Command,
@@ -7869,7 +7884,7 @@ async fn run_idle_command_inner(
         Command::Prompt(None) => shell.show_overlay_text(prompt_templates_text(&app)),
         Command::Answer(instruction) => {
             return Ok(IdleCommandOutcome::Submit {
-                app: Box::new(app),
+                app,
                 input: answer_now_input(instruction),
             });
         }
@@ -7881,7 +7896,7 @@ async fn run_idle_command_inner(
                         shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
                     }
                     return Ok(IdleCommandOutcome::Submit {
-                        app: Box::new(app),
+                        app,
                         input: ComposedInput::from_text(rendered.text),
                     });
                 }
@@ -7890,7 +7905,8 @@ async fn run_idle_command_inner(
             }
         }
         Command::Extensions(commands::ExtensionsSubcommand::Menu) => {
-            app = extension_management_menu(app, shell, input).await?;
+            app = boxed_idle_app_action(app, |app| extension_management_menu(app, shell, input))
+                .await?;
         }
         Command::Extensions(commands::ExtensionsSubcommand::Status) => {
             request_extension_ui(shell, &mut app);
@@ -7901,9 +7917,11 @@ async fn run_idle_command_inner(
                 .revoke_terminal_grant_for_shell(shell, "the extensions are being reloaded");
             let report = reload_resource_processes(&mut app, shell, input).await?;
             let mut messages = extension_reload_notices(reload, report, true);
-            let catalog = app
-                .executable_extensions
-                .synchronize_provider_catalog_report(&mut app.catalog, &app.client);
+            let catalog = {
+                let app = &mut *app;
+                app.executable_extensions
+                    .synchronize_provider_catalog_report(&mut app.catalog, &app.client)
+            };
             messages.extend(provider_reload_notices(reload, catalog, true));
             if messages.is_empty() {
                 shell.notice("no running executable extensions to reload");
@@ -7974,7 +7992,7 @@ async fn run_idle_command_inner(
             }
             request_extension_ui(shell, &mut app);
         }
-        Command::Exit => return Ok(IdleCommandOutcome::Quit(Box::new(app))),
+        Command::Exit => return Ok(IdleCommandOutcome::Quit(app)),
         Command::Login(provider) => match validate_provider(provider.as_deref()) {
             Ok("codex") => login_codex(&mut app, shell).await?,
             Ok("custom") => login_custom(shell)?,
@@ -7982,25 +8000,31 @@ async fn run_idle_command_inner(
             Err(e) => shell.error(e.to_string()),
         },
         Command::Setup => {
-            app = setup_provider(app, shell, input).await?;
+            app = boxed_idle_app_action(app, |app| setup_provider(app, shell, input)).await?;
         }
         Command::Logout(provider) => match validate_provider(provider.as_deref()) {
             Ok("codex") => {
-                app = logout_codex(app, shell, input).await?;
+                app = boxed_idle_app_action(app, |app| logout_codex(app, shell, input)).await?;
             }
             Ok("custom") => {
-                app = logout_custom(app, shell, input).await?;
+                app = boxed_idle_app_action(app, |app| logout_custom(app, shell, input)).await?;
             }
             Ok(_) => unreachable!(),
             Err(e) => shell.error(e.to_string()),
         },
         Command::New => {
-            app = transition(app, shell, input, Reconfig::NewSession).await?;
+            app = boxed_idle_app_action(app, |app| {
+                transition(app, shell, input, Reconfig::NewSession)
+            })
+            .await?;
             shell.notice("created a new session");
         }
         Command::Resume(Some(id)) => {
             let path = app.sessions.path_by_id(&id)?;
-            app = transition(app, shell, input, Reconfig::Resume(path)).await?;
+            app = boxed_idle_app_action(app, |app| {
+                transition(app, shell, input, Reconfig::Resume(path))
+            })
+            .await?;
             shell.notice("resumed session");
         }
         Command::Resume(None) => {
@@ -8012,21 +8036,28 @@ async fn run_idle_command_inner(
             )
             .await?
             {
-                app = transition(app, shell, input, Reconfig::Resume(path)).await?;
+                app = boxed_idle_app_action(app, |app| {
+                    transition(app, shell, input, Reconfig::Resume(path))
+                })
+                .await?;
                 shell.notice("resumed session");
             }
         }
         Command::Fork => {
-            app = fork_session(app, shell, input).await?;
+            app = boxed_idle_app_action(app, |app| fork_session(app, shell, input)).await?;
         }
         Command::Clone => {
-            app = clone_session(app, shell, input).await?;
+            app = boxed_idle_app_action(app, |app| clone_session(app, shell, input)).await?;
         }
         Command::Fast(requested) => apply_fast_command(&mut app, shell, requested),
         Command::Model(Some(id)) => {
-            app = transition(app, shell, input, Reconfig::Model(ModelId(id))).await?;
+            app = boxed_idle_app_action(app, |app| {
+                transition(app, shell, input, Reconfig::Model(ModelId(id)))
+            })
+            .await?;
         }
         Command::Theme(requested) => {
+            let app = &mut *app;
             configure_terminal_theme(
                 shell,
                 input,
@@ -8041,7 +8072,10 @@ async fn run_idle_command_inner(
             let level = ThinkingLevel::parse(&level)?;
             let reasoning =
                 requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
-            app = select_thinking(app, shell, input, reasoning, None).await?;
+            app = boxed_idle_app_action(app, |app| {
+                select_thinking(app, shell, input, reasoning, None)
+            })
+            .await?;
         }
         Command::Debug => {
             let rendered = shell.dump_rendered_frame().await;
@@ -8049,14 +8083,20 @@ async fn run_idle_command_inner(
         }
         Command::Model(None) => {
             if let Some(model) = open_model_picker(&mut app, shell, input).await? {
-                app = transition(app, shell, input, Reconfig::Model(model)).await?;
+                app = boxed_idle_app_action(app, |app| {
+                    transition(app, shell, input, Reconfig::Model(model))
+                })
+                .await?;
             }
         }
         Command::Thinking(None) => {
             if let Some((mode, level)) = thinking_configuration_picker(&app, shell, input).await? {
                 let reasoning =
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
-                app = select_thinking(app, shell, input, reasoning, Some((mode, level))).await?;
+                app = boxed_idle_app_action(app, |app| {
+                    select_thinking(app, shell, input, reasoning, Some((mode, level)))
+                })
+                .await?;
             }
         }
         Command::Verbose(value) => {
@@ -8082,7 +8122,7 @@ async fn run_idle_command_inner(
             // the process image. `/reload --force` is handled before
             // `commands::parse` and is the explicit host path.
             let (next, plan, applied) = reload_resources_with_reexec(
-                app,
+                *app,
                 shell,
                 input,
                 reexec,
@@ -8093,12 +8133,9 @@ async fn run_idle_command_inner(
             if applied {
                 shell.notice("resources reloaded");
             }
-            app = next;
+            app = Box::new(next);
             if let Some(plan) = plan {
-                return Ok(IdleCommandOutcome::Reexec {
-                    app: Box::new(app),
-                    plan,
-                });
+                return Ok(IdleCommandOutcome::Reexec { app, plan });
             }
         }
         Command::Skills(commands::SkillsSubcommand::Load(id)) => {
@@ -8106,14 +8143,14 @@ async fn run_idle_command_inner(
                 shell.error(format!("Failed to invoke skill '{id}': {error}"));
             } else {
                 return Ok(IdleCommandOutcome::Submit {
-                    app: Box::new(app),
+                    app,
                     input: ComposedInput::from_text(format!("/skill:{id}")),
                 });
             }
         }
         Command::Skills(commands::SkillsSubcommand::Reload) => {
-            let (next, applied) = reload_resources(app, shell, input).await?;
-            app = next;
+            let (next, applied) = reload_resources(*app, shell, input).await?;
+            app = Box::new(next);
             if applied {
                 request_extension_ui(shell, &mut app);
                 shell.notice("skills and prompt templates reloaded");
@@ -8132,7 +8169,7 @@ async fn run_idle_command_inner(
             apply_scoped_models_command(&mut app, shell, sub).await;
         }
         Command::Bash(escape) => {
-            return run_idle_shell_escape(app, shell, input, escape).await;
+            return run_idle_shell_escape(*app, shell, input, escape).await;
         }
         Command::Unknown(text) => {
             if let Some(arguments) = subagents_command_arguments(&text, &app.executable_extensions)
@@ -8146,7 +8183,7 @@ async fn run_idle_command_inner(
                             shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
                         }
                         return Ok(IdleCommandOutcome::Submit {
-                            app: Box::new(app),
+                            app,
                             input: ComposedInput::from_text(rendered.text),
                         });
                     }
@@ -8193,7 +8230,7 @@ async fn run_idle_command_inner(
         }
     }
     shell.render();
-    Ok(IdleCommandOutcome::Continue(Box::new(app)))
+    Ok(IdleCommandOutcome::Continue(app))
 }
 
 #[derive(Default)]

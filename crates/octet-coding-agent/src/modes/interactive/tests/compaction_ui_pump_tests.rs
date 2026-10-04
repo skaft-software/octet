@@ -52,7 +52,7 @@ for line in sys.stdin:
         break
 "#;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_and_requested_compaction_pump_real_before_and_after_hook_composer_requests() {
     for requested in [false, true] {
         let (directory, mut app) = crate::compaction::tests::app_for_estimate();
@@ -101,7 +101,7 @@ hooks = ["session_before_compact", "session_compact"]
                 summary.name == "compaction-ui-probe" && summary.running
             }),
             "{}",
-            app.executable_extensions.status_summary()
+            app.executable_extensions.inspect_text()
         );
         app.agent = octet_agent::Agent::new(octet_agent::AgentConfig {
             client: app.client.clone(),
