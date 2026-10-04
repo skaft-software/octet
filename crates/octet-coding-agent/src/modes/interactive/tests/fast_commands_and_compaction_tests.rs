@@ -258,6 +258,48 @@ fn unpriced_usage_marks_local_and_native_compaction_reports_after_reopen() {
     }
 }
 
+#[test]
+fn compaction_report_follows_active_ancestry_past_metadata_leaves() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("report-ancestry.jsonl")).unwrap();
+    let first_kept = session
+        .append(EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("retained".into())],
+            },
+        )))
+        .unwrap();
+    let active = session
+        .compact("active summary", first_kept.clone())
+        .unwrap();
+    let leaf = session
+        .append(EntryValue::Config {
+            model: None,
+            reasoning: None,
+            reasoning_mode: None,
+        })
+        .unwrap();
+    session.checkout(first_kept.clone()).unwrap();
+    session.compact("abandoned summary", first_kept).unwrap();
+    session.checkout(leaf).unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    report_compaction(
+        &mut shell,
+        &CompactionOutcome::Compacted { elided: 1 },
+        &session,
+    );
+    assert_eq!(shell.debug_error(), None);
+    assert!(shell.debug_snapshot().contains("Context compacted"));
+    assert_eq!(
+        crate::compaction::latest_compaction(&session).unwrap().id,
+        active
+    );
+    shell.show_compaction_summary();
+    let snapshot = shell.debug_snapshot();
+    assert!(snapshot.contains("active summary"), "{snapshot}");
+    assert!(!snapshot.contains("abandoned summary"), "{snapshot}");
+}
+
 #[tokio::test]
 async fn fast_local_summary_cost_ceiling_fails_closed_before_network_io() {
     let server = wiremock::MockServer::start().await;

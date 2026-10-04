@@ -1083,12 +1083,42 @@ async fn compact_interactively<S>(
     if force {
         app.config.compaction.keep_recent_tokens = 1;
     }
-    let result = await_with_ctrl_c(
-        crate::compaction::attempt_compaction_with_instructions(app, instructions),
-        shell,
-        input,
-    )
-    .await;
+    let result = if app.config.compaction.mode == CompactionMode::NativeResponses {
+        // Native Responses retains its separate non-token manual API.
+        await_with_ctrl_c(
+            crate::compaction::attempt_compaction_with_instructions(app, instructions),
+            shell,
+            input,
+        )
+        .await
+    } else {
+        let cancellation = octet_agent::CancellationToken::default();
+        let mut compaction = Box::pin(crate::compaction::attempt_compaction_with_cancellation(
+            app,
+            instructions,
+            cancellation.clone(),
+        ));
+        match await_with_ctrl_c(compaction.as_mut(), shell, input).await {
+            Some(result) => Some(result),
+            None => {
+                // Do not drop the owner mid-hook/provider request: drive its
+                // cancellation through accounting and policy restoration. A
+                // post-commit failure must still report the retained checkpoint.
+                cancellation.cancel();
+                match compaction.await {
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<AgentError>(),
+                            Some(AgentError::Cancelled)
+                        ) =>
+                    {
+                        None
+                    }
+                    result => Some(result),
+                }
+            }
+        }
+    };
     app.config.compaction.keep_recent_tokens = original_keep;
     // Clear the transient activity on every result before publishing the one
     // settled frame, including errors and cancellation of a held-open response.
@@ -3946,13 +3976,12 @@ fn report_compaction(shell: &mut InteractiveShell, outcome: &CompactionOutcome, 
                     )
                 },
             );
-            let summary = session
-                .head()
-                .and_then(|head| session.entry(&head))
-                .and_then(|entry| match &entry.value {
+            let summary = crate::compaction::latest_compaction(session).and_then(|entry| {
+                match &entry.value {
                     octet_agent::EntryValue::Compaction { summary, .. } => Some(summary.clone()),
                     _ => None,
-                });
+                }
+            });
             if let Some(summary) = summary {
                 shell.compaction_marker(format!("Context compacted · {detail}"), summary);
             } else {

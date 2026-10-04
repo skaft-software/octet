@@ -92,6 +92,7 @@ async fn held_open_manual_compaction_keeps_input_live_and_settles_all_outcomes()
             let force = columns == 46;
             let original_keep = if force { 99 } else { 1 };
             app.config.compaction.keep_recent_tokens = original_keep;
+            let original_agent_policy = app.agent.compaction_token_policy();
             let before = app.agent.session().entries().len();
             let mut shell = InteractiveShell::test_shell();
             let was_verbose = shell.verbose_tools();
@@ -130,6 +131,7 @@ async fn held_open_manual_compaction_keeps_input_live_and_settles_all_outcomes()
                 }
             }
             assert_eq!(app.config.compaction.keep_recent_tokens, original_keep);
+            assert_eq!(app.agent.compaction_token_policy(), original_agent_policy);
             assert_eq!(shell.pending(), "draft while API waits");
             assert_ne!(shell.verbose_tools(), was_verbose);
             let expected_requests = match outcome {

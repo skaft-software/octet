@@ -78,3 +78,21 @@ Actual tree frontend change points: `extensions/serve/runs.rs` `SessionCommand::
 ## Verification / limits
 
 Core tests in `compaction/session_operations/tests.rs`; seven agent integration tests in `agent/compaction/session_tests.rs`; two metadata snapshot tests in the process leaf module. No compilation/test execution claimed yet (parent owns Cargo). Native branch-summary records/replacement, replacement-session setup handles, callback-operation cancellation receipts, and arbitrary Pi compaction details remain incomplete. Durable append bounds remain 16KiB / 256 nodes; no silent widening. No default provider fallback after veto/error.
+
+## Follow-up: live frontend wiring — 2026-10-04
+
+The coding frontend's `compaction.rs` now delegates local manual compaction to
+`Agent::compact_session_with_instructions`; the duplicate summary/commit path
+is removed. Forced retention reaches the Agent and its original policy is
+restored after settlement. Interactive cancellation cancels and settles the
+owned future instead of dropping it, and reporting follows the active ancestry
+past metadata appended by after-hooks. Native Responses keeps its separate API.
+
+Serve's live `SessionCommand::Checkout` now awaits `navigate_session_tree`.
+A veto with no mutation retains the owner; a failed hook after mutation retires
+the owner for reopening rather than rolling back durable work or reusing an
+old-branch model. Existing guarded rebuild/rollback paths remain.
+
+Targeted frontend tests are authored but **not compiled or run**. The performance
+agent now owns the heavy-build slot; only source review, rustfmt and whitespace
+checks ran for this follow-up. Earlier driver tests do not qualify these callers.
