@@ -1,4 +1,4 @@
-# Tern RAIL implementation and incomplete qualification
+# Tern RAIL — unfinished implementation and verification
 
 **Status:** Authorized RAIL implementation; independent presentation deliverable,
 not complete native parity and not release-ready qualification.
@@ -263,15 +263,21 @@ than inventing states:
 
 - **S36 — Close/interrupt/draft clear/dispatch, EOF/errors/signals,
   suspend/external editor, resize/focus/hide/eviction/credits/fallback.
-  Preserved; unverified.** `tern.rs`, `tern_input.rs`, `tui/keymap.rs`,
+  Changed/preserved; partially tested.** `tern.rs`, `tern_input.rs`, `tui/keymap.rs`,
   `tui/terminal/lifecycle.rs`: one input/render owner, retained history,
   bounded coalescing and explicit fallback. Hidden presentation is suspended
   even with remaining credit. A focus counter arriving during materialization
   cannot be consumed without reasserting focus (deterministic regression).
-  PTY resize/focus/visibility/eviction passes; actual Tern pane-return fresh input
-  remains intermittent/unqualified, despite one passing run. Retained pixels
-  alone are not recovery. Escape/Enter remain context-owned; every applicable
-  recovery and cancellation-settlement journey still requires qualification.
+  Resize reasserts the current owner even without a visibility transition.
+  Native startup enables/restores focus reporting; supported pointer-focus
+  requests cannot change the host-selected owner. The shared frontend uses the
+  supported level-triggered tty reader, avoiding a stranded readiness edge
+  during resize/protocol bursts. Idle teardown cannot wait for new input.
+  Three actual Tern 0.4.0 runs passed nine owned split/return cycles and nine
+  pointer-reselection cases with fresh input visible and echoed by the host.
+  Earlier failures are retained; OS-app switching, IME, 0.3.1 and the remaining
+  recovery/cancellation-settlement matrix are still untested. Retained pixels
+  alone remain insufficient proof.
 - **S37 — Accessibility/IME, intrinsic diff/image actions, typography/zoom,
   window/file/system permissions. Preserved terminal ownership;
   blocked/unverified dimensions.** `tern.rs`, `crates/octet-tern/src/wire.rs`:
@@ -309,12 +315,12 @@ campaign was undertaken by this documentation deliverable.
 
 Current follow-up (partial evidence, not family-wide passes):
 
-- TSP client crate: **23 unit tests and 1 doc test passed**.
-- TUI library lane: **936 passed, 1 deliberately ignored** fixture exporter.
+- TSP client crate: **24 unit tests and 1 doc test passed**.
+- TUI library lane: **938 passed, 1 deliberately ignored** fixture exporter.
 - Native auth owner fixtures: **7 passed**; auth progress/CLI policy fixtures:
   **6 passed**. No OAuth, real credential save or browser authorization was run.
 - Active tool input: **6 passed**.
-- Real octet binary / synthetic TSP terminal: **29 passed, 0 ignored**.
+- Real octet binary / synthetic TSP terminal: **31 passed, 0 ignored**.
   This covers fresh/model-less/resumed/forked startup, local reports,
   source-backed catalogue filtering/rename persistence, resumed/forked export,
   Unicode/UTF-16 editing, remapped/disabled controls, ordinary and
@@ -336,11 +342,23 @@ Current follow-up (partial evidence, not family-wide passes):
 - Separate consecutive-character native rename lane: **10 checks passed**, owned
   serve exited 0; individual edits without explicit frame waits persisted every
   character through the real host driver. This is not IME/full keyboard coverage.
-- Separate actual pane-return runs **failed fresh-input admission**, including
-  after pointer reselect; a single earlier passing run does not clear this
-  intermittent lifecycle gate. These failures are retained, not part of the
-  57 passing checks. IME/accessibility, consent geometry, real auth/grants/workers
-  and Tern 0.3.1 remain unqualified. Accessibility snapshots alone are not passes.
+- Shared-reader ANSI regressions: **6 late-terminal-reply PTY tests passed**;
+  all **20 startup-frame PTY tests passed across two bounded invocations**
+  (19-test slice plus the 30-layout repeated-redraw test); **1 non-TTY ownership
+  test passed**. A preliminary waiting-drain experiment failed three startup
+  interactions; comparison with the prior reader and corrected no-idle-wait drain
+  was retained. One corrected-run HTTP-arrival timeout occurred before terminal
+  startup; its isolated rerun and subsequent 19-test slice passed. That failure
+  remains recorded rather than being silently classified as inherited.
+- Actual pane-return repair: **three independent 18-check runs passed**, owned
+  serves exited 0. Each asserted owned original/new pane IDs and three split/
+  return cycles plus composer pointer reselection; fresh edits appeared in both
+  native editor and host output. The stalled pre-fix observer's blocked write and
+  unread ingress, plus earlier failures after pointer reselect, remain private.
+  Supported TSP pointer-focus admission has unit/synthetic-PTY evidence; these
+  actual pointer runs did not emit that event and are not proof of its emission.
+  OS-app switching, IME/accessibility, consent geometry, real auth/grants/workers
+  and Tern 0.3.1 remain untested. Accessibility snapshots alone are not passes.
 - Formatting and whitespace checks passed. Full workspace and strict Clippy
   were not rerun as passing checks; their inherited blockers remain separate.
 
@@ -358,8 +376,8 @@ Private screenshots, ingress records and logs are deliberately not published.
 
 ## Exact remaining gate
 
-Qualify the implemented auth and rename routes in every applicable dimension;
-resolve the intermittent actual pane-return input failure without hiding it.
+Complete the implemented auth and rename test matrices; extend the repaired
+0.4.0 pane-return path to the remaining lifecycle/platform/version cases.
 Active-session export passes resumed/forked PTY cases and a fresh-session actual
 native journey without backend edits; its full error/mutation matrix still needs
 qualification. Native paste intent, same-length stale

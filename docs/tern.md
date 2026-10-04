@@ -210,8 +210,13 @@ published only after the exact frame acknowledgement, and is rejected after an
 unpainted selection or panel change. This acknowledgement does **not** establish
 native geometric visibility; consent visibility remains unqualified.
 
-The frontend remains the sole stdin owner. It reassembles and routes TSP
-replies, credit, appearance, disclosure, picker and editor gestures. Editor
+The frontend remains the sole stdin owner. It uses crossterm's supported
+level-triggered tty reader so coincident resize signals and protocol traffic
+cannot strand an unread tty readiness edge. Polling stays synchronous on that
+owner, without a detached read across terminal handoff. Teardown only polls the
+decoder for existing input; it must not wait and consume a rebuilt owner's fresh
+command. The frontend reassembles and routes TSP replies, credit, appearance,
+disclosure, picker and editor gestures. Editor
 gesture offsets are checked UTF-16 boundaries before conversion to UTF-8;
 stale lengths and invalid ranges are rejected. The wire has no independent
 source edit revision: same-length stale edits remain a qualification gap, not
@@ -291,15 +296,21 @@ percentages or measurements are invented when the host does not supply them.
 
 A hidden pane suspends presentation without failing the renderer: credit
 starvation and rejected background frames while hidden are not timeouts, and
-returning to the tab forces a frame and re-asserts native keyboard focus.
-An OS focus return that arrives with no TSP `Visible` event (another app or
-overlay was in front, e.g. screen recording) takes the same recovery path via
-the frontend's `FocusGained` signal: the next frame is forced, `composer.editor`
-focus is re-asserted, and the draft is refreshed. A focus return arriving during
-materialization is not consumed by a draft-only refresh. Hidden presentation
-also remains suspended when unused frame credit exists. Actual pane-return
-fresh-input admission remains intermittently unqualified; synthetic focus tests
-or retained pixels do not establish that journey.
+returning to the tab forces a frame and reasserts the current host-selected input
+owner. Native startup enables standard terminal focus-change reporting and
+restores it on teardown. An OS focus return without a TSP `Visible` event uses
+the frontend's `FocusGained` signal. Resize also reasserts focus when visibility
+has not changed: pane layout can replace the input target without hiding it.
+Supported TSP `focus {sf,id}` requests only reassert the current host-selected
+node; they cannot enter an underlying composer, secret field or consent body.
+A focus return arriving during materialization is not consumed by a draft-only
+refresh. Hidden presentation remains suspended with unused credit.
+
+The previously reproduced pane-return stall is repaired in the tested Tern
+0.4.0 developer runtime: three independent runs passed nine owned split/return
+cycles and nine composer pointer-reselection checks, proving fresh edits in the
+native editor and host output. Earlier failed runs remain retained. This is not
+OS-app switching, IME or Tern 0.3.1 evidence; those journeys remain untested.
 Resize, zoom and appearance events preserve native ownership and retained
 identity. Explicit eviction reopens the surface and replays its regions. Credit
 exhaustion coalesces changes until acknowledgements arrive; negotiation,
@@ -359,9 +370,9 @@ running an ANSI TUI. Extension-defined styled rows also remain native ANSI
 content until those extension contracts provide semantic nodes.
 
 All 37 existing octet native surface families remain required. Native auth
-progress and semantic session rename are implemented but not fully qualified;
-intermittent actual pane-return input remains a blocker; export's full mutation/
-error matrix remains unqualified.
+progress and semantic session rename are implemented but their full test matrices
+are unfinished; repaired pane-return input has current 0.4.0 runtime evidence,
+not full lifecycle/version coverage; export's mutation/error matrix is unfinished.
 Native paste intent, revision-complete composer/temporary edits, semantic
 navigation/search/selection and pointer geometry remain gaps.
 Tern 0.3.1 is untested. This is an independent RAIL implementation deliverable,

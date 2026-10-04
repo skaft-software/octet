@@ -317,6 +317,34 @@ fn resize_motion_and_appearance_keep_the_surface_and_transcript_identity() {
 }
 
 #[test]
+fn resize_without_visibility_transition_reasserts_current_owner_focus() {
+    for temporary_owner in [false, true] {
+        let (mut shell, mut surface, output) = setup(2);
+        if temporary_owner {
+            shell.begin_tool_input("Owned input", false);
+        }
+        surface.flush(&shell.state).unwrap();
+        let focus = surface.sent.focus.clone();
+        ack(&shell, 1);
+        surface
+            .observe(&Incoming::Event(Event::Resize {
+                sf: Some(SURFACE.into()),
+                cols: 120,
+                cell: None,
+                visible: Some(true),
+            }))
+            .unwrap();
+        surface.flush(&shell.state).unwrap();
+        assert_eq!(output.messages("f").len(), 2);
+        assert!(output.last_frame()["ops"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(["focus", focus])));
+        assert_eq!(output.messages("o").len(), 1);
+    }
+}
+
+#[test]
 fn model_switch_preserves_stored_prompt_color_instead_of_using_the_new_accent() {
     let (shell, mut surface, output) = setup(2);
     shell.state.borrow_mut().push_block(TranscriptBlock::User {

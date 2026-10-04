@@ -268,14 +268,18 @@ impl TernSurface {
                 self.set_visible(*visible);
             }
             Incoming::Event(Event::Theme { .. } | Event::Motion { .. }) => self.last_key = None,
-            Incoming::Event(Event::Resize {
-                visible: Some(visible),
-                ..
-            }) => {
-                self.set_visible(*visible);
+            Incoming::Event(Event::Resize { sf, visible, .. })
+                if sf.as_deref().is_none_or(|id| id == SURFACE) =>
+            {
+                if let Some(visible) = visible {
+                    self.set_visible(*visible);
+                }
+                // Pane layout can replace Tern's input target without a Visible
+                // transition or an OS FocusGained event. Reassert this surface's
+                // current owner; an unchanged retained tree is not input recovery.
+                self.force_focus = true;
                 self.last_key = None;
             }
-            Incoming::Event(Event::Resize { .. }) => self.last_key = None,
             Incoming::Event(Event::Toggle {
                 sf, id, collapsed, ..
             }) if sf == SURFACE => {
@@ -1151,6 +1155,25 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             .retain(|child| child.id != "work.elapsed");
     }
     Some(node)
+}
+
+/// Pointer focus may only reassert the input owner already selected by the
+/// host. It cannot enter an underlying composer, secret field or consent body.
+pub(super) fn focus_target(shell: &ShellState) -> Option<String> {
+    if shell.tool_input_prompt.is_some() {
+        return super::tern_prompt::focus(shell);
+    }
+    if let Some(panel) = &shell.panel {
+        let owns_native_focus = match panel {
+            super::Panel::SessionPicker { picker } => !picker.confirming_delete,
+            super::Panel::ReadOnlyDocument { .. } => true,
+            _ => super::tern_picker::interactive(panel),
+        };
+        return owns_native_focus
+            .then(|| super::tern_picker::focus(shell))
+            .flatten();
+    }
+    (editor_focused(shell) && !shell.startup_pending).then(|| "composer.editor".into())
 }
 
 pub(super) fn editor_focused(shell: &ShellState) -> bool {
