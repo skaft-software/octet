@@ -17,6 +17,46 @@ accounting, durable source and authority boundaries. Native ANSI content is a
 deliberate compatible projection, not an ANSI TUI running below Tern; it does
 not establish a missing semantic input route.
 
+## Delivery boundary and deferred backlog
+
+The user has deferred the remaining work into independently reviewable tickets,
+**not one requirement for the next release**. [PR #503](https://github.com/skaft-software/octet/pull/503)
+submits the tested first implementation slice for [PR #480](https://github.com/skaft-software/octet/pull/480)
+to decide whether to integrate. Reviewing or accepting that slice does not
+assert complete S01–S37 parity or release readiness. No merge or release is
+implied by this ledger.
+
+[Tracker #504](https://github.com/skaft-software/octet/issues/504) owns the remaining
+scope below. These are unscheduled backlog items, with no release milestone.
+The family-wide gates elsewhere in this document remain completion criteria for
+the full redesign, not an automatic demand to put every follow-up in 0.8.2.
+
+| Follow-up | Bounded outcome | Families | Dependencies |
+| --- | --- | --- | --- |
+| [#505](https://github.com/skaft-software/octet/issues/505) | Native editor undo and stale-edit protection | S11, ordinary S34 | — |
+| [#506](https://github.com/skaft-software/octet/issues/506) | Atomic paste and attachment-chip editing | S13, submitted-media S20 | #505 |
+| [#507](https://github.com/skaft-software/octet/issues/507) | Stable reader and native navigation | S08, S24 navigation | — |
+| [#508](https://github.com/skaft-software/octet/issues/508) | Transcript search, selection, copy and links | S24 search, S25 | #507 |
+| [#509](https://github.com/skaft-software/octet/issues/509) | Onboarding and authentication journeys | S03, S04 | — |
+| [#510](https://github.com/skaft-software/octet/issues/510) | Visible consent and private prompt ownership | S31–S35 | — |
+| [#511](https://github.com/skaft-software/octet/issues/511) | Session discovery and durable mutations | S09, S10 | #510 consent |
+| [#512](https://github.com/skaft-software/octet/issues/512) | Model/settings/completion interactions | S05–S07, S12 | — |
+| [#513](https://github.com/skaft-software/octet/issues/513) | Streaming conversation and queued-run lifecycle | S14–S17, S21–S23 | — |
+| [#514](https://github.com/skaft-software/octet/issues/514) | Tools, diffs and output/media disclosure | S18–S20 | — |
+| [#515](https://github.com/skaft-software/octet/issues/515) | Extension menus and custom UI ownership | S26–S28 | #510 authority |
+| [#516](https://github.com/skaft-software/octet/issues/516) | Worker activity and inspection | S29, S30 | #510 authority |
+| [#517](https://github.com/skaft-software/octet/issues/517) | Startup, recovery and terminal versions | S01, S02, S36, version S37 | — |
+| [#518](https://github.com/skaft-software/octet/issues/518) | Accessibility, IME and responsive controls | S37; cross-cutting | #505 composition |
+
+The immediate daily-use milestone is an authorized actual-Tern coding session
+through configuration, composition, streamed response, tool inspection/approval,
+interruption, history navigation and resumption without lost drafts/payloads,
+invisible approvals or stuck input. Individual follow-ups can land independently;
+this journey does not erase the remaining family-specific requirements. Existing
+shared scrollback, streaming, media, theme and deletion issues are referenced by
+the native-specific tickets rather than replaced. Real OAuth, credential/grant
+changes and paid-provider execution still require separately approved scope.
+
 ## Reading this ledger
 
 **Changed** means source-level RAIL adapter work, **preserved** means an existing
@@ -381,6 +421,13 @@ Current follow-up (partial evidence, not family-wide passes):
   moves the caret to the end before asserting exact native text.
 - After edit opt-in, pane-return **18 checks** and rapid rename **10 checks**
   passed again, with both owned serves exiting 0.
+- A local macOS arm64 release-profile build of code commit `555e8d13` completed
+  with `--release --locked --offline --jobs 3` for both `octet` and `octet-host`.
+  The copied, uninstalled `octet` binary passed version/help smoke checks and
+  the actual-Tern 0.4.0 runtime **61**, pane-return **18** and rapid-rename **10**
+  checks again; all owned serves exited 0. The build emitted 13 warnings. This
+  is an optimized source tryout, not a signed/published or release-qualified
+  distribution, and does not clear inherited baseline failures.
 - Formatting and whitespace checks passed. Full workspace and strict Clippy
   were not rerun as passing checks; their inherited blockers remain separate.
 
