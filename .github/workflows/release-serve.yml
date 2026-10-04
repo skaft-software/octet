@@ -27,6 +27,8 @@ env:
 jobs:
   resolve:
     name: Resolve canonical release
+    # Never allocate a default-branch cache scope for manually selected source.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
@@ -190,7 +192,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.resolve.outputs.source_commit }}
+          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: apps/web/.node-version
@@ -227,7 +229,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.resolve.outputs.source_commit }}
+          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
         with:
@@ -305,9 +307,12 @@ jobs:
     needs: [resolve, security]
     runs-on: ubuntu-24.04
     steps:
+      # Dispatch builds execute only their immutable triggering commit, which
+      # resolve requires to equal the canonical source. Only dedicated tag
+      # pushes may select a different source for a workflow-only tooling repair.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.resolve.outputs.source_commit }}
+          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
       # Extension release bundles and their smoke-test launcher are built from
@@ -414,7 +419,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.resolve.outputs.source_commit }}
+          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
           fetch-depth: 0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -526,7 +531,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.resolve.outputs.source_commit }}
+          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: octet-extension-test-launcher

@@ -243,43 +243,39 @@ impl SessionLeafProcessLease {
     /// Owned, borrow-free existing `hook/run` future on the pinned connection.
     /// Adds top-level `session_leaf` to that request. This does not invent a new
     /// hook kind; the hook must already be actually declared and implemented.
-    pub fn run_hook(
+    pub async fn run_hook(
         self,
         hook: ExtensionHook,
         payload: serde_json::Value,
         context: ExtensionExecutionContext,
-    ) -> impl std::future::Future<Output = Result<ExtensionHookOutput, ExtensionRuntimeError>>
-           + Send
-           + 'static {
-        async move {
-            if hook.is_session_hook()
-                || !self.process.inner.contributions.hooks.contains(&hook)
-                || context.resource_owner.as_ref() != Some(&self.bound.snapshot.owner)
-                || !lock_std_mutex(&self.connection.session_leaf.bound)
-                    .as_ref()
-                    .is_some_and(|bound| Arc::ptr_eq(bound, &self.bound))
-            {
-                return Err(ExtensionRuntimeError::Protocol(
-                    "private session leaf hook authority changed or hook unavailable".into(),
-                ));
-            }
-            let mut params = serde_json::to_value(HookRequest {
-                hook,
-                payload,
-                context,
-            })
-            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
-            params["session_leaf"] = serde_json::to_value(&self.bound.snapshot)
-                .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
-            self.process
-                .request_typed_on_connection(
-                    Arc::clone(&self.connection),
-                    methods::HOOK_RUN,
-                    &params,
-                    Some(self.bound.snapshot.owner.clone()),
-                )
-                .await
+    ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
+        if hook.is_session_hook()
+            || !self.process.inner.contributions.hooks.contains(&hook)
+            || context.resource_owner.as_ref() != Some(&self.bound.snapshot.owner)
+            || !lock_std_mutex(&self.connection.session_leaf.bound)
+                .as_ref()
+                .is_some_and(|bound| Arc::ptr_eq(bound, &self.bound))
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "private session leaf hook authority changed or hook unavailable".into(),
+            ));
         }
+        let mut params = serde_json::to_value(HookRequest {
+            hook,
+            payload,
+            context,
+        })
+        .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        params["session_leaf"] = serde_json::to_value(&self.bound.snapshot)
+            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        self.process
+            .request_typed_on_connection(
+                Arc::clone(&self.connection),
+                methods::HOOK_RUN,
+                &params,
+                Some(self.bound.snapshot.owner.clone()),
+            )
+            .await
     }
 }
 

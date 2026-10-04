@@ -139,6 +139,31 @@ If refreshing, retain and review the complete source matching its digest and
 update all three projections plus the receipt together. Do not describe the older
 review examples as a review of this newer snapshot.
 
+### 2026-10-03 finish-gate refresh
+
+The current outputs pin public `https://models.dev/api.json` SHA-256
+`de67b09d75ca4597d687ae12eae7ea3f845e7e9c03f18cbc6a9868d2f41d02be`.
+The complete 5,312,470-byte response is retained locally with the finish-gate
+receipts at `octet-rc/finish-20261003.VGvsCj/models-dev-api.json`; it is not a
+published release artifact. All four outputs were regenerated together with the
+existing generator and reproduced with `--source ... --check`.
+
+Relative to the preceding `25c0f9...` outputs, route membership and names are
+unchanged: 916 pricing routes, 406 names and 939 capability routes. Thirteen
+OpenRouter price records change. For example, `~deepseek/deepseek-flash-latest`
+now quotes $0.003/$2.40/$0.003 per million input/output/cache-read tokens, and
+`moonshotai/kimi-k3` quotes $0.499/$13/$0.49. These are exact aggregator quotes,
+not direct-provider tariffs or availability evidence.
+
+Two OpenRouter output limits change to 943,718 tokens within their unchanged
+1,048,576-token contexts: `z-ai/glm-5.3` (previously 131,072) and
+`deepseek/deepseek-v4-pro-0813` (previously 393,216). Modalities, reasoning,
+tool and structured-output assertions are unchanged. Endpoint precedence,
+extraction exclusions and direct DeepSeek's unverified pricing remain intact.
+Seven offline metadata-tooling tests and 13 release-gate tests passed for this
+refresh; final live freshness must still be rerun when the release source is
+frozen.
+
 The following historical closeout details apply only to the `404d33...` source.
 Relative to its preceding PR head, those outputs contain:
 

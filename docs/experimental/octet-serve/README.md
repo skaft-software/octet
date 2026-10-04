@@ -1,8 +1,8 @@
 # Experimental `octet serve`
 
-This guide describes experimental Serve in octet **0.8.0**. Install the
-[version-matched package](#install-or-update-a-package), or use a reviewed
-source checkout:
+This guide describes experimental Serve in the octet **0.8.2 source candidate**.
+0.8.2 release assets are not published. Use a reviewed source checkout now, or a
+[matching local package](#install-or-update-a-package):
 
 ```console
 cargo run --features serve -- serve --port 0
@@ -16,10 +16,11 @@ This starts a headless host for the launch workspace and opens its local web
 client. `--port 0` picks an available port. `--no-open` skips opening the
 browser, and `--web-root <directory>` selects a development asset directory.
 
-The [0.8.0 release notes](../../releases/v0.8.0.md) describe the changes and
-link the current signed-asset and public-install evidence. The historical
+The [0.8.2 candidate record](../../releases/v0.8.2.md) describes the changes and
+remaining qualification, not signed publication or public-install evidence.
+The historical [0.8.0](../../releases/v0.8.0.md),
 [0.7.6](../../releases/v0.7.6.md) and [0.7.4](../../releases/v0.7.4.md) records
-keep their own evidence, and those results don't qualify 0.8.0. Serve is still
+keep their own evidence, and those results don't qualify 0.8.2. Serve is still
 experimental. Live-provider and native-host audio checks are optional and **NOT
 RUN** in this source review. Package smoke tests don't qualify private-LAN
 access, real terminal or SSH behavior, endurance, or every graphical media,
@@ -116,9 +117,9 @@ come from the source, and recovery hasn't been qualified on the current version.
 
 ## Install or update a package
 
-With octet `0.8.0`, install or update by name only after matching Serve assets
-are published and verified on the exact GitHub release. This checkout doesn't
-claim a 0.8.0 publication. Once that gate is met:
+With octet `0.8.2`, install or update by name only after matching Serve assets
+are published and verified on the exact GitHub release. 0.8.2 is an unpublished
+source candidate; these catalog commands apply only once that gate is met:
 
 ```console
 octet extension install octet-serve
@@ -128,13 +129,13 @@ octet extension update octet-serve
 For a reviewed, matching local archive instead:
 
 ```console
-octet extension install --path ./octet-serve-0.8.0-TARGET.tar.gz
+octet extension install --path ./octet-serve-0.8.2-TARGET.tar.gz
 octet extension list
 octet serve
 ```
 
 Local archives don't need GitHub network access. The package requires exactly
-`=0.8.0`. Replace `TARGET` with `x86_64-unknown-linux-gnu`,
+`=0.8.2`. Replace `TARGET` with `x86_64-unknown-linux-gnu`,
 `x86_64-apple-darwin` or `aarch64-apple-darwin`. Linux musl isn't supported. A
 local build or archive isn't evidence of signed publication.
 

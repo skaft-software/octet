@@ -252,13 +252,7 @@ pub trait ProviderContextSessionWait: Send {
         _request: &octet_ai::Request,
         _context: &ProviderContextProjectionContext,
     ) -> Option<
-        std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = Result<Option<ProviderContextProjection>, String>>
-                    + Send
-                    + 'static,
-            >,
-        >,
+        futures_util::future::BoxFuture<'static, Result<Option<ProviderContextProjection>, String>>,
     > {
         None
     }

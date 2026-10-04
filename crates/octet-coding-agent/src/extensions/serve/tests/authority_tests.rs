@@ -264,7 +264,7 @@ fn serve_authority_rebuild_preserves_launch_gates_tools_and_runtime_domain() {
             .unwrap()
             .domain()
             .clone();
-        let mut rebuilt = rebuild_app(app, None, None, None, None).unwrap();
+        let mut rebuilt = rebuild_worker_app(app, None, None, None, None).unwrap();
         assert_eq!(rebuilt.config.sandbox, plan.config.sandbox);
         assert_eq!(rebuilt.config.effect_policy, plan.config.effect_policy);
         assert_eq!(rebuilt.agent.registered_tool_names(), tools);

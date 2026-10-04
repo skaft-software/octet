@@ -18,6 +18,15 @@ from urllib.parse import unquote, urlsplit
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INVENTORY = "docs/package-assets.txt"
+# Workstation-specific RC evidence and internal task notes are not public docs.
+# Keep this finite: newly tracked documentation still requires inventory review.
+PRIVATE_RC_RECORDS = {
+    "docs/rc/0.8.2/README-RC.md",
+    "docs/rc/0.8.2/TERN-REDESIGN-TASK.md",
+    "docs/rc/0.8.2/UI-FIX.md",
+    "docs/rc/0.8.2/VERIFICATION.md",
+    "docs/rc/0.8.2/verification-results.json",
+}
 
 
 def inventory():
@@ -72,7 +81,9 @@ def main():
     # This newly introduced manifest is allowed while testing the uncommitted
     # implementation. The production native producer requires it tracked too.
     assert set(files) <= tracked | {INVENTORY}, set(files) - tracked - {INVENTORY}
-    assert {p for p in tracked if p.startswith(("docs/", "examples/", "sdk/"))} <= set(files)
+    assert not set(files) & PRIVATE_RC_RECORDS, "private RC records must not ship"
+    public_sources = {p for p in tracked if p.startswith(("docs/", "examples/", "sdk/"))}
+    assert public_sources - PRIVATE_RC_RECORDS <= set(files)
     for name, kind in files.items():
         source = ROOT
         for part in name.split("/"):

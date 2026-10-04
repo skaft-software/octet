@@ -85,8 +85,10 @@ async fn expired_actor_drops_queued_command_before_send_and_does_not_disable_key
         alive.clone(),
         Some("expired".into()),
         Arc::downgrade(&state),
-        CONNECTION_IDLE_TIMEOUT,
-        tokio::time::Instant::now() - MAX_CONNECTION_LIFETIME,
+        ConnectionTiming {
+            idle_timeout: CONNECTION_IDLE_TIMEOUT,
+            opened_at: tokio::time::Instant::now() - MAX_CONNECTION_LIFETIME,
+        },
         unreachable_dialer(),
     ));
     let message = tokio::time::timeout(Duration::from_secs(1), peer.next())
@@ -291,8 +293,10 @@ where
         alive,
         Some(key.to_owned()),
         Arc::downgrade(state),
-        idle_timeout,
-        connection.opened_at,
+        ConnectionTiming {
+            idle_timeout,
+            opened_at: connection.opened_at,
+        },
         dialer,
     ));
     (connection, actor)

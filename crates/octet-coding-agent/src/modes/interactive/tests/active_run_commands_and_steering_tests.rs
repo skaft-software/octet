@@ -40,8 +40,7 @@ async fn changelog_startup_and_idle_skip_responses_context_prewarm() {
             format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes());
         let accept = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
         socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
-        loop {
-            let Ok(opcode) = socket.read_u8().await else { break; };
+        while let Ok(opcode) = socket.read_u8().await {
             if opcode == 0x88 { break; } // Client teardown may send Close.
             assert_eq!(opcode, 0x81, "fixture expects one complete JSON text frame");
             let flags = socket.read_u8().await.unwrap();

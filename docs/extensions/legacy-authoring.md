@@ -7,12 +7,13 @@ defines version policy and the distinct canonical API `0.3` models. Earlier
 example versions remain intentional; these shared operations do not translate
 wires or make every low-level service a supported coding-product feature.
 
-**Identity boundary:** octet 0.8.0 source uses only octet first-party names,
+**Identity boundary:** octet 0.8.2 candidate source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
-The source SDK distributions and four official executable bundles are version
-`0.8.0`; independent examples keep their own versions. Native publication does
-not publish SDK registries; see
+The source SDK distributions and six official executable bundles are version
+`0.8.2`; independent examples keep their own versions. 0.8.2 assets are not
+published; use reviewed source or matching local archives. Native publication
+does not publish SDK registries; see
 [installation and availability](../installation.md).
 
 The [legacy protocol reference](PROTOCOL-REFERENCE.md) retains complete API
@@ -763,10 +764,10 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 ## Installable extension bundles
 
 Catalog commands select the package matching the running host version. For
-octet 0.8.0 availability, signed assets, and public-install verification, consult
-the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0).
-Use a reviewed source or local archive when matching publication has not been
-verified.
+octet 0.8.2 candidate availability and remaining qualification, consult the
+[candidate record](../releases/v0.8.2.md) and [installation](../installation.md).
+0.8.2 assets are not published. Use reviewed source or a matching local archive
+until publication is approved and version-matched assets are verified.
 
 Executable bundles use runtime `extension.toml`, not Serve's application launcher
 manifest. An archive has exactly one root named for the extension, all regular
@@ -789,17 +790,17 @@ unpackaged for legacy runtime compatibility. The current source bundle declares:
 
 ```toml
 name = "octet-web-search"
-version = "0.8.0"
+version = "0.8.2"
 api_version = "0.4"
-requires_octet = "=0.8.0"
+requires_octet = "=0.8.2"
 ```
 
 `requires_octet` is optional for unpackaged local copies but enforced when
 present. Installed bundles require an exact match to the running octet version.
-The first-party catalog is `octet-browse`, `octet-mcp`, `octet-subagents`, and
-`octet-web-search`. The four working-tree manifests declare API `0.4`; their
-exact host pins still apply. This source metadata is not evidence of a
-published 0.8.0 bundle.
+The first-party catalog is `octet-browse`, `octet-codemode`,
+`octet-computer-use`, `octet-mcp`, `octet-subagents`, and `octet-web-search`.
+The six working-tree manifests declare API `0.4`; their exact host pins still
+apply. This source metadata is not evidence of a published 0.8.2 bundle.
 
 After matching publication is verified:
 
@@ -878,7 +879,7 @@ loopback/process/workspace capabilities. Official installation uses a matching
 target archive and shared release `SHA256SUMS`; local archives use:
 
 ```console
-octet extension install --path ./octet-serve-0.8.0-TARGET.tar.gz
+octet extension install --path ./octet-serve-0.8.2-TARGET.tar.gz
 ```
 
 The application archive retains its strict two-file payload and atomic install.

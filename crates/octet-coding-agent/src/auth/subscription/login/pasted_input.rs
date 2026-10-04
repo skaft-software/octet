@@ -109,6 +109,7 @@ fn unix_immediately_readable(fd: libc::c_int) -> io::Result<bool> {
 
 #[cfg(windows)]
 async fn read_windows_line(limit: usize) -> io::Result<String> {
+    use std::os::windows::io::{AsRawHandle, BorrowedHandle};
     use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{GetFileType, ReadFile, FILE_TYPE_PIPE};
     use windows_sys::Win32::System::Console::{
@@ -128,23 +129,31 @@ async fn read_windows_line(limit: usize) -> io::Result<String> {
             left: *mut u32,
         ) -> i32;
     }
-    // SAFETY: the process owns its standard input handle; it is borrowed, not closed.
-    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::other("stdin is unavailable"));
-    }
+    let handle = {
+        // SAFETY: GetStdHandle returns the process's standard input handle.
+        let raw = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            return Err(io::Error::other("stdin is unavailable"));
+        }
+        // SAFETY: login exclusively owns input while the renderer is suspended;
+        // the process keeps this handle live for the read. Borrowing never closes
+        // stdin on completion or cancellation. BorrowedHandle is Send, so only
+        // this typed borrow (not a raw pointer) is retained across the await.
+        unsafe { BorrowedHandle::borrow_raw(raw) }
+    };
     let mut mode = 0;
     // SAFETY: mode is writable, and the borrowed handle remains live.
-    let console = unsafe { GetConsoleMode(handle, &mut mode) } != 0;
+    let console = unsafe { GetConsoleMode(handle.as_raw_handle(), &mut mode) } != 0;
     // SAFETY: GetFileType accepts the borrowed standard handle.
-    let pipe = unsafe { GetFileType(handle) } == FILE_TYPE_PIPE;
+    let pipe = unsafe { GetFileType(handle.as_raw_handle()) } == FILE_TYPE_PIPE;
     let mut bytes = Vec::new();
     let mut wide = Vec::new();
     while bytes.len() < limit && wide.len() < limit {
         if console {
             let mut available = 0;
             // SAFETY: available is writable; this query never waits for input.
-            if unsafe { GetNumberOfConsoleInputEvents(handle, &mut available) } == 0 {
+            if unsafe { GetNumberOfConsoleInputEvents(handle.as_raw_handle(), &mut available) } == 0
+            {
                 return Err(io::Error::last_os_error());
             }
             if available > 0 {
@@ -153,7 +162,9 @@ async fn read_windows_line(limit: usize) -> io::Result<String> {
                 // SAFETY: a pending record is available and login exclusively
                 // owns console input. Reading a record doesn't wait for Enter,
                 // unlike ReadFile in console line-input mode.
-                if unsafe { ReadConsoleInputW(handle, &mut record, 1, &mut read) } == 0 {
+                if unsafe { ReadConsoleInputW(handle.as_raw_handle(), &mut record, 1, &mut read) }
+                    == 0
+                {
                     return Err(io::Error::last_os_error());
                 }
                 if read > 0 && record.EventType == KEY_EVENT as u16 {
@@ -190,7 +201,7 @@ async fn read_windows_line(limit: usize) -> io::Result<String> {
                 // pipe; null output buffers request no bytes to be copied.
                 if unsafe {
                     PeekNamedPipe(
-                        handle,
+                        handle.as_raw_handle(),
                         std::ptr::null_mut(),
                         0,
                         std::ptr::null_mut(),
@@ -214,7 +225,7 @@ async fn read_windows_line(limit: usize) -> io::Result<String> {
                 // terminal/pipe wait or a detached background stdin worker.
                 if unsafe {
                     ReadFile(
-                        handle,
+                        handle.as_raw_handle(),
                         (&mut byte as *mut u8).cast(),
                         1,
                         &mut read,
@@ -256,6 +267,17 @@ async fn read_windows_line(limit: usize) -> io::Result<String> {
     } else {
         String::from_utf8(bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "pasted redirect is not UTF-8"))
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    #[test]
+    fn pasted_input_future_is_send() {
+        fn assert_send(_: impl std::future::Future + Send) {}
+        // Construct but never poll: this checks the native platform future
+        // without reading stdin or needing a console, runtime, or credentials.
+        assert_send(super::read_line(1024));
     }
 }
 

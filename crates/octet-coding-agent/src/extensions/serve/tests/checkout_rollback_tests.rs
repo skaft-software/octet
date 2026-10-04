@@ -59,7 +59,7 @@ fn prepared_session_descriptor_is_consumed_once_and_checkout_rebuild_reopens_pat
     }));
     assert!(plan.prepared_session.get_mut().unwrap().is_none());
 
-    let rebuilt = rebuild_app(
+    let rebuilt = rebuild_worker_app(
         app,
         None,
         None,

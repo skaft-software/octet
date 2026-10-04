@@ -141,8 +141,13 @@ For a reviewed local archive instead, use
 `octet extension install --path ./bundle.tar.gz`. Installing is inert: it
 doesn't enable a package, save a trust grant, start code or set up dependencies.
 Full access implicitly trusts selected executable extensions, but enabling stays
-explicit. Safe mode keeps executable extensions stopped. Executable bundles are
-separate from the terminal binary and from the graphical Serve app. [Resource
+explicit. Safe mode starts only enabled extensions with host authority for their
+selected source; ungranted sources stay stopped. `--trust-extension`, an explicit
+`--extension-dir`, or a source-bound `trusted_extensions` grant can supply that
+authority, but never enables a bundle. `--no-process`/`--no-shell`, workspace trust,
+and compatibility/integrity checks still apply. Granted code runs with your OS
+permissions outside the tool-effect broker: safe mode is not an OS sandbox.
+Executable bundles are separate from the terminal binary and graphical Serve app. [Resource
 discovery](resources.md) covers source selection, and
 [extensions](extensions.md) covers packaging, trust, atomic update and removal.
 Catalog install and update select the package that matches the running octet

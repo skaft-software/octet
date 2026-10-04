@@ -39,12 +39,16 @@ legacy `cost_microdollars` fields means **unpriced**, not free, even after
 switching to a priced model. Cost scalars are only known subtotals while any
 unpriced operation or `usage_uncertainty` record remains. A
 `usage_uncertainty` line may carry an optional `bound` sibling of `record`:
-`{"tokens":4096,"cost_microdollars":7}`. `tokens` is the admitted input estimate
-plus the provider-enforced output cap; `cost_microdollars` is the worst-case
-charge at that route's price (omitted when unpriced). Hard ceilings reserve known
-usage plus these bounds. Missing bounds (including pre-0.8.2 lines, unsettled
-native steering and cache warming) refuse both ceilings; a missing cost refuses
-the cost ceiling. The older reader ignores this sibling and remains fail-closed.
+`{"tokens":4096,"cost_microdollars":7}`. Historical bounded records retain their
+recorded token exposure and worst-case cost (omitted when unpriced); ledger
+checks include those values alongside known usage. They do not authorize new
+inference. Current transports enforce output caps but supply no trusted
+input-token admission bound, so hard token or cost ceilings refuse new provider
+requests before dispatch. Planning estimates, prior usage and model context
+windows cannot substitute for that bound. New ambiguous attempts remain
+unbounded. Missing bounds (including older lines, unsettled native steering and
+cache warming) refuse both ceilings; a missing cost refuses the cost ceiling.
+The older reader ignores this sibling and remains fail-closed.
 Branch checkout does not erase session-global spending/exposure.
 
 ## Entries

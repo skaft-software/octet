@@ -207,8 +207,7 @@ fn register_static_model(
         api_name: model.id.into(),
         display_name: Some(
             octet_ai::model_metadata::model_display_name(model.id)
-                .unwrap_or_else(|| model.name.to_owned())
-                .into(),
+                .unwrap_or_else(|| model.name.to_owned()),
         ),
         protocol: route.protocol,
         capabilities: static_model_capabilities(model),

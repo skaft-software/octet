@@ -71,6 +71,26 @@ fn generated_capabilities_keep_exact_provider_scoped_source_assertions() {
 
 #[test]
 fn repeated_installs_release_old_overlays_and_return_owned_names() {
+    // Parallel catalog readers may briefly retain an Arc after replacement.
+    // Exercise actual global installs in a separate process so immediate
+    // reclamation assertions cannot race those legitimate readers.
+    const ISOLATED: &str = "OCTET_TEST_METADATA_RECLAMATION_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "model_metadata::tests::repeated_installs_release_old_overlays_and_return_owned_names",
+                "--nocapture",
+            ])
+            .env(ISOLATED, "1")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated metadata reclamation test failed"
+        );
+        return;
+    }
     let previous = live_overlay();
     let mut last = None;
     let mut names = Vec::new();

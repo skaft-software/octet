@@ -636,8 +636,10 @@ impl ResponsesWsPool {
                         alive,
                         Some(key.to_owned()),
                         Arc::downgrade(&self.state),
-                        CONNECTION_IDLE_TIMEOUT,
-                        connection.opened_at,
+                        ConnectionTiming {
+                            idle_timeout: CONNECTION_IDLE_TIMEOUT,
+                            opened_at: connection.opened_at,
+                        },
                         production_dialer(),
                     ));
                     Ok(connection)
@@ -668,8 +670,10 @@ impl ResponsesWsPool {
                 alive,
                 None,
                 Arc::downgrade(&self.state),
-                CONNECTION_IDLE_TIMEOUT,
-                connection.opened_at,
+                ConnectionTiming {
+                    idle_timeout: CONNECTION_IDLE_TIMEOUT,
+                    opened_at: connection.opened_at,
+                },
                 production_dialer(),
             ));
             Ok(connection)
@@ -1514,20 +1518,28 @@ async fn pump_resumed(
     }
 }
 
+struct ConnectionTiming {
+    idle_timeout: Duration,
+    opened_at: tokio::time::Instant,
+}
+
 async fn run_connection<S>(
     mut socket: S,
     mut commands: mpsc::Receiver<RequestCommand>,
     alive: Arc<AtomicBool>,
     key: Option<String>,
     state: Weak<Mutex<PoolState>>,
-    idle_timeout: Duration,
-    opened_at: tokio::time::Instant,
+    timing: ConnectionTiming,
     _dialer: SocketDialer<S>,
 ) where
     S: futures_core::Stream<Item = Result<Message, tungstenite::Error>>
         + futures_util::Sink<Message, Error = tungstenite::Error>
         + Unpin,
 {
+    let ConnectionTiming {
+        idle_timeout,
+        opened_at,
+    } = timing;
     let mut continuation = None;
     let expires_at = opened_at + MAX_CONNECTION_LIFETIME;
     // Fatal transport failures must mark the actor dead and disable its key

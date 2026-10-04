@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) async fn shutdown_worker_app(app: &mut Option<App>) {
+pub(super) async fn shutdown_worker_app(app: &mut Option<Box<App>>) {
     if let Some(mut app) = app.take() {
         app.executable_extensions.shutdown().await;
     }
@@ -32,7 +32,7 @@ pub(super) fn serve_runtime_manager(plan: &WorkerPlan) -> anyhow::Result<Extensi
     Ok(ExtensionRuntimeManager::new(domain))
 }
 
-pub(super) fn build_worker_app(plan: &mut WorkerPlan) -> anyhow::Result<App> {
+pub(super) fn build_worker_app(plan: &mut WorkerPlan) -> anyhow::Result<Box<App>> {
     anyhow::ensure!(
         plan.authority == authority_ceiling_from_sandbox(&plan.config.sandbox),
         "Serve session authority must match the immutable host policy"
@@ -62,7 +62,7 @@ pub(super) fn build_worker_app(plan: &mut WorkerPlan) -> anyhow::Result<App> {
         system,
         Some(serve_runtime_manager(plan)?),
     )?;
-    Ok(app)
+    Ok(Box::new(app))
 }
 
 pub(super) fn command_name_is_claimed_by_builtin(name: &str) -> bool {
@@ -210,4 +210,30 @@ pub(super) fn trim_command_discovery_to_transport_bounds(discovery: &mut Command
         }
         break;
     }
+}
+
+// Move large App values only at these synchronous ownership boundaries, not in
+// the long-lived worker poll frame that also polls the agent/provider stream.
+pub(super) fn reconfigure_worker_app(
+    app: Box<App>,
+    reconfig: Reconfig,
+) -> anyhow::Result<Box<App>> {
+    crate::app::apply_reconfig(*app, reconfig).map(Box::new)
+}
+
+pub(super) fn rebuild_worker_app(
+    app: Box<App>,
+    new_model: Option<octet_ai::Model>,
+    new_reasoning: Option<ReasoningConfig>,
+    new_reasoning_mode: Option<octet_ai::ReasoningMode>,
+    selection: Option<SessionSelection>,
+) -> anyhow::Result<Box<App>> {
+    rebuild_app(
+        *app,
+        new_model,
+        new_reasoning,
+        new_reasoning_mode,
+        selection,
+    )
+    .map(Box::new)
 }

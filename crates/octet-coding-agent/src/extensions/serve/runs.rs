@@ -50,7 +50,10 @@ pub(super) async fn run_worker(
     events: mpsc::Sender<TimestampedEvent>,
     known_entries: usize,
 ) {
-    let mut app: Option<App> = None;
+    // App ownership moves through many idle command branches. Keep those moves
+    // pointer-sized: their debug-build temporaries otherwise enlarge this poll
+    // frame even while an unrelated provider stream is being polled beneath it.
+    let mut app: Option<Box<App>> = None;
     let mut projection = ProjectionState::new(known_entries);
     let pull_request_refresh = tokio::spawn(run_hosted_pull_request_refresh(
         PullRequestRefreshPlan::from(&plan),
@@ -511,27 +514,32 @@ pub(super) async fn run_worker(
                 }
 
                 let selection = SessionSelection::OpenExisting(path.clone());
-                let rebuilt =
-                    match rebuild_app(owned_app, None, None, None, Some(selection.clone())) {
-                        Ok(rebuilt) => rebuilt,
-                        Err(_) => {
-                            match checkout_rejection_after_rollback(
-                                restore_checkout_owner(&path, previous_head, &mut plan),
-                                ServiceError::Internal,
-                            ) {
-                                Ok((restored, rejection)) => {
-                                    app = Some(restored);
-                                    let _ = message.response.send(Err(rejection));
-                                    continue;
-                                }
-                                Err(owner_lost) => {
-                                    app = None;
-                                    let _ = message.response.send(Err(owner_lost));
-                                    break;
-                                }
+                let rebuilt = match rebuild_worker_app(
+                    owned_app,
+                    None,
+                    None,
+                    None,
+                    Some(selection.clone()),
+                ) {
+                    Ok(rebuilt) => rebuilt,
+                    Err(_) => {
+                        match checkout_rejection_after_rollback(
+                            restore_checkout_owner(&path, previous_head, &mut plan),
+                            ServiceError::Internal,
+                        ) {
+                            Ok((restored, rejection)) => {
+                                app = Some(restored);
+                                let _ = message.response.send(Err(rejection));
+                                continue;
+                            }
+                            Err(owner_lost) => {
+                                app = None;
+                                let _ = message.response.send(Err(owner_lost));
+                                break;
                             }
                         }
-                    };
+                    }
+                };
                 let model = selection_for_model(&rebuilt.model, &rebuilt.reasoning, &plan.config);
                 let mut replacement = seed_from_session(
                     rebuilt.agent.session(),
@@ -769,10 +777,8 @@ pub(super) async fn run_worker(
                     continue;
                 };
                 let outcome = if let Some(owned_app) = app.take() {
-                    match crate::app::apply_reconfig(
-                        owned_app,
-                        Reconfig::Model(ModelId(model.clone())),
-                    ) {
+                    match reconfigure_worker_app(owned_app, Reconfig::Model(ModelId(model.clone())))
+                    {
                         Ok(rebuilt) => {
                             plan.launch.model = rebuilt.model.spec.id.clone();
                             plan.launch.reasoning = rebuilt.reasoning.clone();
@@ -850,8 +856,7 @@ pub(super) async fn run_worker(
                     }
                 };
                 let outcome = if let Some(owned_app) = app.take() {
-                    match crate::app::apply_reconfig(owned_app, Reconfig::Thinking(parsed.clone()))
-                    {
+                    match reconfigure_worker_app(owned_app, Reconfig::Thinking(parsed.clone())) {
                         Ok(rebuilt) => {
                             plan.launch.model = rebuilt.model.spec.id.clone();
                             plan.launch.reasoning = rebuilt.reasoning.clone();

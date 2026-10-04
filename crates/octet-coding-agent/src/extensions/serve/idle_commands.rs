@@ -26,11 +26,14 @@ pub(super) fn self_help_prompt(topic: Option<&str>) -> String {
 /// parsed from the same grammar as the TUI, but only durable/session-safe
 /// outcomes cross the graphical protocol boundary.
 pub(super) async fn invoke_idle_slash_command(
-    app: App,
+    app: Box<App>,
     invocation: SlashCommandInvocation,
     plan: &mut WorkerPlan,
     projection: &mut ProjectionState,
-) -> (Option<App>, Result<SlashInvocationOutcome, ServiceError>) {
+) -> (
+    Option<Box<App>>,
+    Result<SlashInvocationOutcome, ServiceError>,
+) {
     let parsed = commands::parse(&invocation.invocation);
     match parsed {
         commands::Command::Changelog => (Some(app), Err(ServiceError::InvalidBoundary)),
@@ -125,12 +128,15 @@ pub(super) async fn invoke_idle_slash_command(
 }
 
 pub(super) fn apply_slash_reconfiguration(
-    app: App,
+    app: Box<App>,
     reconfig: Reconfig,
     plan: &mut WorkerPlan,
     projection: &mut ProjectionState,
-) -> (Option<App>, Result<SlashInvocationOutcome, ServiceError>) {
-    match crate::app::apply_reconfig(app, reconfig) {
+) -> (
+    Option<Box<App>>,
+    Result<SlashInvocationOutcome, ServiceError>,
+) {
+    match reconfigure_worker_app(app, reconfig) {
         Ok(rebuilt) => {
             plan.launch.model = rebuilt.model.spec.id.clone();
             plan.launch.reasoning = rebuilt.reasoning.clone();
@@ -147,10 +153,13 @@ pub(super) fn apply_slash_reconfiguration(
 }
 
 pub(super) fn reload_slash_resources(
-    app: App,
+    app: Box<App>,
     plan: &mut WorkerPlan,
     projection: &mut ProjectionState,
-) -> (Option<App>, Result<SlashInvocationOutcome, ServiceError>) {
+) -> (
+    Option<Box<App>>,
+    Result<SlashInvocationOutcome, ServiceError>,
+) {
     let mut app = app;
     let system = match compose_instructions(&app.config) {
         Ok(system) => system,
@@ -158,7 +167,7 @@ pub(super) fn reload_slash_resources(
     };
     app.system_tokens = crate::compaction::estimate_text_tokens(&system);
     app.system = system;
-    match rebuild_app(app, None, None, None, None) {
+    match rebuild_worker_app(app, None, None, None, None) {
         Ok(rebuilt) => {
             plan.launch.model = rebuilt.model.spec.id.clone();
             plan.launch.reasoning = rebuilt.reasoning.clone();

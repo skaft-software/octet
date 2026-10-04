@@ -195,3 +195,19 @@ fn provider_failure_diagnostics_include_status_and_request_id() {
     assert!(timeout_message.contains("phase=response body timeout"));
     assert!(timeout_message.contains("detail=stream idle beyond its timeout"));
 }
+
+#[test]
+fn serve_worker_future_has_bounded_inline_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = pull_request_worker_plan(directory.path(), "worker-frame");
+    let (_commands, receiver) = mpsc::channel(1);
+    let (events, _receiver) = mpsc::channel(1);
+    let worker = run_worker(plan, receiver, events, 0);
+    let bytes = std::mem::size_of_val(&worker);
+    // Keeping App inline made this future roughly 96 KiB and its debug poll
+    // frame over 1 MiB, exhausting the Tokio stack when polling a provider run.
+    assert!(
+        bytes < 32 * 1024,
+        "Serve worker retains {bytes} bytes inline"
+    );
+}

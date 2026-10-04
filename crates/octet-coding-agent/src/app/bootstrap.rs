@@ -760,7 +760,6 @@ fn rejection_detail(body: &[u8], headers: &http::HeaderMap) -> Option<String> {
             }
         }
     }
-    let mut supplied = supplied;
     supplied.sort_by_key(|value| std::cmp::Reverse(value.len()));
     supplied.dedup();
     let mut message = message.to_owned();

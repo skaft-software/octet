@@ -198,11 +198,16 @@ evidence, not provider-confirmed billable-attempt counts.
 checkpoints, compaction, checkout (to another branch or the root) and reopening.
 It's session-wide accounting, never model-visible context or head state.
 Existing usage and cost totals are **known subtotals**, not complete spend. If
-`usage_uncertainty.bound` is present, hard ceilings charge its input estimate
-plus the provider-enforced output cap and its worst-case cost, including for
-limits enabled after resuming. Missing bounds still fail closed, and missing
-prices fail the cost ceiling. `usage_uncertainty_records()` exposes the bounded
-identifiers separately from the optional admission bounds, and neither invents
+`usage_uncertainty.bound` is present, the ledger includes its recorded token
+and worst-case cost exposure when checking limits, including after resuming.
+A historical bounded record does not authorize a new provider request. Current
+transports lack a trusted input-token admission bound, so hard token or cost
+ceilings refuse new inference before dispatch, even when an output cap exists.
+Planning estimates, prior usage and model context windows are not input bounds.
+New ambiguous attempts therefore retain unbounded uncertainty; missing bounds
+fail both ceilings, and missing prices fail the cost ceiling.
+`usage_uncertainty_records()` exposes the bounded identifiers separately from
+the optional admission bounds, and neither invents
 provider-confirmed usage. Delegated exposure is mirrored into the owning root
 ledger by child, recording only increases.
 

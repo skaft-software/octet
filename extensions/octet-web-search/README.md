@@ -13,16 +13,21 @@ tabs, sign in, run JavaScript or submit forms.
 
 ## Start a search
 
-With [octet 0.8.2](../../docs/installation.md), Python 3.9+ available as
-`python3`, and verified matching published assets, the catalog path is:
+After approved 0.8.2 publication and verification of matching assets, the catalog
+path needs [octet 0.8.2](../../docs/installation.md) and Python 3.9+ as `python3`:
 
 ```console
 octet extension install octet-web-search
 octet --enable-extension octet-web-search
 ```
 
-For a reviewed source checkout instead, add `--extension-dir ./extensions` to
-the launch command from the repository root.
+For this unpublished candidate, launch the reviewed source-built host from the
+repository root instead (see [build from a checkout](../../docs/installation.md#build-from-a-checkout)):
+
+```console
+./target/release/octet --safe-mode --extension-dir ./extensions \
+    --enable-extension octet-web-search
+```
 
 Then open `/extensions`, choose **octet-web-search** (choosing a disabled
 extension enables it first), and pick **Use Brave Search**. Load the optional
@@ -81,11 +86,15 @@ narrow it. See the [full configuration rules](REFERENCE.md#searxng).
 
 Installing is inert, and the bundle stays disabled until you enable it. Default
 full access (`unsafe_host`) trusts the selected extension implicitly, without
-saving a grant. `--trust-extension` and source-bound `trusted_extensions` grants
-are optional, and are never activation. `--safe-mode` removes implicit trust and
-keeps the process stopped even with explicit grants: executable startup still
-needs `unsafe_host`. An admitted extension has your OS authority, and manifest
-consent metadata isn't a sandbox. Skill loading is independent.
+saving a grant. `--safe-mode` removes implicit trust, but an enabled extension
+with a grant for its selected source can start. `--trust-extension` and
+source-bound `trusted_extensions` grants never enable it; an explicit
+`--extension-dir` is an invocation-only authority grant, also not activation.
+A bare persistent name grants only the global bundle, never a same-named project
+shadow. `--no-process`/`--no-shell`, workspace trust, and source, compatibility
+and integrity checks still apply. Granted code runs with your OS authority
+outside the tool-effect broker; safe mode governs brokered effects, not OS
+isolation. Manifest consent metadata isn't a sandbox. Skill loading is independent.
 
 The source bundle `0.8.2` needs exactly octet `0.8.2`. For a reviewed source
 checkout, select it with `--extension-dir ./extensions`. What follows is a

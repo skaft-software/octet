@@ -605,7 +605,7 @@ fn eval_model_profile_selects_real_runtime_model_prompt_reply_and_private_creden
         let profile = write_profile(&fixture, &server, model, true);
         let original_profile = std::fs::read(&profile).unwrap();
         let suite = fixture.write_suite(model, &serde_json::json!({"schema":"octet-eval-suite-1", "cases":[
-            {"id":"literal", "prompt":"@never-read-this-file --model forged", "expect":{"equals":format!("{model}: @NEVER-READ-THIS-FILE --MODEL FORGED")},"budgets":{"max_cost_microdollars":200000}},
+            {"id":"literal", "prompt":"@never-read-this-file --model forged", "expect":{"equals":format!("{model}: @NEVER-READ-THIS-FILE --MODEL FORGED")}},
             {"id":"independent", "prompt":"second prompt", "expect":{"equals":format!("{model}: SECOND PROMPT")}}
         ]}).to_string());
         assert_success(&model_run(&fixture, &suite, &profile, &[]));
@@ -686,27 +686,43 @@ fn eval_model_profile_selects_real_runtime_model_prompt_reply_and_private_creden
 }
 
 #[test]
-fn eval_model_cost_budgets_refuse_before_inference_when_unknown_or_insufficient() {
+fn eval_model_cost_budgets_refuse_without_pricing_or_enforceable_input_bounds() {
     let fixture = Fixture::new();
     let server = ModelServer::start(ModelBehavior::Reply);
-    let suite = fixture.write_suite("budget", r#"{"schema":"octet-eval-suite-1","cases":[{"id":"budget","prompt":"chargeable","budgets":{"max_cost_microdollars":1}}]}"#);
-    for known_prices in [false, true] {
-        let profile = write_profile(&fixture, &server, "local-budget", known_prices);
-        assert_success(&model_run(&fixture, &suite, &profile, &[]));
-        let report = fixture.latest_report();
-        assert_eq!(report["totals"]["failed"], 1, "{report}");
-        assert_eq!(report["cases"][0]["input_tokens"], 0);
-        assert_eq!(report["cases"][0]["cost_microdollars"], 0);
-        assert_eq!(
-            server.captured().len(),
-            0,
-            "hard budget must refuse before POST"
+    for ceiling in [1, 200000] {
+        let suite = fixture.write_suite(
+            "budget",
+            &serde_json::json!({
+                "schema":"octet-eval-suite-1", "cases":[{
+                    "id":"budget", "prompt":"chargeable",
+                    "budgets":{"max_cost_microdollars":ceiling}
+                }]
+            })
+            .to_string(),
         );
-        if !known_prices {
-            assert!(report["cases"][0]["failure"]
-                .as_str()
-                .unwrap()
-                .contains("pricing is unknown"));
+        for known_prices in [false, true] {
+            let profile = write_profile(&fixture, &server, "local-budget", known_prices);
+            assert_success(&model_run(&fixture, &suite, &profile, &[]));
+            let report = fixture.latest_report();
+            assert_eq!(report["totals"]["failed"], 1, "{report}");
+            let case = &report["cases"][0];
+            assert_eq!(case["input_tokens"], 0);
+            assert_eq!(case["output_tokens"], 0);
+            assert_eq!(case["usage_records"], 0);
+            assert_eq!(case["cost_microdollars"], 0);
+            // Known prices and a roomy ceiling still cannot supply a trusted
+            // provider-tokenized input bound. No request may be dispatched.
+            assert_eq!(
+                server.captured().len(),
+                0,
+                "hard budget must refuse before POST"
+            );
+            if !known_prices {
+                assert!(case["failure"]
+                    .as_str()
+                    .unwrap()
+                    .contains("pricing is unknown"));
+            }
         }
     }
 }

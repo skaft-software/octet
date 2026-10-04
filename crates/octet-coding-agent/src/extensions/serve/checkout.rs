@@ -191,7 +191,7 @@ pub(super) fn stored_prompt_context_for_entry(
 // each mutable subsystem; combining them into a broad context would weaken that boundary.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn drive_sibling_conversation_branch(
-    mut owned_app: App,
+    mut owned_app: Box<App>,
     source_user_entry_id: EntryId,
     input: RunPromptInput,
     provenance: ConversationBranchProvenance,
@@ -202,7 +202,7 @@ pub(super) async fn drive_sibling_conversation_branch(
     commands: &mut mpsc::Receiver<WorkerMessage>,
     events: &mpsc::Sender<TimestampedEvent>,
     admission: oneshot::Sender<Result<DriverCommandOutcome, ServiceError>>,
-) -> Result<(App, bool, Option<GoalDecision>), ServiceError> {
+) -> Result<(Box<App>, bool, Option<GoalDecision>), ServiceError> {
     let path = owned_app.agent.session().path().to_owned();
     let previous_head = owned_app
         .agent
@@ -249,7 +249,7 @@ pub(super) async fn drive_sibling_conversation_branch(
         return Ok((owned_app, false, None));
     }
     let selection = SessionSelection::OpenExisting(path.clone());
-    let mut candidate = match rebuild_app(
+    let mut candidate = match rebuild_worker_app(
         owned_app,
         new_model,
         new_reasoning,
@@ -379,11 +379,11 @@ pub(super) fn rollback_conversation_fork(
 }
 
 pub(super) fn rollback_checkout_candidate(
-    mut candidate: App,
+    mut candidate: Box<App>,
     path: &Path,
     previous_head: EntryId,
     plan: &mut WorkerPlan,
-) -> Result<App, ServiceError> {
+) -> Result<Box<App>, ServiceError> {
     candidate.executable_extensions.shutdown_blocking();
     drop(candidate);
     restore_checkout_owner(path, previous_head, plan)
@@ -393,7 +393,7 @@ pub(super) fn restore_checkout_owner(
     path: &Path,
     previous_head: EntryId,
     plan: &mut WorkerPlan,
-) -> Result<App, ServiceError> {
+) -> Result<Box<App>, ServiceError> {
     #[cfg(test)]
     if plan.checkout_hooks.fail_rollback {
         return Err(ServiceError::Internal);

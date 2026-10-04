@@ -2447,7 +2447,7 @@ async fn request_output_ceiling_clamps_only_to_remaining_context() {
 }
 
 #[tokio::test]
-async fn hard_cost_reservation_blocks_network_before_a_request_can_overshoot() {
+async fn hard_cost_ceiling_without_enforceable_input_bound_refuses_before_dispatch() {
     let server = MockServer::start().await;
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
@@ -2486,8 +2486,13 @@ async fn hard_cost_reservation_blocks_network_before_a_request_can_overshoot() {
         .complete("do not spend beyond the ceiling")
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("cost limit"), "{error}");
+    assert!(
+        matches!(error, octet_agent::AgentError::InputLimitUnavailable),
+        "{error:?}"
+    );
     assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(agent.session().usage_records().is_empty());
+    assert!(agent.session().usage_uncertainty_records().is_empty());
 }
 
 #[tokio::test]
@@ -8088,7 +8093,7 @@ impl Respond for Gateway504ThenAnswer {
 }
 
 #[tokio::test]
-async fn capped_504_charges_worst_case_without_disabling_later_cost_ceiling() {
+async fn output_capped_504_refuses_hard_cost_ceiling_and_uncapped_recovery_stays_uncertain() {
     let (mut agent, server, _workspace, session_path) =
         recovery_harness_with_output_cap(vec![], true).await;
     server.reset().await;
@@ -8098,38 +8103,42 @@ async fn capped_504_charges_worst_case_without_disabling_later_cost_ceiling() {
         .mount(&server)
         .await;
     agent.set_max_session_cost_microdollars(Some(u64::MAX));
-    assert_eq!(
-        agent.complete("possibly accepted").await.unwrap().text,
-        "bounded retry"
-    );
-    let exposure = agent.session().usage_uncertainty_exposure().unwrap();
-    assert!(exposure.tokens > 0);
-    let cost = exposure.cost_microdollars.unwrap();
-    assert!(cost > 0);
-    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
-    assert_eq!(wire_requests(&server).await.len(), 2);
+    assert!(matches!(
+        agent.complete("possibly accepted").await,
+        Err(octet_agent::AgentError::InputLimitUnavailable)
+    ));
+    assert!(wire_requests(&server).await.is_empty());
+    assert!(agent.session().usage_records().is_empty());
+    assert!(agent.session().usage_uncertainty_records().is_empty());
 
-    let current = cost.saturating_add(agent.session().total_cost_microdollars());
-    agent.set_max_session_cost_microdollars(Some(current));
-    assert!(matches!(agent.complete("not affordable").await,
-        Err(octet_agent::AgentError::CostLimit { current: charged, .. }) if charged == current));
-    assert_eq!(wire_requests(&server).await.len(), 2);
-    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    // Removing the ceiling permits ordinary recovery, but an output cap alone
+    // cannot bound the failed attempt's provider-tokenized input or spend.
+    agent.set_max_session_cost_microdollars(None);
     assert_eq!(
-        agent.complete("now affordable").await.unwrap().text,
+        agent
+            .complete("recover without a ceiling")
+            .await
+            .unwrap()
+            .text,
         "bounded retry"
     );
-    assert_eq!(wire_requests(&server).await.len(), 3);
-    assert_eq!(
-        Session::open_read_only(&session_path)
-            .unwrap()
-            .usage_uncertainty_exposure(),
-        Some(exposure)
-    );
+    assert_eq!(wire_requests(&server).await.len(), 2);
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(agent.session().usage_uncertainty_exposure().is_none());
+
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert!(matches!(
+        agent.complete("unknown historical spend").await,
+        Err(octet_agent::AgentError::UsageUncertain)
+    ));
+    assert_eq!(wire_requests(&server).await.len(), 2);
+    let reopened = Session::open_read_only(&session_path).unwrap();
+    assert!(reopened.has_uncertain_usage());
+    assert!(reopened.usage_uncertainty_exposure().is_none());
 }
 
 #[tokio::test]
-async fn cap_supported_hard_cost_budget_charges_unknown_interrupted_usage_at_its_worst_case() {
+async fn output_cap_without_input_bound_refuses_hard_cost_ceiling_before_interruption() {
     let (mut agent, server, _workspace, _) = recovery_harness_with_output_cap(
         vec![
             interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
@@ -8142,9 +8151,29 @@ async fn cap_supported_hard_cost_budget_charges_unknown_interrupted_usage_at_its
     let mut run = agent.prompt("bounded spending").await.unwrap();
     let events = collect(&mut run).await;
     drop(run);
-    // This route does not replay interrupted inference, and a hard ceiling does
-    // not change that. The attempt is charged its admitted worst case instead of
-    // closing the ceiling for the rest of the session.
+    // Neither a roomy ceiling nor an enforced output cap provides a sound
+    // provider-tokenized input bound. No failed attempt is admitted.
+    assert!(
+        matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Failed(octet_agent::AgentError::InputLimitUnavailable)
+        ),
+        "{events:?}"
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderUsageUncertain | AgentEvent::ProviderRetry { .. }
+    )));
+    assert!(wire_requests(&server).await.is_empty());
+    assert!(agent.session().usage_records().is_empty());
+    assert!(agent.session().usage_uncertainty_records().is_empty());
+
+    // This output-capped Default route does not replace interrupted streams.
+    // With no cumulative ceiling it may dispatch, preserving unknown exposure.
+    agent.set_max_session_cost_microdollars(None);
+    let mut run = agent.prompt("uncapped interruption").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
     assert!(
         matches!(
             assert_single_run_finished(&events),
@@ -8154,36 +8183,15 @@ async fn cap_supported_hard_cost_budget_charges_unknown_interrupted_usage_at_its
     );
     assert!(events
         .iter()
-        .any(|e| matches!(e, AgentEvent::ProviderUsageUncertain)));
+        .any(|event| matches!(event, AgentEvent::ProviderUsageUncertain)));
     assert!(!events
         .iter()
-        .any(|e| matches!(e, AgentEvent::ProviderRetry { .. })));
+        .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
     assert_eq!(wire_requests(&server).await.len(), 1);
-    let charged = agent
-        .session()
-        .usage_uncertainty_exposure()
-        .and_then(|exposure| exposure.cost_microdollars)
-        .expect("a capped, priced attempt has a bounded cost");
-    assert!(charged > 0);
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(agent.session().usage_uncertainty_exposure().is_none());
 
-    // The charge counts against the ceiling before any later dispatch.
-    let current = charged.saturating_add(agent.session().total_cost_microdollars());
-    agent.set_max_session_cost_microdollars(Some(current));
-    let mut run = agent.prompt("not affordable").await.unwrap();
-    let events = collect(&mut run).await;
-    drop(run);
-    assert!(
-        matches!(
-            assert_single_run_finished(&events),
-            FinishReason::Failed(octet_agent::AgentError::CostLimit { current: counted, .. })
-                if *counted == current
-        ),
-        "{events:?}"
-    );
-    assert_eq!(wire_requests(&server).await.len(), 1);
-
-    agent.set_max_session_cost_microdollars(Some(u64::MAX));
-    let mut run = agent.prompt("now affordable").await.unwrap();
+    let mut run = agent.prompt("later uncapped answer").await.unwrap();
     let events = collect(&mut run).await;
     drop(run);
     assert!(
@@ -8191,6 +8199,8 @@ async fn cap_supported_hard_cost_budget_charges_unknown_interrupted_usage_at_its
         "{events:?}"
     );
     assert_eq!(wire_requests(&server).await.len(), 2);
+    assert!(agent.session().has_uncertain_usage());
+    assert!(agent.session().usage_uncertainty_exposure().is_none());
 }
 
 #[tokio::test]
@@ -9083,11 +9093,10 @@ async fn qualified_http_admission_and_stream_budgets_are_independent_and_cumulat
 }
 
 #[tokio::test(start_paused = true)]
-async fn qualified_http_failures_replay_alike_under_a_roomy_hard_budget_and_permanent_rejections_never_replay(
-) {
-    // `bounded` marks transient failures on a capped route, which a hard ceiling
-    // can charge at their admitted worst case. Permanent rejections never replay.
-    for (status, code, bounded) in [
+async fn http_failures_recover_without_ceilings_but_finite_input_budgets_refuse_dispatch() {
+    // Transient HTTP failures retain their ordinary recovery policy without a
+    // ceiling. Output caps alone cannot authorize finite cumulative budgets.
+    for (status, code, output_capped) in [
         (500, "server_error", true),
         (502, "server_error", true),
         (503, "server_error", true),
@@ -9100,13 +9109,9 @@ async fn qualified_http_failures_replay_alike_under_a_roomy_hard_budget_and_perm
         (429, "insufficient_quota", false),
         (401, "invalid_api_key", false),
     ] {
-        let mut attempts = Vec::new();
         for hard_budget in [false, true] {
-            if hard_budget && !bounded {
-                continue;
-            }
             let (mut agent, server, _workspace, _) =
-                recovery_harness_with_output_cap(vec![], bounded).await;
+                recovery_harness_with_output_cap(vec![], output_capped).await;
             server.reset().await;
             Mock::given(method("POST"))
                 .and(path("responses"))
@@ -9134,33 +9139,50 @@ async fn qualified_http_failures_replay_alike_under_a_roomy_hard_budget_and_perm
                 .iter()
                 .filter(|event| matches!(event, AgentEvent::ProviderRetry { .. }))
                 .count();
+            if hard_budget {
+                let expected = if output_capped {
+                    matches!(
+                        assert_single_run_finished(&events),
+                        FinishReason::Failed(octet_agent::AgentError::InputLimitUnavailable)
+                    )
+                } else {
+                    matches!(
+                        assert_single_run_finished(&events),
+                        FinishReason::Failed(octet_agent::AgentError::OutputLimitUnavailable)
+                    )
+                };
+                assert!(expected, "{status} {code}: {events:?}");
+                assert!(requests.is_empty(), "{status} {code}");
+                assert_eq!(retries, 0);
+                assert!(agent.session().usage_records().is_empty());
+                assert!(agent.session().usage_uncertainty_records().is_empty());
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ProviderUsageUncertain)));
+                continue;
+            }
             assert_eq!(retries, requests.len() - 1, "{status} {code}");
-            if !bounded {
+            if !output_capped {
                 assert_eq!(requests.len(), 1, "{status} {code}");
             }
-            if hard_budget {
-                // Every attempt carried the enforceable cap that bounds it, and
-                // any uncertainty it left keeps a priced bound, so the ceiling
-                // still works for the rest of the session.
+            if output_capped {
                 assert!(requests
                     .iter()
                     .all(|request| request["max_output_tokens"].as_u64().is_some()));
-                assert!(agent.session().usage_uncertainty_records().len() <= requests.len());
-                assert!(agent
-                    .session()
-                    .usage_uncertainty_exposure()
-                    .is_some_and(|exposure| exposure.cost_microdollars.is_some()));
+                // Ordinary routes allow three replacements for their legacy
+                // HTTP statuses; HTTP 520 requires Codex qualification.
+                assert_eq!(
+                    requests.len(),
+                    if status == 520 { 1 } else { 4 },
+                    "{status} {code}"
+                );
+                assert!(agent.session().has_uncertain_usage());
+                assert!(agent.session().usage_uncertainty_exposure().is_none());
             }
             if status == 503 {
                 assert!(agent.session().has_uncertain_usage());
             }
-            attempts.push(requests.len());
         }
-        // A ceiling with room never changes whether a failure replays.
-        assert!(
-            attempts.windows(2).all(|pair| pair[0] == pair[1]),
-            "{status} {code}: {attempts:?}"
-        );
     }
 }
 
@@ -9198,11 +9220,8 @@ async fn unpriced_history_blocks_auxiliary_cost_reservation_before_dispatch() {
 async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_uncertainty() {
     for status in [503, 520] {
         for gate in [false, true] {
-            // The uncapped Codex route recovers through its full envelope. A
-            // capped route follows its own replacement policy, and a hard
-            // ceiling with room must not change it: it only charges each
-            // unknown attempt its admitted bound.
-            let mut capped_baseline = None;
+            // Uncapped Codex and output-capped Default routes retain their own
+            // recovery policies. Finite ceilings refuse before either dispatch.
             for (capped, hard_budget) in [(false, false), (true, false), (true, true)] {
                 let mut steps = Vec::new();
                 if gate {
@@ -9240,6 +9259,7 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                 if hard_budget {
                     agent.set_max_session_cost_microdollars(Some(u64::MAX));
                 }
+                let known_records_before = agent.session().usage_records().len();
                 let mut run = agent.prompt("recover auxiliary").await.unwrap();
                 let events = collect(&mut run).await;
                 drop(run);
@@ -9248,28 +9268,65 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                     transport.requests.lock().unwrap().len(),
                     agent.session().usage_uncertainty_records().len(),
                 );
+                let label =
+                    format!("status={status} gate={gate} capped={capped} hard={hard_budget}");
                 assert_eq!(
                     events
                         .iter()
                         .filter(|event| matches!(event, AgentEvent::ProviderUsageUncertain))
                         .count(),
-                    1
+                    usize::from(!hard_budget),
+                    "{label}"
                 );
-                let label =
-                    format!("status={status} gate={gate} capped={capped} hard={hard_budget}");
                 match (capped, hard_budget) {
                     (false, _) => assert_eq!(outcome, (true, 23, 21), "{label}"),
-                    (true, false) => capped_baseline = Some(outcome),
-                    (true, true) => {
-                        assert_eq!(Some(outcome), capped_baseline, "{label}");
-                        assert!(
-                            agent
-                                .session()
-                                .usage_uncertainty_exposure()
-                                .is_some_and(|exposure| exposure.cost_microdollars.is_some()),
+                    (true, false) => {
+                        // HTTP 520 requires Codex qualification. Otherwise,
+                        // summaries allow three attempts and gates four.
+                        let attempts = if status == 520 {
+                            1
+                        } else if gate {
+                            4
+                        } else {
+                            3
+                        };
+                        assert_eq!(
+                            outcome,
+                            (false, attempts + usize::from(gate), attempts),
                             "{label}"
                         );
                     }
+                    (true, true) => {
+                        assert!(
+                            matches!(
+                                assert_single_run_finished(&events),
+                                FinishReason::Failed(
+                                    octet_agent::AgentError::InputLimitUnavailable
+                                )
+                            ),
+                            "{label}: {events:?}"
+                        );
+                        assert_eq!(outcome, (false, 0, 0), "{label}");
+                        assert_eq!(
+                            agent.session().usage_records().len(),
+                            known_records_before,
+                            "{label}"
+                        );
+                        assert!(
+                            !events.iter().any(|event| matches!(
+                                event,
+                                AgentEvent::ProviderRetry { .. }
+                                    | AgentEvent::ProviderOperationRetry { .. }
+                            )),
+                            "{label}"
+                        );
+                    }
+                }
+                if !hard_budget {
+                    assert!(
+                        agent.session().usage_uncertainty_exposure().is_none(),
+                        "{label}"
+                    );
                 }
             }
         }
@@ -9422,9 +9479,19 @@ async fn qualified_provider_stream_json_recovery_never_dispatches_provisional_to
             let mut run = agent.prompt("recover malformed provider frame").await.unwrap();
             let events = collect_virtual_recovery(&mut run).await;
             drop(run);
-            assert_eq!(matches!(assert_single_run_finished(&events), FinishReason::Completed), !hard_budget, "{events:?}");
-            assert_eq!(wire_requests(&server).await.len(), if hard_budget { 1 } else { 2 });
-            assert_eq!(agent.session().usage_uncertainty_records().len(), 1, "{events:?}");
+            if hard_budget {
+                assert!(matches!(assert_single_run_finished(&events), FinishReason::Failed(octet_agent::AgentError::InputLimitUnavailable)), "{events:?}");
+                assert!(wire_requests(&server).await.is_empty());
+                assert!(agent.session().usage_records().is_empty());
+                assert!(agent.session().usage_uncertainty_records().is_empty());
+                assert!(!events.iter().any(|event| matches!(event, AgentEvent::ProviderRetry { .. } | AgentEvent::ProviderUsageUncertain)));
+            } else {
+                assert!(matches!(assert_single_run_finished(&events), FinishReason::Completed), "{events:?}");
+                assert_eq!(wire_requests(&server).await.len(), 2);
+                assert_eq!(agent.session().usage_uncertainty_records().len(), 1, "{events:?}");
+                assert!(agent.session().usage_uncertainty_exposure().is_none());
+                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ProviderRetry { .. })).count(), 1);
+            }
             assert!(!events.iter().any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
         }
     }
