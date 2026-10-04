@@ -1,9 +1,14 @@
 # PR #480 takeover: source progress, not completion
 
-Work is confined to the candidate worktree. No commit, push, install or release
-has been performed. Protected installed Pi adapter hashes remain unchanged.
+Work is confined to the candidate worktree. The implementation checkpoint was
+committed locally as `5165e670d6e415039a5a85180562e9cdec478d97`. No push, install
+or release has been performed. Protected installed Pi adapter hashes remain unchanged.
 
 ## Coverage artifacts
+
+- [Remaining compatibility work and Lean readiness](pi-extension-lean-readiness.md):
+  implementation/reachability gaps, original/native acceptance, formal property
+  families, checked implementation linkage and reproducible proof/CI prerequisites.
 
 - [Pinned Pi inventory](pi-api-coverage.md) / `pi-api-coverage.json`: 13,279
   structural rows from 420 pinned reference files plus original-corpus evidence.
