@@ -48,7 +48,7 @@ TypeBox packages remain distinct; both `@earendil-works` and old `@mariozechner`
 Pi imports alias to the same host facades. Setup uses `npm ci --ignore-scripts`, without global
 installs, asset downloads, providers or model calls. There is no coding-agent npm
 dependency. jiti's disk transpilation cache is disabled. Pure context helpers
-and command-argument parsing are adapted from Pi 1.0 commit `581e7ba78141a4d8b61cc9d11b8b22ae7e59195e`
+and command-argument parsing/path normalization are adapted from Pi 1.0 commit `581e7ba78141a4d8b61cc9d11b8b22ae7e59195e`
 under its [MIT license](LICENSE.pi); no Pi session store or agent runtime is imported.
 
 ## Implemented surface
@@ -73,6 +73,10 @@ under its [MIT license](LICENSE.pi); no Pi session store or agent runtime is imp
   Declaring either field, even empty, requires the feature. Limits: 1024 UTF-8 bytes
   per string, at most 16 guidelines, C0/C1 forbidden except newline/tab. Pi projection
   trimming and aggregate catalog-budget enforcement remain native responsibilities.
+- Adapter-side `resources_discover` behind `resource_paths_v1`: ordered awaited
+  factory callbacks, normalized filesystem roots and the dedicated native reply.
+  Native activation must remain off without the complete App consumer described
+  below. Registration capture never invokes resource discovery.
 - A shared in-process `pi.events.on/once/off/emit` bus preserving synchronous
   order, object/function identity and retained owner contexts across factories.
 - Text tool results, `details` retained in `metadata.pi_details`, explicit error
@@ -87,7 +91,8 @@ under its [MIT license](LICENSE.pi); no Pi session store or agent runtime is imp
   and editor dialogs; useful composer/session-entry/user-message/active-tool
   operations only when negotiated. Setters update local mirrors synchronously,
   await host acknowledgement at live boundaries, roll back refused mirror writes,
-  and report background refusals. Assistant/system provider turns and custom
+  and report background refusals. `appendEntry` instead updates only after a known
+  synchronous durable receipt (see below). Assistant/system provider turns and custom
   transcript display are explicitly unsupported.
 - `ctx.ui.custom`, footer/header/widget/editor factories, safe component focus,
   input listeners and overlay composition. JS components, callbacks and timers
@@ -97,9 +102,11 @@ under its [MIT license](LICENSE.pi); no Pi session store or agent runtime is imp
   frontend displays ambient chrome. The compatibility palette is local, not a
   claim to reproduce octet's host theme; unknown roles are explicit errors.
 - Selected TUI components/utilities, including `CustomEditor` based only on the
-  Pi TUI `Editor`. `new TUI`, `ProcessTerminal`, terminal image escapes,
-  `createAgentSession`, provider/auth storage and coding-tool runtime imports have
-  no SDK fallback and are explicitly unsupported.
+  Pi TUI `Editor`. `new TUI`, `ProcessTerminal`, terminal image escapes and
+  provider/auth storage have no SDK fallback and remain explicitly unsupported.
+  `createAgentSession` and coding-tool descriptors now delegate through the
+  installed host-owned child facade and negotiated agent-session features only.
+  Child calls retain the original host-issued owner and retire with that owner.
 - Custom editors require a host-issued mount ID and input revisions. Ordered
   draft checkpoints carry mount/input/checkpoint identity and require matching
   commit replies. A completed input event checkpoints final text even for cursor,
@@ -135,17 +142,95 @@ fields (for example an `agent_end.messages` array) or returning an unapplied
 transformation/veto fails explicitly. Command argument arrays join with spaces;
 the wire cannot reconstruct original shell quoting.
 
-**pi-clm 1.0.0 is not qualified.** The unchanged pinned entrypoint still refuses
-unsupported `resources_discover` registration. The three pure context-helper
-exports work, but that is only part of the still-blocked factory/registration gate.
-There is no live binding for dynamic resource-path discovery, provider-payload
-replacement, session-tree observations, or cancellable compaction. Tool metadata
-has a negotiated adapter mapping, not yet native prompt-projection qualification.
-Effective context/payload transformations and authoritative synchronous
-`appendEntry` are not implemented. The selected 0.85.0 TUI/schema
-profile is not a claim that all Pi 0.85.0 runtime imports or CLM's seven behavioral
-gates work. `appendEntry` remains asynchronous; flushing a Promise after a hook
-cannot satisfy CLM's persist-before-activate contract.
+**pi-clm 1.0.0 is not qualified.** Unchanged pinned capture now gets past resource,
+context, pipeline and compaction registration, then explicitly refuses `turn_start`:
+whole-run lifecycle notifications are not per-model-turn events. No no-op aliases
+are installed to force registration through. `before_agent_start` now uses the
+negotiated native `before_prompt_state_v1` applied-system contract; configure records
+`capabilities.system_prompt` for that factory. The selected TUI/schema profile
+and adapter process tests do not qualify CLM's seven behavioral gates.
+
+## Native context, persistence and provider phases
+
+`context` maps to the real API 0.4 `provider_context` preparation hook and requires
+`session_entries`, a matching native owner/preparation and actual top-level
+`session_leaf` grant. Ordered awaited callbacks can replace messages or mutate the
+list/content in place. The native system stays separate. Only canonical messages
+and system are returned, never replacement tools, credentials, route or Session.
+Text, tool calls/results and Pi custom messages have explicit translations; media,
+opaque reasoning/provider continuations and unsupported roles fail rather than lose
+data. Missing native timestamps, usage and historical provider identities are not
+invented. Native validation/budgeting remains authoritative.
+
+`appendEntry` is now **synchronous void**: an independent worker owns the sole
+physical stdin reader/serialized writer while the factory thread waits for the
+native durable receipt. Hook writes require the actual one-use session-leaf grant;
+only a known successor permits another append. No optimistic entry or Promise
+flush counts as persistence. Cancellation after claim waits for the actual outcome;
+transport loss means unknown outcome, terminal connection and no replay. Existing
+16 KiB/depth16/nodes256 private-entry bounds remain; large CLM checkpoints can be
+explicitly refused. Native entry mirrors translate lazily, preserve actual IDs,
+parents and available timestamps, and expose only the initialized namespace's
+private custom state. Unrepresentable mixed-message entries refuse; other native
+markers retain their identities as `octet_native`, not fabricated Pi entries.
+
+Negotiated `pipeline_hooks_v1` dispatches actual `before_provider_request`,
+`before_provider_headers` and `after_provider_response`. These operate on encoded
+JSON, header mutation/deletion patches, and real status/header arrival respectively,
+not canonical context or inferred stream completion. Private callback exceptions
+are redacted. Native code polices reserved headers and effects before send.
+
+Actual awaited `session_before_compact`/`session_compact` and
+`session_before_tree`/`session_tree` hooks carry native session-leaf consumers.
+Cancellation/veto is not an advisory notification. The bounded replacement profile
+supports summary + firstKeptEntryId; unsupported counts/details/usage fail explicitly.
+Native missing Pi preparation fields (`willRetry`, tokensBefore, settings/fileOps,
+full tree-summary preparation) remain explicit refusals, not fabricated values.
+`ctx.waitForIdle` requires a live command and negotiated `session_control_v1`, then
+awaits the actual same-session idle receipt. No hook can wait for its own run to end.
+
+These are functional adapter bindings, not native durability/provider/CLM
+qualification. Parent-owned native builds and actual App/Agent captures remain
+required; `resource_paths/pi_app_tests.rs` supplies two ordinary nonempty factory
+integration tests without replacing the Agent or using a handwritten protocol peer.
+
+## Resource discovery boundary
+
+`resources_discover` requires offered/negotiated API 0.4 `resource_paths_v1` whenever
+registered. **Do not enable the native feature without the complete active App
+consumer and its startup/reload/retirement qualification.** This adapter mapping
+alone is not activation or native-loader qualification. Review/capture records the
+hook without calling it; changed reviewed catalogs require explicit reconfiguration.
+
+Native `hook/run` supplies `{cwd,reason:"startup"|"reload"}` and a complete
+`context.resource_owner`, after its real `session_start` settles. The adapter uses
+its existing ordered hook queue, snapshots handlers in factory/registration order,
+awaits each callback, and replies only
+`{resource_paths:{skill_paths:[],prompt_paths:[],theme_paths:[]}}` with actual results.
+There is no generic disposition/context/notification envelope or cached old roots.
+Undefined/omitted contributions are empty; null, malformed arrays, sparse arrays,
+unknown fields and unsupported transformations fail explicitly. Ordinary callback
+exceptions are diagnosed with factory provenance and later callbacks run (Pi policy);
+coded adapter/host refusals, validation errors and cancellation fail the request.
+
+Paths use pinned Pi lexical resolution: trim, home/file-URL expansion, then resolve
+against **event cwd**, not the factory or manifest directory. Internal Unicode
+spaces and `@` are not rewritten; a blank string resolves to cwd just as in Pi.
+Synthetic/inline paths are refused. Raw and normalized paths are limited to 4096
+UTF-8 bytes each; controls after trim or URL decoding are refused. At most 64 paths
+and 64 KiB normalized path bytes are aggregated across all arrays and handlers,
+before any native deduplication; order and duplicates are preserved. No filesystem
+access, symlink canonicalization, trust grant, theme conversion or precedence
+emulation happens here. Native loaders own admission; native later-wins precedence
+is not Pi first-skill-wins. Native JSON theme conversion and its qualification are
+separate from this adapter; path normalization alone never establishes format support.
+
+Request cancellation and owner retirement abort discovery's own signal, including
+queued work, without weakening other hooks or retained editor lifetimes. Late
+cooperative callback results cannot publish another reply. Cancellation does not
+forcibly stop arbitrary trusted JS. Native deadlines, generation fences before
+publication, actual registry/catalog/theme refresh and removal of already-applied
+roots are still the native consumer's responsibility; the adapter cannot supply them.
 
 ## Command completion boundaries
 
@@ -199,7 +284,11 @@ Stdout is exclusively a captured serialized RPC writer. Console and direct
 plain `process.stdout.write` calls are bounded stderr diagnostics. Transport has
 1 MiB input/output frames, 128 writer slots/4 MiB queued bytes, latest-wins UI
 snapshots, 128 outstanding reverse requests, 65,536 unique reverse IDs, 30-second
-reverse deadlines, at most 8 host requests and 16 surfaces. Cancellation and
+reverse deadlines, at most 8 host requests and 16 surfaces. Worker inbound transfer
+is bounded to 256 frames/4 MiB (128 while synchronous append is blocked), allowing
+an editor's unchanged 128-event initial burst plus control frames. A synchronous
+append timeout requests cancellation but waits for the known result; a final
+watchdog terminalizes as unknown, never replaying. Cancellation and
 reverse replies stay serviceable while ordered hooks await; cooperative JS cannot
 preempt CPU-bound code. Shutdown acknowledgement/drain is bounded to 1.5 seconds;
 EOF/crash exits and the host owns final process-tree cleanup. Trusted code can
@@ -220,6 +309,10 @@ byte ranges, out-of-order replies, quote/cursor refusals and strict result bound
 Tool-metadata tests execute real tools and validate negotiation, empty declarations,
 UTF-8/count/control limits and unchanged manifest shape. These are not native
 completion-UI or effective-prompt qualification.
+Resource tests execute real factory subprocesses with nonempty paths, deterministic
+ordering/cancellation barriers, strict envelopes/bounds, capture equality and a
+source-hash-verified Pi 1.0 normalization oracle. They do not prove native filesystem
+admission, App publication, prompt projection, theme parsing or CLM gate 1.
 Optional acceptance tests load original files unchanged via `PI_DOOM_PATH` /
 `PI_DOOM_WAD`, `PI_FOOTER_PATH`, `PI_DRAW_PATH`, and `PI_RAINBOW_PATH`. They skip
 when sources/assets are unavailable, never download or copy them, and exercise

@@ -1487,6 +1487,7 @@ fn load_theme_path_for(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let source_text = read_theme_file_bounded(path)?;
+    let source_text = crate::extensions::resource_paths::pi_theme::native_source(path, &source_text)?;
     let fallback_name = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1519,12 +1520,13 @@ fn load_resolved_theme_for(
     capabilities: TerminalCapabilities,
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
+    let source_text = crate::extensions::resource_paths::pi_theme::native_source(path, source_text)?;
     let fallback_name = path
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or("Custom theme");
     load_theme_source_for(
-        source_text,
+        &source_text,
         &path.display().to_string(),
         ThemeSource::File(path.to_owned()),
         fallback_name,
@@ -1736,7 +1738,9 @@ pub(crate) fn selectable_file_themes(
         .resources()
         .iter()
         .filter(|resource| {
-            !is_reserved_theme_name(&resource.name) && !resource.name.ends_with(".toml")
+            !is_reserved_theme_name(&resource.name)
+                && !resource.name.ends_with(".toml")
+                && !resource.name.ends_with(".json")
         })
         .filter_map(|resource| {
             let source = resolver.read_text(resource).ok()?;

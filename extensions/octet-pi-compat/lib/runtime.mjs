@@ -6,11 +6,18 @@ import { fileURLToPath } from 'node:url';
 import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions } from './completions.mjs';
+import { discoverResources } from './resources.mjs';
+import { projectContext } from './provider-context.mjs';
+import { providerPipeline, pipelineHooks } from './provider-pipeline.mjs';
+import { sessionOperation, sessionOperationHooks } from './session-operations.mjs';
+import { beforeAgentStart } from './before-agent-start.mjs';
+import { installChildRuntime, retireChildSessions, CHILD_FEATURES, CHILD_METHODS } from './children.mjs';
+import { appendReply, entryPayload, leafGrant } from './session-leaf.mjs';
 import { RemoteUI } from './remote-ui.mjs';
 import { Timers, deadline } from './timers.mjs';
 
-const retainedMethods = new Set(['ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'tools/set_active']);
-const supportedFeatures = new Set(['request_cancellation', 'content_parts', 'request_progress', 'remote_ui', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'tool_prompt_metadata_v1']);
+const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'tools/set_active']);
+const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'remote_ui', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -55,6 +62,7 @@ export class Runtime {
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
     this.maxConcurrent = 8; this.foreground = null; this.autocompleteRegistration = null;
+    this.uninstallChildren = installChildRuntime(this);
   }
   mouseIntent(enabled) {
     this.require('remote_ui'); const store = this.scope.getStore(); this.assertOwner(store);
@@ -88,6 +96,36 @@ export class Runtime {
     return this.transport.request(method, {
       parent_request_id: store.id, ...(retained ? { resource_owner: store.state.owner } : {}), ...params,
     }, { parent: live && !independentCheckpoint ? store.id : undefined, signal: store.controller.signal });
+  }
+  appendEntry(type, data, store = this.scope.getStore()) {
+    this.require('session_entries');
+    const clean = entryPayload(type, data);
+    if (this.stopping) throw rpcError(-32002, 'host is draining');
+    this.assertOwner(store); store.controller.signal.throwIfAborted();
+    if (!Number.isSafeInteger(store.id) || store.id < 0 || !store.live || this.active.get(store.id)?.controller !== store.controller) throw rpcError(-32002, 'active numeric parent_request_id required for synchronous append');
+    const grant = store.leaf?.grant;
+    if (!grant && !['command/execute', 'tool/call'].includes(store.method)) unsupported('synchronous hook append', 'actual host session_leaf grant required');
+    if (store.leaf && !grant) throw rpcError(-32002, 'session_leaf authority exhausted or revoked');
+    // Consume locally before submission, including ambiguous transport failure.
+    // Only an authenticated known successor may authorize another append.
+    if (store.leaf) store.leaf.grant = null;
+    const result = this.transport.requestSync('session/append_entry', {
+      parent_request_id: store.id, resource_owner: store.state.owner, entry_type: type, data: clean,
+      ...(grant ? { session_leaf: { grant_id: grant.grant_id, activation_epoch: grant.activation_epoch, operation_id: grant.operation_id } } : {}),
+    }, { parent: store.id, signal: store.controller.signal, onCancel: () => store.controller.abort(cancelled()) });
+    let committed;
+    try { committed = appendReply(result, grant, store.state.owner); }
+    catch (error) {
+      const ambiguous = rpcError(-32002, `session append outcome unknown: invalid commit reply (${error.message})`);
+      this.transport.fail(ambiguous); throw ambiguous;
+    }
+    if (store.leaf) store.leaf.grant = committed.successor;
+    const host = store.state.host;
+    const entry = { id: committed.entryId, type: 'custom', customType: type, data: clean, ...(grant ? { parentId: grant.expected_head } : {}) };
+    // A durable ACK is the only source of local read-after-write success.
+    for (const entries of new Set([host.session_entries, host.session_branch])) if (Array.isArray(entries)) entries.push(entry);
+    host.session_leaf_id = committed.head ?? committed.entryId;
+    return undefined; // Pi appendEntry is synchronous void, never a Promise.
   }
   track(promise, store = this.scope.getStore()) {
     const p = Promise.resolve(promise);
@@ -160,11 +198,16 @@ export class Runtime {
     this.features = new Set([...required, ...(params.protocol.optional_features || [])].filter(f => supportedFeatures.has(f)));
     for (const f of ['request_cancellation', 'content_parts']) this.require(f);
     this.maxConcurrent = Math.min(8, params.protocol.limits?.max_concurrent_requests || 1);
+    this.namespace = params.extension?.name;
     this.initialHost = params.host || {}; this.workspace = params.workspace; this.initializingId = store.id;
     for (const flag of params.flag_values || []) this.flagValues.set(flag.name, flag.value);
     await this.load();
     const metadata = this.metadata(), declared = params.contributes || {};
     if (metadata.argument_completions?.length) this.require('autocomplete');
+    if (metadata.hooks.includes('resources_discover')) this.require('resource_paths_v1');
+    if (metadata.hooks.some(hook => hook === 'provider_context' || sessionOperationHooks.includes(hook))) this.require('session_entries');
+    if (metadata.hooks.some(hook => pipelineHooks.includes(hook))) this.require('pipeline_hooks_v1');
+    if (metadata.events.includes('before_agent_start')) this.require('before_prompt_state_v1');
     if (metadata.tools.some(tool => tool.prompt_snippet !== undefined || tool.prompt_guidelines !== undefined)) this.require('tool_prompt_metadata_v1');
     for (const [kind, names] of [['tools', metadata.tools.map(t => t.name)], ['commands', metadata.commands.map(c => c.name)], ['hooks', metadata.hooks], ['tool_renderers', metadata.tool_renderers]]) {
       if (JSON.stringify([...(declared[kind] || [])].sort()) !== JSON.stringify([...names].sort())) invalid(`manifest ${kind} differs from reviewed registrations: ${names.join(', ')}`);
@@ -213,9 +256,16 @@ export class Runtime {
     }
     if (this.foreground && this.foreground !== state) this.retire(this.foreground).catch(e => this.backgroundError(e));
     this.foreground = state; store.state = state;
+    if (params.session_leaf !== undefined) {
+      if (store.method !== 'hook/run') invalid('session_leaf requires hook/run');
+      store.leaf = { grant: leafGrant(params.session_leaf, state.owner) };
+    }
   }
   async retire(state) {
-    state.alive = false; this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
+    state.alive = false; retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
+    // Awaited resource/context callbacks are cancelled on owner retirement.
+    // Existing editor/retained-operation lifetime and cancellation stay unchanged.
+    for (const store of this.active.values()) if ((store.resourceDiscovery || store.providerContext) && store.state === state) store.controller.abort(cancelled());
     await this.ui.ownerEnded(state);
   }
   updated(params) {
@@ -250,6 +300,10 @@ export class Runtime {
     if (message.method === 'initialize') return this.initialize(p, store);
     if (!this.initialized) invalid('not initialized');
     if (message.method === 'ui/autocomplete/complete') return commandCompletions(this, p, store);
+    if (message.method === 'hook/run' && p.hook === 'resources_discover') return discoverResources(this, p, store);
+    if (message.method === 'hook/run' && p.hook === 'provider_context') return projectContext(this, p, store);
+    if (message.method === 'hook/run' && pipelineHooks.includes(p.hook)) return providerPipeline(this, p, store);
+    if (message.method === 'hook/run' && sessionOperationHooks.includes(p.hook)) return sessionOperation(this, p, store);
     this.bind(p, store);
     if (message.method === 'command/execute') {
       const cmd = this.commands.get(p.name); if (!cmd) invalid(`unknown command ${p.name}`);
@@ -291,7 +345,12 @@ export class Runtime {
       if (!this.metadata().hooks.includes(p.hook)) invalid(`unknown hook ${p.hook}`);
       let disposition = { action: 'continue' };
       const payload = p.payload || {};
+      let systemPrompt;
       for (const event of events) {
+        if (event === 'before_agent_start' && this.events.has(event)) {
+          systemPrompt = await beforeAgentStart(this, payload, store);
+          continue;
+        }
         const value = p.hook === 'before_tool_call' ? { type: event, toolName: payload.name, input: payload.arguments }
           : p.hook === 'after_tool_call' ? { type: event, toolName: payload.name, input: payload.arguments, content: [{ type: 'text', text: payload.output }], isError: payload.is_error }
           : strict({ type: event, ...payload }, `${event} event`);
@@ -300,7 +359,7 @@ export class Runtime {
       }
       await this.flush(store);
       if (p.hook === 'session_end' && store.state) await this.retire(store.state);
-      return { disposition, context: [], notifications: [] };
+      return { disposition, context: [], notifications: [], ...(systemPrompt === undefined || systemPrompt === payload.system_prompt ? {} : { system_prompt: systemPrompt }) };
     });
     if (message.method === 'tool/render') {
       const tool = this.tools.get(p.name); if (!tool) invalid('unknown renderer');
@@ -317,6 +376,9 @@ export class Runtime {
   }
   async notify(message) {
     const p = message.params;
+    // Advisory notifications cannot deliver a veto or a post-commit append
+    // consumer. Actual Pi compaction callbacks now arrive as awaited hook/run.
+    if (['compaction/started', 'compaction/settled'].includes(message.method)) return;
     if (message.method === 'ui/editor-state') {
       this.require('editor_handoff'); const state = this.foreground;
       // The host can publish its first composer snapshot before any request
@@ -393,14 +455,18 @@ export class Runtime {
   async shutdown(id) {
     if (this.stopping) return;
     this.stopping = true;
+    retireChildSessions(this); this.uninstallChildren?.();
     for (const store of this.active.values()) store.controller.abort(cancelled());
     this.timers.all(); await this.ui.shutdown();
     for (const state of this.states.values()) state.alive = false;
     try { await deadline(this.transport.send({ jsonrpc: '2.0', id, result: {} }), 750); await deadline(this.transport.idle(), 750); }
-    finally { process.exit(0); }
+    finally {
+      try { await deadline(this.transport.close(), 250); }
+      finally { process.exit(0); }
+    }
   }
   lost(error, eof) {
-    this.stopping = true; this.timers.all();
+    this.stopping = true; this.timers.all(); retireChildSessions(this); this.uninstallChildren?.();
     for (const store of this.active.values()) store.controller.abort(cancelled());
     this.ui.shutdown().finally(() => { if (!eof) console.error(`[pi-compat transport] ${error.message}`); process.exit(eof ? 0 : 1); });
   }

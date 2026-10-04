@@ -18,12 +18,8 @@ export class CustomEditor extends Editor {
   }
 }
 // Named imports resolve to explicit refusals instead of any SDK fallback.
-export const createAgentSession = () => unsupported('createAgentSession', 'Rust owns agent sessions; no Pi runtime is installed');
-export class AgentSession { constructor() { unsupported('AgentSession', 'Rust owns the agent'); } }
-export class SessionManager { constructor() { unsupported('SessionManager', 'use ctx.sessionManager host getters'); } }
+export { createAgentSession, AgentSession, SessionManager, createCodingTools, codingTools, readTool, bashTool, editTool, writeTool, searchTool,
+  createReadTool, createBashTool, createEditTool, createWriteTool, createSearchTool,
+  DefaultResourceLoader, SettingsManager, createGrepTool, createFindTool, createLsTool } from './child-sdk.mjs';
 export class ModelRegistry { constructor() { unsupported('ModelRegistry', 'use the host-owned ctx.modelRegistry'); } }
 export class AuthStorage { constructor() { unsupported('AuthStorage', 'provider credentials remain host-owned'); } }
-export const createCodingTools = () => unsupported('createCodingTools', 'Rust owns standard tools');
-const unavailableTool = name => new Proxy({}, { get() { return unsupported(name, 'Rust owns tool execution'); } });
-export const codingTools = unavailableTool('codingTools');
-export const readTool = unavailableTool('readTool'), bashTool = unavailableTool('bashTool'), editTool = unavailableTool('editTool'), writeTool = unavailableTool('writeTool');

@@ -15,7 +15,9 @@ use tokio::time::MissedTickBehavior;
 
 use sexy_tui_rs::{sanitize_text, ControlPictures, SanitizeOptions};
 
-use crate::app::bootstrap::{build_app, resolve_launch_print, Bootstrap};
+use crate::app::bootstrap::{
+    build_app_with_resource_consumer as build_app, resolve_launch_print, Bootstrap,
+};
 use crate::modes::{timestamp, HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::{
     format_duration, is_hidden_tool_detail, provider_lifecycle_label,
@@ -194,6 +196,7 @@ async fn run_prompt(
     tracker: &mut RunTracker,
     presentation: PromptPresentation,
 ) -> anyhow::Result<PromptExit> {
+    app.refresh_resource_paths_headless().await?;
     // Explicit template arguments are data, not local commands.
     if app.config.prompt_template.is_none() {
         crate::commands::reject_tui_changelog(&prompt)?;
@@ -652,8 +655,9 @@ pub async fn run_plain(boot: Bootstrap, initial_prompt: Option<String>) -> anyho
     }
     let launch = resolve_launch_print(&boot, &timestamp())?;
     let system = compose_instructions(&boot.config)?;
-    let mut theme = crate::tui::theme::load_theme(&boot.config);
     let mut app = build_app(boot, launch, system)?;
+    app.refresh_resource_paths_headless().await?;
+    let mut theme = crate::tui::theme::load_theme(&app.config);
     crate::tui::theme::apply_model_lab(&mut theme, crate::tui::theme::model_lab(&app.model));
     let mut tracker = RunTracker::default();
     let mut output = std::io::stdout().lock();

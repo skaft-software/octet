@@ -2,6 +2,7 @@
 
 pub mod bootstrap;
 mod delegation_models;
+pub(crate) mod resource_paths;
 pub(crate) mod subscriptions;
 
 use std::path::PathBuf;
@@ -500,6 +501,7 @@ pub struct App {
     pub skills: Arc<dyn octet_agent::skills::SkillRegistry>,
     pub prompts: Arc<PromptRegistry>,
     pub executable_extensions: crate::extensions::ExecutableExtensions,
+    pub(crate) resource_paths: resource_paths::ResourcePathConsumer,
     pub goal_store: Arc<DurableGoalStore>,
     pub goal_driver: GoalDriver,
     pub goal_session_id: String,

@@ -3,18 +3,22 @@ import { join, resolve } from 'node:path';
 import { bounded, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
 import { theme } from './theme.mjs';
 import { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
+import { translateSessionEntries } from './session-mirror.mjs';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 
 export const hookEvents = {
   session_start: 'session_start', session_end: 'session_end', session_shutdown: 'session_end',
   tool_call: 'before_tool_call', tool_result: 'after_tool_call', input: 'before_prompt',
-  before_agent_start: 'before_prompt', after_response: 'after_response',
+  before_agent_start: 'before_prompt', after_response: 'after_response', resources_discover: 'resources_discover',
+  context: 'provider_context',
+  before_provider_request: 'before_provider_request', before_provider_headers: 'before_provider_headers', after_provider_response: 'after_provider_response',
+  session_before_compact: 'session_before_compact', session_compact: 'session_compact', session_before_tree: 'session_before_tree', session_tree: 'session_tree',
 };
 export const notificationEvents = {
   'turn/started': 'agent_start', 'turn/settled': 'agent_end',
   'tool/started': 'tool_execution_start', 'tool/settled': 'tool_execution_end',
   'message/started': 'message_start', 'message/updated': 'message_update', 'message/settled': 'message_end',
-  'compaction/started': 'session_before_compact', 'compaction/settled': 'session_compact', 'compaction/failed': 'session_compact_failed',
+  'compaction/failed': 'session_compact_failed',
   'session/info_changed': 'session_info_changed', 'dialog/started': 'ui_prompt_start', 'dialog/settled': 'ui_prompt_end',
   'model/selected': 'model_select', 'reasoning/selected': 'thinking_level_select', 'bash/user': 'user_bash',
 };
@@ -101,15 +105,7 @@ export function createAPI(runtime, factory) {
       result.catch(() => { if (s.state.host.session_name === next) s.state.host.session_name = old; });
       return result;
     },
-    appendEntry(type, data) {
-      runtime.require('session_entries'); bounded(type, 'entry type', 128); const clean = plainJSON(data, 'entry data');
-      const s = store(); s.controller.signal.throwIfAborted(); const entries = s.state.host.session_entries;
-      const pending = { type: 'custom', customType: type, data: clean };
-      if (Array.isArray(entries)) entries.push(pending);
-      const promise = runtime.hostCall('session/append_entry', { entry_type: type, data: clean }, s).then(result => { pending.id = result.entry_id; return result.entry_id; });
-      promise.catch(() => { if (entries?.includes(pending)) entries.splice(entries.indexOf(pending), 1); });
-      return runtime.track(promise, s);
-    },
+    appendEntry(type, data) { return runtime.appendEntry(type, data, store()); },
     setLabel(entryId, label) { bounded(entryId, 'entry id', 256); bounded(label, 'label', 4096); return op('session/set_label', { entry_id: entryId, label }, 'session_entries'); },
     sendUserMessage(text, options) {
       if (options !== undefined) unsupported('sendUserMessage options', 'delivery mode is owned by the host');
@@ -261,14 +257,17 @@ export function createContext(runtime, store) {
       return operation('composer/insert', { text }, 'composer');
     },
   }, 'ctx.ui');
+  // Lazy translation: a UI/resource-only factory must not fail merely because
+  // an unrelated native history contains media this Pi message profile cannot map.
+  const sessionEntries = key => translateSessionEntries(snapshot(current().host, key, `ctx.sessionManager.${key}`), runtime.namespace);
   const sessionManager = strict({
     getSessionId: () => current().host.session_id ?? undefined,
     getSessionName: () => current().host.session_name ?? undefined,
-    getEntries: () => [...snapshot(current().host, 'session_entries', 'ctx.sessionManager.getEntries')],
-    getBranch: () => [...snapshot(current().host, 'session_branch', 'ctx.sessionManager.getBranch')],
+    getEntries: () => sessionEntries('session_entries'),
+    getBranch: () => sessionEntries('session_branch'),
     getLeafId: () => snapshot(current().host, 'session_leaf_id', 'ctx.sessionManager.getLeafId'),
     getSessionFile: () => snapshot(current().host, 'session_file', 'ctx.sessionManager.getSessionFile'),
-    getEntry: id => snapshot(current().host, 'session_entries', 'ctx.sessionManager.getEntry').find(entry => entry.id === id),
+    getEntry: id => sessionEntries('session_entries').find(entry => entry.id === id),
   }, 'ctx.sessionManager');
   return strict({
     get cwd() { return current().workspace; },
@@ -305,6 +304,13 @@ export function createContext(runtime, store) {
     hasPendingMessages: () => snapshot(current().host, 'has_pending_messages', 'ctx.hasPendingMessages'),
     getSystemPrompt: () => snapshot(current().host, 'system_prompt', 'ctx.getSystemPrompt'),
     get signal() { return store.controller.signal; },
+    waitForIdle() {
+      if (store.method !== 'command/execute') unsupported('ctx.waitForIdle', 'requires a live command, never a hook waiting on its own run');
+      return operation('session/wait_for_idle', { resource_owner: current().owner }, 'session_control_v1').then(result => {
+        fields(result, ['session_id'], 'idle receipt'); bounded(result.session_id, 'idle session id', 256);
+        if (result.session_id !== current().host.session_id) invalid('idle receipt session changed');
+      });
+    },
     abort() { unsupported('ctx.abort', 'host wire has no root-run abort contract'); },
   }, 'ctx');
 }

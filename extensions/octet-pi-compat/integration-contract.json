@@ -1,5 +1,31 @@
 {
   "api_version": "0.4",
+  "before_agent_start": "Negotiated before_prompt_state_v1; before_prompt payload {prompt,system_prompt}. Ordered callbacks see event.systemPrompt and return {systemPrompt}; hook response system_prompt is a per-run replacement including empty string, never additive context. configure declares capabilities.system_prompt. 256KiB/noNUL; message/images transformations remain explicit refusals. Native apply/transaction qualification is parent-owned.",
+  "child_facade": "Runtime installs children.mjs, negotiates CHILD_FEATURES and retains CHILD_METHODS with original resource_owner; owner retirement/shutdown retire child facades. coding-agent shim reexports child-sdk. No Pi agent/provider fallback; child native end-to-end qualification is separate.",
+  "provider_context": {
+    "hook": "context -> provider_context; requires session_entries and actual top-level session_leaf matching preparation owner/head",
+    "input": "payload {request,preparation:{resource_owner,session_id,head,tool_generation}}; context.resource_owner is authoritative",
+    "output": "ordinary envelope plus provider_context:{messages:<canonical>,system:<unchanged native string|null>} when changed; ordered awaited Pi handlers support replacement and in-place edits",
+    "limits": "Text/tool/custom-message profile only; media, opaque continuation, unsupported roles and native facts not supplied explicitly refuse. Never fabricate timestamps, usage, historical provider identity or entry IDs. Native budgets/role validation remain authoritative."
+  },
+  "synchronous_append": {
+    "api": "appendEntry is synchronous void; independent transport worker and one bounded shared reply cell, never an optimistic Promise",
+    "authority": "Hook append requires actual host session_leaf {grant_id,activation_epoch,operation_id,owner,expected_head}; exact parent and owner echoed; consume before submission, advance only with validated known successor",
+    "receipt": "session/append_entry -> {entry_id,head,successor}; head names the committed entry. Existing active command/tool legacy service may reply {entry_id}. No local fake ACK, retry or persistence inference",
+    "limits": "16KiB encoded entry envelope, depth16/nodes256/key256/type128. Private string values may contain LF/CR/TAB only. After-claim cancellation waits for known outcome; lost/malformed receipt terminalizes unknown",
+    "mirrors": "Lazy native Entry translation from host snapshots; initialize.extension.name selects own private namespace. Real IDs/parents/timestamps preserved; native markers remain octet_native. Missing facts stay missing."
+  },
+  "provider_pipeline": {
+    "feature": "pipeline_hooks_v1; requires actual API0.4 native consumer",
+    "phases": "before_provider_request -> {provider_payload}; before_provider_headers in-place changes -> {provider_headers:<patch including null deletions>}; after_provider_response at actual header arrival -> {}",
+    "privacy": "Encoded bodies/headers and callback exception text are not emitted in ordinary diagnostics. Native owns reserved header validation/auth/signing and attempt cancellation."
+  },
+  "session_operations": {
+    "hooks": "session_before_compact/session_compact/session_before_tree/session_tree require session_entries and actual bound native leaf",
+    "reply": "ordinary envelope plus session_operation:{action:continue|cancel|replace_compaction,replacement?:{summary,first_kept}}",
+    "gaps": "No advisory-notification veto. Native missing Pi willRetry/counts/settings/fileOps/tree-summary preparation explicitly refuse. Unsupported compaction replacement details/counts/usage are not dropped."
+  },
+  "wait_for_idle": "Live command only; negotiated session_control_v1; session/wait_for_idle with actual parent/resource_owner waits for {session_id} matching current native session. No settled-parent exception or hook-self-wait.",
   "runner": "node runner.mjs --config /absolute/bridge.json",
   "config": { "extensions": ["/absolute/reviewed/entry.ts"] },
   "configure": "node configure.mjs --reviewed --output /absolute/extensions/octet-pi-compat <entry.ts>...; canonical Node + absolute runner; no activation/trust/HOME edits",
@@ -16,6 +42,17 @@
     "mapping": "promptSnippet -> prompt_snippet, promptGuidelines -> prompt_guidelines in tool catalog only; preserve values for native Pi projection trimming, never add manifest keys",
     "bounds": "<=1024 UTF-8 bytes per string, <=16 guidelines; C0/C1 forbidden except newline/tab. Empty strings/arrays allowed. Native host counts fields in aggregate catalog budget.",
     "qualification": "Adapter raw-process catalog/negotiation/boundary/execution tests only; effective native prompt projection needs independent qualification. No new authority or canonical0.3 change."
+  },
+  "resource_discovery": {
+    "activation": "Integrated adapter contract; native resource_paths_v1 stays default-off outside a complete real App startup/reload/retirement consumer. Mapping or empty CLM results do not qualify activation.",
+    "registration": "Map resources_discover to the same named API0.4 hook; declaring it requires negotiated resource_paths_v1. Configure captures the hook without executing callbacks; initialize retains exact reviewed catalog and manifest equality.",
+    "request": "hook/run {hook:'resources_discover',payload:{cwd,reason:'startup'|'reload'},context:{resource_owner,...}}. Native supplies an absolute cwd and complete current owner after actual session_start. No payload.binding fallback, invented owner or inferred reload reason.",
+    "response": "Only {resource_paths:{skill_paths,prompt_paths,theme_paths}}. Snapshot factory/registration order, await callbacks through the existing hook queue, validate optional skillPaths/promptPaths/themePaths string arrays and merge without deduplication. Undefined is empty; null/sparse/malformed/unknown fields fail, never silently strip transformations.",
+    "normalization": "Pinned Pi1.0 trim/home/file-URL/lexical cwd resolution (including blank path -> cwd), not factory/manifest directory or realpath. Preserve internal Unicode spaces and @. Reject synthetic paths; <=4096 UTF-8 bytes per raw/normalized path and no controls after trim/decoding; <=64 paths and <=65536 normalized bytes across all fields/handlers before deduplication.",
+    "fences": "Require current full native owner before dispatch, between callbacks and after tracked reverse operations. Cancellation races the queue/callback/flush; retirement aborts only active discovery controllers. Preserve existing editor87 lifetime rules exactly; no late reply, timeout replay or fabricated host ACK.",
+    "errors": "Diagnose ordinary callback exceptions with contributing factory provenance and continue like Pi. Coded adapter/native refusals and returned-value validation errors fail the request. Diagnostics are separate notifications/stderr, never generic hook result fields.",
+    "native_responsibilities": "Admission/trust/no-follow reads, deadline, owner/process generation fences, real loader consumption, catalog/Agent/shell/theme publication and withdrawal on reload/retirement. Native later-wins precedence differs from Pi; native JSON format support and qualification are separate. No full resource or CLM compatibility claim.",
+    "qualification": "Node actual-factory subprocess tests and source-hash-verified Pi1.0 normalization only. Native consumer activation and all App/frontend tests remain integration gates."
   },
   "context_updated": {
     "method": "context/updated",

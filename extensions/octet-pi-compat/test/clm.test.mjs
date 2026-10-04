@@ -10,7 +10,7 @@ import { root } from './helper.mjs';
 // Explicitly supplied, unchanged b84a9d7c upstream source only. A passing
 // refusal regression is NOT any of CLM's seven native qualification gates.
 const entry = process.env.PI_CLM_PATH;
-test('unchanged pinned pi-clm 1.0.0 explicitly refuses unbound resources_discover', {
+test('unchanged pinned pi-clm 1.0.0 still refuses unbound per-model turn events after native context/pipeline/session declarations', {
   skip: !entry && 'set PI_CLM_PATH to reviewed pi-clm b84a9d7c root index.ts',
 }, t => {
   const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -26,5 +26,5 @@ test('unchanged pinned pi-clm 1.0.0 explicitly refuses unbound resources_discove
   assert.equal(result.error, undefined);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
-  assert.match(result.stderr, /unsupported_feature event resources_discover/);
+  assert.match(result.stderr, /unsupported_feature event turn_start/);
 });

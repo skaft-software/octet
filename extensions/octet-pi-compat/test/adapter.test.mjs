@@ -97,9 +97,9 @@ test('EOF, crash transport and active shutdown are bounded without model/runtime
   const bad = launch(t); const badExit = once(bad.child, 'exit'); bad.child.stdin.write(' '.repeat(1048577)); assert.equal((await badExit)[0], 1);
   const malformed = launch(t); const malformedExit = once(malformed.child, 'exit'); malformed.child.stdin.write('{bad json}\n'); assert.equal((await malformedExit)[0], 1);
 });
-test('unsupported options/results and forbidden Pi runtime calls never silently disappear', async t => {
+test('unsupported options/results and unnegotiated child calls never silently disappear', async t => {
   const peer = launch(t); await peer.init();
-  for (const [mode, reason] of [['unsupported', /ctx.ui.setTitle/], ['unsafe-output', /direct terminal control/], ['runtime', /createAgentSession.*Rust owns agent sessions/], ['media', /content part.data/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
+  for (const [mode, reason] of [['unsupported', /ctx.ui.setTitle/], ['unsafe-output', /direct terminal control/], ['runtime', /unsupported_feature agent_sessions: feature was not negotiated/], ['media', /content part.data/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
 });
 test('shared events preserve synchronous object/function identity across multiple unchanged factories', async t => {
   const dir = await temporary(t), a = join(dir, 'a.ts'), b = join(dir, 'b.ts');

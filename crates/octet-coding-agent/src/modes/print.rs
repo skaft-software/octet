@@ -7,7 +7,9 @@ use crate::modes::rpc::JsonEventStream;
 use octet_agent::{AgentEvent, InputPart, OutputChannel, UserInput};
 use octet_ai::Media;
 
-use crate::app::bootstrap::{build_app, resolve_launch_print, Bootstrap};
+use crate::app::bootstrap::{
+    build_app_with_resource_consumer as build_app, resolve_launch_print, Bootstrap,
+};
 use crate::modes::{timestamp, HostRunOutcome};
 use crate::resources::{compose_instructions, expand_skill_command};
 
@@ -99,6 +101,7 @@ async fn run_prompt(
     media: Vec<Media>,
     json: bool,
 ) -> anyhow::Result<()> {
+    app.refresh_resource_paths_headless().await?;
     if app.config.prompt_template.is_none() {
         crate::commands::reject_tui_changelog(&prompt)?;
         if crate::commands::handle_cache_warming_input(app, &prompt)? {

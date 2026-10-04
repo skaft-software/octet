@@ -684,13 +684,22 @@ impl ExecutableExtensions {
             }
         }
         if let Some(resource_owner) = self.resource_owner.clone() {
-            let (ui_processes, processes): (Vec<_>, Vec<_>) =
+            let (deferred_processes, processes): (Vec<_>, Vec<_>) =
                 self.processes.iter().cloned().partition(|process| {
-                    self.remote_ui_wake.is_some()
-                        && process.supports_feature(EXTENSION_FEATURE_REMOTE_UI)
+                    // Resource startup must run under the frontend's event pump,
+                    // even without remote UI. It can await durable session work
+                    // (or a real headless refusal) before discovery is admitted.
+                    (process.supports_feature(
+                        octet_agent::extension_process::EXTENSION_FEATURE_RESOURCE_PATHS,
+                    ) && process
+                        .contributions()
+                        .hooks
+                        .contains(&ExtensionHook::ResourcesDiscover))
+                        || (self.remote_ui_wake.is_some()
+                            && process.supports_feature(EXTENSION_FEATURE_REMOTE_UI))
                 });
             self.pending_session_hook_starts.extend(
-                ui_processes
+                deferred_processes
                     .into_iter()
                     .filter(|process| process.declares_session_hooks())
                     .map(|process| (process, resource_owner.clone())),

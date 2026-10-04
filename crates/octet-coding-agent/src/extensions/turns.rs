@@ -226,6 +226,7 @@ impl ExecutableExtensions {
         prompt: String,
     ) -> anyhow::Result<ExtensionPromptComposition> {
         let mut notifications = self.drain_events();
+        let mut effective_system = base_system.to_owned();
         // Composition is transactional. Context already queued by an
         // extension remains pending until the complete composed prompt has
         // passed validation and can be submitted durably.
@@ -249,7 +250,11 @@ impl ExecutableExtensions {
                     PROMPT_RPC_DEADLINE,
                     process.run_hook(
                         ExtensionHook::BeforePrompt,
-                        before_prompt_hook_payload(&prompt),
+                        if process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1) {
+                            serde_json::json!({"prompt": &prompt, "system_prompt": &effective_system})
+                        } else {
+                            before_prompt_hook_payload(&prompt)
+                        },
                         execution.clone(),
                     ),
                 )
@@ -272,6 +277,13 @@ impl ExecutableExtensions {
                         "extension {:?} denied the prompt: {reason}",
                         process.descriptor().manifest.name
                     );
+                }
+                if let Some(system) = output.system_prompt {
+                    anyhow::ensure!(process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1),
+                        "extension returned an unnegotiated before_prompt system replacement");
+                    anyhow::ensure!(system.len() <= 256 * 1024 && !system.contains('\0'),
+                        "extension before_prompt system replacement exceeds bounds");
+                    effective_system = system;
                 }
                 let mut dropped = 0usize;
                 let mut last_error = None;
@@ -331,7 +343,7 @@ impl ExecutableExtensions {
 
         notifications.extend(rejected_context.iter().cloned());
         self.diagnostics.extend(rejected_context);
-        let (system, prompt) = compose_context(base_system, prompt, context.into_vec())?;
+        let (system, prompt) = compose_context(&effective_system, prompt, context.into_vec())?;
         notifications.extend(self.drain_events());
         Ok(ExtensionPromptComposition {
             system,
