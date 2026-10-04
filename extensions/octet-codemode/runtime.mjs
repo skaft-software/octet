@@ -16,7 +16,7 @@ export function negotiate(init) {
     isObject(init.extension) && init.extension.name === "octet-codemode" && init.extension.version === "0.8.2",
     "requires API 0.4, octet 0.8.2 and octet-codemode 0.8.2");
   const offer = init.protocol;
-  params(exactKeys(offer, ["version", "required_features", "optional_features", "limits"]) && offer.version === "0.4" &&
+  params(exactKeys(offer, ["version", "required_features", "optional_features", "limits", "bulk_objects_v1"]) && offer.version === "0.4" &&
     Array.isArray(offer.required_features) && Array.isArray(offer.optional_features), "feature-negotiated API 0.4 offer required (not canonical contract)");
   const offered = [...offer.required_features, ...offer.optional_features];
   params(offered.every((feature) => typeof feature === "string") && new Set(offered).size === offered.length,
@@ -24,7 +24,7 @@ export function negotiate(init) {
   params(offer.required_features.every((feature) => SUPPORTED.has(feature)), "unsupported required protocol feature");
   params(REQUIRED.every((feature) => offered.includes(feature)), "host must offer tool_composition_v1, request_cancellation and content_parts");
   params(offer.required_features.includes("request_cancellation") && offer.required_features.includes("content_parts"), "foundation features must be required");
-  params(exactKeys(offer.limits, ["max_concurrent_requests"]) && Number.isSafeInteger(offer.limits.max_concurrent_requests) &&
+  params(exactKeys(offer.limits, ["max_concurrent_requests", "resource_refs_v1"]) && Number.isSafeInteger(offer.limits.max_concurrent_requests) &&
     offer.limits.max_concurrent_requests >= 4 && offer.limits.max_concurrent_requests <= 64, "host concurrency offer must be 4..64");
   params(Array.isArray(init.flag_values), "flag_values must be a list");
   const flags = { "codemode-mode": "on", "codemode-inline-budget": 3000 };
