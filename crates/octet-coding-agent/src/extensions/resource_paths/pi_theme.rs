@@ -8,8 +8,10 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{Context, ensure};
 use serde_json::{Map, Value};
+
+mod colors;
 
 const MAX_BYTES: usize = 256 * 1024;
 const MAX_VARS: usize = 256;
@@ -304,7 +306,7 @@ fn resolve<'a>(mut value: &'a Value, vars: &'a Map<String, Value>) -> anyhow::Re
         if color.to_ascii_lowercase().starts_with("oklch(")
             || color.to_ascii_lowercase().starts_with("okhsl(")
         {
-            bail!("Pi perceptual colors require adapter conversion; native JSON accepts hex, ANSI indices and terminal defaults");
+            return colors::parse(color);
         }
         ensure!(
             visited.insert(color),
@@ -369,6 +371,55 @@ mod tests {
     }
 
     #[test]
+    fn native_perceptual_colors_match_pinned_pi_oracle_vectors() {
+        // Generated only from hash-verified upstream sources, never from this port.
+        // The adapter tests verify these same fixtures against the live pinned oracle.
+        let vectors: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../extensions/octet-pi-compat/test/fixtures/theme-colors.json"
+        )))
+        .unwrap();
+        for case in vectors["valid"].as_array().unwrap() {
+            let input = &case[0];
+            assert_eq!(
+                resolve(input, &Map::new()).unwrap(),
+                case[1].as_str().unwrap(),
+                "{input}"
+            );
+        }
+        for input in vectors["invalid"].as_array().unwrap() {
+            assert!(resolve(input, &Map::new()).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn native_projection_preserves_perceptual_variables_roles_fallbacks_and_export_validation() {
+        let mut input = fixture("Perceptual", "oklch(62% 0.1 200)");
+        input["vars"]["background"] = Value::from("okhsl(250 60% 55%)");
+        input["colors"]["selectedBg"] = Value::from("background");
+        input["colors"]
+            .as_object_mut()
+            .unwrap()
+            .remove("searchMatchBg");
+        input["export"] = serde_json::json!({"pageBg": "primary", "cardBg": "background"});
+        let source = input.to_string();
+        let native = native_source(Path::new("perceptual.json"), &source).unwrap();
+        let parsed: toml::Value = toml::from_str(&native).unwrap();
+        assert_eq!(parsed["colors"]["accent"].as_str(), Some("#1c989e"));
+        assert_eq!(parsed["colors"]["selected_bg"].as_str(), Some("#4e88c2"));
+        assert_eq!(
+            parsed["roles"]["extension.pi.accent"]["foreground"].as_str(),
+            Some("#1c989e")
+        );
+        assert_eq!(
+            parsed["roles"]["extension.pi.searchMatchBg"]["background"].as_str(),
+            Some("#4e88c2")
+        );
+        input["export"]["pageBg"] = Value::from("okhsl(0 2 0.5)");
+        assert!(native_source(Path::new("bad-export.json"), &input.to_string()).is_err());
+    }
+
+    #[test]
     fn native_projection_rejects_malformed_unsafe_and_unsupported_documents() {
         let mut cases = Vec::new();
         for bad in [
@@ -379,7 +430,8 @@ mod tests {
             Value::from("#ffff"),
             Value::from("\u{1b}[31m"),
             Value::from("missing"),
-            Value::from("oklch(62% 0.1 200)"),
+            Value::from("oklch(101% 0.1 200)"),
+            Value::from("okhsl(0 150% 50%)"),
         ] {
             let mut value = fixture("Invalid", "#abcdef");
             value["colors"]["accent"] = bad;

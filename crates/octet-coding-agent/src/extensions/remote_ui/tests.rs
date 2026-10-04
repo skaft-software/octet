@@ -80,6 +80,15 @@ for line in sys.stdin:
         s = surfaces[p['surface_id']]
         send(dict(method='$/cancelRequest', params=dict(id=s['last_checkpoint_id'])))
         send(dict(method='notification', params=dict(message='checkpoint-cancelled')))
+    elif method == 'ui/key' and p.get('key') in ('p', 'v'):
+        s = surfaces[p['surface_id']]
+        if p['key'] == 'v':
+            id = 'close-' + s['id']
+            closes[id] = s
+            send(dict(id=id, method='ui/close', params=dict(parent_request_id=s['parent'],
+                resource_owner=s['owner'], surface_id=s['id'])))
+        send(dict(id='paste-' + s['id'], method='composer/insert',
+            params=dict(parent_request_id=s['parent'], resource_owner=s['owner'], text='-inserted')))
     elif method == 'ui/key' and p.get('key') == 'q':
         s = surfaces[p['surface_id']]
         id = 'close-' + s['id']
@@ -290,6 +299,69 @@ fn wire(path: &PathBuf) -> Vec<serde_json::Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+#[tokio::test]
+async fn remote_ui_close_then_paste_publishes_focus_within_one_request_drain() {
+    use octet_agent::extension_process::ExtensionEvent;
+    for (character, expected_requests) in [('p', 1), ('v', 2)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut extensions, log) = fixture(&temp).await;
+        let mut frontend = Frontend::new([]);
+        command(&mut extensions, &mut frontend, &["fullscreen"]).await;
+        let before = frontend.shell.extension_editor_snapshot().text;
+        let mut observed = extensions.processes[0].subscribe();
+        assert!(extensions.route_remote_ui_event(
+            &mut frontend.shell,
+            &key(
+                KeyCode::Char(character),
+                KeyEventKind::Press,
+                KeyModifiers::NONE
+            ),
+        ));
+        // Hold the product consumer until both real child requests are queued.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut requests = 0;
+            while requests < expected_requests {
+                if matches!(
+                    observed.recv().await.unwrap(),
+                    ExtensionEvent::RemoteUiRequested { .. }
+                        | ExtensionEvent::ComposerRequested { .. }
+                ) {
+                    requests += 1;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        extensions.drain_events_for_shell(&mut frontend.shell);
+        let expected = if character == 'v' {
+            format!("{before}-inserted")
+        } else {
+            before
+        };
+        assert_eq!(frontend.shell.extension_editor_snapshot().text, expected);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(reply) = wire(&log).into_iter().find(|m| m["id"] == "paste-screen-1") {
+                    if character == 'v' {
+                        assert!(reply.get("result").is_some(), "{reply}");
+                    } else {
+                        assert!(
+                            reply.get("error").is_some(),
+                            "a blocked paste must not ACK: {reply}"
+                        );
+                        assert!(reply.to_string().contains("native composer"), "{reply}");
+                    }
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        extensions.shutdown().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

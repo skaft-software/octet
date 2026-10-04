@@ -522,6 +522,10 @@ impl ExecutableExtensions {
         extensions.rescan_global_config = crate::cli::global_config_path();
         extensions.effect_policy = config.effect_policy;
         extensions.start_policy_supervisors();
+        // Install actual native history before either immediate or deferred
+        // session_start callbacks. Initialize's coarse model/skill projection
+        // deliberately does not expose a namespace-independent session mirror.
+        extensions.refresh_host_state(session, model, reasoning, sessions);
         extensions.start_session_lifecycle();
         extensions
     }
@@ -931,7 +935,7 @@ impl ExecutableExtensions {
             Result<octet_agent::extension_process::ExtensionReloadReport, String>,
         )>,
     > + Send
-           + 'static {
+    + 'static {
         self.resource_paths_epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.cancel_background_work();

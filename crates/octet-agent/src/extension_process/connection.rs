@@ -1005,6 +1005,12 @@ impl ProcessConnection {
                     "extension generation is draining".into(),
                 ));
             }
+            let mut params = params;
+            session_leaf::attach_request_session_mirror(
+                &connection,
+                resource_owner.as_ref(),
+                &mut params,
+            )?;
             let id = connection.next_id.fetch_add(1, Ordering::Relaxed);
             let message = serde_json::json!({
                 "jsonrpc": "2.0",

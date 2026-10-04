@@ -1,5 +1,26 @@
-import { Extension, ToolError, type RequestContext, type InferSchema } from '../process/index.mjs';
+import { Extension, ToolError, resourceType, blobSchema, type BlobRef, type RequestContext, type InferSchema } from '../process/index.mjs';
 const extension = new Extension({maxConcurrentRequests: 2});
+const counter = resourceType<{n: number}>('example.Counter', value => { value.n = 0; });
+extension.typedTool({name: 'counter', description: 'Native counter', parameters: {type: 'object'},
+  outputSchema: {type: 'object', properties: {counter: counter.schema}, required: ['counter'], additionalProperties: false},
+}, async (_args, ctx) => ({counter: await ctx.exportResource(counter, {n: 0})}), () => 'Counter');
+extension.tool({name: 'add', description: 'Native increment', receiver: '/counter',
+  parameters: {type: 'object', properties: {counter: counter.schema}, required: ['counter'], additionalProperties: false},
+}, (args, ctx) => {
+  const native: {n: number} = ctx.resource(args.counter);
+  // @ts-expect-error Native resources retain their declared type.
+  const wrong: {text: string} = ctx.resource(args.counter);
+  void wrong;
+  return {text: String(++native.n), diagnostics: [{severity: 'info', code: 'counter.add', message: 'Incremented'}]};
+});
+const blob: InferSchema<typeof blobSchema> = {} as BlobRef;
+void blob;
+extension.hook('cache_warming_decision', () => ({cache_warming_decision: 'stop'}));
+extension.hook('model_turn_start', (_payload, context) => { context.throwIfCancelled(); return {session_operation: {action: 'continue'}}; });
+// @ts-expect-error No speculative hook name.
+extension.hook('imaginary_hook', () => {});
+// @ts-expect-error Required feature names are a bounded known authoring set.
+new Extension({features: ['arbitrary_wire']});
 extension.tool({name: 'typed', description: 'Inference test', parameters: {
   type: 'object', properties: {
     text: {type: 'string'}, wait: {type: 'integer'},

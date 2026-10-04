@@ -29,8 +29,8 @@ With Node >=22.19 available on `PATH`, run the focused integration target:
 cargo test --offline --manifest-path sdk/typescript/host-smoke/Cargo.toml --test native_typed -- --nocapture --test-threads=1
 ```
 
-These five stable `ts_native_*` tests invoke the source SDK CLI to generate a
-manifest/launcher for `tests/fixtures/typed-author.mjs`, then use production
+These nine `ts_native_*` tests invoke the source SDK CLI to generate a
+manifest/launcher for the typed and native-breadth author fixtures, then use production
 `ExtensionProcess` discovery, explicit enablement and dispatch. They require no
 npm install, generated example files, provider or network. Each test owns a
 private HOME/workspace and append-only child log (including PID), prints the
@@ -44,9 +44,23 @@ cooperative cancellation. Cancellation waits for an explicit child entry
 barrier, drops the real host waiter, observes the host's terminal settlement,
 then checks a valid follow-up and clean shutdown in the same PID/generation.
 It does not infer cancellation from an arbitrary delay or allow supervision to
-hide a replaced process. No Python/Rust parity, full extension-values matrix,
-resource/bulk, model-turn or installed-release acceptance is claimed by this
-bounded TypeScript target.
+hide a replaced process.
+
+Four added tests in `tests/native_breadth/mod.rs` use the author module
+`tests/fixtures/native_breadth.mjs` (not a handwritten wire peer). They cover
+resource export/resolution/release, foreign/unknown/retired zero-entry refusals,
+failed-output provisional cleanup, failed disposers remaining retired, and
+shutdown cleanup. Cleanup assertions wait for the production host's completed
+or failed disposal status, not merely an author log. They also exercise a real
+`policy/evaluate` reverse reply returning typed output with retained diagnostic
+metadata, malformed diagnostic recovery, verified PNG publication and invalid
+signature refusal, and a real before-prompt hook.
+
+These four additions are authored but not native-run-qualified by the test
+worker; the parent build/test run is required. No full Python/Rust parity,
+resource race matrix, native bulk, private session hooks, provider media
+projection, model-turn or installed-release acceptance is claimed. See the
+[implementation/reachability/evidence table](../../conformance/sdk-parity.md).
 
 The independent Node real-process/hostile-boundary/offline-pack suite is:
 

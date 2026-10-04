@@ -142,12 +142,28 @@ is one author source file plus a local package and generated manifest.
 - `extension.onShutdown(async ({reason}) => { /* local cleanup */ })` registers
   one bounded cleanup callback. Reasons are `shutdown` or `transport_lost`.
   It is not a model hook and does not own host cleanup.
-- Hooks, resource-object authoring, bulk transfer, structured diagnostics,
-  media/artifacts, dynamic tools, host reverse requests, flags, UI, context
-  contributions and lifecycle subscriptions are
-  **not implemented by this bounded authoring package**. Registration/manifest
-  mismatches are rejected; `extension.hook(...)` throws explicitly. No no-op
-  success is fabricated. The lower-level host wire remains live independently.
+- Named hooks use `extension.hook(name, (payload, context) => result)` with
+  hook-specific result validation. Session observations are continue-only;
+  private append grants advance only through host commit receipts.
+- `resourceType(name, dispose)` supplies nominal schemas for fixed object fields.
+  `context.exportResource`, `context.resource` and `context.releaseResource`
+  expose registration, admitted native identity and retirement. Resource tools
+  publish operation descriptors and serialize handlers. Arrays/root resource
+  positions are rejected; copied schema JSON is not a resource declaration.
+- Results may include validated `diagnostics` (metadata plus bounded text) and
+  image/audio `media` parts. `context.publishArtifact(bytes, mimeType)` publishes
+  at most 256 KiB inline; signature/owner checks remain host-owned.
+- `context.request(method, params)` is a bounded reverse-service allowlist, not
+  arbitrary RPC or retained authority. The SDK owns correlation and cancellation;
+  callers cannot supply authority fields. Declare needed service features with
+  `new Extension({features: [...]})`.
+- Bulk supports `blobSchema`, `validateBlob`, negotiated transport metadata and
+  low-level write/commit/read/release requests. **No secure local-file I/O helper
+  is implemented**; descriptor reachability is not bulk authoring parity.
+- Dynamic tools, flags, remote UI, lifecycle subscriptions, retained-owner and
+  session-control/child services are **not implemented by this package**. See
+  [the source parity inventory](../../conformance/sdk-parity.md) for separate
+  implementation, reachability and native-evidence axes.
 
 Keep module top-level code to imports and registration. Export the Extension;
 do **not** call `run()` in a CLI-loaded module. The launcher owns the process
@@ -161,8 +177,11 @@ discipline, not isolation.
 ## Runtime bounds
 
 The wire is current API `0.4` feature-negotiated JSONL, **not canonical API `0.3`**.
-It selects only offered `request_progress` plus required `request_cancellation`
-and `content_parts`; API versions and the exact manifest catalogs must match.
+It selects offered `request_progress`, required `request_cancellation` and
+`content_parts`, plus declared hook/resource and explicitly requested service
+features. Missing required author features fail initialization; API versions and
+the exact manifest catalogs must match. Reverse calls have a 30-second deadline,
+32 concurrent children and 65,536 non-reused IDs per process generation.
 
 - UTF-8 frames are at most **1 MiB including LF** in either direction, matching
   the stateful Rust host reader. Invalid UTF-8 or overlong frames terminates the

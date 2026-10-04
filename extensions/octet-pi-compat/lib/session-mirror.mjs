@@ -37,6 +37,11 @@ export function translateSessionEntries(entries, namespace) {
       const messages = canonicalToPi([canonical], calls);
       if (messages.length !== 1) unsupported('native mixed-message session entry', 'cannot fabricate extra Pi entry identities');
       const message = messages[0];
+      const metadata = entry.metadata?.tool_output?.metadata;
+      if (metadata && Object.hasOwn(metadata, 'pi_details')) {
+        if (message.role !== 'toolResult') unsupported('session Pi tool details', 'native entry does not identify a tool result');
+        message.details = plainJSON(metadata.pi_details, 'Pi tool details');
+      }
       if (entry.timestamp_unix_ms !== undefined) message.timestamp = entry.timestamp_unix_ms;
       return { ...base, type: 'message', message };
     }

@@ -1,4 +1,5 @@
 //! Source SDK acceptance through the production host, not a handwritten wire peer.
+mod native_breadth;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -7,11 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use octet_agent::{
-    discover_extension_manifests, ExtensionCatalog, ExtensionEvent, ExtensionHealthState,
-    ExtensionPolicy, ExtensionProcess, ExtensionRoot, ExtensionRuntimeConfig,
-    ExtensionRuntimeError, ExtensionSource,
+    ExtensionCatalog, ExtensionEvent, ExtensionHealthState, ExtensionPolicy, ExtensionProcess,
+    ExtensionRoot, ExtensionRuntimeConfig, ExtensionRuntimeError, ExtensionSource,
+    discover_extension_manifests,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 const NAME: &str = "typescript-typed-native";
@@ -56,6 +57,10 @@ struct Fixture {
 }
 impl Fixture {
     async fn start() -> Self {
+        Self::start_source(false).await
+    }
+
+    async fn start_source(breadth: bool) -> Self {
         assert!(
             cfg!(unix),
             "SDK CLI launcher requires Unix; missing support is not a skip"
@@ -76,7 +81,11 @@ impl Fixture {
         fs::write(&log, "").unwrap();
         let manifest = extension_dir.join("extension.toml");
         let cli = repository.join("sdk/typescript/process/cli.mjs");
-        let source = repository.join("sdk/typescript/tests/fixtures/typed-author.mjs");
+        let source = repository.join(if breadth {
+            "sdk/typescript/host-smoke/tests/fixtures/native_breadth.mjs"
+        } else {
+            "sdk/typescript/tests/fixtures/typed-author.mjs"
+        });
         let generated = Command::new("node")
             .arg(&cli)
             .arg("manifest")
@@ -145,9 +154,22 @@ impl Fixture {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            ["typed_stats", "typed_null"]
+            if breadth {
+                vec!["create", "increment", "release", "service", "media"]
+            } else {
+                vec!["typed_stats", "typed_null"]
+            }
         );
-        let expected_features = ["content_parts", "request_cancellation", "request_progress"];
+        let mut expected_features =
+            vec!["content_parts", "request_cancellation", "request_progress"];
+        if breadth {
+            expected_features.extend([
+                "resource_refs_v1",
+                "operation_descriptors_v1",
+                "artifacts",
+                "policy_intents",
+            ]);
+        }
         let features = process.negotiated_features();
         assert_eq!(features.len(), expected_features.len());
         for feature in expected_features {
@@ -305,10 +327,12 @@ async fn ts_native_optional_and_explicit_null() {
         "explicit null is not absent"
     );
     let serialized = serde_json::to_value(null).unwrap();
-    assert!(serialized
-        .as_object()
-        .unwrap()
-        .contains_key("structured_content"));
+    assert!(
+        serialized
+            .as_object()
+            .unwrap()
+            .contains_key("structured_content")
+    );
     fixture.close().await;
 }
 
@@ -402,10 +426,12 @@ async fn ts_native_cancellation_same_generation() {
     // receives a handwritten protocol frame from this test.
     drop(call);
     fixture.wait_for("cancelled").await;
-    assert!(fixture
-        .records()
-        .iter()
-        .any(|row| row["event"] == "cancelled" && row["aborted"] == true));
+    assert!(
+        fixture
+            .records()
+            .iter()
+            .any(|row| row["event"] == "cancelled" && row["aborted"] == true)
+    );
     let settled = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let ExtensionEvent::Diagnostic { message } =

@@ -175,7 +175,12 @@ impl ExecutableExtensions {
             if process.descriptor().manifest.runtime.sharing
                 == octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
             {
-                process.set_host_state(state.clone());
+                if let Err(error) = process.set_host_state_with_session(state.clone(), session) {
+                    self.diagnostics.push(format!(
+                        "warning: extension {:?} session mirror unavailable: {error}",
+                        process.descriptor().manifest.name,
+                    ));
+                }
             }
         }
         // Every session or model boundary refreshes this cache, so a read-only
@@ -281,8 +286,10 @@ impl ExecutableExtensions {
                 if let Some(system) = output.system_prompt {
                     anyhow::ensure!(process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1),
                         "extension returned an unnegotiated before_prompt system replacement");
-                    anyhow::ensure!(system.len() <= 256 * 1024 && !system.contains('\0'),
-                        "extension before_prompt system replacement exceeds bounds");
+                    anyhow::ensure!(
+                        system.len() <= 256 * 1024 && !system.contains('\0'),
+                        "extension before_prompt system replacement exceeds bounds"
+                    );
                     effective_system = system;
                 }
                 let mut dropped = 0usize;

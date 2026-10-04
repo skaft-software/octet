@@ -14,36 +14,36 @@ use octet_agent::extension_api_v03::MAX_JSON_RPC_ID_BYTES;
 #[cfg(windows)]
 use octet_agent::extension_process::WindowsProcessLaunch;
 #[cfg(unix)]
-use octet_agent::extension_process::{wait_for_bash_process, BashProcessLaunch};
+use octet_agent::extension_process::{BashProcessLaunch, wait_for_bash_process};
 use octet_agent::extension_process::{
     ExtensionInputRequest, ExtensionSessionLifecycleError, ExtensionSessionLifecycleOperation,
     ExtensionSessionLifecycleRequest, MAX_EXTENSION_TERMINAL_INPUT_BYTES,
 };
 use octet_agent::{
-    analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EffectBroker,
-    EffectIntent, EntryId, GoalDecision, GoalStatus, GoalTurnSource, OutputChannel, Run,
-    RunControl, Session, ToolEffect, ToolProgress, ToolProgressSink,
+    AgentCompactionMode, AgentError, AgentEvent, EffectBroker, EffectIntent, EntryId, GoalDecision,
+    GoalStatus, GoalTurnSource, OutputChannel, Run, RunControl, Session, ToolEffect, ToolProgress,
+    ToolProgressSink, analyze_session_cache_stats,
 };
 use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::app::bootstrap::{
-    build_app_with_resource_consumer as build_app, effective_compaction_threshold_fraction,
-    estimate_text_tokens, open_launch_session, rebuild_app, resolve_launch_interactive,
-    terminal_goal_session_id, Bootstrap, SessionSelection,
+    Bootstrap, SessionSelection, build_app_with_resource_consumer as build_app,
+    effective_compaction_threshold_fraction, estimate_text_tokens, open_launch_session,
+    rebuild_app, resolve_launch_interactive, terminal_goal_session_id,
 };
 use crate::app::{
-    apply_reconfig, level_from_reasoning, reasoning_label, requested_thinking_to_reasoning,
-    supported_levels_with_subagents, App, Reconfig,
+    App, Reconfig, apply_reconfig, level_from_reasoning, reasoning_label,
+    requested_thinking_to_reasoning, supported_levels_with_subagents,
 };
 use crate::commands::{self, Command};
 #[cfg(test)]
 use crate::compaction::attempt_compaction;
-use crate::compaction::{context_window, estimate_next_request_tokens, CompactionOutcome};
+use crate::compaction::{CompactionOutcome, context_window, estimate_next_request_tokens};
 use crate::config::{CompactionMode, Config, ResumeSelector, SandboxPolicy, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
-use crate::prompts::{render_and_record, RenderedPrompt};
+use crate::prompts::{RenderedPrompt, render_and_record};
 use crate::provider_setup::{
     CompletedSetup, ProviderSetupError, ProviderSetupService, ProviderSetupState,
     SetupAuthentication, SetupAuthority, SetupDraft,
@@ -52,17 +52,16 @@ use crate::resources::{compose_instructions, expand_skill_command};
 use crate::tui::composer::ComposedInput;
 use crate::tui::keymap::{self, InputAction};
 use crate::tui::pickers::{
-    self, confirmation_picker, extension_confirmation_picker, extension_input_picker,
-    extension_picker, message_picker, optional_model_picker, pick_list_with_preview,
-    provider_setup_picker, read_only_document, read_only_document_live_styled, session_picker,
-    subagent_picker, thinking_picker, SubagentPickerSnapshot,
+    self, SubagentPickerSnapshot, confirmation_picker, extension_confirmation_picker,
+    extension_input_picker, extension_picker, message_picker, optional_model_picker,
+    pick_list_with_preview, provider_setup_picker, read_only_document,
+    read_only_document_live_styled, session_picker, subagent_picker, thinking_picker,
 };
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
-    background_from_terminal_rgb, is_reserved_theme_name, load_named_theme_for_background,
-    load_theme, load_theme_for_background, selectable_file_themes, TerminalBackground,
-    TerminalThemeChoice,
+    TerminalBackground, TerminalThemeChoice, background_from_terminal_rgb, is_reserved_theme_name,
+    load_named_theme_for_background, load_theme, load_theme_for_background, selectable_file_themes,
 };
 use crate::tui::view::{
     InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult, Panel, PanelAction, PanelResult,
@@ -73,8 +72,8 @@ mod extension_menu;
 mod onboarding;
 
 use extension_menu::{
-    authority_label, extension_options_menu, set_extension_enabled, set_extension_host_authority,
-    ExtensionMenuOutcome,
+    ExtensionMenuOutcome, authority_label, extension_options_menu, set_extension_enabled,
+    set_extension_host_authority,
 };
 
 /// Ordered controls sent to the frozen Agent during an active run.
@@ -268,6 +267,132 @@ where
             }
         }))
     }
+}
+
+/// A command frontend may lend its existing shell/input to the sole idle App
+/// owner, but only after the command pump has released its fleet borrow.
+trait InteractiveCommandFrontend: crate::extensions::ExtensionConfirmationHandler {
+    fn apply_lifecycle<'a>(
+        &'a mut self,
+        app: &'a mut App,
+        request: ExtensionSessionLifecycleRequest,
+    ) -> Pin<Box<dyn Future<Output = bool> + 'a>>;
+}
+
+impl<S> InteractiveCommandFrontend for InteractiveExtensionConfirmations<'_, S>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    fn apply_lifecycle<'a>(
+        &'a mut self,
+        app: &'a mut App,
+        request: ExtensionSessionLifecycleRequest,
+    ) -> Pin<Box<dyn Future<Output = bool> + 'a>> {
+        Box::pin(execute_command_session_lifecycle(
+            app, self.shell, self.input, request,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_interactive_extension_command<H: InteractiveCommandFrontend>(
+    app: &mut App,
+    frontend: &mut H,
+    extension: Option<&str>,
+    name: &str,
+    arguments: Vec<String>,
+    attended: bool,
+    approval_budget: usize,
+) -> anyhow::Result<Option<String>> {
+    let Some(mut command) = app.executable_extensions.prepare_owned_command(
+        extension,
+        name,
+        arguments,
+        attended,
+        approval_budget,
+    ) else {
+        return Ok(None);
+    };
+    let failure = loop {
+        match command
+            .advance(&mut app.executable_extensions, frontend, true)
+            .await
+        {
+            Ok(Some(request)) => {
+                // This is an idle owner, not a recursive callback into a
+                // borrowed Agent. Lifecycle work retains its existing pumps;
+                // none of those pumps dispatches further session mutations.
+                if command
+                    .during_lifecycle(frontend.apply_lifecycle(app, request))
+                    .await
+                {
+                    command.session_replaced();
+                }
+            }
+            Ok(None) => break None,
+            Err(error) => break Some(error),
+        }
+    };
+    command
+        .finish(&mut app.executable_extensions, frontend, failure)
+        .await
+        .map(Some)
+}
+
+async fn run_interactive_presentation_action<H: InteractiveCommandFrontend>(
+    app: &mut App,
+    frontend: &mut H,
+    extension: &str,
+    action_id: &str,
+) -> anyhow::Result<String> {
+    let action = app
+        .executable_extensions
+        .resolve_presentation_action(extension, action_id)?;
+    if action.destructive {
+        let request = octet_agent::extension_process::ConfirmationRequest {
+            parent_request_id: None,
+            prompt: format!("Run {}?", action.label),
+            detail: Some(format!("Declared by extension {extension:?}")),
+            destructive: true,
+            default: false,
+        };
+        if !frontend.confirm(extension, &request).await? {
+            anyhow::bail!("extension presentation action was denied");
+        }
+    }
+    run_interactive_extension_command(
+        app,
+        frontend,
+        Some(extension),
+        &action.command,
+        action.arguments,
+        false,
+        usize::from(action.destructive),
+    )
+    .await?
+    .ok_or_else(|| {
+        anyhow::anyhow!("extension presentation action routed to an unavailable command")
+    })
+}
+
+async fn execute_command_session_lifecycle<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    request: ExtensionSessionLifecycleRequest,
+) -> bool
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let replaced = execute_extension_session_lifecycle(app, shell, input, request).await;
+    if replaced {
+        shell.herdr_session_changed(
+            herdr_session_id(app),
+            Some("resume"),
+            herdr_launch_scope(app),
+        );
+    }
+    replaced
 }
 
 /// Reconfiguration work requested while the Agent is active. It is applied
@@ -993,7 +1118,9 @@ where
 {
     let mut future = Box::pin(future);
     let mut input_open = true;
-    let remote_ui_wake = extensions.as_deref().and_then(|extensions| extensions.remote_ui_wake());
+    let remote_ui_wake = extensions
+        .as_deref()
+        .and_then(|extensions| extensions.remote_ui_wake());
     let mut frontend_tick = tokio::time::interval(Duration::from_millis(50));
     frontend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1137,8 +1264,13 @@ async fn compact_interactively<S>(
             cancellation.clone(),
         ));
         match await_with_ctrl_c_and_extensions(
-            compaction.as_mut(), shell, input, Some(&mut app.executable_extensions),
-        ).await {
+            compaction.as_mut(),
+            shell,
+            input,
+            Some(&mut app.executable_extensions),
+        )
+        .await
+        {
             Some(result) => Some(result),
             None => {
                 // Do not drop the owner mid-hook/provider request: drive its
@@ -5510,9 +5642,16 @@ where
                 input,
                 dialogs: &dialogs,
             };
-            app.executable_extensions
-                .execute_command_with_confirmation("subagents", arguments, &mut confirmations)
-                .await
+            run_interactive_extension_command(
+                app,
+                &mut confirmations,
+                Some(crate::extensions::SUBAGENTS_EXTENSION_NAME),
+                "subagents",
+                arguments,
+                false,
+                0,
+            )
+            .await
         };
         request_extension_ui(shell, app);
         match result {
@@ -5939,11 +6078,14 @@ fn session_id_for_path(path: &Path) -> anyhow::Result<String> {
     bounded_extension_session_id(session_id)
 }
 
-async fn create_extension_session(
+async fn create_extension_session<S>(
     app: &App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
-) -> anyhow::Result<String> {
+    input: &mut S,
+) -> anyhow::Result<String>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let path = app.sessions.new_path(&crate::modes::timestamp());
     run_blocking_lifecycle(shell, input, "creating session…", move || {
         let mut prepared = None;
@@ -5953,11 +6095,14 @@ async fn create_extension_session(
     .await
 }
 
-async fn fork_extension_session(
+async fn fork_extension_session<S>(
     app: &App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
-) -> anyhow::Result<String> {
+    input: &mut S,
+) -> anyhow::Result<String>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let sessions = app.sessions.clone();
     let source_path = app.agent.session().path().to_owned();
     let destination = sessions.new_path(&crate::modes::timestamp());
@@ -5969,12 +6114,15 @@ async fn fork_extension_session(
     .await
 }
 
-async fn open_extension_session(
+async fn open_extension_session<S>(
     path: PathBuf,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     label: &'static str,
-) -> anyhow::Result<Session> {
+) -> anyhow::Result<Session>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     run_blocking_lifecycle(shell, input, label, move || {
         let mut prepared = None;
         open_launch_session(&mut prepared, SessionSelection::OpenExisting(path))
@@ -5997,13 +6145,16 @@ fn replace_extension_active_session(app: &mut App, session: Session) -> anyhow::
     Ok(session_id)
 }
 
-async fn switch_extension_session(
+async fn switch_extension_session<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     request: &ExtensionSessionLifecycleRequest,
     session_id: String,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<String>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let path = app.sessions.path_by_id(&session_id)?;
     let session = open_extension_session(path, shell, input, "switching session…").await?;
     if request.is_cancelled() {
@@ -6014,12 +6165,15 @@ async fn switch_extension_session(
     replace_extension_active_session(app, session).map(Some)
 }
 
-async fn reload_extension_session(
+async fn reload_extension_session<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     request: &ExtensionSessionLifecycleRequest,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<String>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let path = app.agent.session().path().to_owned();
     let session = open_extension_session(path, shell, input, "reloading session…").await?;
     if request.is_cancelled() {
@@ -6056,8 +6210,13 @@ where
             |_| {},
         ));
         match await_with_ctrl_c_and_extensions(
-            compaction.as_mut(), shell, input, Some(&mut app.executable_extensions),
-        ).await {
+            compaction.as_mut(),
+            shell,
+            input,
+            Some(&mut app.executable_extensions),
+        )
+        .await
+        {
             Some(result) => result,
             None => {
                 cancellation.cancel();
@@ -6109,12 +6268,15 @@ where
     result
 }
 
-async fn execute_extension_session_lifecycle(
+async fn execute_extension_session_lifecycle<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     request: ExtensionSessionLifecycleRequest,
-) -> bool {
+) -> bool
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     if request.is_cancelled() {
         return false;
     }
@@ -6535,6 +6697,7 @@ async fn apply_pending_actions(
             }
             PendingIdleAction::Subagents(arguments) => {
                 run_subagents_command(&mut app, shell, input, arguments).await?;
+                *goal_deadline = recovered_goal_deadline(&app)?;
             }
             PendingIdleAction::Extensions(sub) => {
                 // Reuse the idle dispatcher verbatim so the menu, reload, and
@@ -7907,6 +8070,7 @@ async fn run_idle_command_inner(
         Command::Extensions(commands::ExtensionsSubcommand::Menu) => {
             app = boxed_idle_app_action(app, |app| extension_management_menu(app, shell, input))
                 .await?;
+            *goal_deadline = recovered_goal_deadline(&app)?;
         }
         Command::Extensions(commands::ExtensionsSubcommand::Status) => {
             request_extension_ui(shell, &mut app);
@@ -7975,13 +8139,13 @@ async fn run_idle_command_inner(
                     input,
                     dialogs: &dialogs,
                 };
-                app.executable_extensions
-                    .execute_presentation_action_with_confirmation(
-                        &extension,
-                        &action,
-                        &mut confirmations,
-                    )
-                    .await
+                run_interactive_presentation_action(
+                    &mut app,
+                    &mut confirmations,
+                    &extension,
+                    &action,
+                )
+                .await
             };
             match result {
                 Ok(output) if output.trim().is_empty() => {
@@ -7990,6 +8154,7 @@ async fn run_idle_command_inner(
                 Ok(output) => shell.show_overlay_text(output),
                 Err(error) => shell.error(format!("extension action failed: {error}")),
             }
+            *goal_deadline = recovered_goal_deadline(&app)?;
             request_extension_ui(shell, &mut app);
         }
         Command::Exit => return Ok(IdleCommandOutcome::Quit(app)),
@@ -8175,6 +8340,7 @@ async fn run_idle_command_inner(
             if let Some(arguments) = subagents_command_arguments(&text, &app.executable_extensions)
             {
                 run_subagents_command(&mut app, shell, input, arguments).await?;
+                *goal_deadline = recovered_goal_deadline(&app)?;
             } else {
                 let selection = shell.selected_plain_text();
                 match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {

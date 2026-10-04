@@ -1,6 +1,23 @@
 // Pure color helpers adapted from Pi 1.0 581e7ba78141a4d8b61cc9d11b8b22ae7e59195e.
 // packages/tui/src/oklab.ts sha256 45b067e6e3605b385f595adecd7c0216f1c6b6686680d5c73f661286de736be6
 // Copyright (c) 2025 Mario Zechner. MIT, see ../LICENSE.pi.
+// Oklab/OKHSL reference implementation: Copyright (c) 2021 Björn Ottosson.
+// https://bottosson.github.io/posts/colorpicker/
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 const multiply = (m, [x, y, z])=>m.map((row)=>row[0] * x + row[1] * y + row[2] * z);
 const LINEAR_SRGB_TO_LMS = [
     [

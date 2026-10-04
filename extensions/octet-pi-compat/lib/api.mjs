@@ -177,11 +177,11 @@ export function createContext(runtime, store) {
     if (typeof factory !== 'function') invalid('ui.custom factory');
     if (!options.overlay && (options.overlayOptions || options.onHandle)) invalid('overlay options require overlay=true');
     if (options.onHandle) unsupported('ui.custom.onHandle', 'use the TUI overlay handle supplied by showOverlay');
-    let finish;
-    const result = new Promise(resolve => { finish = resolve; });
-    const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, overlayOptions: options.overlay ? (options.overlayOptions || {}) : undefined });
+    let finish, reject;
+    const result = new Promise((resolve, fail) => { finish = resolve; reject = fail; });
+    const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, reject, overlayOptions: options.overlay ? (options.overlayOptions || {}) : undefined });
     runtime.track(mounting, store);
-    return mounting.then(() => result);
+    return Promise.all([mounting, result]).then(([, value]) => value);
   };
   const ui = strict({
     theme,

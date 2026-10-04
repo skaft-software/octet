@@ -25,9 +25,46 @@ function variant(value, label) {
 }
 const name = value => bounded(value, 'context name', 256);
 
+// Pi 1.0 ImageContent can represent inline images only. URL/provider references,
+// detail hints and audio need a native replay binding, not an invented Pi field.
+function imageData(value) {
+  const data = bounded(value, 'context image data', 786432);
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
+      || Buffer.from(data, 'base64').toString('base64') !== data) invalid('context image base64');
+  return data;
+}
+function imageType(value) {
+  const mime = bounded(value, 'context image MIME type', 256);
+  if (!/^image\/[a-zA-Z0-9!#$&^_.+\-]+$/.test(mime)) invalid('context image MIME type');
+  return mime;
+}
+function mediaToPi(media) {
+  const [kind, value] = variant(media, 'canonical media');
+  if (kind !== 'Image') unsupported(`context media ${kind}`, 'Pi 1.0 has no audio content type');
+  record(value, ['source', 'media_type', 'detail'], 'canonical image');
+  if (value.detail != null) unsupported('context image detail', 'Pi ImageContent has no detail hint');
+  const [source, data] = variant(value.source, 'canonical image source');
+  if (source !== 'Inline') unsupported(`context image source ${source}`, 'Pi ImageContent requires inline bytes');
+  if (value.media_type == null) unsupported('context image without MIME type', 'cannot invent image format');
+  return { type: 'image', data: imageData(data), mimeType: imageType(value.media_type) };
+}
+function contentToPi(part, label) {
+  const [kind, value] = variant(part, label);
+  if (kind === 'Text') return { type: 'text', text: text(value) };
+  if (kind === 'Media') return mediaToPi(value);
+  unsupported(`${label} ${kind}`, 'no lossless Pi content binding');
+}
+
+// Ephemeral structural provenance, never visible Pi fields or Session IDs.
+// Keep a native mixed user/tool batch intact when retained messages are sent
+// back after an unrelated context edit. Copies/new messages use Pi's ordinary
+// one-message conversion; they cannot claim the original native boundary.
+const projectionOrigins = new WeakMap();
+
 export function canonicalToPi(messages, calls = new Map()) {
   const output = [];
   for (const message of array(messages, 'canonical messages')) {
+    const start = output.length;
     const [role, body] = variant(message, 'canonical message');
     if (role === 'Assistant') {
       record(body, ['content', 'model', 'protocol'], 'canonical assistant');
@@ -44,8 +81,18 @@ export function canonicalToPi(messages, calls = new Map()) {
         }
         if (kind === 'Reasoning') {
           record(value, ['text', 'state'], 'canonical reasoning');
-          if (value.state != null) unsupported('context opaque reasoning continuation', 'no lossless Pi signature binding');
-          return { type: 'thinking', thinking: value.text === null ? '' : text(value.text) };
+          if (value.text === null) unsupported('context absent reasoning text', 'cannot replace absent text with an invented empty string');
+          const thinking = { type: 'thinking', thinking: text(value.text) };
+          if (value.state != null) {
+            const state = record(value.state, ['protocol', 'model', 'kind'], 'context opaque reasoning');
+            if (!['anthropic_messages', 'bedrock_converse'].includes(body.protocol)
+                || state.protocol !== body.protocol || state.model !== body.model) unsupported('context opaque reasoning continuation', 'signature producer must match the assistant');
+            const [kind, signature] = variant(state.kind, 'reasoning state kind');
+            if (kind !== 'AnthropicSignature') unsupported('context opaque reasoning continuation', 'no lossless Pi signature binding for this state');
+            record(signature, ['signature'], 'reasoning signature');
+            thinking.thinkingSignature = text(signature.signature);
+          }
+          return thinking;
         }
         unsupported(`context assistant part ${kind}`, 'no lossless Pi content binding');
       });
@@ -58,24 +105,23 @@ export function canonicalToPi(messages, calls = new Map()) {
       const flush = () => { if (content.length) { output.push({ role: 'user', content }); content = []; } };
       for (const part of array(body.content, 'user content')) {
         const [kind, value] = variant(part, 'user part');
-        if (kind === 'Text') content.push({ type: 'text', text: text(value) });
+        if (kind === 'Text' || kind === 'Media') content.push(contentToPi(part, 'context user part'));
         else if (kind === 'ToolResult') {
           flush(); record(value, ['tool_call_id', 'content', 'is_error', 'added_tool_names'], 'canonical tool result');
           if (value.added_tool_names != null) unsupported('context tool registry metadata');
           const id = name(value.tool_call_id), toolName = calls.get(id);
           if (!toolName) invalid('canonical tool result has no preceding call');
           if (typeof value.is_error !== 'boolean') invalid('tool result error flag');
-          const parts = array(value.content, 'tool result content').map(part => {
-            const [kind, textValue] = variant(part, 'tool result part');
-            if (kind !== 'Text') unsupported(`context tool result part ${kind}`);
-            return { type: 'text', text: text(textValue) };
-          });
+          const parts = array(value.content, 'tool result content').map(part => contentToPi(part, 'context tool result part'));
           output.push({ role: 'toolResult', toolCallId: id, toolName, content: parts, isError: value.is_error });
         } else unsupported(`context user part ${kind}`, 'no lossless Pi content binding');
       }
       flush();
       if (!body.content.length) output.push({ role: 'user', content: [] });
     } else unsupported(`canonical context role ${role}`);
+    const projected = output.slice(start);
+    const origin = { canonical: plainJSON(message, 'canonical source message', 786432), projected: JSON.stringify(projected), count: projected.length };
+    projected.forEach((item, index) => projectionOrigins.set(item, { origin, index }));
   }
   return output;
 }
@@ -83,6 +129,10 @@ export function canonicalToPi(messages, calls = new Map()) {
 function userParts(content) {
   if (typeof content === 'string') return [{ Text: text(content) }];
   return array(content, 'Pi user content').map(part => {
+    if (part?.type === 'image') {
+      record(part, ['type', 'data', 'mimeType'], 'Pi image part');
+      return { Media: { Image: { source: { Inline: imageData(part.data) }, media_type: imageType(part.mimeType), detail: null } } };
+    }
     record(part, ['type', 'text'], 'Pi text part');
     if (part.type !== 'text') unsupported(`context Pi content ${part.type}`);
     return { Text: text(part.text) };
@@ -101,7 +151,15 @@ export function piToCanonical(messages) {
       const protocol = protocols[message.api]; if (!protocol) unsupported(`Pi context API ${message.api}`);
       const content = array(message.content, 'Pi assistant content').map(part => {
         if (part?.type === 'text') { record(part, ['type', 'text'], 'Pi text part'); return { Text: text(part.text) }; }
-        if (part?.type === 'thinking') { record(part, ['type', 'thinking'], 'Pi thinking part'); return { Reasoning: { text: text(part.thinking), state: null } }; }
+        if (part?.type === 'thinking') {
+          record(part, ['type', 'thinking', 'thinkingSignature'], 'Pi thinking part');
+          let state = null;
+          if (Object.hasOwn(part, 'thinkingSignature')) {
+            if (!['anthropic_messages', 'bedrock_converse'].includes(protocol)) unsupported('Pi opaque reasoning signature', 'no lossless native signature binding for this API');
+            state = { protocol, model: name(message.model), kind: { AnthropicSignature: { signature: text(part.thinkingSignature) } } };
+          }
+          return { Reasoning: { text: text(part.thinking), state } };
+        }
         if (part?.type === 'toolCall') {
           record(part, ['type', 'id', 'name', 'arguments'], 'Pi tool call');
           const args = plainJSON(part.arguments, 'tool arguments', 262144);
@@ -117,7 +175,23 @@ export function piToCanonical(messages) {
       output.push({ User: { content: [{ ToolResult: { tool_call_id: name(message.toolCallId), content: userParts(message.content), is_error: message.isError } }] } });
     } else unsupported(`Pi context role ${message?.role}`, 'canonical provider role has no faithful binding');
   }
-  return plainJSON(output, 'canonical context projection', 786432);
+  // All parts must pass ordinary validation before reusing source structure:
+  // JSON equality alone would hide symbol/nonenumerable/undefined mutations.
+  const restored = [];
+  for (let index = 0; index < messages.length; index++) {
+    const source = projectionOrigins.get(messages[index]);
+    if (source?.index === 0) {
+      const group = messages.slice(index, index + source.origin.count);
+      if (group.length === source.origin.count && group.every((item, offset) => {
+        const next = projectionOrigins.get(item);
+        return next?.origin === source.origin && next.index === offset;
+      }) && JSON.stringify(group) === source.origin.projected) {
+        restored.push(source.origin.canonical); index += group.length - 1; continue;
+      }
+    }
+    restored.push(output[index]);
+  }
+  return plainJSON(restored, 'canonical context projection', 786432);
 }
 
 export async function cancellable(work, signal) {

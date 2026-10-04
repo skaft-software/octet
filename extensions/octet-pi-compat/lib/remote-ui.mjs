@@ -5,6 +5,7 @@ import { theme, keybindings } from './theme.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 
 const CURSOR_MARKER = '\x1b_pi:c\x07';
+const MAX_CAPTURE_READMISSIONS = 8;
 const basic = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 21, 22, 23, 24, 25, 27, 28, 29, 39, 49, ...Array.from({ length: 8 }, (_, i) => 30 + i), ...Array.from({ length: 8 }, (_, i) => 40 + i), ...Array.from({ length: 8 }, (_, i) => 90 + i), ...Array.from({ length: 8 }, (_, i) => 100 + i)]);
 export function safeLines(lines) {
   if (!Array.isArray(lines) || lines.length > 256) throw rpcError(-32602, 'bounds_exceeded ui/frame rows');
@@ -137,13 +138,14 @@ export class RemoteTUI {
 
 export class RemoteUI {
   constructor(runtime) { this.runtime = runtime; this.surfaces = new Map(); this.slots = new Map(); this.counter = 0; }
-  async mount(store, placement, title, factory, { done, slot, overlayOptions } = {}) {
+  async mount(store, placement, title, factory, { done, reject, slot, overlayOptions } = {}) {
     this.runtime.require('remote_ui'); this.runtime.assertOwner(store);
     if (this.surfaces.size >= 16) throw rpcError(-32012, 'bounds_exceeded remote surfaces');
     if (slot) await this.clearSlot(store, slot);
     const surface = {
       id: `pi-${++this.counter}`, runtime: this.runtime, placement, store, closed: false, opened: false, revision: 0, scheduled: false,
-      columns: 80, rows: 24, resolve: done, ready: false, dirty: false, initialInputs: [],
+      columns: 80, rows: 24, resolve: done, reject, ready: false, dirty: false, initialInputs: [],
+      phase: 'admitting', desiredMouseCapture: Boolean(store.mouseCapture), requestedMouseCapture: false, admittedMouseCapture: false,
     };
     surface.requestRender = () => {
       if (surface.closed || !surface.ready) return;
@@ -167,8 +169,8 @@ export class RemoteUI {
     this.surfaces.set(surface.id, surface);
     if (slot) { surface.slotKey = `${store.state.key}:${store.factory}:${slot}`; this.slots.set(surface.slotKey, surface); }
     try {
-      const geometry = await this.runtime.hostCall('ui/open', { surface_id: surface.id, title, placement, ...(store.mouseCapture ? { mouse_capture: true } : {}) }, store);
-      surface.columns = dimension(geometry.columns); surface.rows = dimension(geometry.rows); surface.opened = true;
+      const geometry = await this.admit(surface, title, Boolean(store.mouseCapture));
+      if (!geometry || surface.closed) return surface;
       if (placement === 'editor') {
         if (!geometry.editor_mount_id) unsupported('editor checkpoint', 'host ui/open must supply editor_mount_id');
         if (typeof geometry.editor_mount_id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(geometry.editor_mount_id)) invalid('editor_mount_id');
@@ -177,21 +179,27 @@ export class RemoteUI {
         // Input never establishes its own mount identity.
         if (surface.initialInputs.some(input => input.editor_input.mount_id !== surface.mountId)) invalid('editor input mount/revision mismatch');
       }
-      if (surface.closed) {
-        // An early local refusal may precede the host's open acknowledgement.
-        if (!surface.observedClose && store.state.alive && !this.runtime.stopping) await this.runtime.hostCall('ui/close', { surface_id: surface.id }, store);
-        return surface;
-      }
-      if (!store.state.alive) { await this.close(surface, undefined, true); return surface; }
+      surface.phase = 'constructing';
       const finish = value => this.close(surface, value).catch(error => this.runtime.backgroundError(error));
       surface.component = await this.runtime.scope.run(surface.store, () => factory(surface.tui.facade, theme, keybindings, finish));
       component(surface.component);
       if (surface.closed) { this.runtime.scope.run(surface.store, () => surface.component.dispose?.()); return surface; }
+      // Geometry is host-issued before construction. Each open freezes only its
+      // request; intent may still change while either close or open awaits ACK.
+      // Reconcile before activation, with bounded churn and no intermediate frame.
+      surface.phase = 'admitting';
+      let readmissions = 0;
+      while (surface.desiredMouseCapture !== surface.admittedMouseCapture) {
+        if (++readmissions > MAX_CAPTURE_READMISSIONS) throw rpcError(-32012, 'bounds_exceeded mouse capture admission changes');
+        await this.releaseMount(surface);
+        if (surface.closed) return surface;
+        if (!await this.admit(surface, title, surface.desiredMouseCapture) || surface.closed) return surface;
+      }
       if (overlayOptions) surface.tui.showOverlay(surface.component, overlayOptions);
       else { surface.tui.children.push(surface.component); surface.tui.setFocus(surface.component); }
       if (placement === 'editor') await this.bindEditor(surface);
       if (surface.closed) return surface;
-      surface.ready = true;
+      surface.phase = 'active'; surface.ready = true;
       // First delivery, not recovery replay: seed/bind first, then dispatch each
       // fenced host event exactly once. push captures the resulting ACK tail.
       for (const input of surface.initialInputs.splice(0)) {
@@ -202,6 +210,33 @@ export class RemoteUI {
       if (placement === 'fullscreen' && store.method === 'command/execute' && store.detach) store.detach();
       return surface;
     } catch (error) { await this.close(surface, undefined, !surface.opened).catch(e => this.runtime.backgroundError(e)); throw error; }
+  }
+  async admit(surface, title, capture) {
+    surface.requestedMouseCapture = capture;
+    const geometry = await this.runtime.hostCall('ui/open', {
+      surface_id: surface.id, title, placement: surface.placement, mouse_capture: capture,
+    }, surface.store);
+    // Observed retirement already restored the host lease; never revive it or
+    // send a duplicate close because an earlier successful ACK arrived late.
+    if (surface.observedClose) return null;
+    if (!surface.store.state.alive || this.runtime.stopping) { await this.close(surface, undefined, true); return null; }
+    // Record admission before validating geometry, so malformed success also
+    // gets cleaned up. Local done/cancel still needs a close after a late ACK.
+    surface.opened = true; surface.admittedMouseCapture = capture;
+    if (surface.closed) { await this.releaseMount(surface); return null; }
+    surface.columns = dimension(geometry.columns); surface.rows = dimension(geometry.rows);
+    return geometry;
+  }
+  releaseMount(surface) {
+    if (surface.releasing) return surface.releasing;
+    if (!surface.opened || surface.observedClose || !surface.store.state.alive || this.runtime.stopping) return;
+    // Claim the close synchronously. done/cancel during this ACK cannot send a
+    // second close or open a replacement before this release has settled.
+    surface.opened = false; surface.admittedMouseCapture = false;
+    surface.releasing = Promise.resolve().then(() => this.runtime.hostCall('ui/close',
+      { surface_id: surface.id }, { ...surface.store, controller: new AbortController() }))
+      .finally(() => { surface.releasing = null; });
+    return surface.releasing;
   }
   async bindEditor(surface) {
     const c = surface.component, store = surface.store;
@@ -328,7 +363,8 @@ export class RemoteUI {
   }
   async close(surface, value, observed = false) {
     if (surface.closed) return;
-    surface.closed = true; surface.observedClose = observed;
+    surface.closed = true; surface.observedClose = observed; surface.phase = 'closed';
+    if (observed) { surface.opened = false; surface.admittedMouseCapture = false; }
     surface.initialInputs.length = 0;
     if (surface.editor && observed) surface.editor.retired = true;
     this.surfaces.delete(surface.id);
@@ -339,17 +375,22 @@ export class RemoteUI {
       disposed.add(c);
       try { this.runtime.scope.run(surface.store, () => c.dispose?.()); } catch (error) { this.runtime.backgroundError(error); }
     }
-    surface.tui.listeners.clear(); surface.resolve?.(value);
-    if (surface.opened && !observed && surface.store.state.alive && !this.runtime.stopping) {
-      // Stop accepting input before draining an adapter-initiated restoration.
-      // Otherwise an accepted draft write can arrive after the native editor is
-      // editable (or a replacement editor has read its seed) and overwrite it.
-      // Host rescue/shutdown remain immediate, not blocked on extension effects.
-      try { await surface.editor?.tail; }
-      finally {
-        if (surface.store.state.alive && !this.runtime.stopping) await this.runtime.hostCall('ui/close', { surface_id: surface.id }, { ...surface.store, controller: new AbortController() });
+    surface.tui.listeners.clear();
+    try {
+      if ((surface.opened || surface.releasing) && !observed && surface.store.state.alive && !this.runtime.stopping) {
+        // Stop accepting input before draining an adapter-initiated restoration.
+        // Otherwise an accepted draft write can arrive after the native editor is
+        // editable (or a replacement editor has read its seed) and overwrite it.
+        // Host rescue/shutdown remain immediate, not blocked on extension effects.
+        try { await surface.editor?.tail; }
+        finally {
+          await this.releaseMount(surface);
+        }
       }
-    }
+    } catch (error) { surface.reject?.(error); throw error; }
+    // ui.custom continuations may paste into the native composer. Resolve only
+    // after the host has acknowledged restoration, never before sending close.
+    surface.resolve?.(value);
   }
   clearSlot(store, slot) {
     const surface = this.slots.get(`${store.state.key}:${store.factory}:${slot}`);
@@ -381,7 +422,8 @@ export class RemoteUI {
           else surface.tui.input(keyData(params), params.kind === 'release');
         }
       } else if (method === 'ui/mouse') {
-        if (!surface.store.mouseCapture) invalid('ui/mouse without capture');
+        if (!surface.ready) return; // No component input before capture admission.
+        if (!surface.admittedMouseCapture) invalid('ui/mouse without capture');
         if (surface.placement === 'editor') unsupported('custom editor mouse input', 'no host-issued editor input revision');
         surface.tui.input(mouseData(params), false);
       } else unsupported(method);

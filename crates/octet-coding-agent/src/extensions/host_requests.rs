@@ -286,6 +286,15 @@ impl ExecutableExtensions {
                             "custom-editor composer writes require an editor checkpoint".into(),
                         )
                     }
+                    ExtensionComposerOperation::Set { .. }
+                    | ExtensionComposerOperation::Insert { .. }
+                        if !shell.extension_editor_snapshot().focused =>
+                    {
+                        ExtensionRequestOutcome::Failed(
+                            ExtensionRequestFailure::InvalidRequest,
+                            "native composer does not own input".into(),
+                        )
+                    }
                     ExtensionComposerOperation::Checkpoint {
                         text,
                         owner,
@@ -399,7 +408,12 @@ impl ExecutableExtensions {
                             shell,
                             self.terminal_arbiter.active().is_some(),
                         ) {
-                            Ok(result) => ExtensionRequestOutcome::Ok(result),
+                            Ok(result) => {
+                                // Publish ownership before the next queued request:
+                                // close followed by paste can share this drain.
+                                shell.set_remote_ui(self.remote_ui.projection());
+                                ExtensionRequestOutcome::Ok(result)
+                            }
                             Err((failure, detail)) => {
                                 ExtensionRequestOutcome::Failed(failure, detail)
                             }

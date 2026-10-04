@@ -68,8 +68,19 @@ export class Runtime {
   }
   mouseIntent(enabled) {
     this.require('remote_ui'); const store = this.scope.getStore(); this.assertOwner(store);
-    if (store.surface?.opened && enabled !== Boolean(store.mouseCapture)) unsupported('changing live mouse capture', 'declare capture before opening the component');
-    store.mouseCapture = enabled;
+    const surface = store.surface;
+    if (surface?.closed) {
+      if (enabled) unsupported('changing live mouse capture', 'component is closed');
+      return; // dispose may repeat the release intent; the host owns restoration.
+    }
+    if (surface?.phase === 'active' && enabled && !surface.desiredMouseCapture) {
+      unsupported('changing live mouse capture', 'declare capture before component activation');
+    }
+    // Before activation, pending admissions reconcile this latest desired value;
+    // they never mutate their frozen request or pretend the host lease changed.
+    // A live disable remains teardown intent, not host-authorized reconfiguration.
+    if (surface) surface.desiredMouseCapture = enabled;
+    (surface?.store ?? store).mouseCapture = enabled;
   }
   require(feature) { if (!this.features.has(feature)) unsupported(feature, 'feature was not negotiated'); }
   assertOwner(store) {

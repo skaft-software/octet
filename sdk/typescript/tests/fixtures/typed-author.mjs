@@ -32,9 +32,10 @@ extension.typedTool({name: 'typed_stats', description: 'Count Unicode characters
     return {characters: [...text].length, note: null};
   }, value => `${value.characters} Unicode characters`);
 extension.tool({name: 'typed_null', description: 'Return an explicit typed null',
-  parameters: {type: 'object', additionalProperties: false}, outputSchema: {type: 'null'}},
-  () => {
+  parameters: {type: 'object', properties: {diagnostics: {type: 'boolean'}, invalidDiagnostic: {type: 'boolean'}}, additionalProperties: false}, outputSchema: {type: 'null'}},
+  ({diagnostics, invalidDiagnostic}) => {
     record('call', {tool: 'typed_null', home: process.env.HOME});
-    return {text: 'No value', structuredContent: null};
+    return {text: 'No value', structuredContent: null,
+      ...(diagnostics || invalidDiagnostic ? {diagnostics: [{severity: 'warning', code: 'fixture.note', message: invalidDiagnostic ? '\u001b[31m' : 'No samples\navailable'}]} : {})};
   });
 export default extension;

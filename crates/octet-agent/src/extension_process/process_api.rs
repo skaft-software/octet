@@ -211,22 +211,48 @@ impl ExtensionProcess {
     /// future reload initialization. Negotiated API 0.4 remote UI owners also
     /// receive a bounded `context/updated {resource_owner, host}` replacement.
     pub fn set_host_state(&self, state: ExtensionHostState) {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        self.set_host_state_on_connection(state, connection, false, false, None);
+    }
+
+    pub(super) fn set_host_state_on_connection(
+        &self,
+        state: ExtensionHostState,
+        connection: Arc<ProcessConnection>,
+        mirror_changed: bool,
+        mirror_refreshed: bool,
+        mut retired_owner: Option<String>,
+    ) {
         let replaced_session;
         {
             let mut current = write_std_lock(&self.inner.host_state);
-            if *current == state {
+            if *current == state && !mirror_changed {
                 return;
             }
-            replaced_session = current.session_id != state.session_id;
-            if replaced_session {
-                if let Some(owner) = current.session_id.as_deref() {
-                    // Lifecycle validity cannot depend on UI negotiation or subscriptions.
-                    self.retire_resource_owner(owner);
+            replaced_session = current.session_id != state.session_id || retired_owner.is_some();
+            if replaced_session && !mirror_refreshed {
+                if let Some(previous) = lock_std_mutex(&connection.session_leaf.mirror).take() {
+                    retired_owner = Some(previous.owner.session_id);
                 }
+            }
+            if replaced_session && retired_owner.is_none() {
+                retired_owner = current.session_id.clone();
             }
             *current = state.clone();
         }
-        let connection = read_std_lock(&self.inner.connection);
+        if let Some(owner) = retired_owner {
+            // Retire on this pinned connection, without reacquiring the active
+            // connection lock held by native snapshot publication. Authority is
+            // the opaque resource owner, not the display session filename.
+            lock_std_mutex(&connection.resources).retire_owner(&owner);
+            lock_std_mutex(&connection.issued_resource_owners)
+                .retain(|issued| issued.session_id != owner);
+            connection.pending_changed.notify_waiters();
+            if let Some(service) = read_std_lock(&self.inner.delegation_service).clone() {
+                service.shutdown_owner(&owner);
+            }
+            connection.resource_cleanup_changed.notify_one();
+        }
         let protocol = read_std_lock(&connection.protocol);
         if protocol.version != EXTENSION_API_VERSION_0_4
             || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
@@ -249,10 +275,32 @@ impl ExtensionProcess {
         // The bounded surface map supplies at most sixteen distinct owners.
         for owner in connection.remote_ui.owners() {
             if lock_std_mutex(&connection.issued_resource_owners).contains(&owner) {
-                let _ = connection.queue_notification(
+                let mut host = serde_json::to_value(&state).expect("host state serializes");
+                if let Err(error) =
+                    session_leaf::attach_session_mirror(&connection, &owner, &mut host, true)
+                {
+                    let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                        message: format!("context update refused: {error}"),
+                    });
+                    // Even a mismatched owner must not keep a previously
+                    // published mirror alive after replacement was refused.
+                    connection.begin_drain();
+                    connection.kill_process_group();
+                    break;
+                }
+                if !connection.queue_notification(
                     methods::CONTEXT_UPDATED,
-                    serde_json::json!({"resource_owner": owner, "host": state}),
-                );
+                    serde_json::json!({"resource_owner": owner, "host": host}),
+                ) {
+                    // A retained mirror must not remain usable after losing a
+                    // replacement. Retire the generation rather than present
+                    // an old complete snapshot as the current session.
+                    if lock_std_mutex(&connection.session_leaf.mirror).is_some() {
+                        connection.begin_drain();
+                        connection.kill_process_group();
+                    }
+                    break;
+                }
             }
         }
     }
@@ -537,6 +585,11 @@ impl ExtensionProcess {
             context.resource_owner = Some(resource_owner.clone());
             params["context"] = serde_json::to_value(context)
                 .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+            session_leaf::attach_request_session_mirror(
+                &endpoint.connection,
+                Some(&resource_owner),
+                &mut params,
+            )?;
         }
         let result = endpoint
             .connection
@@ -2521,6 +2574,14 @@ impl ExtensionProcess {
                     previous.generation,
                 );
             }
+            // This is a host-owned observation, not a retained append grant.
+            // Rebind only at accepted cutover, after old callbacks settled;
+            // failed candidates never receive or alter the active mirror.
+            let mut mirror = lock_std_mutex(&previous.session_leaf.mirror).clone();
+            if let Some(mirror) = &mut mirror {
+                mirror.rebind_generation(generation);
+            }
+            *lock_std_mutex(&replacement.session_leaf.mirror) = mirror;
             *active = Arc::clone(&replacement);
             replacement.activate_post_initialize();
             self.inner.generation.store(generation, Ordering::Release);

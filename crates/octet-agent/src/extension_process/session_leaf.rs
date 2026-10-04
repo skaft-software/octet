@@ -9,6 +9,27 @@ use serde::{Deserialize, Serialize};
 
 mod session_operations;
 
+#[cfg(all(test, unix))]
+mod mirror_tests;
+
+// Retained context consumers accept at most 512 KiB of complete host state.
+const MAX_SESSION_MIRROR_BYTES: usize = 512 * 1024;
+const MAX_SESSION_MIRROR_ENTRIES: usize = 16_384;
+
+#[derive(Clone, PartialEq)]
+pub(super) struct SessionMirror {
+    pub(super) owner: ExtensionResourceOwner,
+    // None is an unavailable projection, never an empty session. Remember the
+    // failure so later callbacks cannot fall back to an older successful view.
+    value: Option<serde_json::Value>,
+}
+
+impl SessionMirror {
+    pub(super) fn rebind_generation(&mut self, generation: u64) {
+        self.owner.process_generation = generation;
+    }
+}
+
 use super::ExtensionResourceOwner;
 use super::*;
 use crate::session_leaf::{
@@ -174,6 +195,9 @@ struct BoundLeaf {
 #[derive(Default)]
 pub(super) struct SessionLeafMailbox {
     bound: StdMutex<Option<Arc<BoundLeaf>>>,
+    // Observation only, not an append grant. Keep it through connection drain
+    // so an accepted reload can rebind the last host-installed immutable view.
+    pub(super) mirror: StdMutex<Option<SessionMirror>>,
 }
 
 impl SessionLeafMailbox {
@@ -194,6 +218,69 @@ pub struct SessionLeafProcessLease {
 }
 
 impl ExtensionProcess {
+    /// Install a complete read-only mirror from the actual native Session. This
+    /// is independent of the invocation-scoped append grant. Projection failure
+    /// replaces the cached view with unavailable state; it never retains stale
+    /// entries or substitutes a successful empty session.
+    pub fn set_host_state_with_session(
+        &self,
+        state: ExtensionHostState,
+        session: &crate::Session,
+    ) -> Result<(), ExtensionRuntimeError> {
+        // Keep the publication on the authoritative generation through the
+        // synchronous update. Reload cutover cannot copy an older snapshot
+        // halfway through a refresh and then start its replacement callbacks.
+        let active = read_std_lock(&self.inner.connection);
+        let connection = Arc::clone(&active);
+        if !session_mirror_supported(&connection) {
+            drop(active);
+            self.set_host_state(state);
+            return Ok(());
+        }
+        let owner = ExtensionResourceOwner {
+            session_id: session.resource_owner_key(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: connection.generation,
+        };
+        let projection = session_snapshot(
+            session,
+            &self.descriptor().manifest.name,
+            MAX_SESSION_MIRROR_BYTES.min(connection.max_message_bytes()),
+        )
+        .and_then(|snapshot| {
+            let mut host = serde_json::to_value(&state)
+                .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+            merge_session_snapshot(&mut host, &snapshot);
+            validate_session_snapshot_size(&host, MAX_SESSION_MIRROR_BYTES)?;
+            // Include the real notification envelope, not just its entries.
+            validate_session_snapshot_size(
+                &serde_json::json!({
+                    "jsonrpc":"2.0", "method":methods::CONTEXT_UPDATED,
+                    "params":{"resource_owner":owner,"host":host}
+                }),
+                connection.max_message_bytes().saturating_sub(1),
+            )?;
+            Ok(snapshot)
+        });
+        let mirror = SessionMirror {
+            owner,
+            value: projection.as_ref().ok().cloned(),
+        };
+        let (changed, retired_owner) = {
+            let mut slot = lock_std_mutex(&connection.session_leaf.mirror);
+            let changed = slot.as_ref() != Some(&mirror);
+            let retired_owner = slot
+                .as_ref()
+                .filter(|previous| previous.owner.session_id != mirror.owner.session_id)
+                .map(|previous| previous.owner.session_id.clone());
+            *slot = Some(mirror);
+            (changed, retired_owner)
+        };
+        self.set_host_state_on_connection(state, connection, changed, true, retired_owner);
+        drop(active);
+        projection.map(|_| ())
+    }
+
     /// Install the direct producer on the actual current reader before hook
     /// dispatch. No capability is negotiated here. Only a host-issued grant for
     /// this process instance/generation and manifest namespace can bind.
@@ -251,23 +338,11 @@ impl SessionLeafProcessLease {
                 "session snapshot owner changed".into(),
             ));
         }
-        let namespace = &self.process.descriptor().manifest.name;
-        let entries = session
-            .entries()
-            .iter()
-            .map(|entry| session_entry_for_namespace(entry, namespace))
-            .collect::<Result<Vec<_>, _>>()?;
-        let branch = crate::compaction::session_operation_branch(session)
-            .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))?
-            .iter()
-            .map(|entry| session_entry_for_namespace(entry, namespace))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.host_snapshot = Some(serde_json::json!({
-            "session_entries": entries,
-            "session_branch": branch,
-            "session_leaf_id": session.head(),
-            "session_file": session.path(),
-        }));
+        self.host_snapshot = Some(session_snapshot(
+            session,
+            &self.process.descriptor().manifest.name,
+            self.connection.max_message_bytes(),
+        )?);
         Ok(self)
     }
     /// Initial immutable grant snapshot for the owned hook request.
@@ -334,6 +409,110 @@ impl SessionLeafProcessLease {
 
 /// Owner-filtered native record. Private metadata never crosses namespaces,
 /// including through compaction preparation or full session mirrors.
+fn session_mirror_supported(connection: &ProcessConnection) -> bool {
+    let protocol = read_std_lock(&connection.protocol);
+    protocol.version == EXTENSION_API_VERSION_0_4
+        && protocol.supports(EXTENSION_FEATURE_SESSION_ENTRIES)
+}
+
+fn merge_session_snapshot(host: &mut serde_json::Value, snapshot: &serde_json::Value) {
+    host.as_object_mut()
+        .expect("execution host is an object")
+        .extend(
+            snapshot
+                .as_object()
+                .expect("session snapshot is an object")
+                .clone(),
+        );
+}
+
+/// Attach only the view installed for this exact connection and native owner.
+/// The private leaf path already carries a newer invocation snapshot and must
+/// not have it overwritten by the last frontend boundary's cached observation.
+pub(super) fn attach_session_mirror(
+    connection: &ProcessConnection,
+    owner: &ExtensionResourceOwner,
+    host: &mut serde_json::Value,
+    notification: bool,
+) -> Result<(), ExtensionRuntimeError> {
+    if !session_mirror_supported(connection) || host.get("session_entries").is_some() {
+        return Ok(());
+    }
+    let slot = lock_std_mutex(&connection.session_leaf.mirror);
+    let Some(mirror) = slot.as_ref() else {
+        return Ok(());
+    };
+    if mirror.owner != *owner || owner.process_generation != connection.generation {
+        return Err(ExtensionRuntimeError::Protocol(
+            "session snapshot owner changed".into(),
+        ));
+    }
+    if let Some(snapshot) = &mirror.value {
+        merge_session_snapshot(host, snapshot);
+    } else if notification {
+        // Retained adapters merge context updates: explicit nulls invalidate
+        // each getter, whereas omitted fields would leave stale data behind.
+        merge_session_snapshot(
+            host,
+            &serde_json::json!({
+                "session_entries":null, "session_branch":null,
+                "session_leaf_id":null, "session_file":null,
+            }),
+        );
+    } else {
+        return Err(ExtensionRuntimeError::Protocol(
+            "session snapshot unavailable; no entries truncated".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn attach_request_session_mirror(
+    connection: &ProcessConnection,
+    owner: Option<&ExtensionResourceOwner>,
+    params: &mut serde_json::Value,
+) -> Result<(), ExtensionRuntimeError> {
+    if let Some(owner) = owner {
+        if let Some(host) = params
+            .get_mut("context")
+            .and_then(|context| context.get_mut("host"))
+        {
+            attach_session_mirror(connection, owner, host, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn session_snapshot(
+    session: &crate::Session,
+    namespace: &str,
+    limit: usize,
+) -> Result<serde_json::Value, ExtensionRuntimeError> {
+    if session.entries().len() > MAX_SESSION_MIRROR_ENTRIES {
+        return Err(ExtensionRuntimeError::Protocol(
+            "session snapshot exceeds entry bound; no entries truncated".into(),
+        ));
+    }
+    let mut entries = Vec::with_capacity(session.entries().len());
+    let mut remaining = limit;
+    for entry in session.entries() {
+        let entry = session_entry_for_namespace(entry, namespace)?;
+        remaining = remaining.saturating_sub(session_snapshot_bytes(&entry, remaining)?);
+        entries.push(entry);
+    }
+    let branch = crate::compaction::session_operation_branch(session)
+        .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))?
+        .iter()
+        .map(|entry| session_entry_for_namespace(entry, namespace))
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot = serde_json::json!({
+        "session_entries":entries, "session_branch":branch,
+        "session_leaf_id":session.head(), "session_file":session.path(),
+    });
+    validate_session_snapshot_size(&snapshot, limit)?;
+    Ok(snapshot)
+}
+
 fn session_entry_for_namespace(
     entry: &crate::session::Entry,
     namespace: &str,
@@ -374,6 +553,13 @@ fn validate_session_snapshot_size(
     value: &impl Serialize,
     limit: usize,
 ) -> Result<(), ExtensionRuntimeError> {
+    session_snapshot_bytes(value, limit).map(|_| ())
+}
+
+fn session_snapshot_bytes(
+    value: &impl Serialize,
+    limit: usize,
+) -> Result<usize, ExtensionRuntimeError> {
     struct Count {
         bytes: usize,
         limit: usize,
@@ -390,11 +576,13 @@ fn validate_session_snapshot_size(
             Ok(())
         }
     }
-    serde_json::to_writer(Count { bytes: 0, limit }, value).map_err(|_| {
+    let mut count = Count { bytes: 0, limit };
+    serde_json::to_writer(&mut count, value).map_err(|_| {
         ExtensionRuntimeError::Protocol(
             "session snapshot exceeds wire bound; no entries truncated".into(),
         )
-    })
+    })?;
+    Ok(count.bytes)
 }
 
 #[cfg(test)]
@@ -445,15 +633,19 @@ mod session_snapshot_tests {
         assert!(values.contains_key("owner.one"));
         assert!(values.contains_key("owner.public"));
         assert!(!values.contains_key("owner.two"));
-        assert!(original
-            .metadata
-            .as_ref()
-            .unwrap()
-            .extension_metadata
-            .contains_key("owner.two"));
-        assert!(!serde_json::to_string(&projected)
-            .unwrap()
-            .contains("private:owner.two"));
+        assert!(
+            original
+                .metadata
+                .as_ref()
+                .unwrap()
+                .extension_metadata
+                .contains_key("owner.two")
+        );
+        assert!(
+            !serde_json::to_string(&projected)
+                .unwrap()
+                .contains("private:owner.two")
+        );
     }
 
     #[test]

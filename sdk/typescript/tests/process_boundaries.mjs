@@ -124,7 +124,9 @@ test('valid cancellation notifications share only the target ID and settle the t
 
 test('invalid cancellation cannot cancel unrelated work', bounded, async t => {
   const h = harness(t); await h.ready(); h.send(tool(2, {ms: 30})); await h.progress(2);
+  // String child IDs are now valid but never alias the numeric host ID.
   h.send({jsonrpc: '2.0', method: '$/cancelRequest', params: {id: '2'}});
+  h.send({jsonrpc: '2.0', method: '$/cancelRequest', params: {id: false}});
   assert((await h.reply(2)).result); await h.stop();
   assert.match(h.stderr(), /Invalid cancellation/);
 });

@@ -115,6 +115,19 @@ impl<'a> ExtensionActionConsole<'a> {
     }
 }
 
+impl InteractiveCommandFrontend for ExtensionActionConsole<'_> {
+    fn apply_lifecycle<'a>(
+        &'a mut self,
+        app: &'a mut App,
+        request: ExtensionSessionLifecycleRequest,
+    ) -> Pin<Box<dyn Future<Output = bool> + 'a>> {
+        self.close();
+        Box::pin(execute_command_session_lifecycle(
+            app, self.shell, self.input, request,
+        ))
+    }
+}
+
 impl crate::extensions::ExtensionConfirmationHandler for ExtensionActionConsole<'_> {
     fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
         self.observe_fullscreen_mount();
@@ -459,7 +472,7 @@ pub(super) async fn extension_options_menu(
             MenuEntry::Disable => return Ok(ExtensionMenuOutcome::Disable),
             MenuEntry::HostAuthority(true) => return Ok(ExtensionMenuOutcome::GrantHostAuthority),
             MenuEntry::HostAuthority(false) => {
-                return Ok(ExtensionMenuOutcome::RevokeHostAuthority)
+                return Ok(ExtensionMenuOutcome::RevokeHostAuthority);
             }
             MenuEntry::Item(index) => items[index].clone(),
         };
@@ -552,18 +565,32 @@ async fn run_extension_menu_action(
     let dialogs = app.executable_extensions.lifecycle_snapshot();
     let (result, ui_yield) = {
         let mut console = ExtensionActionConsole::new(shell, input, &dialogs, item.label.clone());
-        let result = app
-            .executable_extensions
-            .execute_menu_action_with_confirmation(
-                extension,
-                &item.label,
-                place,
+        let result = async {
+            if item.destructive {
+                let request = octet_agent::extension_process::ConfirmationRequest {
+                    parent_request_id: None,
+                    prompt: format!("{}?", item.label),
+                    detail: Some(format!("{place} · offered by {extension}")),
+                    destructive: true,
+                    default: false,
+                };
+                if !console.confirm(extension, &request).await? {
+                    anyhow::bail!("{} was cancelled", item.label);
+                }
+            }
+            run_interactive_extension_command(
+                app,
+                &mut console,
+                Some(extension),
                 &command,
                 arguments,
-                item.destructive,
-                &mut console,
+                true,
+                usize::from(item.destructive),
             )
-            .await;
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{extension} no longer offers {:?}", item.label))
+        }
+        .await;
         let ui_yield = if console.should_yield_to_fullscreen() {
             ExtensionMenuActionDisposition::ReturnToIdle
         } else {
@@ -573,15 +600,28 @@ async fn run_extension_menu_action(
         (result, ui_yield)
     };
     request_extension_ui(shell, app);
-    if ui_yield == ExtensionMenuActionDisposition::ReturnToIdle {
-        return Ok(ui_yield);
-    }
+    present_extension_menu_action_result(shell, input, &item.label, result, ui_yield).await
+}
+
+async fn present_extension_menu_action_result<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    label: &str,
+    result: anyhow::Result<String>,
+    ui_yield: ExtensionMenuActionDisposition,
+) -> anyhow::Result<ExtensionMenuActionDisposition>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
     match result {
+        // Admission is sticky, even if the component closed before the command
+        // failed. It suppresses success chrome, never the command error.
+        Err(error) => shell.error(format!("{label}: {error:#}")),
+        Ok(_) if ui_yield == ExtensionMenuActionDisposition::ReturnToIdle => {}
         Ok(output) if output.trim().is_empty() => {
-            shell.notice(format!("{} finished", item.label));
+            shell.notice(format!("{label} finished"));
         }
-        Ok(output) => read_only_document(shell, input, item.label.clone(), output).await?,
-        Err(error) => shell.error(format!("{}: {error:#}", item.label)),
+        Ok(output) => read_only_document(shell, input, label, output).await?,
     }
     Ok(ui_yield)
 }
@@ -801,6 +841,54 @@ pub(super) async fn set_extension_enabled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fullscreen_menu_yield_preserves_command_errors_after_surface_closed() {
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let disposition = present_extension_menu_action_result(
+            &mut shell,
+            &mut input,
+            "Draw",
+            Err(anyhow::anyhow!("capture admission failed").context("command failed")),
+            ExtensionMenuActionDisposition::ReturnToIdle,
+        )
+        .await
+        .unwrap();
+        assert_eq!(disposition, ExtensionMenuActionDisposition::ReturnToIdle);
+        assert_eq!(
+            shell.debug_error().as_deref(),
+            Some("Draw: command failed: capture admission failed")
+        );
+        shell.render();
+        let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+        assert!(
+            frame.contains("Draw: command failed: capture admission failed"),
+            "{frame}"
+        );
+        assert!(!shell.has_overlay());
+        assert!(!shell.debug_snapshot().contains("Draw finished"));
+    }
+
+    #[tokio::test]
+    async fn fullscreen_menu_success_does_not_reopen_a_document() {
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        for output in ["", "component result"] {
+            let disposition = present_extension_menu_action_result(
+                &mut shell,
+                &mut input,
+                "Draw",
+                Ok(output.into()),
+                ExtensionMenuActionDisposition::ReturnToIdle,
+            )
+            .await
+            .unwrap();
+            assert_eq!(disposition, ExtensionMenuActionDisposition::ReturnToIdle);
+            assert!(!shell.has_overlay());
+            assert!(!shell.debug_snapshot().contains("Draw finished"));
+        }
+    }
 
     fn status(label: &str) -> octet_agent::ExtensionPresentationStatus {
         octet_agent::ExtensionPresentationStatus {
