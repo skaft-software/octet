@@ -4,13 +4,14 @@ import { bounded, fields, invalid, plainJSON, strict, unsupported } from './erro
 import { theme } from './theme.mjs';
 import { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
 import { translateSessionEntries } from './session-mirror.mjs';
+import { compactionCallbackStore, requestCompaction } from './compaction.mjs';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 
 export const hookEvents = {
   session_start: 'session_start', session_end: 'session_end', session_shutdown: 'session_end',
   tool_call: 'before_tool_call', tool_result: 'after_tool_call', input: 'before_prompt',
   before_agent_start: 'before_prompt', after_response: 'after_response', resources_discover: 'resources_discover',
-  context: 'provider_context',
+  context: 'provider_context', turn_start: 'model_turn_start', turn_end: 'model_turn_end',
   before_provider_request: 'before_provider_request', before_provider_headers: 'before_provider_headers', after_provider_response: 'after_provider_response',
   session_before_compact: 'session_before_compact', session_compact: 'session_compact', session_before_tree: 'session_before_tree', session_tree: 'session_tree',
 };
@@ -303,7 +304,7 @@ export function createContext(runtime, store) {
     isIdle: () => snapshot(current().host, 'is_idle', 'ctx.isIdle'),
     hasPendingMessages: () => snapshot(current().host, 'has_pending_messages', 'ctx.hasPendingMessages'),
     getSystemPrompt: () => snapshot(current().host, 'system_prompt', 'ctx.getSystemPrompt'),
-    get signal() { return store.controller.signal; },
+    get signal() { return compactionCallbackStore(runtime, store).controller.signal; },
     waitForIdle() {
       if (store.method !== 'command/execute') unsupported('ctx.waitForIdle', 'requires a live command, never a hook waiting on its own run');
       return operation('session/wait_for_idle', { resource_owner: current().owner }, 'session_control_v1').then(result => {
@@ -311,6 +312,7 @@ export function createContext(runtime, store) {
         if (result.session_id !== current().host.session_id) invalid('idle receipt session changed');
       });
     },
+    compact: options => requestCompaction(runtime, store, options),
     abort() { unsupported('ctx.abort', 'host wire has no root-run abort contract'); },
   }, 'ctx');
 }

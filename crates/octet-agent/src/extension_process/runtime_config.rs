@@ -161,6 +161,7 @@ pub(super) struct OfferedHostServices {
     pub(super) provider_pipeline: bool,
     pub(super) bulk_objects: bool,
     pub(super) session_lifecycle: bool,
+    pub(super) session_compaction: bool,
     pub(super) approvals: bool,
     pub(super) secrets: bool,
 }

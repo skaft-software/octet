@@ -194,6 +194,23 @@ pub(crate) async fn attempt_compaction_with_cancellation(
     instructions: Option<&str>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<CompactionOutcome> {
+    attempt_compaction_for_agent(
+        &mut app.agent,
+        &app.config.compaction,
+        instructions,
+        cancellation,
+    )
+    .await
+}
+
+/// Split the sole Session owner from the frontend so admitted reverse requests
+/// can keep draining while awaited compaction hooks run.
+pub(crate) async fn attempt_compaction_for_agent(
+    agent: &mut octet_agent::Agent,
+    policy: &crate::config::CompactionPolicy,
+    instructions: Option<&str>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<CompactionOutcome> {
     let instructions = instructions
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -205,13 +222,13 @@ pub(crate) async fn attempt_compaction_with_cancellation(
     }) {
         anyhow::bail!("compaction instructions must be at most 16 KiB without terminal controls");
     }
-    if app.config.compaction.mode == crate::config::CompactionMode::NativeResponses {
+    if policy.mode == crate::config::CompactionMode::NativeResponses {
         if instructions.is_some() {
             return Ok(CompactionOutcome::Skipped {
                 reason: "custom instructions require local compaction mode".into(),
             });
         }
-        return Ok(match app.agent.compact_responses_native().await {
+        return Ok(match agent.compact_responses_native().await {
             Ok(_) => CompactionOutcome::NativeCompacted,
             Err(error) => CompactionOutcome::Skipped {
                 reason: error.to_string(),
@@ -220,31 +237,25 @@ pub(crate) async fn attempt_compaction_with_cancellation(
     }
 
     let previous_boundary =
-        latest_compaction(app.agent.session()).and_then(|entry| match &entry.value {
+        latest_compaction(agent.session()).and_then(|entry| match &entry.value {
             EntryValue::Compaction { first_kept, .. } => Some(first_kept.clone()),
             _ => None,
         });
     // `/compact` temporarily reduces the frontend retention budget. Apply it
     // to the sole compaction owner, then restore the autonomous policy on every
     // settled result (including cooperative cancellation and hook veto).
-    let mode = app.agent.compaction_mode();
-    let (_, threshold, original_keep) = app.agent.compaction_token_policy();
-    app.agent.set_compaction_token_mode(
-        mode,
-        threshold,
-        app.config.compaction.keep_recent_tokens,
-    )?;
-    let result = app
-        .agent
+    let mode = agent.compaction_mode();
+    let (_, threshold, original_keep) = agent.compaction_token_policy();
+    agent.set_compaction_token_mode(mode, threshold, policy.keep_recent_tokens)?;
+    let result = agent
         .compact_session_with_instructions(instructions, cancellation, std::mem::drop)
         .await;
-    app.agent
-        .set_compaction_token_mode(mode, threshold, original_keep)?;
+    agent.set_compaction_token_mode(mode, threshold, original_keep)?;
     match result {
         Ok(info) => {
             // Count the actual replacement boundary, not the proposed one: a
             // hook may retain a different tail. Metadata leaves don't count.
-            let session = app.agent.session();
+            let session = agent.session();
             let mut cursor = session
                 .entry(&info.first_kept)
                 .and_then(|entry| entry.parent.as_ref());

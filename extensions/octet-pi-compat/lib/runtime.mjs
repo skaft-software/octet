@@ -10,14 +10,16 @@ import { discoverResources } from './resources.mjs';
 import { projectContext } from './provider-context.mjs';
 import { providerPipeline, pipelineHooks } from './provider-pipeline.mjs';
 import { sessionOperation, sessionOperationHooks } from './session-operations.mjs';
+import { modelTurn, modelTurnHooks } from './model-turns.mjs';
+import { compactionCallbackStore, settleCompactions, retireCompactions, cancelCompactions } from './compaction.mjs';
 import { beforeAgentStart } from './before-agent-start.mjs';
 import { installChildRuntime, retireChildSessions, CHILD_FEATURES, CHILD_METHODS } from './children.mjs';
 import { appendReply, entryPayload, leafGrant } from './session-leaf.mjs';
 import { RemoteUI } from './remote-ui.mjs';
 import { Timers, deadline } from './timers.mjs';
 
-const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'tools/set_active']);
-const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'remote_ui', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1']);
+const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'tools/set_active']);
+const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'remote_ui', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -79,6 +81,7 @@ export class Runtime {
     this.assertOwner(s); return { ...s, factory };
   }
   hostCall(method, params, store = this.scope.getStore()) {
+    store = compactionCallbackStore(this, store);
     if (this.stopping) throw rpcError(-32002, 'host is draining');
     if (!Number.isSafeInteger(store?.id) || store.id < 0) throw rpcError(-32002, 'active numeric parent_request_id required');
     store.controller.signal.throwIfAborted();
@@ -128,6 +131,7 @@ export class Runtime {
     return undefined; // Pi appendEntry is synchronous void, never a Promise.
   }
   track(promise, store = this.scope.getStore()) {
+    store = compactionCallbackStore(this, store);
     const p = Promise.resolve(promise);
     // Observe even void setters: failures are returned at a live host boundary or
     // surfaced as bounded background diagnostics, never swallowed.
@@ -197,6 +201,7 @@ export class Runtime {
     if (required.some(f => !supportedFeatures.has(f))) unsupported('initialize required feature');
     this.features = new Set([...required, ...(params.protocol.optional_features || [])].filter(f => supportedFeatures.has(f)));
     for (const f of ['request_cancellation', 'content_parts']) this.require(f);
+    if (this.features.has('session_compaction_v1')) this.require('session_control_v1');
     this.maxConcurrent = Math.min(8, params.protocol.limits?.max_concurrent_requests || 1);
     this.namespace = params.extension?.name;
     this.initialHost = params.host || {}; this.workspace = params.workspace; this.initializingId = store.id;
@@ -205,7 +210,7 @@ export class Runtime {
     const metadata = this.metadata(), declared = params.contributes || {};
     if (metadata.argument_completions?.length) this.require('autocomplete');
     if (metadata.hooks.includes('resources_discover')) this.require('resource_paths_v1');
-    if (metadata.hooks.some(hook => hook === 'provider_context' || sessionOperationHooks.includes(hook))) this.require('session_entries');
+    if (metadata.hooks.some(hook => hook === 'provider_context' || sessionOperationHooks.includes(hook) || modelTurnHooks.includes(hook))) this.require('session_entries');
     if (metadata.hooks.some(hook => pipelineHooks.includes(hook))) this.require('pipeline_hooks_v1');
     if (metadata.events.includes('before_agent_start')) this.require('before_prompt_state_v1');
     if (metadata.tools.some(tool => tool.prompt_snippet !== undefined || tool.prompt_guidelines !== undefined)) this.require('tool_prompt_metadata_v1');
@@ -262,7 +267,7 @@ export class Runtime {
     }
   }
   async retire(state) {
-    state.alive = false; retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
+    state.alive = false; retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
     // Awaited resource/context callbacks are cancelled on owner retirement.
     // Existing editor/retained-operation lifetime and cancellation stay unchanged.
     for (const store of this.active.values()) if ((store.resourceDiscovery || store.providerContext) && store.state === state) store.controller.abort(cancelled());
@@ -304,6 +309,7 @@ export class Runtime {
     if (message.method === 'hook/run' && p.hook === 'provider_context') return projectContext(this, p, store);
     if (message.method === 'hook/run' && pipelineHooks.includes(p.hook)) return providerPipeline(this, p, store);
     if (message.method === 'hook/run' && sessionOperationHooks.includes(p.hook)) return sessionOperation(this, p, store);
+    if (message.method === 'hook/run' && modelTurnHooks.includes(p.hook)) return modelTurn(this, p, store);
     this.bind(p, store);
     if (message.method === 'command/execute') {
       const cmd = this.commands.get(p.name); if (!cmd) invalid(`unknown command ${p.name}`);
@@ -421,7 +427,7 @@ export class Runtime {
     });
   }
   cancel(id) {
-    this.active.get(id)?.controller.abort(cancelled()); this.transport.cancel(id);
+    this.active.get(id)?.controller.abort(cancelled()); cancelCompactions(this, id); this.transport.cancel(id);
     this.ui.cancelParent(id).catch(e => this.backgroundError(e));
   }
   async receive(message) {
@@ -436,25 +442,32 @@ export class Runtime {
     if (this.active.size >= this.maxConcurrent) {
       await this.transport.send({ jsonrpc: '2.0', id: message.id, error: { code: -32012, message: 'bounds_exceeded concurrent requests' } }); return;
     }
-    const store = { id: message.id, method: message.method, controller: new AbortController(), pending: new Set(), errors: [], live: true };
+    const store = { id: message.id, method: message.method, hook: message.method === 'hook/run' ? message.params?.hook : undefined, controller: new AbortController(), pending: new Set(), errors: [], live: true };
     this.active.set(message.id, store);
+    let settlementError = rpcError(-32002, 'originating request did not complete');
     try {
       const result = await this.scope.run(store, () => this.dispatch(message, store));
       store.controller.signal.throwIfAborted();
       if (!this.stopping) {
         await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
+        settlementError = undefined;
         if (message.method === 'initialize') this.registerAutocomplete();
       }
     } catch (error) {
+      settlementError = error;
       if (!this.stopping) await this.transport.send({ jsonrpc: '2.0', id: message.id, error: {
         code: store.controller.signal.aborted ? -32800 : (Number.isInteger(error.code) ? error.code : -32603),
         message: store.controller.signal.aborted ? 'request cancelled' : String(error?.message || error).slice(0, 4096),
       } });
-    } finally { store.live = false; this.active.delete(message.id); this.transport.settleParent(message.id); }
+    } finally {
+      store.live = false; this.active.delete(message.id); this.transport.settleParent(message.id);
+      settleCompactions(this, store, settlementError);
+    }
   }
   async shutdown(id) {
     if (this.stopping) return;
     this.stopping = true;
+    retireCompactions(this, undefined, cancelled());
     retireChildSessions(this); this.uninstallChildren?.();
     for (const store of this.active.values()) store.controller.abort(cancelled());
     this.timers.all(); await this.ui.shutdown();
@@ -466,7 +479,7 @@ export class Runtime {
     }
   }
   lost(error, eof) {
-    this.stopping = true; this.timers.all(); retireChildSessions(this); this.uninstallChildren?.();
+    this.stopping = true; retireCompactions(this, undefined, error); this.timers.all(); retireChildSessions(this); this.uninstallChildren?.();
     for (const store of this.active.values()) store.controller.abort(cancelled());
     this.ui.shutdown().finally(() => { if (!eof) console.error(`[pi-compat transport] ${error.message}`); process.exit(eof ? 0 : 1); });
   }

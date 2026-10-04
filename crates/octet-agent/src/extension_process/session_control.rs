@@ -7,6 +7,112 @@ mod tests;
 /// API 0.4 owner-scoped requests to a real foreground session driver.
 pub const EXTENSION_FEATURE_SESSION_CONTROL_V1: &str = "session_control_v1";
 
+/// API 0.4 terminal, owner-fenced local compaction on a real idle consumer.
+pub const EXTENSION_FEATURE_SESSION_COMPACTION_V1: &str = "session_compaction_v1";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionCompactionRequest {
+    parent_request_id: u64,
+    resource_owner: ExtensionResourceOwner,
+    #[serde(default)]
+    custom_instructions: Option<String>,
+}
+
+pub(super) fn dispatch_session_compaction(
+    state: &ProtocolReadState,
+    object: &serde_json::Map<String, serde_json::Value>,
+    params: serde_json::Value,
+) -> Result<(), String> {
+    let request_id = parse_child_request_id(object, "session/compact")?;
+    {
+        let protocol = read_std_lock(&state.protocol);
+        if protocol.version != EXTENSION_API_VERSION_0_4
+            || !protocol.supports(EXTENSION_FEATURE_SESSION_CONTROL_V1)
+            || !protocol.supports(EXTENSION_FEATURE_SESSION_COMPACTION_V1)
+            || !state
+                .session_lifecycle
+                .as_ref()
+                .is_some_and(|service| service.supports_compaction())
+        {
+            return reject_typed_child_request(state, request_id, ExtensionRequestFailure::UnsupportedFeature,
+                "session/compact requires negotiated session_compaction_v1 and an opted-in idle consumer");
+        }
+    }
+    if let Err(detail) = validate_remote_ui_envelope(object, true) {
+        return reject_typed_child_request(
+            state,
+            request_id,
+            ExtensionRequestFailure::InvalidRequest,
+            detail,
+        );
+    }
+    let request: SessionCompactionRequest = match serde_json::from_value(params) {
+        Ok(request) => request,
+        Err(error) => {
+            return reject_typed_child_request(
+                state,
+                request_id,
+                ExtensionRequestFailure::InvalidRequest,
+                format!("invalid session/compact request: {error}"),
+            )
+        }
+    };
+    if let Some(instructions) = &request.custom_instructions {
+        if let Err((failure, detail)) =
+            bounded_plain_text_failure("compaction instructions", instructions, 16 * 1024)
+        {
+            return reject_typed_child_request(state, request_id, failure, detail);
+        }
+        if instructions
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        {
+            return reject_typed_child_request(
+                state,
+                request_id,
+                ExtensionRequestFailure::InvalidRequest,
+                "compaction instructions contain a control character",
+            );
+        }
+    }
+    // A synchronous Pi compact() enqueues locally, writes its parent's successful
+    // reply first, THEN sends this request. Refuse live parents (especially an
+    // awaited compaction hook) rather than deadlock or weaken ordinary lifetimes.
+    let pending = lock_std_mutex(&state.pending);
+    if pending
+        .get(&request.parent_request_id)
+        .is_some_and(|parent| parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE)
+    {
+        return reject_typed_child_request(state, request_id, ExtensionRequestFailure::InvalidRequest,
+            "session/compact requires a settled parent; enqueue only after its successful reply, never await it inside a hook or command");
+    }
+    if state.closed.load(Ordering::Acquire)
+        || state.draining.load(Ordering::Acquire)
+        || lock_std_mutex(&state.tombstones).contains(request.parent_request_id)
+    {
+        return reject_typed_child_request(
+            state,
+            request_id,
+            ExtensionRequestFailure::NotForegroundOwner,
+            "session compaction parent or process was cancelled",
+        );
+    }
+    if let Err((failure, detail)) = validate_explicit_request_owner(state, &request.resource_owner)
+    {
+        return reject_typed_child_request(state, request_id, failure, detail);
+    }
+    let registered = insert_child_request(state, request_id.clone(), None, None)?;
+    drop(pending);
+    queue_session_compaction_operation(
+        state,
+        request_id,
+        request.custom_instructions,
+        request.resource_owner,
+        registered.response_state,
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionControlRequest {

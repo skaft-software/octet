@@ -18,6 +18,21 @@ struct ProcessSessionOperation {
     lease: Option<SessionLeafProcessLease>,
 }
 
+fn validate_session_operation_output(output: &ExtensionHookOutput) -> Result<(), String> {
+    if output.system_prompt.is_some()
+        || output.provider_context.is_some()
+        || output.provider_retry.is_some()
+        || output.cache_warming_decision.is_some()
+        || output.compaction_frames.is_some()
+        || output.persistence_metadata.is_some()
+        || output.post_mutation.is_some()
+        || !output.context.is_empty()
+    {
+        return Err("unrelated session callback effect".into());
+    }
+    Ok(())
+}
+
 impl SessionOperationInvocation for ProcessSessionOperation {
     fn take_future(&mut self) -> SessionOperationFuture {
         let lease = self
@@ -45,16 +60,7 @@ impl SessionOperationInvocation for ProcessSessionOperation {
             // replacements from some unrelated hook contract.
             let output: ExtensionHookOutput =
                 serde_json::from_value(value).map_err(|_| "invalid session callback envelope")?;
-            if output.provider_context.is_some()
-                || output.provider_retry.is_some()
-                || output.cache_warming_decision.is_some()
-                || output.compaction_frames.is_some()
-                || output.persistence_metadata.is_some()
-                || output.post_mutation.is_some()
-                || !output.context.is_empty()
-            {
-                return Err("unrelated session callback effect".into());
-            }
+            validate_session_operation_output(&output)?;
             process.publish_hook_output(&output);
             match output.disposition {
                 ExtensionHookDisposition::Continue => Ok(decision),
@@ -103,6 +109,8 @@ impl SessionOperationHook for ExtensionProcess {
             SessionOperation::Compacted { .. } => ExtensionHook::SessionCompact,
             SessionOperation::BeforeTree { .. } => ExtensionHook::SessionBeforeTree,
             SessionOperation::Tree { .. } => ExtensionHook::SessionTree,
+            SessionOperation::ModelTurnStart { .. } => ExtensionHook::ModelTurnStart,
+            SessionOperation::ModelTurnEnd { .. } => ExtensionHook::ModelTurnEnd,
         };
         if !self.inner.contributions.hooks.contains(&hook) {
             return Ok(None);
@@ -141,6 +149,18 @@ impl SessionOperationHook for ExtensionProcess {
                 *entry = session_entry_for_namespace(entry, &binding.namespace)
                     .map_err(|_| "session operation metadata refused")?;
             }
+            SessionOperation::ModelTurnEnd {
+                assistant_entry,
+                tool_result_entries,
+                ..
+            } => {
+                *assistant_entry = session_entry_for_namespace(assistant_entry, &binding.namespace)
+                    .map_err(|_| "session operation metadata refused")?;
+                for entry in tool_result_entries {
+                    *entry = session_entry_for_namespace(entry, &binding.namespace)
+                        .map_err(|_| "session operation metadata refused")?;
+                }
+            }
             _ => {}
         }
         Ok(Some(Box::new(ProcessSessionOperation {
@@ -151,5 +171,23 @@ impl SessionOperationHook for ExtensionProcess {
             payload: serde_json::to_value(operation).map_err(|_| "session event unavailable")?,
             lease: Some(lease),
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_observations_reject_unapplied_system_prompt_replacement() {
+        assert!(validate_session_operation_output(&ExtensionHookOutput::default()).is_ok());
+        for prompt in ["", "unapplied replacement"] {
+            let output: ExtensionHookOutput =
+                serde_json::from_value(serde_json::json!({"system_prompt": prompt})).unwrap();
+            assert_eq!(
+                validate_session_operation_output(&output),
+                Err("unrelated session callback effect".into())
+            );
+        }
     }
 }

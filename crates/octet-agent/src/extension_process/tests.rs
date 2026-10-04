@@ -798,6 +798,7 @@ system_prompt = {system_prompt}
         agent_sessions: false,
         tool_composition: false,
         session_lifecycle: false,
+        session_compaction: false,
         approvals: false,
         secrets: false,
     };

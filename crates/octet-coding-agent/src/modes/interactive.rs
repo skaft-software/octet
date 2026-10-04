@@ -975,9 +975,33 @@ where
     F: std::future::Future,
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    await_with_ctrl_c_and_extensions(future, shell, input, None).await
+}
+
+/// Keep the existing frontend reverse-request consumer live while the Agent is
+/// borrowed by an awaited compaction hook. Never dispatch lifecycle mutations
+/// from this pump; they remain queued for the outer idle owner.
+async fn await_with_ctrl_c_and_extensions<F, S>(
+    future: F,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    mut extensions: Option<&mut crate::extensions::ExecutableExtensions>,
+) -> Option<F::Output>
+where
+    F: std::future::Future,
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let mut future = Box::pin(future);
     let mut input_open = true;
+    let remote_ui_wake = extensions.as_deref().and_then(|extensions| extensions.remote_ui_wake());
+    let mut frontend_tick = tokio::time::interval(Duration::from_millis(50));
+    frontend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if let Some(extensions) = extensions.as_deref_mut() {
+            if apply_extension_background(shell, extensions) {
+                shell.render();
+            }
+        }
         tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
@@ -986,6 +1010,11 @@ where
             }
             event = input.next(), if input_open => match event {
                 Some(Ok(event)) => {
+                    if extensions.as_deref_mut().is_some_and(|extensions| {
+                        extensions.route_remote_ui_event(shell, &event)
+                    }) {
+                        continue;
+                    }
                     if shell.intercept_transcript_input(&event) {
                         continue;
                     }
@@ -1006,6 +1035,8 @@ where
                 None => input_open = false,
             },
             output = &mut future => return Some(output),
+            _ = crate::extensions::remote_ui::notified(&remote_ui_wake), if extensions.is_some() => {},
+            _ = frontend_tick.tick(), if extensions.is_some() => {},
         }
     }
 }
@@ -1085,20 +1116,29 @@ async fn compact_interactively<S>(
     }
     let result = if app.config.compaction.mode == CompactionMode::NativeResponses {
         // Native Responses retains its separate non-token manual API.
-        await_with_ctrl_c(
-            crate::compaction::attempt_compaction_with_instructions(app, instructions),
+        await_with_ctrl_c_and_extensions(
+            crate::compaction::attempt_compaction_for_agent(
+                &mut app.agent,
+                &app.config.compaction,
+                instructions,
+                octet_agent::CancellationToken::default(),
+            ),
             shell,
             input,
+            Some(&mut app.executable_extensions),
         )
         .await
     } else {
         let cancellation = octet_agent::CancellationToken::default();
-        let mut compaction = Box::pin(crate::compaction::attempt_compaction_with_cancellation(
-            app,
+        let mut compaction = Box::pin(crate::compaction::attempt_compaction_for_agent(
+            &mut app.agent,
+            &app.config.compaction,
             instructions,
             cancellation.clone(),
         ));
-        match await_with_ctrl_c(compaction.as_mut(), shell, input).await {
+        match await_with_ctrl_c_and_extensions(
+            compaction.as_mut(), shell, input, Some(&mut app.executable_extensions),
+        ).await {
             Some(result) => Some(result),
             None => {
                 // Do not drop the owner mid-hook/provider request: drive its
@@ -5990,6 +6030,85 @@ async fn reload_extension_session(
     replace_extension_active_session(app, session).map(Some)
 }
 
+/// The same sole idle owner used by create/fork/switch. Keep the native future
+/// alive through cancellation so provider accounting and after-hooks settle.
+async fn compact_extension_session<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    instructions: Option<&str>,
+    cancellation: octet_agent::CancellationToken,
+) -> Result<octet_agent::extension_process::ExtensionSessionCompactionResult, String>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    if let Some(message) = cost_limit_message(app) {
+        return Err(message);
+    }
+    let before = app.agent.session().entries().len();
+    shell.set_run_label("compacting…");
+    shell.render();
+    app.executable_extensions.notify_compaction_started_all();
+    let result = {
+        let mut compaction = Box::pin(app.agent.compact_session_with_instructions(
+            instructions,
+            cancellation.clone(),
+            |_| {},
+        ));
+        match await_with_ctrl_c_and_extensions(
+            compaction.as_mut(), shell, input, Some(&mut app.executable_extensions),
+        ).await {
+            Some(result) => result,
+            None => {
+                cancellation.cancel();
+                compaction.await
+            }
+        }
+    };
+    shell.set_run_label("idle");
+    let result = result.map_err(|error| error.to_string()).and_then(|_| {
+        // A session_compact hook may append private metadata. The head then is
+        // not the committed checkpoint; use the new native Compaction entry.
+        app.agent.session().entries()[before..]
+            .iter()
+            .find_map(|entry| {
+                if let octet_agent::EntryValue::Compaction {
+                    summary,
+                    first_kept,
+                    ..
+                } = &entry.value
+                {
+                    Some(
+                        octet_agent::extension_process::ExtensionSessionCompactionResult {
+                            entry_id: entry.id.0.clone(),
+                            summary: summary.clone(),
+                            first_kept: first_kept.0.clone(),
+                        },
+                    )
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                "native compaction returned without a committed entry; do not retry".to_owned()
+            })
+    });
+    match &result {
+        Ok(_) => {
+            app.executable_extensions.notify_compaction_settled_all();
+            shell.notice("extension session compact completed");
+        }
+        Err(error) => {
+            app.executable_extensions
+                .notify_compaction_failed_all(error);
+            shell.error(format!("extension session compact failed: {error}"));
+        }
+    }
+    update_status(shell, app);
+    shell.render();
+    result
+}
+
 async fn execute_extension_session_lifecycle(
     app: &mut App,
     shell: &mut InteractiveShell,
@@ -6001,6 +6120,27 @@ async fn execute_extension_session_lifecycle(
     }
     let operation = request.operation().clone();
     let mut result = match operation.clone() {
+        ExtensionSessionLifecycleOperation::Compact { instructions } => {
+            let result = if request
+                .resource_owner()
+                .is_some_and(|owner| owner.session_id == app.agent.session().resource_owner_key())
+            {
+                compact_extension_session(
+                    app,
+                    shell,
+                    input,
+                    instructions.as_deref(),
+                    request.cancellation_token(),
+                )
+                .await
+            } else {
+                Err("session compaction owner is not the current foreground session".into())
+            };
+            // Even post-commit errors settle as failures. Never rebuild, roll
+            // back, or retry the durable session to turn them into success.
+            request.respond_compaction(result);
+            return false;
+        }
         ExtensionSessionLifecycleOperation::WaitForIdle => app
             .agent
             .session()
@@ -6022,13 +6162,11 @@ async fn execute_extension_session_lifecycle(
             reload_extension_session(app, shell, input, &request).await
         }
     };
-    let active_session_operation = match &operation {
+    let active_session_operation = matches!(
+        &operation,
         ExtensionSessionLifecycleOperation::Switch { .. }
-        | ExtensionSessionLifecycleOperation::Reload => true,
-        ExtensionSessionLifecycleOperation::WaitForIdle
-        | ExtensionSessionLifecycleOperation::Create
-        | ExtensionSessionLifecycleOperation::Fork => false,
-    };
+            | ExtensionSessionLifecycleOperation::Reload
+    );
     let active_session_replaced =
         active_session_operation && result.as_ref().is_ok_and(|session_id| session_id.is_some());
     if active_session_replaced {
@@ -6047,6 +6185,7 @@ async fn execute_extension_session_lifecycle(
         ExtensionSessionLifecycleOperation::Fork => "fork",
         ExtensionSessionLifecycleOperation::Switch { .. } => "switch",
         ExtensionSessionLifecycleOperation::Reload => "reload",
+        ExtensionSessionLifecycleOperation::Compact { .. } => "compact",
     };
     match result {
         Ok(Some(session_id)) => {

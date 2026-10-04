@@ -393,6 +393,9 @@ impl Agent {
             let mut answer_only = !tools_enabled;
             let mut finish_pending = false;
             let mut completed_turns: u64 = 0;
+            let mut model_turn_hooks = model_turn::ModelTurnHooks::new(
+                &extension_host.session_operation_hooks, &effect_run_id,
+            );
             let mut context_retries = 0usize;
             // Shared by open/body retries, re-preparation and transport fallback.
             // Reset only on a complete successful assistant response.
@@ -608,6 +611,9 @@ impl Agent {
                     context_capacity.invalidate();
                 }
                 if abort.is_set() { break 'run FinishReason::Aborted; }
+                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                    break 'run finish;
+                }
 
                 if let Some(selection) = if native.connection.is_none() { pending_reasoning.take() } else { None } {
                     if let Err(error) = persist_reasoning_selection(session, &model, &selection) {
@@ -673,6 +679,12 @@ impl Agent {
                     if completed_turns >= limit {
                         break 'run FinishReason::MaxTurns;
                     }
+                }
+
+                // Await the real logical-iteration observation before request
+                // preparation. Recovery/compaction re-entry must not repeat it.
+                if let Err(finish) = model_turn_hooks.start(session, completed_turns, &abort.cancellation).await {
+                    break 'run finish;
                 }
 
                 // Freeze one coherent schema/implementation snapshot after
@@ -1683,6 +1695,7 @@ impl Agent {
                     Ok(entry) => entry,
                     Err(error) => break 'run FinishReason::Failed(error.into()),
                 };
+                model_turn_hooks.committed(session, completed_turns - 1, &assistant_entry, &calls);
                 if let Err(error) = native.settle_successor(session, &model, assistant_entry) { break 'run FinishReason::Failed(error); }
                 native.completed_prefix();
                 match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
@@ -1766,6 +1779,13 @@ impl Agent {
                         Err(error) => break 'run FinishReason::Failed(error),
                     }
                     context_capacity.invalidate();
+                }
+
+                // Prior async batches have now settled; no-tool assistants are
+                // also durable. A tool-emitting current turn stays pending until
+                // its own complete result batch commits below.
+                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                    break 'run finish;
                 }
 
                 // Drain control before deciding whether a provisional candidate
@@ -3042,6 +3062,12 @@ impl Agent {
                     }
                 }
 
+                // Unlike TurnFinished, this awaited boundary includes every
+                // paired tool result, in actual durable commit order.
+                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                    break 'run finish;
+                }
+
                 // Every emitted call now has a durable result, including calls
                 // that were never started because the user aborted. Do not
                 // enter another model turn after controlled cancellation.
@@ -3124,6 +3150,13 @@ impl Agent {
                 // Context reconstruction coalesces the consecutive tool-result
                 // entries into the provider-required single user message.
             };
+
+            // Semantic/provider failure may follow a durable no-tool response.
+            // Observe only genuinely settled entries; cancelled or failed hook
+            // activations are never retried, including in terminal cleanup.
+            if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                reason = finish;
+            }
 
             if session.has_unsettled_native_steering() {
                 if let Err(error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "native_steering") { reason = FinishReason::Failed(error.into()); }

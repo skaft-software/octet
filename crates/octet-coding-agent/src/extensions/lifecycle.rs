@@ -219,7 +219,7 @@ impl ExecutableExtensions {
                 let (service, receiver) =
                     ExtensionSessionLifecycleService::channel(SESSION_LIFECYCLE_QUEUE_CAPACITY)
                         .expect("fixed session lifecycle queue capacity is bounded");
-                (Some(service), Some(receiver))
+                (Some(service.with_compaction()), Some(receiver))
             } else {
                 (None, None)
             };

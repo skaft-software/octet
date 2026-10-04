@@ -99,6 +99,7 @@ mod delegation_setup;
 mod error;
 mod images;
 mod live_output;
+mod model_turn;
 mod parallel_reads;
 mod provider_context;
 mod recovery;

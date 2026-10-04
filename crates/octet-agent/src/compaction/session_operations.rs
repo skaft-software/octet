@@ -62,6 +62,30 @@ pub enum SessionOperation {
         /// Source head, before the operation.
         old_head: Option<EntryId>,
     },
+    /// Observes the preparation boundary of one logical model iteration.
+    /// Retries and auxiliary model requests do not begin another iteration.
+    ModelTurnStart {
+        /// Owning run identity, derived from its durable initiating user entry.
+        run_id: String,
+        /// Zero-based logical model iteration within this run.
+        turn_index: u64,
+        /// Actual host wall-clock time at this boundary, in Unix milliseconds.
+        timestamp_ms: u64,
+    },
+    /// Observes a durable assistant and all of its settled tool results.
+    /// This is not the earlier, provider-completion `AgentEvent::TurnFinished`.
+    ModelTurnEnd {
+        /// Same owning run identity as the corresponding start observation.
+        run_id: String,
+        /// Zero-based logical model iteration within this run.
+        turn_index: u64,
+        /// Actual host wall-clock time at this boundary, in Unix milliseconds.
+        timestamp_ms: u64,
+        /// Actual persisted assistant entry; never a reconstructed Pi message.
+        assistant_entry: Entry,
+        /// Actual paired result entries in durable commit order, including errors.
+        tool_result_entries: Vec<Entry>,
+    },
     /// Observes an actual durable checkout, not a frontend selection.
     Tree {
         /// Previously selected head.
@@ -85,7 +109,8 @@ pub struct SessionCompactionReplacement {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionOperationDecision {
-    /// No interception; preserve any earlier replacement.
+    /// No interception; preserve any earlier replacement. This is the only
+    /// valid decision for model-turn and other post-commit observations.
     #[default]
     Continue,
     /// Explicit veto; do not commit or invoke the native summarizer.
@@ -136,7 +161,7 @@ pub trait SessionOperationHook: Send + Sync {
 /// Payload-free operation failures; a post-commit failure cannot undo history.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionOperationError {
-    /// Host cancellation won before commit.
+    /// Host cancellation won. Already committed entries are never rolled back.
     #[error("session operation cancelled")]
     Cancelled,
     /// A callback exceeded the shared operation deadline.

@@ -547,6 +547,10 @@ pub enum ExtensionHook {
     BeforeProviderHeaders,
     /// Observe actual HTTP status and headers before body consumption (API 0.4).
     AfterProviderResponse,
+    /// Observe the start of one actual model iteration with an awaited leaf consumer.
+    ModelTurnStart,
+    /// Observe the durable assistant and settled tool results for one model iteration.
+    ModelTurnEnd,
     /// Await a cancellable decision before a prepared local compaction.
     SessionBeforeCompact,
     /// Observe the actual durable compaction record.
@@ -587,7 +591,9 @@ impl ExtensionHook {
     pub(super) fn is_session_operation(self) -> bool {
         matches!(
             self,
-            Self::SessionBeforeCompact
+            Self::ModelTurnStart
+                | Self::ModelTurnEnd
+                | Self::SessionBeforeCompact
                 | Self::SessionCompact
                 | Self::SessionBeforeTree
                 | Self::SessionTree

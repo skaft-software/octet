@@ -245,6 +245,22 @@ pub enum ExtensionSessionLifecycleOperation {
     },
     /// Reopen the active session from its durable descriptor.
     Reload,
+    /// Compact local history at the actual idle boundary, then await after-hooks.
+    Compact {
+        /// Optional bounded instructions for the native summary operation.
+        instructions: Option<String>,
+    },
+}
+
+/// The actual newly committed native compaction, never the current metadata leaf.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ExtensionSessionCompactionResult {
+    /// Durable Compaction entry identifier.
+    pub entry_id: String,
+    /// Validated summary stored in that entry.
+    pub summary: String,
+    /// Retained history boundary stored in that entry.
+    pub first_kept: String,
 }
 
 /// Terminal disposition supplied by the product's active-session driver.
@@ -259,16 +275,18 @@ pub enum ExtensionSessionLifecycleError {
 pub(super) struct SessionLifecycleDriverState {
     pub(super) active: AtomicBool,
     pub(super) epoch: AtomicU64,
+    pub(super) changed: Notify,
 }
 
 /// Sender half of the bounded active-session lifecycle service.
 ///
-/// A product constructs this before process startup, offers it only to API 0.3
+/// A product constructs this before process startup, offers it only to API 0.3/0.4
 /// peers, and activates it after the current application/session is safe to
 /// mutate. Deactivation fences queued work from a previous app generation.
 #[derive(Clone)]
 pub struct ExtensionSessionLifecycleService {
     capacity: Arc<Semaphore>,
+    compaction: bool,
     pub(super) sender: mpsc::Sender<ExtensionSessionLifecycleRequest>,
     pub(super) state: Arc<SessionLifecycleDriverState>,
 }
@@ -285,7 +303,55 @@ pub struct ExtensionSessionLifecycleRequest {
     _capacity: tokio::sync::OwnedSemaphorePermit,
     pub(super) operation: ExtensionSessionLifecycleOperation,
     pub(super) epoch: u64,
-    pub(super) response: oneshot::Sender<Result<String, ExtensionSessionLifecycleError>>,
+    response: SessionLifecycleResponse,
+    state: Arc<SessionLifecycleDriverState>,
+    cancellation: CancellationToken,
+    authority: Option<SessionCompactionAuthority>,
+}
+
+enum SessionLifecycleResponse {
+    SessionId(oneshot::Sender<Result<String, ExtensionSessionLifecycleError>>),
+    Compaction(oneshot::Sender<Result<ExtensionSessionCompactionResult, String>>),
+}
+
+impl SessionLifecycleResponse {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::SessionId(response) => response.is_closed(),
+            Self::Compaction(response) => response.is_closed(),
+        }
+    }
+
+    fn unavailable(self) {
+        match self {
+            Self::SessionId(response) => {
+                let _ = response.send(Err(ExtensionSessionLifecycleError::Unavailable));
+            }
+            Self::Compaction(response) => {
+                let _ = response.send(Err(
+                    "session compaction was cancelled or its owner retired".into()
+                ));
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct SessionCompactionAuthority {
+    pub(super) owner: ExtensionResourceOwner,
+    pub(super) issued: IssuedResourceOwners,
+    pub(super) closed: Arc<AtomicBool>,
+    pub(super) draining: Arc<AtomicBool>,
+    pub(super) response: Arc<ChildResponseState>,
+}
+
+impl SessionCompactionAuthority {
+    pub(super) fn is_current(&self) -> bool {
+        !self.closed.load(Ordering::Acquire)
+            && !self.draining.load(Ordering::Acquire)
+            && self.response.state.load(Ordering::Acquire) == CHILD_ACTIVE
+            && lock_std_mutex(&self.issued).contains(&self.owner)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -306,10 +372,12 @@ impl ExtensionSessionLifecycleService {
         let state = Arc::new(SessionLifecycleDriverState {
             active: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
+            changed: Notify::new(),
         });
         Ok((
             Self {
                 capacity: Arc::new(Semaphore::new(capacity)),
+                compaction: false,
                 sender,
                 state: Arc::clone(&state),
             },
@@ -321,16 +389,29 @@ impl ExtensionSessionLifecycleService {
         ))
     }
 
+    /// Opt in before process startup only when this receiver has a native idle
+    /// compaction consumer. Ordinary lifecycle embedders do not offer compaction.
+    pub fn with_compaction(mut self) -> Self {
+        self.compaction = true;
+        self
+    }
+
+    pub(super) fn supports_compaction(&self) -> bool {
+        self.compaction
+    }
+
     /// Enables admission for the currently bound active application/session.
     pub fn activate(&self) {
         self.state.epoch.fetch_add(1, Ordering::AcqRel);
         self.state.active.store(true, Ordering::Release);
+        self.state.changed.notify_waiters();
     }
 
     /// Rejects future work and fences queued work from the prior binding.
     pub fn deactivate(&self) {
         self.state.active.store(false, Ordering::Release);
         self.state.epoch.fetch_add(1, Ordering::AcqRel);
+        self.state.changed.notify_waiters();
     }
 
     pub(super) fn try_submit(
@@ -340,6 +421,45 @@ impl ExtensionSessionLifecycleService {
         oneshot::Receiver<Result<String, ExtensionSessionLifecycleError>>,
         SessionLifecycleSubmitError,
     > {
+        let (response, receiver) = oneshot::channel();
+        self.try_submit_request(
+            operation,
+            SessionLifecycleResponse::SessionId(response),
+            CancellationToken::default(),
+            None,
+        )?;
+        Ok(receiver)
+    }
+
+    pub(super) fn try_submit_compaction(
+        &self,
+        instructions: Option<String>,
+        cancellation: CancellationToken,
+        authority: SessionCompactionAuthority,
+    ) -> Result<
+        oneshot::Receiver<Result<ExtensionSessionCompactionResult, String>>,
+        SessionLifecycleSubmitError,
+    > {
+        if !self.compaction || !authority.is_current() {
+            return Err(SessionLifecycleSubmitError::Unavailable);
+        }
+        let (response, receiver) = oneshot::channel();
+        self.try_submit_request(
+            ExtensionSessionLifecycleOperation::Compact { instructions },
+            SessionLifecycleResponse::Compaction(response),
+            cancellation,
+            Some(authority),
+        )?;
+        Ok(receiver)
+    }
+
+    fn try_submit_request(
+        &self,
+        operation: ExtensionSessionLifecycleOperation,
+        response: SessionLifecycleResponse,
+        cancellation: CancellationToken,
+        authority: Option<SessionCompactionAuthority>,
+    ) -> Result<(), SessionLifecycleSubmitError> {
         if !self.state.active.load(Ordering::Acquire) {
             return Err(SessionLifecycleSubmitError::Unavailable);
         }
@@ -352,15 +472,17 @@ impl ExtensionSessionLifecycleService {
             .clone()
             .try_acquire_owned()
             .map_err(|_| SessionLifecycleSubmitError::Full)?;
-        let (response, receiver) = oneshot::channel();
         let request = ExtensionSessionLifecycleRequest {
             _capacity: capacity,
             operation,
             epoch,
             response,
+            state: Arc::clone(&self.state),
+            cancellation,
+            authority,
         };
         match self.sender.try_send(request) {
-            Ok(()) => Ok(receiver),
+            Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => Err(SessionLifecycleSubmitError::Full),
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 Err(SessionLifecycleSubmitError::Unavailable)
@@ -400,12 +522,11 @@ impl ExtensionSessionLifecycleReceiver {
             };
             let current = self.state.active.load(Ordering::Acquire)
                 && self.state.epoch.load(Ordering::Acquire) == request.epoch;
-            if current && !request.response.is_closed() {
+            if current && !request.is_cancelled() {
                 return Some(request);
             }
-            let _ = request
-                .response
-                .send(Err(ExtensionSessionLifecycleError::Unavailable));
+            request.cancellation.cancel();
+            request.response.unavailable();
         }
     }
 }
@@ -419,10 +540,38 @@ impl ExtensionSessionLifecycleRequest {
     /// Returns whether protocol cancellation or process shutdown already won.
     pub fn is_cancelled(&self) -> bool {
         self.response.is_closed()
+            || self.cancellation.is_cancelled()
+            || self.authority.as_ref().is_some_and(|authority| {
+                !authority.is_current()
+                    || !self.state.active.load(Ordering::Acquire)
+                    || self.state.epoch.load(Ordering::Acquire) != self.epoch
+            })
     }
 
-    /// Delivers exactly one product outcome to the extension process.
+    /// Token shared with protocol cancellation and owner/epoch retirement.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    /// The issued compaction owner, rechecked against the real foreground Session.
+    pub fn resource_owner(&self) -> Option<&ExtensionResourceOwner> {
+        self.authority.as_ref().map(|authority| &authority.owner)
+    }
+
+    /// Delivers exactly one ordinary lifecycle outcome to the extension process.
     pub fn respond(self, result: Result<String, ExtensionSessionLifecycleError>) {
-        let _ = self.response.send(result);
+        let SessionLifecycleResponse::SessionId(response) = self.response else {
+            unreachable!("compaction requests use respond_compaction")
+        };
+        let _ = response.send(result);
+    }
+
+    /// Settle only after native compaction and its after-hook. An error may follow
+    /// a durable commit: it is never permission to roll back or replay the request.
+    pub fn respond_compaction(self, result: Result<ExtensionSessionCompactionResult, String>) {
+        let SessionLifecycleResponse::Compaction(response) = self.response else {
+            unreachable!("ordinary lifecycle requests use respond")
+        };
+        let _ = response.send(result);
     }
 }

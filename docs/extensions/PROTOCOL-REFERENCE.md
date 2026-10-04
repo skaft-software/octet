@@ -262,6 +262,13 @@ API `0.4` extensions, not just one package name. Negotiation alone conveys no
 authority: only a live model-tool request with a bound composition dispatcher
 can use it. See [composition](#225-compositioncontext-compositioncall-compositionstore-api-04-feature-tool_composition_v1).
 
+API `0.4` offers `session_control_v1` only with a bound active-session lifecycle
+service. `session_compaction_v1` additionally requires that service to opt into a
+real idle compaction consumer; selecting it requires `session_control_v1`.
+Admission still requires an active frontend binding. Neither feature changes
+canonical API `0.3` `session_lifecycle`. See [session control](#session-control-v1)
+and [compaction](#session-compaction-v1) for the distinct parent-lifetime rules.
+
 The coding host conditionally appends `agent_sessions` to
 `optional_features` only for the trusted, enabled first-party
 `octet-subagents` extension when its child-session service can be bound. The
@@ -554,8 +561,85 @@ failure, cancellation, interruption, frontend loss, or shutdown.
 **Dispositions:**
 - `{ "action": "continue" }` — proceed normally.
 - `{ "action": "deny", "reason": "..." }` — deny the intercepted operation
-  (meaningful for `before_prompt` and `before_tool_call` only; other hooks
-  continue regardless).
+  (meaningful for the legacy `before_prompt` and `before_tool_call`; other legacy
+  hooks continue regardless). The awaited session-operation hooks below have
+  their own decision validation, not this ignored-denial rule.
+
+### 1.4b Native model-turn hooks (API `0.4`, feature `session_entries`)
+
+**Source status:** these newly authored native paths and tests are not yet
+compiled or native-test-qualified. This specifies the source contract, not an
+installed-binary or full Pi compatibility claim.
+
+For these model-turn and compaction contracts, an unsupported/safe refusal is a
+boundary, not repair evidence for a captured Pi breakage. Captured Pi breakages
+remain Octet-owned open defects; refusal tests do not establish closure.
+
+Declare `model_turn_start`, `model_turn_end`, or both in `contributes.hooks`,
+select API `0.4`, and negotiate `session_entries`. They use
+`SessionOperationHook`, registered through `ExtensionHost::session_operation_hook`,
+with a real awaited private session-leaf consumer. They are not API `0.3`
+`session_start`/`session_end`, best-effort lifecycle notifications, whole-run
+`turn/started`/`turn/settled`, or `AgentEvent::TurnFinished` aliases.
+
+The host sends ordinary `hook/run` requests with `params.hook` set to the declared
+name. The respective `params.payload` shapes are:
+
+```json
+{"kind":"model_turn_start","run_id":"run:001","turn_index":0,"timestamp_ms":1791129600000}
+```
+
+```json
+{"kind":"model_turn_end","run_id":"run:001","turn_index":0,"timestamp_ms":1791129600123,"assistant_entry":{"id":"002","parent":"001","timestamp_unix_ms":1791129600110,"value":{"type":"message","Assistant":{"content":[{"Text":"Done."}],"model":"local-model","protocol":"open_ai_chat"}}},"tool_result_entries":[]}
+```
+
+IDs and times above illustrate shape; the host uses actual session facts.
+`run_id` is `run:<initiating durable user entry id>`. `turn_index` is zero-based
+within that run, one logical iteration per assistant response. `timestamp_ms`
+is host wall-clock Unix milliseconds at the respective boundary. Start is
+awaited before model-request preparation; provider retries, context-compaction
+re-entry and auxiliary compaction/gate calls do not create duplicate starts or
+additional logical turns. The hooks themselves do not make model calls.
+
+End is awaited only after one real assistant entry and all its paired tool-result
+entries have committed, including tool errors and asynchronous tool settlement.
+`tool_result_entries` is in durable commit order. Asynchronous tools may overlap
+a later model iteration; end observations remain in iteration order, not provider
+completion order. End does not mean whole-run success or terminal-gate approval.
+
+The entries are native `Entry` serializations, unchanged except for the existing
+receiving-namespace metadata filter: retain public extension metadata and the
+receiver's own private metadata, not another extension's private values. Keep
+real IDs, parents, `timestamp_unix_ms`, optional metadata and all content. Native
+assistant content is under `value.Assistant`; tool results are under
+`value.User.content[].ToolResult`, potentially several in one entry. No usage,
+stop reason, provider-specific or Pi message fields are fabricated. An adapter
+unable to project media or opaque content must refuse explicitly, not drop it.
+
+The callback includes the existing owner-fenced session snapshot and private
+`params.session_leaf` grant. While it is awaited, the sole Session writer services
+the authenticated, bounded private `session/append_entry` lane and returns real
+commit receipts; a frontend notification queue is not its consumer. Grants are
+invocation-scoped, with activation/operation, owner, instance and generation
+fences, and are revoked when the invocation settles. Retaining the snapshot does
+not retain append authority or exempt ordinary reverse calls from their parent
+lifetime. Full snapshot/frame bounds still apply; oversize fails, not truncates.
+
+Return the ordinary permitted hook envelope, optionally adding
+`"session_operation":{"action":"continue"}`; absence means Continue:
+
+```json
+{"disposition":{"action":"continue"},"notifications":[],"session_operation":{"action":"continue"}}
+```
+
+Both observations reject `session_operation` actions `cancel` and
+`replace_compaction`, and reject disposition `deny`. Unrelated hook effects and
+nonempty prompt-context contributions are invalid. Callbacks run in registration
+order under the shared cancellation/deadline boundary. Failure or cancellation
+stops the run but cannot undo committed assistant, tool-result or private entries.
+Callbacks are not retried and no duplicate end is synthesized. Preparation,
+persistence or cancellation failure may leave a start without an end; parked or
+separately deferred-resume polling is not represented as a fabricated completion.
 
 ---
 
@@ -872,7 +956,9 @@ bounded writer queue. Host finalizers remain authoritative if delivery fails.
 
 `after_response` remains success-only in both API versions. It is not sent on
 failure, cancellation, interruption, frontend loss, shutdown, or a turn limit;
-API `0.2` lifecycle settlement covers those terminal outcomes.
+API `0.2` lifecycle settlement covers those terminal outcomes. Root-product
+`turn/started` and `turn/settled` describe the owning run, not each model iteration;
+use the awaited API `0.4` model-turn hooks above for durable per-iteration facts.
 
 ### 1.11 Wave-1 notifications (API `0.2`, negotiated)
 
@@ -889,8 +975,8 @@ with a bounded diagnostic instead of being delivered.
 | `message/started` | `lifecycle_events_v2` | `message_start` |
 | `message/updated` | `lifecycle_events_v2` | `message_update` |
 | `message/settled` | `lifecycle_events_v2` | `message_end` |
-| `compaction/started` | `lifecycle_events_v2` | `session_before_compact` |
-| `compaction/settled` | `lifecycle_events_v2` | `session_compact` |
+| `compaction/started` | `lifecycle_events_v2` | Advisory start only; not the awaited `session_before_compact` hook |
+| `compaction/settled` | `lifecycle_events_v2` | Advisory settlement only; not the awaited `session_compact` hook |
 | `compaction/failed` | `lifecycle_events_v2` | `session_compact_failed` |
 | `session/info_changed` | `lifecycle_events_v2` | `session_info_changed` |
 | `dialog/started` | `lifecycle_events_v2` | `ui_prompt_start` |
@@ -914,9 +1000,13 @@ event: it never splits, re-buffers, or reorders it and never opens a per-delta
 round trip. It also accepts an SDK-shaped batch as a JSON array under `deltas`
 (or the alias `updates`); an array longer than 1024 deltas is refused as
 `bounds_exceeded` and no event is emitted.
-Every other Wave-1 notification forwards its bounded payload as the matching Pi
-event and is never silently dropped: it is either dispatched or refused with a
-typed error name in the diagnostic.
+The API `0.4` `session_before_compact` and `session_compact` callbacks instead
+use declared, awaited `SessionOperationHook` dispatch with negotiated
+`session_entries` and a real private append consumer. The before-hook intercepts
+prepared local compaction; the after-hook observes its actual durable entry.
+Advisory `compaction/started`/`compaction/settled` notifications cannot provide
+these semantics, and the adapter does not re-emit them as duplicate callbacks.
+Other Wave-1 mappings above retain their bounded dispatch/refusal behavior.
 
 These notifications do **not** change the extension API version. They remain API
 `0.2`; there is no API `0.3` variant, and API `0.3` provider manifests do not
@@ -1838,6 +1928,120 @@ nesting beyond the protocol limit), the entry id to 256 bytes, and the name and
 label to 4 KiB. Every method is owner-scoped through `parent_request_id` and is
 refused with `-32002` `not_foreground_owner` for any other owner.
 
+<a id="session-control-v1"></a>
+
+### 2.21b Active-session control (API `0.4`, feature `session_control_v1`)
+
+This optional service targets the product's active session, not extension-owned
+`agent/*` children. It is offered only with a real bound lifecycle service and
+executes through its existing idle-boundary driver. Canonical API `0.3` keeps its
+separate `session_lifecycle` capability and request shapes unchanged.
+
+Every request has closed params with required `parent_request_id: u64` and
+optional/null `resource_owner` (the exact previously issued triple). The only
+other accepted field is `session_id`, required for switch and absent/null for
+all other methods:
+
+| Method | `session_id` | Successful result / effect |
+|---|---|---|
+| `session/wait_for_idle` | absent/null | `{"session_id":"..."}` for the active durable session, only after an observed idle boundary; no mutation |
+| `session/create` | absent/null | `{"session_id":"..."}` for a newly durable session; does not switch |
+| `session/fork` | absent/null | `{"session_id":"..."}` for a durable fork at the active head; does not switch |
+| `session/switch` | existing workspace session ID, at most 256 UTF-8 bytes | `{"session_id":"..."}` after making that session active; not an arbitrary file path |
+| `session/reload` | absent/null | `{"session_id":"..."}` after reopening the active durable session |
+
+```json
+{"jsonrpc":"2.0","id":"idle-1","method":"session/wait_for_idle","params":{"parent_request_id":7,"resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"host-issued-instance","process_generation":1}}}
+```
+
+A live parent's owner takes precedence; the request remains its ordinary child
+and parent settlement/cancellation cancels it. An explicit owner does **not**
+detach a call made while the parent is live. With a settled parent, a still-issued
+owner permits an independently answered request; missing, foreign or stale owners
+and known cancellation tombstones are refused. Owner validation is not an
+admission-success acknowledgement or replay permit.
+
+The bounded queue preserves operation order. Idle waits cannot overtake earlier
+mutations, and no method returns success before its actual consumer completes.
+An active handler must not wait for a mutation whose idle boundary depends on
+that handler settling. Deactivation/activation epochs fence queued work from a
+replacement application. Cancellation does not roll back a committed mutation.
+Admission uses typed `unsupported_feature`, `invalid_request` and
+`not_foreground_owner` refusals; lifecycle queue/worker exhaustion returns
+`-32012`, and unavailable/failed lifecycle execution returns `-32603`.
+
+<a id="session-compaction-v1"></a>
+
+### 2.21c `session/compact` (API `0.4`, feature `session_compaction_v1`)
+
+**Source status:** newly authored Rust dispatch, consumer and tests are uncompiled
+and unqualified. The source binding is the isolated interactive lifecycle
+consumer, not a claim of installed, headless or Serve support.
+
+Negotiation requires both `session_compaction_v1` and `session_control_v1`.
+The host offers compaction only when a real lifecycle receiver has opted in via
+`ExtensionSessionLifecycleService::with_compaction()` before process startup;
+ordinary `channel()` alone does not enable it. Dispatch additionally requires
+the actual opted-in service and active frontend binding. API `0.1`/`0.2` and
+canonical `0.3` cannot negotiate this service.
+
+The request envelope and params are closed. Required fields are
+`parent_request_id: u64` and `resource_owner`, the complete exact host-issued
+`{session_id,extension_instance_id,process_generation}` triple.
+`custom_instructions` is optional string/null, capped at **16 KiB raw UTF-8**
+before normalization. LF and TAB are allowed; other controls are refused. Blank
+instructions are valid; the native Agent trims and normalizes them to absent.
+
+```json
+{"jsonrpc":"2.0","id":"compact-1","method":"session/compact","params":{"parent_request_id":7,"resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"host-issued-instance","process_generation":1},"custom_instructions":"Keep the open questions."}}
+```
+
+**Send only after the originating host request's successful terminal reply has
+been written.** A live parent is deterministically refused with `-32602`
+`invalid_request`, including recursive awaited calls from a compaction hook.
+Do not await idle or compaction while settling that handler. This is a distinct
+post-reply service, not a blanket editor-checkpoint or ordinary-child lifetime
+exception. Retained contexts may send once no handler scope is live, using their
+original issued owner and cancellation scope.
+
+For an adapter exposing synchronous void `ctx.compact()`, enqueue locally in the
+handler scope and flush the reverse request only **after serially writing the
+successful host reply**. On parent error/cancellation suppress the request and
+invoke `onError`; never include compaction in the handler's awaited flush. Refuse
+calls from `session_before_compact`/`session_compact`, including deferred callbacks
+scheduled by those hooks, rather than starting a recursive callback chain.
+
+The issued owner is session-scoped authority after settlement, not a success ACK
+or replay token. A known parent-cancellation tombstone refuses the request;
+cancelling one request does not itself revoke every future call by that owner.
+Owner retirement, process close/drain or replacement generation, child
+cancellation and lifecycle-epoch change fence queued and executing work. The
+consumer also checks the actual foreground Session owner. Native cancellation is
+cooperative: the operation and provider accounting are driven to settlement,
+not abandoned when the caller disappears.
+
+There is no queue-admission success. Exactly one terminal outcome is admitted;
+success follows actual native Agent compaction, durable commit **and its awaited
+after-hooks**:
+
+```json
+{"jsonrpc":"2.0","id":"compact-1","result":{"entry_id":"checkpoint-id","summary":"Actual stored summary.","first_kept":"retained-entry-id"}}
+```
+
+These three strings come from the newly appended native Compaction entry, not
+`session.head` (an after-hook may append private metadata). No token counts,
+usage, details or other metrics are fabricated. Unsafe/no compactable history,
+a before-hook veto, unavailable consumer or Native Responses mode is a refusal,
+not successful compaction; this is the cancellable local service.
+
+Admission errors use `unsupported_feature` (`-32601`), `invalid_request` or
+`bounds_exceeded` (`-32602`), and `not_foreground_owner` (`-32002`). Execution
+failures use JSON-RPC errors (`-32603`), not success-shaped values. A post-commit
+after-hook failure explicitly retains the checkpoint and forbids retry; it cannot
+roll back or replay compaction. Oversized/undeliverable results are not truncated
+into success. Lost delivery or cancellation never authorizes automatic replay of
+possibly committed work.
+
 ### 2.22 `session/send_message`, `session/send_user_message` (API `0.2`, feature `message_injection`)
 
 `session/send_message` requests `{ "parent_request_id": 2, "role":
@@ -2460,7 +2664,9 @@ The encoded menu is at most 256 KiB.
 | `secrets` | conditional | Owner-scoped `secret/get` for exact manifest-allowlisted names |
 | `composer` | no | Host-owned `composer/get`, `composer/set`, and `composer/insert`; the extension API stays `0.2` |
 | `shortcuts` | no | Runtime `shortcut/register` plus admitted `shortcut/trigger` dispatch; at most 64 per process |
-| `session_entries` | no | `session/append_entry`, `session/set_name`, and `session/set_label` durable entry/session metadata |
+| `session_entries` | no | `session/append_entry`, `session/set_name`, and `session/set_label` durable entry/session metadata; declared API `0.4` model-turn/session-operation hooks use the awaited private leaf consumer |
+| `session_control_v1` | API 0.4, conditional | Active-session `session/wait_for_idle`, `session/create`, `session/fork`, `session/switch`, `session/reload`; real bound lifecycle driver required |
+| `session_compaction_v1` | API 0.4, conditional | Post-reply, issued-owner `session/compact` with a durable terminal result; requires `session_control_v1` and an opted-in active compaction consumer |
 | `message_injection` | no | Bounded `session/send_message` (assistant|system) and `session/send_user_message` |
 | `lifecycle_events_v2` | no | Coalesced `message/started`, `message/updated`, `message/settled`, `compaction/*`, `session/info_changed`, `dialog/*`, `model/selected`, `reasoning/selected`, and `bash/user` fan-out |
 | `active_tools` | no | Host-owned `tools/set_active` replacement active tool set |

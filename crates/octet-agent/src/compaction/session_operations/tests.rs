@@ -236,6 +236,67 @@ fn source_revision_rejects_head_aba_and_reopened_writer() {
 }
 
 #[test]
+fn model_turn_observations_serialize_real_entries_and_only_accept_continue() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create(dir.path().join("session.jsonl")).unwrap();
+    let root = user(&mut session, "real user");
+    let assistant = session
+        .append(EntryValue::Message(Message::Assistant(
+            octet_ai::AssistantMessage {
+                content: vec![octet_ai::AssistantPart::Text("real answer".into())],
+                model: octet_ai::ModelId("local".into()),
+                protocol: octet_ai::Protocol::OpenAiChat,
+            },
+        )))
+        .unwrap();
+    let end = SessionOperation::ModelTurnEnd {
+        run_id: format!("run:{}", root.0),
+        turn_index: 7,
+        timestamp_ms: 123,
+        assistant_entry: session.entry(&assistant).unwrap().clone(),
+        tool_result_entries: Vec::new(),
+    };
+    let value = serde_json::to_value(&end).unwrap();
+    assert_eq!(value["kind"], "model_turn_end");
+    assert_eq!(value["turn_index"], 7);
+    assert_eq!(value["timestamp_ms"], 123);
+    assert_eq!(
+        value["assistant_entry"],
+        serde_json::to_value(session.entry(&assistant).unwrap()).unwrap()
+    );
+    assert_eq!(value["tool_result_entries"], serde_json::json!([]));
+    let start = SessionOperation::ModelTurnStart {
+        run_id: format!("run:{}", root.0),
+        turn_index: 7,
+        timestamp_ms: 122,
+    };
+    assert_eq!(
+        serde_json::to_value(&start).unwrap(),
+        serde_json::json!({
+            "kind":"model_turn_start", "run_id":format!("run:{}", root.0),
+            "turn_index":7, "timestamp_ms":122,
+        })
+    );
+    for operation in [&start, &end] {
+        validate_decision(operation, &SessionOperationDecision::Continue).unwrap();
+        for decision in [
+            SessionOperationDecision::Cancel,
+            SessionOperationDecision::ReplaceCompaction {
+                replacement: SessionCompactionReplacement {
+                    summary: "not authority".into(),
+                    first_kept: root.clone(),
+                },
+            },
+        ] {
+            assert!(matches!(
+                validate_decision(operation, &decision),
+                Err(SessionOperationError::InvalidDecision)
+            ));
+        }
+    }
+}
+
+#[test]
 fn observations_cannot_veto_or_replace_already_committed_work() {
     let event = SessionOperation::Tree {
         old_head: None,

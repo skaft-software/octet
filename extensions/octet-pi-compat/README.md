@@ -136,19 +136,28 @@ under its [MIT license](LICENSE.pi); no Pi session store or agent runtime is imp
 Hook registration maps `session_start`/`session_end`/`session_shutdown` to paired
 API 0.4 lifecycle hooks, `tool_call`/`tool_result` to tool hooks, and
 `input`/`before_agent_start`/`after_response` to available prompt/response hooks.
-Negotiated turn/tool/message/compaction/model/dialog observations are dispatched
+`turn_start`/`turn_end` use awaited native `model_turn_start`/`model_turn_end`
+callbacks with a real session-leaf consumer, not whole-run `turn/started` or
+`turn/settled` notifications. Whole-run observations remain `agent_start`/`agent_end`.
+Other negotiated tool/message/compaction/model/dialog observations are dispatched
 in order. Events expose only facts actually supplied by octet; reading absent Pi
 fields (for example an `agent_end.messages` array) or returning an unapplied
 transformation/veto fails explicitly. Command argument arrays join with spaces;
 the wire cannot reconstruct original shell quoting.
 
-**pi-clm 1.0.0 is not qualified.** Unchanged pinned capture now gets past resource,
-context, pipeline and compaction registration, then explicitly refuses `turn_start`:
-whole-run lifecycle notifications are not per-model-turn events. No no-op aliases
-are installed to force registration through. `before_agent_start` now uses the
-negotiated native `before_prompt_state_v1` applied-system contract; configure records
-`capabilities.system_prompt` for that factory. The selected TUI/schema profile
-and adapter process tests do not qualify CLM's seven behavioral gates.
+**pi-clm 1.0.0 is not qualified.** Unchanged pinned registration capture now
+succeeds with native per-model-turn mappings; no whole-run aliases are installed
+to force registration through.
+`before_agent_start` uses the negotiated native `before_prompt_state_v1`
+applied-system contract; configure records `capabilities.system_prompt` for that
+factory. Registration capture and adapter fixtures do not qualify CLM's seven
+behavioral gates. Missing initial snapshots, unsupported projections/preparation
+fields and checkpoint bounds remain open compatibility work.
+
+**Rule A:** captured Pi breakages remain Octet-owned defects across the loader,
+adapter, protocol and terminal integration. An explicit refusal is safer than fake
+success, but is not a repair or closure. Qualification must match the original case,
+candidate and security policy; historical passes do not qualify changed source.
 
 ## Native context, persistence and provider phases
 
@@ -189,9 +198,39 @@ full tree-summary preparation) remain explicit refusals, not fabricated values.
 `ctx.waitForIdle` requires a live command and negotiated `session_control_v1`, then
 awaits the actual same-session idle receipt. No hook can wait for its own run to end.
 
-These are functional adapter bindings, not native durability/provider/CLM
-qualification. Parent-owned native builds and actual App/Agent captures remain
-required; `resource_paths/pi_app_tests.rs` supplies two ordinary nonempty factory
+`ctx.compact({customInstructions?, onComplete?, onError?})` is synchronous void.
+It requires both `session_control_v1` and `session_compaction_v1` and an opted-in
+native interactive idle driver. From a live command/tool/hook it queues locally,
+then sends `session/compact` **only after the successful parent reply is written**;
+a failed/cancelled parent cannot dispatch the queued work. It never waits for idle
+inside that parent or treats queue admission as success. Retained callbacks keep
+the original issued owner. One compaction per owner / eight per process bounds
+pending work, including callbacks. Instructions are at most 16 KiB UTF-8, with
+only newline/tab controls. Compaction hooks cannot request recursive compaction.
+
+The completion callback follows the real durable checkpoint and its after-hooks;
+it receives actual `summary` and `firstKeptEntryId`. Unavailable Pi metrics/details
+fail explicitly when read. A post-commit failure preserves the checkpoint and
+must not be retried; cancellation is not rollback. Owner retirement, cancellation,
+transport loss and shutdown revoke pending work without retargeting another owner.
+The existing 30-second reverse deadline is unchanged. Headless/Serve and Native
+Responses are not yet covered by this local cancellable service; those are open
+compatibility gaps, not completed parity cases.
+
+Per-model observations carry the actual iteration index and boundary time. End
+follows the durable assistant plus its paired tool results, including native async
+settlement; retries do not duplicate start. The adapter projects representable text
+and tool messages with actual entry timestamps, including batched tool results,
+but does not invent provider identity, usage or stop reason. Opaque/media/scheduling
+projections still need repair. Model-turn callbacks may append private entries
+through the live leaf consumer, but cannot veto already observed work or transform
+messages. A cancelled/failed turn need not have an end, and auxiliary compaction,
+gate and deferred-resume requests are not fabricated as logical model turns.
+
+These are source integrations, not native durability/provider/CLM qualification.
+The latest compaction service and model-turn Rust changes have not been compiled
+or tested while performance owns the heavy-build slot. Actual App/Agent captures
+remain required; `resource_paths/pi_app_tests.rs` supplies two ordinary nonempty factory
 integration tests without replacing the Agent or using a handwritten protocol peer.
 
 ## Resource discovery boundary
@@ -352,7 +391,7 @@ PI_REFERENCE_REPO=/absolute/reviewed/pi-checkout \
 PI_COMMANDS_PATH=/absolute/reviewed/pi-1.0-commands.ts \
 PI_REFERENCE_REPO=/absolute/reviewed/pi-checkout \
   node --test extensions/octet-pi-compat/test/completions.test.mjs
-# Explicit non-support regression, NOT a CLM parity pass:
+# Unchanged registration capture only, NOT a CLM behavioral parity pass:
 PI_CLM_PATH=/absolute/reviewed/pi-clm-b84a9d7c/index.ts \
   node --test extensions/octet-pi-compat/test/clm.test.mjs
 ```

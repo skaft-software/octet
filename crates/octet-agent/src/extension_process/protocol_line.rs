@@ -179,6 +179,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
+            methods::SESSION_COMPACT => {
+                dispatch_session_compaction(state, object, params)?;
+            }
             "session/wait_for_idle"
             | "session/create"
             | "session/fork"

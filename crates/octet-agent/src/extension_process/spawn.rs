@@ -373,6 +373,9 @@ pub(super) async fn spawn_connection(
         tool_composition: config.tool_composition
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         session_lifecycle: session_lifecycle.is_some(),
+        session_compaction: session_lifecycle
+            .as_ref()
+            .is_some_and(|service| service.supports_compaction()),
         approvals: config.approvals,
         secrets: config.secret_broker.is_some()
             && !descriptor.manifest.capabilities.secrets.is_empty(),
@@ -416,7 +419,12 @@ pub(super) async fn spawn_connection(
     }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
         && descriptor.manifest.capabilities.system_prompt
-        && descriptor.manifest.contributes.hooks.contains(&ExtensionHook::BeforePrompt) {
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::BeforePrompt)
+    {
         optional_features.push(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1.to_owned());
     }
     if offered_host_services.provider_pipeline
@@ -433,6 +441,9 @@ pub(super) async fn spawn_connection(
         && offered_host_services.session_lifecycle
     {
         optional_features.push(EXTENSION_FEATURE_SESSION_CONTROL_V1.to_owned());
+        if offered_host_services.session_compaction {
+            optional_features.push(EXTENSION_FEATURE_SESSION_COMPACTION_V1.to_owned());
+        }
     }
     if offered_host_services.resource_paths
         && descriptor

@@ -262,7 +262,11 @@ pub(super) fn negotiate_contributions_with_host_services(
             }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
                 && manifest.capabilities.system_prompt
-                && manifest.contributes.hooks.contains(&ExtensionHook::BeforePrompt) {
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::BeforePrompt)
+            {
                 allowed.insert(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1);
             }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
@@ -291,6 +295,16 @@ pub(super) fn negotiate_contributions_with_host_services(
                 && offered_host_services.session_lifecycle
             {
                 allowed.insert(EXTENSION_FEATURE_SESSION_CONTROL_V1);
+                if offered_host_services.session_compaction {
+                    allowed.insert(EXTENSION_FEATURE_SESSION_COMPACTION_V1);
+                }
+            }
+            if features.contains(EXTENSION_FEATURE_SESSION_COMPACTION_V1)
+                && !features.contains(EXTENSION_FEATURE_SESSION_CONTROL_V1)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "session_compaction_v1 requires session_control_v1".into(),
+                ));
             }
             if offered_host_services.resource_paths
                 && manifest.api_version == EXTENSION_API_VERSION_0_4

@@ -114,8 +114,10 @@ mod session_control;
 pub use resource_paths::{
     ExtensionResourceDiscoveryReason, ExtensionResourcePaths, EXTENSION_FEATURE_RESOURCE_PATHS,
 };
-use session_control::dispatch_session_control;
-pub use session_control::EXTENSION_FEATURE_SESSION_CONTROL_V1;
+use session_control::{dispatch_session_compaction, dispatch_session_control};
+pub use session_control::{
+    EXTENSION_FEATURE_SESSION_COMPACTION_V1, EXTENSION_FEATURE_SESSION_CONTROL_V1,
+};
 mod resource_validation;
 use bulk::*;
 mod resources;
@@ -226,6 +228,7 @@ pub use self::host_requests::MAX_EXTENSION_MODEL_INPUTS;
 use self::host_requests::*;
 pub use self::lifecycle_events::ExtensionEvent;
 pub use self::lifecycle_events::ExtensionOperationToken;
+pub use self::lifecycle_events::ExtensionSessionCompactionResult;
 pub use self::lifecycle_events::ExtensionSessionLifecycleError;
 pub use self::lifecycle_events::ExtensionSessionLifecycleOperation;
 pub use self::lifecycle_events::ExtensionSessionLifecycleReceiver;
@@ -443,6 +446,8 @@ pub mod methods {
     pub const CANCEL_REQUEST: &str = "$/cancelRequest";
     /// Request-scoped ephemeral progress.
     pub const PROGRESS: &str = "$/progress";
+    /// Extension request to compact the idle active-host session (API 0.4).
+    pub const SESSION_COMPACT: &str = "session/compact";
     /// Extension request to create a durable active-host session.
     pub const SESSION_CREATE: &str = "session/create";
     /// Extension request to fork the active host session.
