@@ -3,6 +3,20 @@
   "runner": "node runner.mjs --config /absolute/bridge.json",
   "config": { "extensions": ["/absolute/reviewed/entry.ts"] },
   "configure": "node configure.mjs --reviewed --output /absolute/extensions/octet-pi-compat <entry.ts>...; canonical Node + absolute runner; no activation/trust/HOME edits",
+  "command_completions": {
+    "registration": "Require negotiated autocomplete only when a command declares getArgumentCompletions. After the initialize response, send process-owned ui/autocomplete/register {revision:1}; require {accepted:true}. No invented parent/session owner.",
+    "request": "ui/autocomplete/complete {text,cursor,revision}; text <=262144 UTF-8 bytes, cursor at a byte boundary, safe nonnegative revision. Inspect current line, trim only before slash, preserve entire raw argument prefix after first space, with Pi1.0 attachment-token precedence.",
+    "response": "Await the real sync/async factory callback. Return {prefix,items:[{value,label,description?}]}; <=32 items, <=1024 UTF-8 bytes per plain-text field. Null/empty/non-array Pi results or unclaimed input return {prefix:'',items:[]}. Errors remain errors; no coercion or truncation.",
+    "fences": "Each request retains its own snapshot and RPC ID; no global revision high-water mark. Cancellation settles promptly without publishing late callback results. Native code must enforce full text/cursor/revision/focus/provider-owner identity before display/application and empty-result chain/path fallback.",
+    "limits": "Explicitly refuse quote consumption after cursor, cursor-inside-quoted-directory edits, control-containing prefixes/items, extra fields and oversized results. Current wire is suffix-only; no proposed item-range fields are emitted. No filesystem completion or automatic/forced-file UI parity claim.",
+    "qualification": "Actual factory/raw-process and source-hash-verified Pi1.0 differential tests, not native completion UI or fallback qualification. Unchanged pinned commands.ts callback executes."
+  },
+  "tool_prompt_metadata": {
+    "feature": "tool_prompt_metadata_v1; API0.4 only; required only by tools declaring either field, including explicit empty values",
+    "mapping": "promptSnippet -> prompt_snippet, promptGuidelines -> prompt_guidelines in tool catalog only; preserve values for native Pi projection trimming, never add manifest keys",
+    "bounds": "<=1024 UTF-8 bytes per string, <=16 guidelines; C0/C1 forbidden except newline/tab. Empty strings/arrays allowed. Native host counts fields in aggregate catalog budget.",
+    "qualification": "Adapter raw-process catalog/negotiation/boundary/execution tests only; effective native prompt projection needs independent qualification. No new authority or canonical0.3 change."
+  },
   "context_updated": {
     "method": "context/updated",
     "params": {
@@ -11,7 +25,20 @@
     },
     "notes": "Negotiated remote_ui only. Unowned/foreign/stale updates cannot mutate retained session contexts. Ordinary hook/run context is {workspace,resource_owner,host}; payload.binding supplies the same complete triple on session hooks. Missing session entries/OAuth/composer snapshots explicitly unsupported, never invented empty data. model_view maps snake_case capacity/rate units to Pi camelCase."
   },
-  "editor_state": "Negotiate editor_handoff; ui/editor-state {text,revision,focused} updates the active owner's real composer. Command-time composer/get refreshes from the actual host. Custom editor onChange/onSubmit use owner-safe composer/set and session/send_user_message and expose host refusal.",
+  "editor_state": "Negotiate editor_handoff; ui/editor-state {text,revision,focused} updates the active owner's native composer mirror only without a custom editor. Unfenced snapshots and command-time composer/get never overwrite an active custom draft or acknowledge its input.",
+  "editor_checkpoint": {
+    "open": "editor ui/open must return editor_mount_id; absence explicitly refuses the custom editor, with no legacy unfenced fallback",
+    "input": "editor ui/key includes editor_input {mount_id,input_revision}; revisions start at 1 and must be consecutive for this mount",
+    "initial_input": "Queue at most128 bounded normalized/fenced events while open/factory/composer seed initialization is pending. Validate actual open mount identity before delivery, seed first, then dispatch each once in order. First component frame awaits its captured checkpoint tail. Overflow/missing/foreign/gapped fences refuse explicitly. Close/rescue discards undispatched events; no raw-key/native recovery replay.",
+    "write": "composer/set {text,editor_checkpoint:{surface_id,mount_id,input_revision,checkpoint_revision}} plus ordinary full resource_owner and retained parent_request_id; no nested caller-chosen owner",
+    "ack": "host replies {input_revision,checkpoint_revision} only after actual commit; adapter requires both to match the captured checkpoint",
+    "ordering": "Input handlers suppress intermediate onChange checkpoints and checkpoint final getText after successful synchronous completion, including no-op/release. Async edits use the last completed input revision and a new checkpoint revision. Submission follows the final checkpoint.",
+    "frames": "Capture lines, geometry and exact checkpoint tail together, await that barrier before publishing; never render newer text after waiting on an older tail. One scheduled frame plus one dirty flag bounds pending render work.",
+    "setters": "Same-owner setEditorText/pasteToEditor use the active component across factories and await a fenced checkpoint; paste requires insertTextAtCursor. Native-only composer/set/insert behavior is unchanged.",
+    "retained_lifetime": "Only actual composer/set editor checkpoints from the mounted editor store, with matching surface/mount identity and full live owner, have independent local child lifetime while the origin is live. Other reverse calls retain their live-parent attachment; generic composer/set without checkpoint still cancels on normal parent settlement. The real numeric opening parent_request_id, full resource_owner and original AbortSignal remain unchanged. True origin/child cancellation still aborts, including retained surface cancellation after reply. Nonretained methods require matching live request identity. Native admission needs the corresponding narrow checkpoint exception and unchanged authority/cancellation fences.",
+    "retirement": "Voluntary clear/replacement drains accepted ordered writes. Observed close/rescue/shutdown stops input immediately and prevents queued work/frames from publishing; in-flight requests retain the retired mount ID for native rejection. Host restoration notices must remain truthful about unacknowledged inputs.",
+    "qualification": "Synthetic process tests only until current-source native integration/build and PTY qualification. Historical burst-rescue failure evidence remains red."
+  },
   "custom_commands": "Only fullscreen custom() detaches command/execute after first frame. Original JS handler/custom() result promise remain live until actual done(result), ui/closed, cancellation, owner replacement or shutdown. Background calls echo opening numeric parent + complete owner. Header/footer/widget setters await all openings before their request settles.",
   "placements": ["fullscreen", "header", "footer", "above_editor", "below_editor", "editor"],
   "surface_limit": 16,

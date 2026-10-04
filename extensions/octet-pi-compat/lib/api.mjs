@@ -49,9 +49,14 @@ export function createAPI(runtime, factory) {
   const op = (method, params, feature) => { runtime.require(feature); const s = store(); return runtime.track(runtime.hostCall(method, params, s), s); };
   return strict({
     registerTool(tool) {
-      fields(tool, ['name', 'label', 'description', 'parameters', 'execute', 'renderCall', 'renderResult', 'output_schema'], 'tool');
+      fields(tool, ['name', 'label', 'description', 'promptSnippet', 'promptGuidelines', 'parameters', 'execute', 'renderCall', 'renderResult', 'output_schema'], 'tool');
       name(tool.name, 'tool name'); bounded(tool.description, 'tool description', 4096);
       if (!tool.description || !tool.parameters || typeof tool.parameters !== 'object' || typeof tool.execute !== 'function') invalid('tool definition');
+      if (tool.promptSnippet !== undefined) bounded(tool.promptSnippet, 'tool promptSnippet', 1024);
+      if (tool.promptGuidelines !== undefined) {
+        if (!Array.isArray(tool.promptGuidelines) || tool.promptGuidelines.length > 16) invalid('tool promptGuidelines must contain at most 16 strings');
+        for (const value of tool.promptGuidelines) bounded(value, 'tool promptGuidelines entry', 1024);
+      }
       if (tool.label !== undefined) bounded(tool.label, 'tool label', 128);
       for (const key of ['renderCall', 'renderResult']) if (tool[key] !== undefined && typeof tool[key] !== 'function') invalid(`tool.${key}`);
       register(runtime, runtime.tools, tool.name, tool, factory);
@@ -59,7 +64,7 @@ export function createAPI(runtime, factory) {
     registerCommand(key, definition) {
       name(key, 'command name'); fields(definition, ['description', 'handler', 'usage', 'getArgumentCompletions'], 'command');
       if (typeof definition.handler !== 'function') invalid('command handler');
-      if (definition.getArgumentCompletions) unsupported('command.getArgumentCompletions', 'host wire has no completion callback');
+      if (definition.getArgumentCompletions !== undefined && typeof definition.getArgumentCompletions !== 'function') invalid('command.getArgumentCompletions must be a function');
       if (definition.description !== undefined) bounded(definition.description, 'command description', 4096);
       register(runtime, runtime.commands, key, definition, factory);
     },
@@ -240,13 +245,19 @@ export function createContext(runtime, store) {
     getEditorText: () => snapshot(current().host, 'composer_text', 'ctx.ui.getEditorText'),
     setEditorText(text) {
       runtime.require('composer'); store.controller.signal.throwIfAborted();
-      bounded(text, 'composer text', 262144); const state = current(), old = state.host.composer_text; state.host.composer_text = text;
+      bounded(text, 'composer text', 262144); const state = current();
+      const checkpoint = runtime.ui.mutateEditor(store, text);
+      if (checkpoint) return runtime.track(checkpoint, store);
+      const old = state.host.composer_text; state.host.composer_text = text;
       const promise = operation('composer/set', { text }, 'composer');
       promise.catch(() => { if (state.host.composer_text === text) state.host.composer_text = old; }); return promise;
     },
     pasteToEditor(text) {
+      runtime.require('composer'); store.controller.signal.throwIfAborted(); current();
       bounded(text, 'composer insert', 262144);
-      // Cursor position is host-owned, so do not invent a local insertion result.
+      const checkpoint = runtime.ui.mutateEditor(store, text, true);
+      if (checkpoint) return runtime.track(checkpoint, store);
+      // Without a custom component the cursor is host-owned; do not invent it.
       return operation('composer/insert', { text }, 'composer');
     },
   }, 'ctx.ui');

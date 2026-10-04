@@ -90,6 +90,10 @@ pub const EXTENSION_FEATURE_TERMINAL_INPUT: &str = "terminal_input";
 /// API `0.2` bounded host-mediated autocomplete queries.
 pub const EXTENSION_FEATURE_AUTOCOMPLETE: &str = "autocomplete";
 
+/// API `0.4` bounded suffix replacement and intra-value completion cursors.
+/// Requires the existing host-mediated `autocomplete` feature.
+pub const EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1: &str = "autocomplete_edit_v1";
+
 /// API `0.2` initialization-time semantic tool-renderer discovery.
 pub const EXTENSION_FEATURE_DYNAMIC_TOOL_RENDERERS: &str = "dynamic_tool_renderers";
 

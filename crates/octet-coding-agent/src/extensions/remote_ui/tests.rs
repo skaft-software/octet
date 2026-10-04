@@ -13,7 +13,7 @@ use octet_agent::extension_process::{
 };
 
 const FIXTURE: &str = r#"#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 surfaces, opens, closes, hook_outputs = {}, {}, {}, set()
 counter = 0
 
@@ -35,6 +35,14 @@ def frame(s):
         lines=['\x1b[38;2;20;80;200mREMOTE FRAME\x1b[0m'])))
     s['revision'] += 1
 
+def checkpoint(s, event, text):
+    revision = event['editor_input']['input_revision']
+    s['last_checkpoint_id'] = 'checkpoint-' + str(s['parent']) + '-' + str(revision)
+    send(dict(id=s['last_checkpoint_id'], method='composer/set',
+        params=dict(parent_request_id=s['parent'], resource_owner=s['owner'], text=text,
+            editor_checkpoint=dict(surface_id=s['id'], mount_id=s['editor_mount_id'],
+                input_revision=revision, checkpoint_revision=revision))))
+
 for line in sys.stdin:
     m = json.loads(line)
     with open(os.path.join(os.environ['OCTET_WORKSPACE'], 'remote-ui-wire.jsonl'), 'a') as log:
@@ -42,7 +50,7 @@ for line in sys.stdin:
     method, p = m.get('method'), m.get('params', {})
     if method == 'initialize':
         result(m['id'], dict(api_version='0.4', tools=[], commands=[dict(name='mount', description='Remote fixture')],
-            protocol=dict(version='0.4', features=['request_cancellation', 'content_parts', 'remote_ui'],
+            protocol=dict(version='0.4', features=['request_cancellation', 'content_parts', 'remote_ui', 'composer'],
                 limits=dict(max_concurrent_requests=4))))
     elif method == 'hook/run':
         hook_outputs.add(m['id'])
@@ -57,18 +65,37 @@ for line in sys.stdin:
     elif method == 'command/execute':
         counter += 1
         args = p.get('arguments', [])
-        s = dict(id='screen-' + str(counter), parent=m['id'], owner=p['context']['resource_owner'],
-            hold='hold' in args, revision=0)
+        s = dict(id='shared-editor' if 'same' in args else 'screen-' + str(counter),
+            parent=m['id'], owner=p['context']['resource_owner'],
+            hold='hold' in args, checkpoint='checkpoint' in args, barriers='barriers' in args, revision=0)
         opens['open-' + str(counter)] = s
         send(dict(id='open-' + str(counter), method='ui/open', params=dict(parent_request_id=m['id'],
             resource_owner=s['owner'], surface_id=s['id'], title='Remote fixture',
             placement=args[0] if args else 'fullscreen', mouse_capture='mouse' in args)))
+    elif method == 'ui/key' and surfaces[p['surface_id']].get('barriers') and p['key'] == 's':
+        s = surfaces[p['surface_id']]
+        s['hold'] = False
+        output(s['parent'])
+    elif method == 'ui/key' and surfaces[p['surface_id']].get('barriers') and p['key'] == 'z':
+        s = surfaces[p['surface_id']]
+        send(dict(method='$/cancelRequest', params=dict(id=s['last_checkpoint_id'])))
+        send(dict(method='notification', params=dict(message='checkpoint-cancelled')))
     elif method == 'ui/key' and p.get('key') == 'q':
         s = surfaces[p['surface_id']]
         id = 'close-' + s['id']
         closes[id] = s
         send(dict(id=id, method='ui/close', params=dict(parent_request_id=s['parent'],
             resource_owner=s['owner'], surface_id=s['id'])))
+    elif method == 'ui/key' and p.get('key') == 'h':
+        workspace = os.environ['OCTET_WORKSPACE']
+        with open(os.path.join(workspace, 'editor-hung'), 'w') as barrier:
+            barrier.write('not servicing stdin or checkpoints')
+        while not os.path.exists(os.path.join(workspace, 'editor-release')):
+            time.sleep(0.001)
+    elif method == 'ui/key' and surfaces[p['surface_id']].get('checkpoint'):
+        s = surfaces[p['surface_id']]
+        if p['key'] == 'c': checkpoint(s, p, 'acknowledged')
+        elif p['key'] == 'x': s['late_checkpoint'] = p
     elif method == 'ui/resize':
         s = surfaces[p['surface_id']]
         s.update(columns=p['columns'], rows=p['rows'])
@@ -76,7 +103,14 @@ for line in sys.stdin:
         frame(s)
     elif method == 'ui/closed':
         s = surfaces.pop(p['surface_id'], None)
+        if s and s.get('late_checkpoint'): checkpoint(s, s['late_checkpoint'], 'late overwrite')
         if s and s['hold']: output(s['parent'])
+    elif method == '$/cancelRequest':
+        for s in surfaces.values():
+            if s['parent'] == p['id']:
+                s['hold'] = False
+                send(dict(id=p['id'], error=dict(code=-32800, message='cancelled')))
+                break
     elif method == 'shutdown':
         result(m['id'], {})
         break
@@ -112,6 +146,7 @@ command = "remote-ui-fixture.py"
 [contributes]
 commands = ["mount"]
 hooks = ["session_start", "session_end"]
+notifications = true
 "#,
     )
     .unwrap();
@@ -618,3 +653,6 @@ fn remote_ui_normalizes_key_kinds_and_zero_based_mouse() {
     .unwrap();
     assert_eq!((mouse.x, mouse.y, mouse.wheel_delta), (0, 0, 1));
 }
+
+#[path = "editor_tests.rs"]
+mod editor_tests;

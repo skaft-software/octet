@@ -10,11 +10,20 @@ pub struct ToolDefinition {
     pub name: String,
     /// Model-facing description.
     pub description: String,
+    /// Optional concise model-facing usage summary, subject to host negotiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_snippet: Option<String>,
+    /// Optional bounded model-facing usage guidelines, subject to host negotiation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_guidelines: Vec<String>,
     /// JSON Schema for tool arguments.
     pub parameters: serde_json::Value,
     /// Optional API `0.2` JSON Schema for `structured_content`.
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
+    /// Optional negotiated API 0.4 operation metadata; ordinary Pi tools omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<OperationDescriptor>,
     /// Optional API `0.4` request-scoped composition policy. Requires
     /// negotiated `tool_composition_v1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,9 +213,46 @@ pub struct ComposerTextRequest {
     /// Bounded UTF-8 text. `composer/set` replaces and `composer/insert`
     /// inserts it at the host composer cursor.
     pub text: String,
+    /// API 0.4 remote-editor checkpoint; permitted only on `composer/set`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_checkpoint: Option<ExtensionEditorCheckpoint>,
     /// Explicit owner for a caller that outlived its host request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// A bounded checkpoint for one host-issued editor mount, carried by composer/set.
+/// The frontend separately validates the admitted owner, live mount and clocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionEditorCheckpoint {
+    /// Extension-local surface identity.
+    pub surface_id: String,
+    /// Host-issued mount identity, changed on every replacement.
+    pub mount_id: String,
+    /// Highest completely handled host input revision; zero denotes the seed.
+    pub input_revision: u64,
+    /// Strictly increasing checkpoint revision, starting at one.
+    pub checkpoint_revision: u64,
+}
+
+impl ExtensionEditorCheckpoint {
+    /// Validates the wire bounds without granting authority to commit a draft.
+    pub fn validate(&self) -> Result<(), (ExtensionRequestFailure, String)> {
+        use crate::extension_remote_ui::{validate_surface_id, MAX_EXTENSION_REMOTE_UI_REVISION};
+        validate_surface_id(&self.surface_id)?;
+        validate_surface_id(&self.mount_id)?;
+        if self.input_revision > MAX_EXTENSION_REMOTE_UI_REVISION
+            || self.checkpoint_revision == 0
+            || self.checkpoint_revision > MAX_EXTENSION_REMOTE_UI_REVISION
+        {
+            return Err((
+                ExtensionRequestFailure::BoundsExceeded,
+                "editor checkpoint revisions exceed their portable bounds".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Result of one admitted composer snapshot request.

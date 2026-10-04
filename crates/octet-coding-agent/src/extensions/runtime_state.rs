@@ -420,7 +420,24 @@ pub(super) struct RegisteredAutocomplete {
     pub(super) extension_instance_id: String,
 }
 
+#[derive(Clone)]
+pub(super) struct AutocompleteProviderFence {
+    pub(super) extension: String,
+    pub(super) extension_instance_id: String,
+    pub(super) generation: u64,
+}
+
+#[derive(Clone)]
+pub(super) struct AutocompleteFence {
+    pub(super) resource_owner: String,
+    pub(super) session_id: Option<String>,
+    // One winning provider, or every queried provider for unclaimed fallback.
+    pub(super) providers: Vec<AutocompleteProviderFence>,
+}
+
+#[derive(Clone)]
 pub(crate) struct ExtensionAutocompleteUpdate {
+    pub(super) fence: AutocompleteFence,
     pub(crate) snapshot: ShellEditorSnapshot,
     pub(crate) prefix: String,
     pub(crate) items: Vec<ShellAutocompleteItem>,

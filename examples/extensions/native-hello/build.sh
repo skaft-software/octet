@@ -11,6 +11,11 @@ out=$(cd -- "$out" && pwd)
 cargo build --manifest-path "$root/sdk/rust/Cargo.toml" --offline --locked --lib --examples
 cp "$CARGO_TARGET_DIR/debug/examples/native-hello" "$out/hello-rust"
 cp "$CARGO_TARGET_DIR/debug/examples/native-probe" "$out/probe-rust"
+# Checked-in additive bundles must resolve within their own source directories;
+# never rely on parent traversal through the host's secure entrypoint resolver.
+mkdir -p "$here/resources/build" "$here/blobs/build"
+cp "$CARGO_TARGET_DIR/debug/examples/resource-hello" "$here/resources/build/resource-hello"
+cp "$CARGO_TARGET_DIR/debug/examples/bulk-hello" "$here/blobs/build/bulk-hello"
 # Static link needs platform system libraries used by Rust std. No dynamic SDK
 # loader path is required. Windows is not qualified by this Bash recipe.
 case "$(uname -s)" in

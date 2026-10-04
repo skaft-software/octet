@@ -178,6 +178,13 @@ pub(super) async fn spawn_connection(
     let closed = Arc::new(AtomicBool::new(false));
     let draining = Arc::new(AtomicBool::new(false));
     let tombstones = Arc::new(StdMutex::new(RequestTombstones::default()));
+    let resources = Arc::new(StdMutex::new(ResourceRegistry::with_bulk(
+        (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4)
+            .then(|| config.bulk_store.clone())
+            .flatten(),
+        Arc::clone(&issued_resource_owners),
+    )));
+    let resource_cleanup_changed = Arc::new(Notify::new());
     let api_v03_contract = Arc::new(StdRwLock::new(None));
     // Keep active-host lifecycle authority out of every legacy process even
     // when a generic caller supplied a runtime service configuration.
@@ -242,6 +249,8 @@ pub(super) async fn spawn_connection(
     tokio::spawn(read_protocol_stdout(
         stdout,
         Arc::clone(&pending),
+        Arc::clone(&resources),
+        Arc::clone(&resource_cleanup_changed),
         Arc::clone(&issued_resource_owners),
         Arc::clone(&session_leaf),
         Arc::clone(&remote_ui),
@@ -302,6 +311,8 @@ pub(super) async fn spawn_connection(
         writer,
         child,
         pending,
+        resources,
+        resource_cleanup_changed: Arc::clone(&resource_cleanup_changed),
         issued_resource_owners,
         session_leaf,
         remote_ui,
@@ -343,9 +354,15 @@ pub(super) async fn spawn_connection(
         message_deltas: StdMutex::new(MessageDeltaCoalescer::default()),
         process_group,
     });
+    tokio::spawn(run_resource_cleanup(
+        Arc::downgrade(&connection),
+        resource_cleanup_changed,
+    ));
     artifact_guard.disarm();
     let offered_host_services = OfferedHostServices {
         remote_ui: config.remote_ui.is_some(),
+        bulk_objects: config.bulk_store.is_some()
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         agent_sessions: config.agent_sessions,
         tool_composition: config.tool_composition
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
@@ -384,6 +401,15 @@ pub(super) async fn spawn_connection(
             .contains(&ExtensionHook::CacheWarmingDecision)
     {
         optional_features.push(EXTENSION_FEATURE_CACHE_WARMING_DECISION.to_owned());
+    }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+        optional_features.push(EXTENSION_FEATURE_RESOURCE_REFS_V1.to_owned());
+        optional_features.push(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1.to_owned());
+        optional_features.push(EXTENSION_FEATURE_TOOL_PROMPT_METADATA.to_owned());
+        optional_features.push(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1.to_owned());
+    }
+    if offered_host_services.bulk_objects {
+        optional_features.push(EXTENSION_FEATURE_BULK_OBJECTS_V1.to_owned());
     }
     if offered_host_services.tool_composition {
         optional_features.push(EXTENSION_FEATURE_TOOL_COMPOSITION.to_owned());
@@ -473,8 +499,17 @@ pub(super) async fn spawn_connection(
                     version: descriptor.manifest.api_version.clone(),
                     required_features,
                     optional_features,
+                    bulk_objects_v1: if offered_host_services.bulk_objects {
+                        config.bulk_store.as_ref().map(|storage| {
+                            let store = storage.lock();
+                            serde_json::json!({"profile":"local-file.v1", "transfer_directory": store.transfer_directory(), "limits":store.limits()})
+                        })
+                    } else { None },
                     limits: ExtensionProtocolLimits {
                         max_concurrent_requests: config.max_pending_requests,
+                        resource_refs_v1: (descriptor.manifest.api_version
+                            == EXTENSION_API_VERSION_0_4)
+                            .then(ResourceProtocolLimits::default),
                     },
                 }
             }),

@@ -4,6 +4,8 @@ use super::*;
 
 pub(super) struct ProtocolReadState {
     pub(super) pending: PendingRequests,
+    pub(super) resources: Resources,
+    pub(super) resource_cleanup_changed: Arc<Notify>,
     pub(super) issued_resource_owners: IssuedResourceOwners,
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
@@ -662,6 +664,8 @@ pub(super) fn queue_secret_lookup(
 pub(super) async fn read_protocol_stdout<R>(
     mut stdout: R,
     pending: PendingRequests,
+    resources: Resources,
+    resource_cleanup_changed: Arc<Notify>,
     issued_resource_owners: IssuedResourceOwners,
     session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     remote_ui: Arc<RemoteUiMailbox>,
@@ -703,6 +707,8 @@ pub(super) async fn read_protocol_stdout<R>(
 {
     let state = ProtocolReadState {
         pending,
+        resources,
+        resource_cleanup_changed,
         issued_resource_owners,
         session_leaf,
         remote_ui,
@@ -809,6 +815,8 @@ pub(super) async fn read_protocol_stdout<R>(
     };
 
     state.closed.store(true, Ordering::Release);
+    lock_std_mutex(&state.resources).retire_generation();
+    state.resource_cleanup_changed.notify_one();
     state.session_leaf.clear();
     state.remote_ui.clear();
     lock_std_mutex(&state.issued_resource_owners).clear();
@@ -847,6 +855,7 @@ pub(super) async fn read_protocol_stdout<R>(
     if health_state == ExtensionHealthState::Crashed {
         if let (Some(child), Some(termination)) = (state.child, state.termination) {
             reap_failed_extension(child, termination).await;
+            lock_std_mutex(&state.resources).terminate_generation();
         }
     }
 }

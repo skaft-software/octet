@@ -10,6 +10,11 @@ use std::time::Duration;
 
 use crate::cache_warmer::{CacheWarmingAction, CacheWarmingDecision};
 use crate::events::AgentEvent;
+use crate::extension_operations::{
+    cursor_binding, cursor_offset, matching_slots, ApplicableOperationsPage,
+    ApplicableOperationsRequest, OperationDiscovery, OperationSelection, DISCOVERY_TOOL_NAME,
+};
+use crate::extension_process::{ExtensionProcess, ExtensionResourceOwner};
 use crate::input::UserInput;
 use crate::tool::{Tool, ToolContext, ToolError};
 use octet_ai::{Model, ModelId, Protocol, StopReason, ToolDef};
@@ -573,7 +578,7 @@ pub(crate) struct RegisteredPersistenceMetadataHook {
 }
 
 #[derive(Default)]
-struct DynamicToolRegistry {
+pub(crate) struct DynamicToolRegistry {
     static_names: HashSet<String>,
     groups: Vec<DynamicToolGroup>,
     reservations: Vec<DynamicToolReservationEntry>,
@@ -585,12 +590,116 @@ struct DynamicToolRegistry {
     ready_changed: Arc<Notify>,
     policy: Option<ToolPolicy>,
     revision: u64,
+    // Cursor fence excludes mere projection changes, which do not mutate the
+    // eligible catalog or policy and must not invalidate another page.
+    catalog_policy_epoch: u64,
     /// `None` publishes the full host-policed surface; `Some` publishes only
     /// the intersection of these names with that surface.
     active_names: Option<BTreeSet<String>>,
+    // One bounded projection window; never an accumulating second catalog.
+    operation_selection: Option<OperationSelection>,
 }
 
 impl DynamicToolRegistry {
+    fn permits(&self, name: &str) -> bool {
+        self.policy.as_ref().is_none_or(|policy| policy(name))
+            && self
+                .active_names
+                .as_ref()
+                .is_none_or(|active| active.contains(name))
+    }
+
+    fn resource_sources(&self) -> Vec<ExtensionProcess> {
+        self.groups
+            .iter()
+            .filter_map(|group| group.resource_source.clone())
+            .collect()
+    }
+
+    pub(crate) fn discover(
+        registry: &RwLock<Self>,
+        session_id: &str,
+        request: ApplicableOperationsRequest,
+    ) -> Result<ApplicableOperationsPage, ToolError> {
+        let (revision, sources) = {
+            let state = registry.read().unwrap_or_else(|p| p.into_inner());
+            (state.catalog_policy_epoch, state.resource_sources())
+        };
+        // Never hold the catalog lock while acquiring a process connection:
+        // reload publishes the catalog while holding that connection's lock.
+        // Validate before consulting or disclosing any candidate metadata.
+        let owner = sources
+            .iter()
+            .find_map(|process| process.lookup_resource(session_id, &request.resource).ok())
+            .ok_or_else(|| {
+                ToolError::new(if request.cursor.is_some() {
+                    "catalog_changed"
+                } else {
+                    "resource_unavailable"
+                })
+            })?;
+        let mut state = registry.write().unwrap_or_else(|p| p.into_inner());
+        if state.catalog_policy_epoch != revision {
+            return Err(ToolError::new("catalog_changed"));
+        }
+        state.applicable_operations(owner, request)
+    }
+
+    fn applicable_operations(
+        &mut self,
+        owner: ExtensionResourceOwner,
+        request: ApplicableOperationsRequest,
+    ) -> Result<ApplicableOperationsPage, ToolError> {
+        let limit = request.limit.unwrap_or(8);
+        if !(1..=32).contains(&limit) {
+            return Err(ToolError::new("operation limit must be between 1 and 32"));
+        }
+        let binding = cursor_binding(&owner, &request.resource, self.catalog_policy_epoch);
+        let offset = cursor_offset(request.cursor.as_deref(), &binding)?;
+        let mut eligible = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.tools)
+            .filter_map(|tool| {
+                let operation = tool.operation()?;
+                let name = tool.definition().name;
+                self.permits(&name)
+                    .then(|| matching_slots(&operation, &name, &owner, &request.resource))
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        eligible.sort_by(|left, right| (&left.id, &left.path).cmp(&(&right.id, &right.path)));
+        if offset > eligible.len() {
+            return Err(ToolError::new("catalog_changed"));
+        }
+        let has_more = eligible.len().saturating_sub(offset) > limit;
+        let operations = eligible
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        self.operation_selection = Some(OperationSelection {
+            owner: owner.clone(),
+            resource: request.resource.clone(),
+            ids: operations
+                .iter()
+                .map(|operation| operation.id.clone())
+                .collect(),
+        });
+        self.revision = self.revision.saturating_add(1);
+        let next_cursor = has_more.then(|| {
+            format!(
+                "{}:{}",
+                cursor_binding(&owner, &request.resource, self.catalog_policy_epoch),
+                offset + operations.len()
+            )
+        });
+        Ok(ApplicableOperationsPage {
+            operations,
+            next_cursor,
+        })
+    }
+
     fn refresh_name_index(&mut self) {
         self.dynamic_names = self
             .groups
@@ -610,6 +719,9 @@ impl DynamicToolRegistry {
 struct DynamicToolGroup {
     owner: String,
     tools: Vec<Arc<dyn Tool>>,
+    // Retained even for an empty/hidden catalog so live lookup can return no
+    // matches without conflating policy invisibility with a fabricated token.
+    resource_source: Option<ExtensionProcess>,
 }
 
 struct DynamicToolReservationEntry {
@@ -643,6 +755,33 @@ pub(crate) struct DynamicToolReservation {
 }
 
 impl DynamicToolRegistration {
+    pub(crate) fn resource_source(&self, process: ExtensionProcess) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut registry = registry.write().unwrap_or_else(|p| p.into_inner());
+            if let Some(group) = registry
+                .groups
+                .iter_mut()
+                .find(|group| group.owner == self.owner)
+            {
+                group.resource_source = Some(process);
+            }
+        }
+    }
+
+    /// Recheck visibility without resolving an old call to a new handler.
+    pub(crate) fn permits_operation(&self, name: &str) -> bool {
+        self.registry.upgrade().is_some_and(|registry| {
+            let registry = registry.read().unwrap_or_else(|p| p.into_inner());
+            registry.groups.iter().any(|group| {
+                group.owner == self.owner
+                    && group
+                        .tools
+                        .iter()
+                        .any(|tool| tool.definition().name == name)
+            }) && registry.permits(name)
+        })
+    }
+
     pub(crate) async fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
         let registry = self
             .registry
@@ -761,6 +900,7 @@ impl DynamicToolRegistration {
         registry.refresh_name_index();
         if registry.groups.len() != previous_len {
             registry.revision = registry.revision.saturating_add(1);
+            registry.catalog_policy_epoch = registry.catalog_policy_epoch.saturating_add(1);
         }
         registry.revision
     }
@@ -813,6 +953,7 @@ impl DynamicToolReservation {
             registry.groups.push(DynamicToolGroup {
                 owner: self.owner.clone(),
                 tools,
+                resource_source: None,
             });
             registry
                 .groups
@@ -821,6 +962,7 @@ impl DynamicToolReservation {
         registry.reservations.swap_remove(index);
         registry.refresh_name_index();
         registry.revision = revision;
+        registry.catalog_policy_epoch = registry.catalog_policy_epoch.saturating_add(1);
         Ok((registry.revision, published))
     }
 }
@@ -1089,6 +1231,7 @@ impl ExtensionHost {
         }
         dynamic.refresh_name_index();
         dynamic.revision = dynamic.revision.saturating_add(1);
+        dynamic.catalog_policy_epoch = dynamic.catalog_policy_epoch.saturating_add(1);
     }
 
     /// Applies the authoritative product tool policy to current and future
@@ -1111,6 +1254,7 @@ impl ExtensionHost {
         dynamic.refresh_name_index();
         dynamic.policy = Some(keep);
         dynamic.revision = dynamic.revision.saturating_add(1);
+        dynamic.catalog_policy_epoch = dynamic.catalog_policy_epoch.saturating_add(1);
     }
 
     /// Builds a detached child host whose provider and execution surfaces are
@@ -1192,6 +1336,7 @@ impl ExtensionHost {
         }
         dynamic.active_names = names.cloned();
         dynamic.revision = dynamic.revision.saturating_add(1);
+        dynamic.catalog_policy_epoch = dynamic.catalog_policy_epoch.saturating_add(1);
         Ok(())
     }
 
@@ -1241,6 +1386,88 @@ impl ExtensionHost {
             .cloned()
             .collect::<Vec<_>>();
         (dynamic.revision, tools)
+    }
+
+    /// Installs one host-owned discovery tool. Only negotiated resource-aware
+    /// catalogs opt into this; ordinary/Pi tools need no metadata or filtering.
+    pub fn enable_operation_discovery(&mut self) {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| tool.definition().name == DISCOVERY_TOOL_NAME)
+        {
+            self.tool(OperationDiscovery {
+                registry: Arc::downgrade(&self.dynamic_tools),
+            });
+        }
+    }
+
+    /// Validates a live reference, returns a bounded exact-match page, and
+    /// selects that page's schemas for the next model turn. Not authorization.
+    pub fn applicable_operations(
+        &self,
+        session_id: &str,
+        request: ApplicableOperationsRequest,
+    ) -> Result<ApplicableOperationsPage, ToolError> {
+        DynamicToolRegistry::discover(&self.dynamic_tools, session_id, request)
+    }
+
+    /// Provider-only projection. Registered/active tool APIs continue to use
+    /// `tool_snapshot`, including all ordinary tools and all registered names.
+    pub(crate) fn model_tool_snapshot(&self, owner: &str) -> (u64, Vec<Arc<dyn Tool>>) {
+        loop {
+            let (revision, selection, sources) = {
+                let dynamic = self.dynamic_tools.read().unwrap_or_else(|p| p.into_inner());
+                (
+                    dynamic.revision,
+                    dynamic.operation_selection.clone(),
+                    dynamic.resource_sources(),
+                )
+            };
+            let stale = selection.as_ref().is_some_and(|selection| {
+                !sources.iter().any(|process| {
+                    process
+                        .lookup_resource(&selection.owner.session_id, &selection.resource)
+                        .is_ok()
+                })
+            });
+            let mut dynamic = self
+                .dynamic_tools
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            if dynamic.revision != revision {
+                continue;
+            }
+            if stale {
+                dynamic.operation_selection = None;
+                dynamic.revision = dynamic.revision.saturating_add(1);
+            }
+            let tools = self
+                .policed_tools(&dynamic)
+                .filter(|tool| {
+                    let name = tool.definition().name;
+                    if !dynamic.permits(&name) {
+                        return false;
+                    }
+                    match tool.operation() {
+                        // Creation entrypoints with no resource inputs remain visible.
+                        Some(operation) if !operation.descriptor.resource_inputs.is_empty() => {
+                            dynamic
+                                .operation_selection
+                                .as_ref()
+                                .is_some_and(|selection| selection.includes(&operation, owner))
+                        }
+                        _ => true,
+                    }
+                })
+                .cloned()
+                .collect();
+            return (dynamic.revision, tools);
+        }
+    }
+
+    pub(crate) fn model_tool_definitions(&self, owner: &str) -> Vec<ToolDef> {
+        crate::tool_composition::advertised_surface(&self.model_tool_snapshot(owner).1)
     }
 
     /// Opens live extension catalog publication after all host tool names have
@@ -1579,6 +1806,7 @@ mod tests {
                 groups: vec![DynamicToolGroup {
                     owner: "other".into(),
                     tools: tools("old"),
+                    resource_source: None,
                 }],
                 ..DynamicToolRegistry::default()
             };

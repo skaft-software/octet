@@ -1,4 +1,5 @@
-// Host facades only. This file never imports the Pi coding-agent package.
+// Host facades and pure utilities only; never import the Pi coding-agent runtime.
+export { calculateContextTokens, estimateTokens, buildSessionContext } from '../lib/context.mjs';
 import { unsupported } from '../lib/errors.mjs';
 import { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
 import { theme } from '../lib/theme.mjs';

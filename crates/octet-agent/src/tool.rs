@@ -55,6 +55,12 @@ pub trait Tool: Send + Sync {
     /// The definition's `name` must be unique across all registered tools.
     fn definition(&self) -> ToolDef;
 
+    /// Negotiated resource-operation metadata from this exact catalog entry.
+    /// Ordinary tools return `None` and retain their existing projection rules.
+    fn operation(&self) -> Option<crate::extension_operations::OperationSnapshot> {
+        None
+    }
+
     /// Optional host-negotiated single-shot composition presentation.
     /// This is not an authority grant; nested effects require fresh admission.
     fn composition_config(&self) -> Option<crate::tool_composition::ToolCompositionConfig> {
@@ -132,6 +138,16 @@ pub trait Tool: Send + Sync {
         &[]
     }
 
+    /// Explicit, owned prompt metadata from a negotiated extension catalog.
+    ///
+    /// Unlike the opt-in legacy built-in section, this contribution accompanies
+    /// this tool whenever it is model-visible. An empty snippet may carry only
+    /// guidelines. It is presentation, never authority. The default preserves
+    /// the existing behavior of native tools and hosts' legacy prompt sections.
+    fn prompt_metadata(&self) -> Option<ToolPromptContribution> {
+        None
+    }
+
     /// Executes the tool with the model-provided arguments (a JSON object
     /// matching the definition's schema).
     async fn execute(
@@ -158,8 +174,8 @@ pub struct ToolPromptContribution {
 
 /// Collects prompt contributions from `tools`, in iteration order.
 ///
-/// Tools that return [`Tool::prompt_snippet`]` == None` are skipped entirely,
-/// which is also the reason a host cannot use this list to enumerate tools: it
+/// Explicit [`Tool::prompt_metadata`] takes precedence. Otherwise tools without
+/// a [`Tool::prompt_snippet`] are skipped, so this list cannot enumerate tools: it
 /// reflects presentation intent only. Callers pass the same `&dyn Tool` values
 /// they registered, so the contribution always matches the code that will run.
 pub fn collect_tool_prompt_contributions<'a>(
@@ -168,6 +184,9 @@ pub fn collect_tool_prompt_contributions<'a>(
     tools
         .into_iter()
         .filter_map(|tool| {
+            if let Some(metadata) = tool.prompt_metadata() {
+                return Some(metadata);
+            }
             let snippet = tool.prompt_snippet()?;
             Some(ToolPromptContribution {
                 name: tool.definition().name,

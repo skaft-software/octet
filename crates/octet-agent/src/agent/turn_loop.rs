@@ -154,7 +154,8 @@ impl Agent {
         // This snapshot is both the preflight boundary and the first provider
         // request's frozen tool surface. Refusing it before the prompt append
         // leaves a frontend free to revise and retry the same draft.
-        let (initial_tool_revision, initial_tools) = self.extensions.tool_snapshot();
+        let (initial_tool_revision, initial_tools) =
+            self.extensions.model_tool_snapshot(&self.resource_owner);
         let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
             advertised_tool_surface(&initial_tools, &self.model)
         } else {
@@ -672,7 +673,7 @@ impl Agent {
                 // control and steering have settled but before context sizing.
                 // Every call emitted by this request resolves against exactly
                 // the tool set the provider saw.
-                let (current_revision, current_tools) = extension_host.tool_snapshot();
+                let (current_revision, current_tools) = extension_host.model_tool_snapshot(&resource_owner);
                 if current_revision != tool_revision {
                     tool_revision = current_revision;
                     if tools_enabled && !answer_only {
@@ -869,7 +870,7 @@ impl Agent {
                     request,
                     input_tokens,
                 );
-                let current_tool_generation = extension_host.tool_snapshot().0;
+                let current_tool_generation = extension_host.model_tool_snapshot(&resource_owner).0;
                 if !prepared.is_current(session, &active_system, current_tool_generation) {
                     // Re-enter the boundary so a publication or append that
                     // crossed compaction cannot pair an old request with a new
@@ -2891,7 +2892,7 @@ impl Agent {
                     // Announce tools that appeared as a consequence of this
                     // execution (extension/MCP registrations). Later requests
                     // exclude announced schemas under deferred tool loading.
-                    let (_, snapshot_tools) = extension_host.tool_snapshot();
+                    let (_, snapshot_tools) = extension_host.model_tool_snapshot(&resource_owner);
                     let snapshot_tools = crate::tool_composition::direct_surface(&snapshot_tools);
                     let newly_added: Vec<String> = snapshot_tools
                         .iter()

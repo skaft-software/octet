@@ -345,6 +345,15 @@ pub enum ExtensionComposerOperation {
         /// Text to insert at the cursor.
         text: String,
     },
+    /// Commit a recovery checkpoint for a currently owned API 0.4 editor mount.
+    Checkpoint {
+        /// Complete replacement text.
+        text: String,
+        /// Authoritative owner resolved by the host at request admission.
+        owner: ExtensionResourceOwner,
+        /// Exact mount and input/checkpoint revisions to arbitrate at commit.
+        checkpoint: ExtensionEditorCheckpoint,
+    },
 }
 
 impl ExtensionComposerOperation {
@@ -353,6 +362,12 @@ impl ExtensionComposerOperation {
     pub fn validate(&self) -> Result<(), String> {
         let text = match self {
             Self::Set { text } | Self::Insert { text } => Some(text),
+            Self::Checkpoint {
+                text, checkpoint, ..
+            } => {
+                checkpoint.validate().map_err(|(_, detail)| detail)?;
+                Some(text)
+            }
             Self::Get => None,
         };
         if let Some(text) = text {
@@ -783,11 +798,37 @@ pub struct ExtensionAutocompleteItem {
     /// Optional plain secondary label.
     #[serde(default)]
     pub description: Option<String>,
+    /// Additional original bytes after the cursor to replace. Absence means zero.
+    /// Presence requires negotiated API `0.4` `autocomplete_edit_v1`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "autocomplete_edit_offset"
+    )]
+    pub replace_after_bytes: Option<u32>,
+    /// UTF-8 byte cursor within `value`. Absence means its byte length.
+    /// Presence requires negotiated API `0.4` `autocomplete_edit_v1`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "autocomplete_edit_offset"
+    )]
+    pub cursor_offset_bytes: Option<u32>,
+}
+
+// Missing fields use serde(default); explicit null is present and invalid.
+fn autocomplete_edit_offset<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    u32::deserialize(deserializer).map(Some)
 }
 
 impl ExtensionAutocompleteItem {
-    pub(super) fn validate(&self) -> Result<(), String> {
-        validate_extension_autocomplete_text("autocomplete value", &self.value)?;
+    fn validate(&self, edit_v1: bool) -> Result<(), String> {
+        if !edit_v1 && (self.replace_after_bytes.is_some() || self.cursor_offset_bytes.is_some()) {
+            return Err("autocomplete edit fields require negotiated autocomplete_edit_v1".into());
+        }
+        validate_extension_autocomplete_edit_text("autocomplete value", &self.value, edit_v1)?;
         validate_extension_autocomplete_text("autocomplete label", &self.label)?;
         if let Some(description) = &self.description {
             validate_extension_autocomplete_text("autocomplete description", description)?;
@@ -808,8 +849,13 @@ pub struct ExtensionAutocompleteResponse {
 }
 
 impl ExtensionAutocompleteResponse {
+    #[cfg(test)]
     pub(super) fn validate(&self) -> Result<(), String> {
-        validate_extension_autocomplete_text("autocomplete prefix", &self.prefix)?;
+        self.validate_fields(false)
+    }
+
+    fn validate_fields(&self, edit_v1: bool) -> Result<(), String> {
+        validate_extension_autocomplete_edit_text("autocomplete prefix", &self.prefix, edit_v1)?;
         if self.items.len() > MAX_EXTENSION_AUTOCOMPLETE_ITEMS {
             return Err(format!(
                 "autocomplete response has {} items; limit is {MAX_EXTENSION_AUTOCOMPLETE_ITEMS}",
@@ -818,7 +864,47 @@ impl ExtensionAutocompleteResponse {
         }
         self.items
             .iter()
-            .try_for_each(ExtensionAutocompleteItem::validate)
+            .try_for_each(|item| item.validate(edit_v1))
+    }
+
+    /// Validate the entire response against the exact original editor snapshot.
+    /// `edit_v1` must reflect host-negotiated capability, never extension data.
+    /// Frontends repeat this check before displaying or accepting a choice.
+    pub fn validate_for_request(
+        &self,
+        request: &ExtensionAutocompleteRequest,
+        edit_v1: bool,
+    ) -> Result<(), String> {
+        request.validate()?;
+        self.validate_fields(edit_v1)?;
+        if !request.text[..request.cursor].ends_with(&self.prefix) {
+            return Err("autocomplete prefix is not the exact suffix before the cursor".into());
+        }
+        for item in &self.items {
+            let after = item.replace_after_bytes.unwrap_or(0) as usize;
+            if after > MAX_EXTENSION_EDITOR_TEXT_BYTES {
+                return Err("autocomplete suffix exceeds editor byte budget".into());
+            }
+            let end = request
+                .cursor
+                .checked_add(after)
+                .filter(|end| *end <= request.text.len() && request.text.is_char_boundary(*end))
+                .ok_or("autocomplete replacement end is outside a UTF-8 character boundary")?;
+            let offset = item
+                .cursor_offset_bytes
+                .map_or(item.value.len(), |value| value as usize);
+            if offset > item.value.len() || !item.value.is_char_boundary(offset) {
+                return Err(
+                    "autocomplete inserted cursor is outside a UTF-8 character boundary".into(),
+                );
+            }
+            let start = request.cursor - self.prefix.len();
+            let bytes = request.text.len() - (end - start) + item.value.len();
+            if bytes > MAX_EXTENSION_EDITOR_TEXT_BYTES {
+                return Err("autocomplete result exceeds editor byte budget".into());
+            }
+        }
+        Ok(())
     }
 }
 

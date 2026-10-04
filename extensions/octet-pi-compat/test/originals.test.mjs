@@ -69,11 +69,13 @@ test('unchanged rainbow CustomEditor: actual editor input, animated RGB frames a
   const peer = launch(t, [rainbow], { composer: '' }); await peer.init(); await peer.start();
   const open = await peer.wait(f => f.method === 'ui/open'); assert.equal(open.params.placement, 'editor');
   peer.notify('ui/editor-state', { text: '', revision: 1, focused: false });
-  for (const key of 'ultrathink') peer.notify('ui/key', { surface_id: open.params.surface_id, key, kind: 'press', modifiers: [] });
+  for (const key of 'ultrathink') peer.editorKey(open.params.surface_id, key);
   const first = await peer.wait(f => f.method === 'ui/frame' && /\x1b\[38;2;/.test(f.params.lines.join('')));
   const later = await peer.wait(f => f.method === 'ui/frame' && f.params.revision > first.params.revision + 1 && f.params.lines.join('') !== first.params.lines.join(''));
   assert.ok(later.params.lines.length > 0);
   const set = await peer.wait(f => f.method === 'composer/set' && f.params.text === 'ultrathink'); assert.deepEqual(set.params.resource_owner, owner);
+  assert.deepEqual(set.params.editor_checkpoint, { surface_id: open.params.surface_id,
+    mount_id: `host-editor-${open.params.surface_id}`, input_revision: 10, checkpoint_revision: 10 });
   peer.notify('ui/resize', { surface_id: open.params.surface_id, columns: 60, rows: 20 }); await peer.wait(f => f.method === 'ui/frame' && f.params.columns === 60);
   peer.notify('ui/closed', { surface_id: open.params.surface_id, reason: 'rescue' }); await peer.close();
 });

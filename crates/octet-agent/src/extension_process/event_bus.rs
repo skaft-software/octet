@@ -1338,6 +1338,7 @@ command = "unused"
                         .map(str::to_owned)
                         .collect(),
                     limits: ExtensionProtocolLimits {
+                        resource_refs_v1: None,
                         max_concurrent_requests: 1,
                     },
                     lifecycle_events: vec![],

@@ -147,21 +147,35 @@ use self::tool_results::*;
 /// bytes (a provider prefix must not churn between turns). The result is
 /// bounded by [`MAX_TOOL_PROMPT_SECTION_BYTES`] on a character boundary.
 fn render_tool_prompt_section<'a>(tools: impl IntoIterator<Item = &'a dyn Tool>) -> Option<String> {
-    let contributions =
-        collect_tool_prompt_contributions(tools.into_iter().take(MAX_TOOL_PROMPT_SECTION_TOOLS));
+    render_tool_prompt_contributions(collect_tool_prompt_contributions(
+        tools.into_iter().take(MAX_TOOL_PROMPT_SECTION_TOOLS),
+    ))
+}
+
+fn render_tool_prompt_contributions(
+    contributions: Vec<crate::tool::ToolPromptContribution>,
+) -> Option<String> {
     if contributions.is_empty() {
         return None;
     }
     let mut section = String::from("Available tools:");
     for contribution in contributions {
-        section.push_str("\n- ");
-        section.push_str(contribution.name.trim());
-        section.push_str(": ");
-        section.push_str(contribution.snippet.trim());
+        if !contribution.snippet.trim().is_empty() {
+            section.push_str("\n- ");
+            section.push_str(contribution.name.trim());
+            section.push_str(": ");
+            section.push_str(contribution.snippet.trim());
+        }
         for guideline in contribution.guidelines {
+            if guideline.trim().is_empty() {
+                continue;
+            }
             section.push_str("\n  - ");
             section.push_str(guideline.trim());
         }
+    }
+    if section == "Available tools:" {
+        return None;
     }
     if section.len() > MAX_TOOL_PROMPT_SECTION_BYTES {
         let mut end = MAX_TOOL_PROMPT_SECTION_BYTES.saturating_sub('…'.len_utf8());
@@ -720,7 +734,7 @@ impl Agent {
         };
         let tools: Vec<_> = self
             .extensions
-            .tool_snapshot()
+            .model_tool_snapshot(&self.resource_owner)
             .1
             .iter()
             .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
@@ -1052,7 +1066,7 @@ impl Agent {
     pub fn request_context_estimate(&self) -> Result<RequestContextEstimate, SessionError> {
         let messages = self.session.context_ref()?;
         let system = self.model_visible_system(true);
-        let tools = self.extensions.tool_definitions();
+        let tools = self.extensions.model_tool_definitions(&self.resource_owner);
         Ok(reconcile_context_estimate(
             &self.session,
             &self.model,
@@ -1066,7 +1080,7 @@ impl Agent {
     pub fn request_context_breakdown(&self) -> Result<ContextBreakdown, SessionError> {
         let messages = self.session.context_ref()?;
         let system = self.model_visible_system(true);
-        let tools = self.extensions.tool_definitions();
+        let tools = self.extensions.model_tool_definitions(&self.resource_owner);
         Ok(context_breakdown(
             &self.session,
             &self.model,
@@ -1134,8 +1148,10 @@ impl Agent {
     /// mid-run — and is bounded in bytes and in tool count, so no registration
     /// can widen a prompt without limit.
     ///
-    /// Disabled by default: a host that owns its own prompt assembly keeps a
-    /// byte-identical system prompt until it opts in. A run that exposes no
+    /// Disabled by default for legacy/native contributions. Explicit negotiated
+    /// extension prompt metadata is still included for model-visible tools.
+    /// Without such metadata, hosts retain a byte-identical system prompt until
+    /// opting in. A run that exposes no
     /// tools (for example [`Agent::prompt_without_tools`]) never carries the
     /// section, so a tool-free run cannot advertise tools. An answer-only turn
     /// inside a tool-bearing run withholds the tool schemas from that request
@@ -1170,7 +1186,7 @@ impl Agent {
     /// opt-in model-visible tool section, exposed so a host can render its own
     /// prompt from the tools that will actually execute.
     pub fn tool_prompt_contributions(&self) -> Vec<ToolPromptContribution> {
-        let (_, tools) = self.extensions.tool_snapshot();
+        let (_, tools) = self.extensions.model_tool_snapshot(&self.resource_owner);
         let tools = crate::tool_composition::direct_surface(&tools);
         collect_tool_prompt_contributions(tools.iter().map(|tool| tool.as_ref()))
     }
@@ -1182,12 +1198,22 @@ impl Agent {
     /// result is deterministic for a given registration and system prompt, and
     /// is what both the live run and the idle context estimates report.
     fn model_visible_system(&self, tools_enabled: bool) -> String {
-        if !self.tool_prompt_section || !tools_enabled {
+        if !tools_enabled {
             return self.system.clone();
         }
-        let (_, tools) = self.extensions.tool_snapshot();
+        let (_, tools) = self.extensions.model_tool_snapshot(&self.resource_owner);
         let tools = crate::tool_composition::direct_surface(&tools);
-        let section = render_tool_prompt_section(tools.iter().map(|tool| tool.as_ref()));
+        let section = if self.tool_prompt_section {
+            render_tool_prompt_section(tools.iter().map(|tool| tool.as_ref()))
+        } else {
+            render_tool_prompt_contributions(
+                tools
+                    .iter()
+                    .filter_map(|tool| tool.prompt_metadata())
+                    .take(MAX_TOOL_PROMPT_SECTION_TOOLS)
+                    .collect(),
+            )
+        };
         match section {
             None => self.system.clone(),
             Some(section) if self.system.is_empty() => section,
@@ -1248,7 +1274,9 @@ impl Agent {
         self.completion_policy
     }
 
-    /// Provider schemas for all currently executable tools, in wire order.
+    /// Schemas for all active registered tools, in wire order. Resource-input
+    /// operations remain registered even when not selected for lazy model
+    /// projection; ordinary/Pi tool registry semantics are unchanged.
     pub fn registered_tool_definitions(&self) -> Vec<ToolDef> {
         self.extensions.tool_definitions()
     }

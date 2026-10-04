@@ -338,6 +338,15 @@ pub(super) struct ProcessTool {
 
 #[async_trait::async_trait]
 impl Tool for ProcessTool {
+    fn operation(&self) -> Option<crate::extension_operations::OperationSnapshot> {
+        Some(crate::extension_operations::OperationSnapshot {
+            descriptor: self.definition.operation.clone()?,
+            extension_instance_id: self.process.inner.instance_id.clone(),
+            generation: self.connection.generation,
+            catalog_revision: self.catalog_revision.load(Ordering::Acquire),
+        })
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             async_execution: false,
@@ -346,6 +355,18 @@ impl Tool for ProcessTool {
             description: self.definition.description.clone(),
             parameters: self.definition.parameters.clone(),
         }
+    }
+
+    fn prompt_metadata(&self) -> Option<crate::tool::ToolPromptContribution> {
+        if self.definition.prompt_snippet.is_none() && self.definition.prompt_guidelines.is_empty()
+        {
+            return None;
+        }
+        Some(crate::tool::ToolPromptContribution {
+            name: self.definition.name.clone(),
+            snippet: self.definition.prompt_snippet.clone().unwrap_or_default(),
+            guidelines: self.definition.prompt_guidelines.clone(),
+        })
     }
 
     fn composition_config(&self) -> Option<ToolCompositionConfig> {
@@ -439,9 +460,10 @@ impl Tool for ProcessTool {
                             notification.message
                         ));
                     }
-                    Ok(ExtensionEvent::Diagnostic { message }) => {
-                        ctx.progress.status(format!("extension diagnostic: {message}"));
-                    }
+                    // Process-wide diagnostics have no request owner. Keep them
+                    // on the diagnostic channel rather than attributing them to
+                    // whichever tool happens to be awaiting its terminal reply.
+                    Ok(ExtensionEvent::Diagnostic { .. }) => {}
                     Ok(ExtensionEvent::StatusContributed { contribution }) => {
                         ctx.progress.status(contribution.text);
                     }

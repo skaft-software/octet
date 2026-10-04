@@ -85,6 +85,7 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
+        self.retire_active_resources();
         self.cancel_session_hook_starts();
         if self.session_lifecycle_started {
             let outcome = ExtensionLifecycleOutcome::Completed;

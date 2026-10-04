@@ -1197,12 +1197,8 @@ pub struct ShellEditorSnapshot {
     pub focused: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShellAutocompleteItem {
-    pub value: String,
-    pub label: String,
-    pub description: Option<String>,
-}
+/// Preserve core-validated edit fields across the native UI boundary.
+pub type ShellAutocompleteItem = octet_agent::extension_process::ExtensionAutocompleteItem;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ShellAutocompleteOverlay {
@@ -1548,6 +1544,28 @@ fn invalidate_editor_autocomplete(state: &mut ShellState) {
     state.extension_autocomplete = None;
     state.extension_autocomplete_selection = None;
     state.path_selection = 0;
+}
+
+fn autocomplete_edit_candidate(
+    editor: &TextEditor,
+    prefix_bytes: usize,
+    item: &ShellAutocompleteItem,
+) -> Option<TextEditor> {
+    let start = editor.cursor() - prefix_bytes;
+    let end = editor.cursor() + item.replace_after_bytes.unwrap_or(0) as usize;
+    let cursor = start
+        + item
+            .cursor_offset_bytes
+            .map_or(item.value.len(), |value| value as usize);
+    // Preview through checked editor APIs. Native editors additionally require
+    // grapheme boundaries: refuse rather than silently clamp a wire cursor or
+    // rebuild arbitrary editor text to bypass that invariant.
+    let mut candidate = editor.clone();
+    if !candidate.replace_range(start..end, &item.value) {
+        return None;
+    }
+    candidate.set_cursor(cursor);
+    (candidate.cursor() == cursor).then_some(candidate)
 }
 
 fn normal_editor_focused(state: &ShellState) -> bool {
@@ -5485,35 +5503,67 @@ impl InteractiveShell {
         self.extension_editor_snapshot()
     }
 
-    /// Install a bounded autocomplete response only if the exact host snapshot
-    /// that originated it is still current. This is the frontend half of the
-    /// revision fence and rejects late/reordered extension replies.
+    /// Retire both the displayed menu and its native selection.
+    pub(crate) fn clear_extension_autocomplete(&mut self) -> bool {
+        let mut state = self.state.borrow_mut();
+        let changed = state.extension_autocomplete.is_some();
+        invalidate_editor_autocomplete(&mut state);
+        changed
+    }
+
+    /// Install a response only against the exact originating editor snapshot.
+    /// Unclaimed results use native path completion under the same fence.
     pub fn set_extension_autocomplete(
         &mut self,
         snapshot: &ShellEditorSnapshot,
         prefix: String,
         items: Vec<ShellAutocompleteItem>,
     ) -> bool {
+        let response =
+            octet_agent::extension_process::ExtensionAutocompleteResponse { prefix, items };
+        let request = octet_agent::extension_process::ExtensionAutocompleteRequest {
+            text: snapshot.text.clone(),
+            cursor: snapshot.cursor,
+            revision: snapshot.revision,
+        };
+        // Negotiation is enforced by the originating process. Revalidate the
+        // complete wire range and result budget at the native boundary.
+        if response.validate_for_request(&request, true).is_err() {
+            return false;
+        }
         let mut state = self.state.borrow_mut();
         let current = {
             let editor = &state.editor;
-            normal_editor_focused(&state)
+            snapshot.focused
+                && normal_editor_focused(&state)
+                && state
+                    .extension_ui
+                    .remote
+                    .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+                    .is_none()
                 && editor.revision() == snapshot.revision
                 && editor.text() == snapshot.text.as_str()
                 && editor.cursor() == snapshot.cursor
-                && snapshot.cursor >= prefix.len()
-                && editor.text()[..snapshot.cursor].ends_with(&prefix)
+                && response.items.iter().all(|item| {
+                    autocomplete_edit_candidate(editor, response.prefix.len(), item).is_some()
+                })
         };
-        if !current || items.is_empty() {
+        if !current {
             return false;
+        }
+        if response.items.is_empty() {
+            invalidate_editor_autocomplete(&mut state);
+            drop(state);
+            self.complete_path();
+            return true;
         }
         state.extension_autocomplete_selection = None;
         state.extension_autocomplete = Some(ShellAutocompleteOverlay {
             text: snapshot.text.clone(),
             cursor: snapshot.cursor,
             revision: snapshot.revision,
-            prefix,
-            items,
+            prefix: response.prefix,
+            items: response.items,
         });
         true
     }
@@ -5528,6 +5578,11 @@ impl InteractiveShell {
         let current = {
             let editor = &state.editor;
             normal_editor_focused(&state)
+                && state
+                    .extension_ui
+                    .remote
+                    .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+                    .is_none()
                 && editor.revision() == overlay.revision
                 && editor.text() == overlay.text.as_str()
                 && editor.cursor() == overlay.cursor
@@ -5546,14 +5601,26 @@ impl InteractiveShell {
             state.extension_autocomplete = None;
             return false;
         };
-        let start = overlay.cursor - overlay.prefix.len();
-        if !state
-            .editor
-            .replace_range(start..overlay.cursor, &item.value)
-        {
-            state.extension_autocomplete = None;
+        let request = octet_agent::extension_process::ExtensionAutocompleteRequest {
+            text: overlay.text.clone(),
+            cursor: overlay.cursor,
+            revision: overlay.revision,
+        };
+        let response = octet_agent::extension_process::ExtensionAutocompleteResponse {
+            prefix: overlay.prefix.clone(),
+            items: vec![item.clone()],
+        };
+        if response.validate_for_request(&request, true).is_err() {
+            invalidate_editor_autocomplete(&mut state);
             return false;
         }
+        let Some(candidate) =
+            autocomplete_edit_candidate(&state.editor, overlay.prefix.len(), item)
+        else {
+            invalidate_editor_autocomplete(&mut state);
+            return false;
+        };
+        state.editor = candidate;
         invalidate_editor_autocomplete(&mut state);
         true
     }
@@ -7907,6 +7974,8 @@ mod extension_handoff_tests {
                 value: "file".into(),
                 label: "file".into(),
                 description: None,
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
             }],
         ));
 
@@ -7922,6 +7991,8 @@ mod extension_handoff_tests {
                 value: "stale".into(),
                 label: "stale".into(),
                 description: None,
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
             }],
         ));
         assert!(shell.set_extension_autocomplete(
@@ -7931,6 +8002,8 @@ mod extension_handoff_tests {
                 value: "file".into(),
                 label: "file".into(),
                 description: None,
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
             }],
         ));
         assert!(shell.accept_extension_autocomplete());

@@ -136,6 +136,7 @@ struct ManagerInner {
     budget: ExtensionRuntimeBudget,
     catalog: StdRwLock<ExtensionRuntimeCatalog>,
     state: StdMutex<ManagerState>,
+    bulk_storage: StdMutex<Option<crate::BulkStorage>>,
     startup_slots: Arc<Semaphore>,
     shutdown: AtomicBool,
     monitor_started: AtomicBool,
@@ -169,12 +170,28 @@ impl ExtensionRuntimeManager {
                 budget,
                 catalog: StdRwLock::new(ExtensionRuntimeCatalog::default()),
                 state: StdMutex::new(ManagerState::default()),
+                bulk_storage: StdMutex::new(None),
                 shutdown: AtomicBool::new(false),
                 monitor_started: AtomicBool::new(false),
                 next_binding: AtomicU64::new(1),
                 next_one_shot: AtomicU64::new(1),
             }),
         })
+    }
+
+    /// Returns the shared, lazily created bulk store for this trust domain.
+    ///
+    /// The product explicitly offers it through each runtime configuration.
+    /// Keeping it on the fleet preserves retained results across producer and
+    /// foreground-binding replacement without granting another session access.
+    pub fn bulk_storage(&self) -> Result<crate::BulkStorage, crate::BulkError> {
+        let mut storage = lock(&self.inner.bulk_storage);
+        if let Some(storage) = storage.as_ref() {
+            return Ok(storage.clone());
+        }
+        let created = crate::BulkStorage::new()?;
+        *storage = Some(created.clone());
+        Ok(created)
     }
 
     /// Returns the immutable canonical workspace/trust domain.
@@ -310,6 +327,7 @@ impl ExtensionRuntimeManager {
             manager: self.clone(),
             id,
             session_digest: sha256_hex(b"octet-extension-session-binding-v1\0", session_owner),
+            resource_owner: session_owner.to_owned(),
             active: Arc::new(StdMutex::new(BTreeSet::new())),
             released: Arc::new(AtomicBool::new(false)),
             release_notify: Arc::new(Notify::new()),
@@ -1327,6 +1345,7 @@ pub struct ExtensionSessionBinding {
     manager: ExtensionRuntimeManager,
     id: u64,
     session_digest: String,
+    resource_owner: String,
     active: Arc<StdMutex<BTreeSet<RuntimeKey>>>,
     released: Arc<AtomicBool>,
     release_notify: Arc<Notify>,
@@ -1710,6 +1729,7 @@ impl ExtensionSessionBinding {
             return Err(ExtensionRuntimeManagerError::ManagerClosed);
         }
         if self.released.load(Ordering::Acquire) {
+            process.retire_resource_owner(&self.resource_owner);
             let keys = {
                 let mut active = lock(&self.active);
                 std::mem::take(&mut *active)
@@ -1811,6 +1831,14 @@ impl ExtensionSessionBinding {
         lock(&self.active).retain(|key| active.contains(key));
     }
 
+    fn retire_resources(&self) {
+        // This synchronous fence must not depend on a Tokio runtime, UI grant,
+        // subscribed hook, successful native disposal, or later fleet shutdown.
+        for process in self.processes() {
+            process.retire_resource_owner(&self.resource_owner);
+        }
+    }
+
     /// Releases the session binding without shutting down workspace-shared or
     /// always-owned runtimes. Call [`ExtensionRuntimeManager::shutdown`] when
     /// the host itself is ending.
@@ -1818,6 +1846,7 @@ impl ExtensionSessionBinding {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.retire_resources();
         self.release_notify.notify_waiters();
         let keys = std::mem::take(&mut *lock(&self.active));
         self.manager.detach_binding(self.id, keys).await;
@@ -1832,6 +1861,7 @@ impl Drop for ExtensionSessionBinding {
         if Arc::strong_count(&self.owners) != 1 || self.released.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.retire_resources();
         let keys = std::mem::take(&mut *lock(&self.active));
         if keys.is_empty() {
             return;

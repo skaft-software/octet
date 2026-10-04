@@ -482,7 +482,7 @@ where
                         shell.render();
                     }
                     InputAction::CompletePath => {
-                        if shell.accept_extension_autocomplete() {
+                        if executable_extensions.accept_editor_autocomplete(shell) {
                             shell.render();
                         } else if !executable_extensions
                             .request_editor_autocomplete(shell.extension_editor_snapshot())
@@ -3293,7 +3293,7 @@ where
                 }
                 match action {
                     InputAction::CompletePath => {
-                        if shell.accept_extension_autocomplete() {
+                        if executable_extensions.accept_editor_autocomplete(shell) {
                             shell.render();
                         } else if !executable_extensions
                             .request_editor_autocomplete(shell.extension_editor_snapshot())
@@ -3888,7 +3888,7 @@ fn apply_extension_background(
         changed = true;
     }
     for update in updates.autocomplete {
-        if shell.set_extension_autocomplete(&update.snapshot, update.prefix, update.items) {
+        if executable_extensions.set_editor_autocomplete(shell, update) {
             changed = true;
         }
     }
@@ -3903,6 +3903,7 @@ fn apply_extension_background(
     if executable_extensions.sync_semantic_ui(shell) {
         changed = true;
     }
+    changed |= executable_extensions.reconcile_editor_autocomplete(shell);
     executable_extensions.sync_editor_state(shell.extension_editor_snapshot());
     // Extension contributions can arrive (or change) after the initial
     // handshake; keep the composer's slash-command list in step so commands

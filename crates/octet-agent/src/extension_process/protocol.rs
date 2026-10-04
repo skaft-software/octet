@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Bounded model-facing tool snippets and guidelines, negotiated only on API 0.4.
+pub const EXTENSION_FEATURE_TOOL_PROMPT_METADATA: &str = "tool_prompt_metadata_v1";
+
 pub(super) fn validate_extension_ui_text(
     kind: &str,
     text: &str,
@@ -79,6 +82,18 @@ pub(super) fn validate_extension_autocomplete_text(kind: &str, text: &str) -> Re
         return Err(format!("{kind} contains a terminal control character"));
     }
     Ok(())
+}
+
+pub(super) fn validate_extension_autocomplete_edit_text(
+    kind: &str,
+    text: &str,
+    edit_v1: bool,
+) -> Result<(), String> {
+    if !edit_v1 {
+        return validate_extension_autocomplete_text(kind, text);
+    }
+    validate_bounded_bytes(kind, text, MAX_EXTENSION_AUTOCOMPLETE_TEXT_BYTES)?;
+    validate_extension_editor_text(text)
 }
 
 pub(super) fn validate_bounded_bytes(kind: &str, value: &str, limit: usize) -> Result<(), String> {
@@ -278,6 +293,28 @@ pub enum ExtensionRequestId {
 pub struct ExtensionProtocolLimits {
     /// Maximum number of concurrently admitted host requests.
     pub max_concurrent_requests: usize,
+    /// Optional API 0.4 native registry bounds; absent on older wires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_refs_v1: Option<ResourceProtocolLimits>,
+}
+
+/// Fixed finite v1 resource service bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceProtocolLimits {
+    /// Includes retired records with unsettled cleanup.
+    pub max_records: usize,
+    /// Provisional registrations per live parent.
+    pub max_registrations_per_parent: usize,
+}
+
+impl Default for ResourceProtocolLimits {
+    fn default() -> Self {
+        Self {
+            max_records: MAX_RESOURCE_RECORDS,
+            max_registrations_per_parent: MAX_RESOURCE_REGISTRATIONS_PER_PARENT,
+        }
+    }
 }
 
 /// Additive feature negotiation sent by an API `0.2` host.
@@ -292,6 +329,10 @@ pub struct ExtensionProtocolRequest {
     pub optional_features: Vec<String>,
     /// Host-capped transport limits.
     pub limits: ExtensionProtocolLimits,
+    /// API 0.4 local-file.v1 transport context for configured bulk storage only.
+    /// This is initialization data, never a tool/domain/model value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk_objects_v1: Option<serde_json::Value>,
 }
 
 /// Feature subset and accepted limits returned by an API `0.2` extension.

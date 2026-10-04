@@ -1,4 +1,10 @@
-//! Qualification against the actual Rust process host, without providers/models.
+//! Qualification against the production host, with a local scripted provider for projection tests.
+#[cfg(test)]
+mod typed_tests;
+#[cfg(test)]
+mod resource_tests;
+#[cfg(test)]
+mod bulk_tests;
 #[cfg(test)]
 mod tests {
     use octet_agent::extension_process::ExtensionRuntimeError;
@@ -61,7 +67,8 @@ mod tests {
             assert_eq!(process.api_version(), "0.4");
             assert!(process.is_running());
             let selected = process.negotiated_features();
-            assert_eq!(selected.len(), 2);
+            assert_eq!(selected.len(), 3);
+            assert!(selected.contains("request_progress"));
             assert!(selected.contains("request_cancellation"));
             assert!(selected.contains("content_parts"));
             let tools = process.tool_definitions();

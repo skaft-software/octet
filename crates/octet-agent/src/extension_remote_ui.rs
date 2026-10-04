@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::extension_process::{
-    ExtensionRequestFailure, ExtensionRequestId, ExtensionResourceOwner,
+    ExtensionEditorCheckpoint, ExtensionRequestFailure, ExtensionRequestId, ExtensionResourceOwner,
 };
 
 /// Optional feature offered only when a remote UI frontend is bound.
@@ -144,20 +144,27 @@ impl ExtensionRemoteUiOperation {
     }
 }
 
-/// Dimensions returned after the host actually opens the fullscreen surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Dimensions and optional editor fence returned after the host admits a surface.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionRemoteUiOpenResult {
     /// Available host terminal columns.
     pub columns: u16,
     /// Available host terminal rows.
     pub rows: u16,
+    /// Host-issued mount identity, present only for editor placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_mount_id: Option<String>,
 }
 
 impl ExtensionRemoteUiOpenResult {
     /// Validates the nonzero host geometry.
     pub fn validate(&self) -> ValidationResult {
-        validate_dimensions(self.columns, self.rows)
+        validate_dimensions(self.columns, self.rows)?;
+        if let Some(mount_id) = &self.editor_mount_id {
+            validate_surface_id(mount_id)?;
+        }
+        Ok(())
     }
 }
 
@@ -259,6 +266,29 @@ pub enum ExtensionRemoteUiKeyModifier {
     Super,
 }
 
+/// Host-issued input clock for one custom-editor mount. Render clocks are separate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionRemoteUiEditorInput {
+    /// Current host-issued editor mount identity, not an extension-local surface ID.
+    pub mount_id: String,
+    /// Monotonic input revision issued by this mount; starts at one.
+    pub input_revision: u64,
+}
+
+impl ExtensionRemoteUiEditorInput {
+    /// Validates the bounded host input fence, not its live authority.
+    pub fn validate(&self) -> ValidationResult {
+        validate_surface_id(&self.mount_id)?;
+        if self.input_revision == 0 || self.input_revision > MAX_EXTENSION_REMOTE_UI_REVISION {
+            return Err(bounds(
+                "editor input revision is outside the portable nonzero range",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Host-to-extension `ui/key` notification payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -271,12 +301,18 @@ pub struct ExtensionRemoteUiKey {
     pub kind: ExtensionRemoteUiKeyKind,
     /// Duplicate-free held modifiers.
     pub modifiers: Vec<ExtensionRemoteUiKeyModifier>,
+    /// Editor-only mount/input fence. Non-editor keys retain their existing shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_input: Option<ExtensionRemoteUiEditorInput>,
 }
 
 impl ExtensionRemoteUiKey {
     /// Validates the bounded normalized key payload.
     pub fn validate(&self) -> ValidationResult {
         validate_surface_id(&self.surface_id)?;
+        if let Some(editor_input) = &self.editor_input {
+            editor_input.validate()?;
+        }
         validate_text(
             "remote UI key",
             &self.key,
@@ -420,7 +456,7 @@ fn validate_dimensions(columns: u16, rows: u16) -> ValidationResult {
     Ok(())
 }
 
-fn validate_surface_id(value: &str) -> ValidationResult {
+pub(crate) fn validate_surface_id(value: &str) -> ValidationResult {
     if value.len() > MAX_EXTENSION_REMOTE_UI_SURFACE_ID_BYTES {
         return Err(bounds("remote UI surface id exceeds its byte limit"));
     }
@@ -642,6 +678,7 @@ impl RemoteUiMailbox {
             .ok_or_else(|| invalid("remote UI frame names an unknown surface or owner"))?;
         let geometry = surface
             .geometry
+            .as_ref()
             .ok_or_else(|| invalid("remote UI frame arrived before open admission"))?;
         if geometry.columns != frame.columns || geometry.rows != frame.rows {
             return Err(invalid("remote UI frame geometry is stale"));
@@ -732,6 +769,35 @@ impl RemoteUiMailbox {
         Ok(owner.clone())
     }
 
+    /// Holds the existing retirement disposition through a synchronous editor
+    /// mutation and its reserved writer admission. The closure must not reenter
+    /// this mailbox or acquire the parent/child maps (lock order is the reverse).
+    pub(crate) fn with_editor_checkpoint(
+        &self,
+        owner: &ExtensionResourceOwner,
+        checkpoint: &ExtensionEditorCheckpoint,
+        commit: impl FnOnce() -> ValidationResult,
+    ) -> ValidationResult {
+        let surfaces = self
+            .surfaces
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let geometry = surfaces
+            .get(&(owner.clone(), checkpoint.surface_id.clone()))
+            .and_then(|surface| surface.geometry.as_ref())
+            .ok_or_else(|| {
+                invalid("editor checkpoint belongs to a retired or unadmitted surface")
+            })?;
+        if geometry.editor_mount_id.as_deref() != Some(checkpoint.mount_id.as_str()) {
+            return Err(invalid(
+                "editor checkpoint mount is retired or not an editor",
+            ));
+        }
+        let result = commit();
+        drop(surfaces);
+        result
+    }
+
     pub(crate) fn validate_mouse(
         &self,
         owner: &ExtensionResourceOwner,
@@ -746,6 +812,7 @@ impl RemoteUiMailbox {
             .ok_or_else(|| invalid("remote UI mouse surface is not open"))?;
         let geometry = surface
             .geometry
+            .as_ref()
             .ok_or_else(|| invalid("remote UI mouse surface is not admitted"))?;
         if !surface.mouse_capture {
             return Err(invalid("remote UI mouse capture was not requested"));
@@ -765,6 +832,10 @@ impl RemoteUiMailbox {
             surface.geometry = Some(ExtensionRemoteUiOpenResult {
                 columns: resize.columns,
                 rows: resize.rows,
+                editor_mount_id: surface
+                    .geometry
+                    .as_ref()
+                    .and_then(|geometry| geometry.editor_mount_id.clone()),
             });
             surface.frame = None;
         }
@@ -825,10 +896,21 @@ impl RemoteUiChildRequest {
             return Ok(None);
         };
         let (surface_id, geometry) = match &self.operation {
-            ExtensionRemoteUiOperation::Open { surface_id, .. } => {
+            ExtensionRemoteUiOperation::Open {
+                surface_id,
+                placement,
+                ..
+            } => {
                 let geometry: ExtensionRemoteUiOpenResult = serde_json::from_value(result.clone())
                     .map_err(|error| format!("invalid remote UI open response: {error}"))?;
                 geometry.validate().map_err(|(_, detail)| detail)?;
+                if geometry.editor_mount_id.is_some()
+                    != (*placement == ExtensionRemoteUiPlacement::Editor)
+                {
+                    return Err(
+                        "remote UI editor mount identity must match editor placement".into(),
+                    );
+                }
                 (surface_id.clone(), Some(geometry))
             }
             ExtensionRemoteUiOperation::Close { surface_id } => {
@@ -1228,6 +1310,7 @@ mod tests {
             key: "x".repeat(MAX_EXTENSION_REMOTE_UI_KEY_BYTES),
             kind: ExtensionRemoteUiKeyKind::Release,
             modifiers: vec![ExtensionRemoteUiKeyModifier::Control],
+            editor_input: None,
         };
         key.validate().unwrap();
         key.key.push('x');
@@ -1294,6 +1377,79 @@ mod tests {
                 "unsafe line: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn remote_editor_mount_fence_survives_resize_and_key_metadata_is_bounded() {
+        let mailbox = Arc::new(RemoteUiMailbox::new(None));
+        let request = mailbox
+            .reserve(
+                ExtensionRequestId::Number(1),
+                owner("session"),
+                ExtensionRemoteUiOperation::Open {
+                    surface_id: "editor".into(),
+                    title: "Editor".into(),
+                    placement: ExtensionRemoteUiPlacement::Editor,
+                    mouse_capture: false,
+                },
+                None,
+            )
+            .unwrap();
+        assert!(request
+            .prepare_response(Some(&serde_json::json!({"columns":80,"rows":24})))
+            .is_err());
+        request
+            .prepare_response(Some(&serde_json::json!({
+                "columns":80,"rows":24,"editor_mount_id":"remote.7"
+            })))
+            .unwrap()
+            .unwrap()
+            .commit()
+            .unwrap();
+        mailbox.resize(
+            &owner("session"),
+            &ExtensionRemoteUiResize {
+                surface_id: "editor".into(),
+                columns: 90,
+                rows: 30,
+            },
+        );
+        let geometry = mailbox
+            .surfaces
+            .lock()
+            .unwrap()
+            .get(&(owner("session"), "editor".into()))
+            .unwrap()
+            .geometry
+            .clone()
+            .unwrap();
+        assert_eq!((geometry.columns, geometry.rows), (90, 30));
+        assert_eq!(geometry.editor_mount_id.as_deref(), Some("remote.7"));
+        let plain: ExtensionRemoteUiKey = serde_json::from_value(serde_json::json!({
+            "surface_id":"editor","key":"a","kind":"press","modifiers":[]
+        }))
+        .unwrap();
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("editor_input")
+            .is_none());
+        let mut key = plain;
+        key.editor_input = Some(ExtensionRemoteUiEditorInput {
+            mount_id: "remote.7".into(),
+            input_revision: 1,
+        });
+        key.validate().unwrap();
+        for revision in [0, MAX_EXTENSION_REMOTE_UI_REVISION + 1] {
+            key.editor_input.as_mut().unwrap().input_revision = revision;
+            assert!(key.validate().is_err());
+        }
+        key.editor_input.as_mut().unwrap().input_revision = MAX_EXTENSION_REMOTE_UI_REVISION;
+        key.validate().unwrap();
+        key.editor_input.as_mut().unwrap().mount_id = "bad/mount".into();
+        assert!(key.validate().is_err());
+        let mut unknown = serde_json::to_value(&key).unwrap();
+        unknown["editor_input"]["extra"] = true.into();
+        assert!(serde_json::from_value::<ExtensionRemoteUiKey>(unknown).is_err());
     }
 
     #[test]

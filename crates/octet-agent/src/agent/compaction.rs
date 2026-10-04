@@ -1476,7 +1476,7 @@ impl Agent {
         let input = octet_ai::responses::encode_responses_replay(&self.model, None, &replay)?;
         let active_system = self.system.clone();
         let instructions = (!active_system.is_empty()).then_some(active_system.as_str());
-        let tools = self.extensions.tool_definitions();
+        let tools = self.extensions.model_tool_definitions(&self.resource_owner);
         require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
         if replay.is_empty() {
             return Err(AgentError::InvalidCompactionPolicy(

@@ -129,6 +129,9 @@ pub(super) fn negotiate_api_v03_contributions(
             description: tool.description,
             parameters: tool.parameters,
             output_schema: tool.output_schema,
+            prompt_snippet: None,
+            prompt_guidelines: Vec::new(),
+            operation: None,
             composition: None,
             constrained_sampling: None,
         })
@@ -216,6 +219,20 @@ pub(super) fn negotiate_contributions_with_host_services(
                 .chain(API_0_2_OPTIONAL_FEATURES)
                 .copied()
                 .collect::<BTreeSet<_>>();
+            if manifest.api_version == EXTENSION_API_VERSION_0_4 {
+                allowed.insert(EXTENSION_FEATURE_RESOURCE_REFS_V1);
+                allowed.insert(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1);
+                allowed.insert(EXTENSION_FEATURE_TOOL_PROMPT_METADATA);
+                allowed.insert(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1);
+            }
+            if negotiated.limits.resource_refs_v1.is_some_and(|limits| {
+                manifest.api_version != EXTENSION_API_VERSION_0_4
+                    || limits != ResourceProtocolLimits::default()
+            }) {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "unsupported resource registry limits".into(),
+                ));
+            }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
                 && manifest
                     .contributes
@@ -231,6 +248,11 @@ pub(super) fn negotiate_contributions_with_host_services(
                     .contains(&ExtensionHook::CacheWarmingDecision)
             {
                 allowed.insert(EXTENSION_FEATURE_CACHE_WARMING_DECISION);
+            }
+            if offered_host_services.bulk_objects
+                && manifest.api_version == EXTENSION_API_VERSION_0_4
+            {
+                allowed.insert(EXTENSION_FEATURE_BULK_OBJECTS_V1);
             }
             if offered_host_services.tool_composition
                 && manifest.api_version == EXTENSION_API_VERSION_0_4
@@ -312,6 +334,13 @@ pub(super) fn negotiate_contributions_with_host_services(
                 return Err(ExtensionRuntimeError::Protocol(format!(
                     "first-party octet-subagents requires `{EXTENSION_FEATURE_DELEGATION_TELEMETRY}`; reinstall the current workspace bundle"
                 )));
+            }
+            if features.contains(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1)
+                && !features.contains(EXTENSION_FEATURE_AUTOCOMPLETE)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "autocomplete_edit_v1 negotiation requires autocomplete".into(),
+                ));
             }
             if features.contains(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
                 && !features.contains(EXTENSION_FEATURE_AGENT_SESSIONS)

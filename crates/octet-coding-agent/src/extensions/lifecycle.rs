@@ -271,6 +271,15 @@ impl ExecutableExtensions {
                 }
             }
             if let Some(manager) = managed_runtime.clone() {
+                let bulk_storage = match manager.bulk_storage() {
+                    Ok(storage) => Some(storage),
+                    Err(error) => {
+                        diagnostics.push(format!(
+                            "warning: extension bulk storage unavailable: {error}"
+                        ));
+                        None
+                    }
+                };
                 let workspace = config.workspace.clone();
                 let state = host_state.clone();
                 let session_lifecycle_service = session_lifecycle_service.clone();
@@ -304,6 +313,7 @@ impl ExecutableExtensions {
                             // API 0.4 extensions. Authority is attached later,
                             // only to live model-tool contexts, never commands.
                             runtime.tool_composition = true;
+                            runtime.bulk_store = bulk_storage.clone();
                             runtime.flag_values = extension_flag_values
                                 .get(&entry.descriptor.manifest.name)
                                 .cloned()
@@ -812,6 +822,15 @@ impl ExecutableExtensions {
         }
     }
 
+    pub(super) fn retire_active_resources(&self) {
+        // Authority ends before fallible observational hooks or native cleanup.
+        if let Some(owner) = &self.resource_owner {
+            for process in &self.processes {
+                process.retire_resource_owner(owner);
+            }
+        }
+    }
+
     /// Releases this App/session's attachment to the durable process fleet.
     ///
     /// Isolated profiles are stopped. Explicitly shared workspace services are
@@ -819,6 +838,7 @@ impl ExecutableExtensions {
     /// App can bind them without a stop/restart gap. Interactive callers must
     /// revoke the terminal grant with their shell before releasing this owner.
     pub async fn release_binding(&mut self) {
+        self.retire_active_resources();
         // A replacement App must not inherit work queued against the old
         // owner. Isolated lifecycle processes are stopped below; shared and
         // legacy processes never receive this service.

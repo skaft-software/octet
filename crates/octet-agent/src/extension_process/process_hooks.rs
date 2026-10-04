@@ -326,6 +326,15 @@ impl ExtensionProcess {
                 .store(0, Ordering::Release);
         }) {
             Ok(registration) => {
+                if read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_RESOURCE_REFS_V1)
+                {
+                    registration.resource_source(self.clone());
+                    if read_std_lock(&connection.protocol)
+                        .supports(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1)
+                    {
+                        host.enable_operation_discovery();
+                    }
+                }
                 *lock_std_mutex(&self.inner.dynamic_tool_registration) = Some(registration);
                 self.inner.dynamic_tool_registration_ready.notify_waiters();
             }

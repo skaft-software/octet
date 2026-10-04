@@ -218,6 +218,12 @@ impl ExtensionProcess {
                 return;
             }
             replaced_session = current.session_id != state.session_id;
+            if replaced_session {
+                if let Some(owner) = current.session_id.as_deref() {
+                    // Lifecycle validity cannot depend on UI negotiation or subscriptions.
+                    self.retire_resource_owner(owner);
+                }
+            }
             *current = state.clone();
         }
         let connection = read_std_lock(&self.inner.connection);
@@ -579,9 +585,6 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        let artifact_owner = resource_owner
-            .as_ref()
-            .map(|owner| owner.session_id.clone());
         let params = if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
             let params = api_v03::ToolCallParams {
                 name,
@@ -602,15 +605,19 @@ impl ExtensionProcess {
         .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         drop(_catalog);
         let _artifact_lease = connection.acquire_artifact_lease();
-        let result = connection
-            .request_with_resource_owner(
-                methods::TOOL_CALL,
+        let policy = lock_std_mutex(&self.inner.dynamic_tool_registration).clone();
+        connection
+            .request_tool(
+                definition,
                 params,
                 self.inner.config.request_timeout,
                 resource_owner,
+                None,
+                None,
+                None,
+                policy,
             )
-            .await?;
-        decode_tool_call_output(&connection, &definition, artifact_owner.as_deref(), result)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -635,9 +642,6 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        let artifact_owner = resource_owner
-            .as_ref()
-            .map(|owner| owner.session_id.clone());
         let params = if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
             let params = api_v03::ToolCallParams {
                 name: definition.name.clone(),
@@ -657,18 +661,19 @@ impl ExtensionProcess {
         }
         .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let _artifact_lease = connection.acquire_artifact_lease();
-        let result = connection
-            .request_with_cancellation(
-                methods::TOOL_CALL,
+        let policy = lock_std_mutex(&self.inner.dynamic_tool_registration).clone();
+        connection
+            .request_tool(
+                definition,
                 params,
                 self.inner.config.request_timeout,
-                cancellation,
-                progress,
                 resource_owner,
-                request_started,
+                Some(cancellation),
+                Some(progress),
+                Some(request_started),
+                policy,
             )
-            .await?;
-        decode_tool_call_output(&connection, &definition, artifact_owner.as_deref(), result)
+            .await
     }
 
     /// Invokes a manifest-declared slash command.
@@ -1166,11 +1171,13 @@ impl ExtensionProcess {
                 "extension did not negotiate autocomplete".into(),
             ));
         }
+        let edit_v1 =
+            read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1);
         let response: ExtensionAutocompleteResponse = self
             .request_typed_on_connection(connection, methods::AUTOCOMPLETE_COMPLETE, &request, None)
             .await?;
         response
-            .validate()
+            .validate_for_request(&request, edit_v1)
             .map_err(ExtensionRuntimeError::Protocol)?;
         Ok(response)
     }
@@ -1233,6 +1240,36 @@ impl ExtensionProcess {
             && owner.process_generation == connection.generation
             && owner.extension_instance_id == self.inner.instance_id
             && connection.remote_ui.contains(owner, surface_id)
+    }
+
+    /// Atomically admits one editor draft mutation and its exact checkpoint ACK
+    /// against parent/child cancellation, surface retirement and generation
+    /// replacement. Writer capacity is reserved before `commit` can run.
+    ///
+    /// `commit` must synchronously validate and mutate only local frontend state;
+    /// it must not call process/mailbox APIs, await, or perform IO. On failure it
+    /// must leave the draft unchanged. Success already admits the response: do
+    /// not also call `respond_to_extension_request` for this checkpoint.
+    pub fn commit_editor_checkpoint(
+        &self,
+        request_id: &ExtensionRequestId,
+        generation: u64,
+        owner: &ExtensionResourceOwner,
+        checkpoint: &ExtensionEditorCheckpoint,
+        commit: impl FnOnce() -> Result<(), (ExtensionRequestFailure, String)>,
+    ) -> Result<(), (ExtensionRequestFailure, String)> {
+        let connection = read_std_lock(&self.inner.connection);
+        if generation != connection.generation
+            || owner.process_generation != generation
+            || owner.extension_instance_id != self.inner.instance_id
+            || !connection_is_usable(&connection)
+        {
+            return Err((
+                ExtensionRequestFailure::NotForegroundOwner,
+                "editor checkpoint process generation is no longer current".into(),
+            ));
+        }
+        connection.commit_editor_checkpoint(request_id, owner, checkpoint, commit)
     }
 
     /// Queues focused input without waiting for extension rendering or stdin IO.

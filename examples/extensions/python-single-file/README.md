@@ -41,8 +41,21 @@ env -u PYTHONPATH CARGO_TARGET_DIR=/tmp/python-single-file-host-target \
   --manifest-path examples/extensions/python-single-file/host-smoke/Cargo.toml -- /path/to/unpacked/wait-extension
 ```
 
-The host smoke uses only the repository Rust host and local extension; it does not
-load provider configuration or make model/network calls.
+The host smoke selects the package directory supplied on the command line, including
+both `wait-extension` and `wait-tool` names. It checks disabled-by-default refusal,
+explicit enablement, API 0.4 negotiation, dropped-waiter cancellation with restart
+supervision disabled, subsequent same-generation tool use and acknowledged shutdown.
+It uses only the repository Rust host and local extension; it does not load provider
+configuration or make model/network calls. After building the probe, run the generator
+regression suite against that real host binary:
+
+```sh
+OCTET_PYTHON_HOST_SMOKE=/tmp/python-single-file-host-target/ci-test/python-extension-host-smoke \
+  python3 scripts/test_extension_author.py -v
+```
+
+Without `OCTET_PYTHON_HOST_SMOKE`, the real-host package-name regression is explicitly
+skipped; the other generator tests include only a raw subprocess lifecycle check.
 
 The package contains your `author.py`, a generated launcher and bounded vendored
 SDK source under `vendor/`; the SDK is not an independent installation. Only the

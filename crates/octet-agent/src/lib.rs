@@ -78,7 +78,11 @@ pub mod events;
 pub mod extension;
 #[rustfmt::skip]
 pub mod extension_api_v03;
+pub(crate) mod extension_bulk;
+mod extension_bulk_host;
+pub mod extension_diagnostics;
 pub mod extension_menu;
+pub mod extension_operations;
 pub mod extension_policy;
 pub mod extension_presentation;
 pub mod extension_process;
@@ -158,6 +162,9 @@ pub use extension::{
     MAX_POST_MUTATION_ID_BYTES, MAX_POST_MUTATION_RESOURCE_ID_BYTES,
     MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
 };
+pub use extension_bulk::{BlobDigest, BlobRef, BulkError, BulkLimits};
+pub use extension_bulk_host::BulkStorage;
+pub use extension_diagnostics::Diagnostic;
 pub use extension_menu::{
     ExtensionMenu, ExtensionMenuItem, MAX_EXTENSION_MENU_ARGUMENTS,
     MAX_EXTENSION_MENU_ARGUMENT_BYTES, MAX_EXTENSION_MENU_BYTES, MAX_EXTENSION_MENU_DEPTH,
@@ -200,7 +207,8 @@ pub use extension_process::{
     ExtensionProtocolRequest, ExtensionProtocolResponse, ExtensionProviderRetryAdvice,
     ExtensionReloadReport, ExtensionRequestId, ExtensionResourceOwner, ExtensionRoot,
     ExtensionRuntimeConfig, ExtensionRuntimeError, ExtensionSource, ExtensionStatusContribution,
-    ExtensionTrust, ExtensionUiSurface, RenderedToolCall,
+    ExtensionTrust, ExtensionUiSurface, OperationDescriptor, RenderedToolCall, ResourceAccess,
+    ResourceCleanupStatus, ResourceInput, ResourceOutput, ResourceRef, ResourceReleaseStatus,
     ToolCallOutput as ExtensionToolCallOutput, ToolCatalogUpdateResponse,
     ToolDefinition as ExtensionToolDefinition, ToolRegistrationRequest, ToolRenderSegment,
     DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION, EXTENSION_API_VERSION_0_1,

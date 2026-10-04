@@ -1,4 +1,4 @@
-import { fields, invalid, rpcError, strict, unsupported } from './errors.mjs';
+import { bounded, fields, invalid, rpcError, strict, unsupported } from './errors.mjs';
 import { keyData, mouseData, reservedKey } from './keys.mjs';
 import { mouseModeIntent } from './transport.mjs';
 import { theme, keybindings } from './theme.mjs';
@@ -143,17 +143,23 @@ export class RemoteUI {
     if (slot) await this.clearSlot(store, slot);
     const surface = {
       id: `pi-${++this.counter}`, runtime: this.runtime, placement, store, closed: false, opened: false, revision: 0, scheduled: false,
-      columns: 80, rows: 24, resolve: done,
+      columns: 80, rows: 24, resolve: done, ready: false, dirty: false, initialInputs: [],
     };
     surface.requestRender = () => {
-      if (surface.closed || !surface.opened || surface.scheduled) return;
+      if (surface.closed || !surface.ready) return;
+      surface.dirty = true;
+      if (surface.scheduled) return;
       surface.scheduled = true;
-      setImmediate(() => {
-        surface.scheduled = false;
-        if (surface.closed || !surface.store.state.alive) return;
-        this.runtime.scope.run(surface.store, () => this.push(surface)).catch(error => {
-          this.runtime.backgroundError(error); this.close(surface, undefined, false).catch(e => this.runtime.backgroundError(e));
-        });
+      setImmediate(async () => {
+        surface.dirty = false;
+        try {
+          if (!surface.closed && surface.store.state.alive) await this.runtime.scope.run(surface.store, () => this.push(surface));
+        } catch (error) {
+          this.runtime.backgroundError(error); this.close(surface).catch(e => this.runtime.backgroundError(e));
+        } finally {
+          surface.scheduled = false;
+          if (surface.dirty) surface.requestRender();
+        }
       });
     };
     surface.store = { ...store, surface };
@@ -163,13 +169,35 @@ export class RemoteUI {
     try {
       const geometry = await this.runtime.hostCall('ui/open', { surface_id: surface.id, title, placement, ...(store.mouseCapture ? { mouse_capture: true } : {}) }, store);
       surface.columns = dimension(geometry.columns); surface.rows = dimension(geometry.rows); surface.opened = true;
-      if (surface.closed || !store.state.alive) { await this.close(surface); return surface; }
+      if (placement === 'editor') {
+        if (!geometry.editor_mount_id) unsupported('editor checkpoint', 'host ui/open must supply editor_mount_id');
+        if (typeof geometry.editor_mount_id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(geometry.editor_mount_id)) invalid('editor_mount_id');
+        surface.mountId = geometry.editor_mount_id;
+        // A notification can arrive before the open reply's JS continuation.
+        // Input never establishes its own mount identity.
+        if (surface.initialInputs.some(input => input.editor_input.mount_id !== surface.mountId)) invalid('editor input mount/revision mismatch');
+      }
+      if (surface.closed) {
+        // An early local refusal may precede the host's open acknowledgement.
+        if (!surface.observedClose && store.state.alive && !this.runtime.stopping) await this.runtime.hostCall('ui/close', { surface_id: surface.id }, store);
+        return surface;
+      }
+      if (!store.state.alive) { await this.close(surface, undefined, true); return surface; }
       const finish = value => this.close(surface, value).catch(error => this.runtime.backgroundError(error));
       surface.component = await this.runtime.scope.run(surface.store, () => factory(surface.tui.facade, theme, keybindings, finish));
       component(surface.component);
+      if (surface.closed) { this.runtime.scope.run(surface.store, () => surface.component.dispose?.()); return surface; }
       if (overlayOptions) surface.tui.showOverlay(surface.component, overlayOptions);
       else { surface.tui.children.push(surface.component); surface.tui.setFocus(surface.component); }
       if (placement === 'editor') await this.bindEditor(surface);
+      if (surface.closed) return surface;
+      surface.ready = true;
+      // First delivery, not recovery replay: seed/bind first, then dispatch each
+      // fenced host event exactly once. push captures the resulting ACK tail.
+      for (const input of surface.initialInputs.splice(0)) {
+        if (surface.closed) break;
+        this.editorInput(surface, input);
+      }
       await this.push(surface);
       if (placement === 'fullscreen' && store.method === 'command/execute' && store.detach) store.detach();
       return surface;
@@ -180,42 +208,129 @@ export class RemoteUI {
     this.runtime.require('composer'); this.runtime.require('message_injection');
     if (typeof c.setText !== 'function' || typeof c.getText !== 'function') unsupported('editor component', 'requires getText/setText');
     const { text } = await this.runtime.hostCall('composer/get', {}, store);
+    if (surface.closed) return;
     store.state.host.composer_text = text; c.setText(text);
     const change = c.onChange, submit = c.onSubmit;
-    surface.editor = { pending: 0, applyingHost: false, tail: Promise.resolve() };
+    const editor = surface.editor = { pending: 0, mutating: 0, inputRevision: 0, checkpointRevision: 0,
+      retired: false, tail: Promise.resolve(), submissions: null };
     const ordered = action => {
-      const editor = surface.editor;
       if (editor.pending >= 128) throw rpcError(-32012, 'bounds_exceeded editor update queue');
       editor.pending++;
       // Draft updates and submission are lossless, ordered effects, not frames.
       // A failed checkpoint prevents later updates from claiming a successful
       // handoff; the runtime surfaces the refusal rather than replaying it.
-      const promise = editor.tail.then(action).finally(() => { editor.pending--; });
+      const promise = editor.tail.then(() => {
+        if (editor.retired) throw rpcError(-32002, 'editor mount retired');
+        return action();
+      }).finally(() => { editor.pending--; });
       editor.tail = promise;
-      this.runtime.track(promise, store);
+      return this.runtime.track(promise, store);
+    };
+    editor.checkpoint = () => {
+      if (surface.closed) throw rpcError(-32002, 'editor mount retired');
+      const text = bounded(c.getText(), 'editor draft', 262144);
+      const checkpoint = { surface_id: surface.id, mount_id: surface.mountId,
+        input_revision: editor.inputRevision, checkpoint_revision: ++editor.checkpointRevision };
+      if (!Number.isSafeInteger(checkpoint.checkpoint_revision)) invalid('editor checkpoint revision exhausted');
+      store.state.host.composer_text = text;
+      return ordered(async () => {
+        const ack = await this.runtime.hostCall('composer/set', { text, editor_checkpoint: checkpoint }, store);
+        fields(ack, ['input_revision', 'checkpoint_revision'], 'editor checkpoint acknowledgement');
+        if (ack.input_revision !== checkpoint.input_revision || ack.checkpoint_revision !== checkpoint.checkpoint_revision) {
+          invalid('editor checkpoint acknowledgement mismatch');
+        }
+      });
     };
     c.onChange = value => {
-      if (surface.editor.applyingHost) return;
+      if (surface.closed) return;
       store.state.host.composer_text = value;
-      ordered(() => this.runtime.hostCall('composer/set', { text: value }, store));
+      if (!editor.mutating) editor.checkpoint();
       change?.(value);
     };
     c.onSubmit = value => {
-      ordered(() => this.runtime.hostCall('session/send_user_message', { text: value }, store));
+      if (surface.closed) return;
+      const send = () => ordered(() => this.runtime.hostCall('session/send_user_message', { text: value }, store));
+      if (editor.submissions) {
+        if (editor.submissions.length >= 128) throw rpcError(-32012, 'bounds_exceeded editor submissions');
+        editor.submissions.push(send);
+      } else { editor.checkpoint(); send(); }
       submit?.(value);
     };
+    // Custom setText may normalize the native seed before its first frame.
+    if (c.getText() !== text) await editor.checkpoint();
+  }
+  activeEditor(store) {
+    this.runtime.assertOwner(store);
+    return [...this.surfaces.values()].find(s => s.placement === 'editor' && s.store.state === store.state && !s.closed);
+  }
+  mutateEditor(store, text, insert = false) {
+    const surface = this.activeEditor(store);
+    if (!surface) return null;
+    if (!surface.editor) unsupported('editor mutation', 'custom editor is still mounting');
+    const method = insert ? 'insertTextAtCursor' : 'setText';
+    if (typeof surface.component[method] !== 'function') unsupported(`editor.${method}`);
+    const editor = surface.editor;
+    editor.mutating++;
+    try { this.runtime.scope.run(surface.store, () => surface.component[method](text)); }
+    catch (error) { this.close(surface).catch(e => this.runtime.backgroundError(e)); throw error; }
+    finally { editor.mutating--; }
+    const checkpoint = editor.checkpoint();
+    surface.requestRender();
+    return checkpoint;
+  }
+  editorInput(surface, params) {
+    const editor = surface.editor;
+    try {
+      const issued = params.editor_input;
+      if (!issued) unsupported('editor input checkpoint', 'host must supply editor_input');
+      fields(issued, ['mount_id', 'input_revision'], 'editor_input');
+      const previous = surface.initialInputs.at(-1)?.editor_input.input_revision ?? editor?.inputRevision ?? 0;
+      if (typeof issued.mount_id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(issued.mount_id)
+          || surface.mountId !== undefined && issued.mount_id !== surface.mountId
+          || !Number.isSafeInteger(issued.input_revision) || issued.input_revision !== previous + 1) invalid('editor input mount/revision mismatch');
+      bounded(params.key, 'editor key', 32, { controls: true });
+      const data = keyData(params);
+      if (!surface.ready) {
+        if (surface.initialInputs.length >= 128) throw rpcError(-32012, 'bounds_exceeded editor initial input queue');
+        // Keep only bounded normalized fields, never a raw terminal byte stream,
+        // arbitrary notification payload, or an acknowledged/replayed input.
+        surface.initialInputs.push({ key: params.key, kind: params.kind, modifiers: [...(params.modifiers ?? [])], editor_input: { ...issued } });
+        return;
+      }
+      editor.mutating++;
+      editor.submissions = [];
+      try { surface.tui.input(data, params.kind === 'release'); } finally { editor.mutating--; }
+      if (!surface.closed) {
+        // Intermediate onChange calls cannot acknowledge an unfinished input.
+        editor.inputRevision = issued.input_revision;
+        editor.checkpoint(); // Includes cursor, consumed, no-op and release events.
+        for (const send of editor.submissions) send();
+        surface.requestRender();
+      }
+    } catch (error) {
+      this.close(surface).catch(e => this.runtime.backgroundError(e));
+      throw error;
+    } finally { if (editor) editor.submissions = null; }
   }
   async push(surface) {
     if (surface.closed) return;
-    const lines = this.runtime.scope.run(surface.store, () => surface.tui.render(surface.columns));
+    const columns = surface.columns, rows = surface.rows;
+    const lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns));
+    // Capture lines and this exact barrier in the same synchronous turn. Never
+    // render newer text after waiting on an older checkpoint acknowledgement.
+    const checkpoint = surface.editor?.tail;
+    await checkpoint;
+    if (surface.closed || !surface.store.state.alive || columns !== surface.columns || rows !== surface.rows) return;
     await this.runtime.transport.notify('ui/frame', {
       resource_owner: surface.store.state.owner, surface_id: surface.id,
-      revision: surface.revision++, columns: surface.columns, rows: surface.rows, lines,
+      revision: surface.revision++, columns, rows, lines,
     }, `frame:${surface.id}`);
   }
   async close(surface, value, observed = false) {
     if (surface.closed) return;
-    surface.closed = true;
+    surface.closed = true; surface.observedClose = observed;
+    surface.initialInputs.length = 0;
+    if (surface.editor && observed) surface.editor.retired = true;
     this.surfaces.delete(surface.id);
     if (surface.slotKey && this.slots.get(surface.slotKey) === surface) this.slots.delete(surface.slotKey);
     this.runtime.timers.surface(surface);
@@ -225,14 +340,31 @@ export class RemoteUI {
       try { this.runtime.scope.run(surface.store, () => c.dispose?.()); } catch (error) { this.runtime.backgroundError(error); }
     }
     surface.tui.listeners.clear(); surface.resolve?.(value);
-    if (surface.opened && !observed && surface.store.state.alive && !this.runtime.stopping) await this.runtime.hostCall('ui/close', { surface_id: surface.id }, { ...surface.store, controller: new AbortController() });
+    if (surface.opened && !observed && surface.store.state.alive && !this.runtime.stopping) {
+      // Stop accepting input before draining an adapter-initiated restoration.
+      // Otherwise an accepted draft write can arrive after the native editor is
+      // editable (or a replacement editor has read its seed) and overwrite it.
+      // Host rescue/shutdown remain immediate, not blocked on extension effects.
+      try { await surface.editor?.tail; }
+      finally {
+        if (surface.store.state.alive && !this.runtime.stopping) await this.runtime.hostCall('ui/close', { surface_id: surface.id }, { ...surface.store, controller: new AbortController() });
+      }
+    }
   }
   clearSlot(store, slot) {
     const surface = this.slots.get(`${store.state.key}:${store.factory}:${slot}`);
     return surface ? this.close(surface) : Promise.resolve();
   }
   async ownerEnded(state) { await Promise.all([...this.surfaces.values()].filter(s => s.store.state === state).map(s => this.close(s, undefined, true))); }
-  async cancelParent(id) { await Promise.all([...this.surfaces.values()].filter(s => s.store.id === id).map(s => this.close(s))); }
+  async cancelParent(id) {
+    await Promise.all([...this.surfaces.values()].filter(s => s.store.id === id).map(s => {
+      // A real cancellation can arrive after the origin's normal reply. Its
+      // retained surface still carries that controller even when active has
+      // dropped the request. Abort before draining, never convert cancel to ACK.
+      s.store.controller.abort(rpcError(-32800, 'request cancelled'));
+      return this.close(s);
+    }));
+  }
   async shutdown() { await Promise.all([...this.surfaces.values()].map(s => this.close(s, undefined, true))); }
   handle(method, params) {
     this.runtime.require('remote_ui');
@@ -244,9 +376,13 @@ export class RemoteUI {
         surface.columns = dimension(params.columns); surface.rows = dimension(params.rows);
         surface.tui.invalidate(); surface.requestRender();
       } else if (method === 'ui/key') {
-        if (!reservedKey(params)) surface.tui.input(keyData(params), params.kind === 'release');
+        if (!reservedKey(params)) {
+          if (surface.placement === 'editor') this.editorInput(surface, params);
+          else surface.tui.input(keyData(params), params.kind === 'release');
+        }
       } else if (method === 'ui/mouse') {
         if (!surface.store.mouseCapture) invalid('ui/mouse without capture');
+        if (surface.placement === 'editor') unsupported('custom editor mouse input', 'no host-issued editor input revision');
         surface.tui.input(mouseData(params), false);
       } else unsupported(method);
 

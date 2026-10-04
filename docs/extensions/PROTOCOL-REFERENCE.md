@@ -245,6 +245,16 @@ If `lifecycle_events` is negotiated and the subscription list is omitted or
 empty, all six events are subscribed. Otherwise it must be an exact subset of
 the six names above. A non-empty subscription without the feature is invalid.
 
+API `0.4` also offers `tool_prompt_metadata_v1`. A tool may then declare
+`prompt_snippet` (optional string) and `prompt_guidelines` (optional string array,
+default empty). These are presentation only: at most 16 guidelines and 1,024
+UTF-8 bytes per string, allowing newline/tab but no other control characters.
+Their encoded bytes share the existing aggregate catalog schema budget.
+Initialization and dynamic registration use the same validation. The Agent
+projects only active, model-visible tools; guidelines need no snippet, and
+ordinary no-metadata tools remain unchanged. See [prompt projection and run
+snapshot semantics](../extensions.md#tool-prompt-metadata-api-04).
+
 The API `0.4` host may additionally offer `tool_composition_v1` when its runtime
 explicitly enables `ExtensionRuntimeConfig.tool_composition` (false by default
 for embedders). The coding host enables this generic service for trusted enabled
@@ -1730,7 +1740,10 @@ Host-owned composer access. `composer/get` requests `{ "parent_request_id": 2 }`
 and returns `{ "text": "<bounded composer text>" }`. `composer/set` requests
 `{ "parent_request_id": 2, "text": "..." }` and replaces the whole composer;
 `composer/insert` requests the same shape and inserts the text at the host
-composer cursor. Both mutations return `{}`.
+composer cursor. Both ordinary mutations return `{}`. While a remote custom
+editor owns the composer, plain mutations are refused; API `0.4` negotiated
+`remote_ui` permits the owner/mount/revision-fenced `composer/set`
+[editor checkpoint](remote-ui.md) instead, with an explicit revision ACK.
 
 ```json
 { "jsonrpc": "2.0", "id": "pi:4", "method": "composer/set",
@@ -1842,6 +1855,100 @@ observation to the holder (it owns the tty for the duration), and the same
 process must not be handed a second grant. The dispatch-level refusal is typed:
 `unsupported_feature` when `terminal_handoff` was not negotiated, and
 `invalid_request`/`bounds_exceeded`/`not_foreground_owner` for everything else.
+
+### 2.24b Host-mediated autocomplete (feature `autocomplete`)
+
+The base profile below retains its existing behavior. API `0.4` may negotiate
+[`autocomplete_edit_v1`](#autocomplete-edit-v1) for the additive edit fields
+and prefix/value control exceptions described below.
+
+`ui/autocomplete/register` accepts `{ "revision": <u64> }`. Registration is
+admitted by an interactive frontend and acknowledged with `{ "accepted": true }`;
+an unavailable frontend refuses rather than fabricating an active chain.
+For an admitted chain, the host sends `ui/autocomplete/complete` with
+`{ "text": "...", "cursor": <UTF-8 byte offset>, "revision": <u64> }`.
+The cursor must be a character boundary in the bounded editor snapshot.
+Reply with `{ "prefix": "...", "items": [{ "value": "...", "label": "...",
+"description": null }] }`. Prefix is the exact suffix before the cursor to
+replace; text fields are at most 1,024 UTF-8 bytes with no controls. At most
+32 items may be returned.
+
+An empty list leaves the query unclaimed. The coding frontend tries the next
+registered live chain and then ordinary native path completion, under one 500 ms
+aggregate deadline. Both menus and fallback apply only if the saved text, cursor,
+revision and focused-editor state still match; a late empty reply cannot edit a
+new draft. Extension choices use suffix replacement, not arbitrary editor edits.
+This contract alone does not cover every Pi completion application's quote,
+cursor, multiline or wrapper semantics.
+
+<a id="autocomplete-edit-v1"></a>
+
+#### API `0.4` profile: `autocomplete_edit_v1`
+
+This optional feature is offered only on API `0.4` and requires negotiated
+`autocomplete`; selecting it without `autocomplete` rejects initialization.
+API `0.1`, `0.2` and canonical `0.3` cannot select it. Registration and the
+`ui/autocomplete/complete` request/response RPC stay unchanged; this profile
+adds two optional fields to each item:
+
+| Item field | Type | Absent default | Validation |
+|---|---|---|---|
+| `replace_after_bytes` | `u32` | `0` | At most 262,144 additional bytes of the original snapshot after the cursor; replacement end must be in range and on a UTF-8 boundary |
+| `cursor_offset_bytes` | `u32` | UTF-8 byte length of `value` | Offset within inserted `value`, from zero through its byte length, on a UTF-8 boundary |
+
+These are nonnegative integer fields, not nullable fields. Explicit null,
+negative/fractional/out-of-u32 values and unknown fields are invalid. Without
+negotiated `autocomplete_edit_v1`, either field's presence is invalid even
+when its value is zero. Absence retains the base insertion/cursor defaults.
+
+With this profile, `prefix` and item `value` permit LF, TAB and CR, but no other
+control characters or terminal escapes. Labels and non-null descriptions remain
+plain/control-free. The existing 1,024 UTF-8 byte bound applies to each string,
+and the response still has at most 32 items. The request snapshot and resulting
+editor text remain within the existing 262,144-byte editor budget; the wire
+frame budget is unchanged.
+
+For original snapshot `text` and byte cursor `c`, let `start = c - prefix.len()`
+and `end = c + replace_after_bytes` (using the absent default). The host requires
+`prefix` to be the **exact suffix** of `text[..c]`, checks original cursor/start/
+end UTF-8 boundaries and range, then replaces `text[start..end]` with `value`.
+The resulting cursor is `start + cursor_offset_bytes`, measured within the
+inserted value, not within the original text. The inserted offset must be a
+UTF-8 boundary, and the complete resulting text must fit the editor budget.
+The entire response is validated against the exact original request on receipt;
+range, UTF-8 and budget validation is repeated at display and explicit acceptance.
+
+Example after both features have been negotiated (cursor immediately before
+an existing quote):
+
+```json
+{"jsonrpc":"2.0","id":42,"method":"ui/autocomplete/complete","params":{"text":"é\"","cursor":2,"revision":7}}
+```
+
+```json
+{"jsonrpc":"2.0","id":42,"result":{"prefix":"é","items":[{"value":"文/\"","label":"Directory","description":"Keep the closing quote","replace_after_bytes":1,"cursor_offset_bytes":4}]}}
+```
+
+Acceptance replaces the two-byte `é` plus the following one-byte quote with
+`文/"` (five UTF-8 bytes), placing the cursor at byte four, after `/` and before
+the retained closing quote. Displaying a choice alone never performs that edit.
+
+The coding host keeps correlation **host-side**, not in extension-supplied DTOs:
+the durable session/resource owner and live registered provider instance and
+process generation are rechecked at display and acceptance. Retired/reloaded/
+replaced providers, changed sessions, changed text/cursor/revision or lost
+normal-editor focus invalidate results and displayed menus. A remote custom
+editor owning the composer also refuses normal-editor completion. Unclaimed
+responses keep the same next-chain/native-path fallback and aggregate deadline;
+fallback retains the queried provider chain's live fences and exact editor
+snapshot, so a late empty result cannot mutate a new draft.
+
+The native editor additionally requires grapheme boundaries. It previews edits
+through checked editor APIs and **refuses an unrepresentable range or cursor**,
+rather than silently flooring/moving the requested byte cursor or bypassing
+editor invariants. Valid UTF-8 boundaries alone therefore do not guarantee
+native acceptance. This native profile does not establish Pi adapter support,
+full Pi completion parity or completed lifecycle qualification.
 
 ### 2.25 `composition/context`, `composition/call`, `composition/store` (API `0.4`, feature `tool_composition_v1`)
 
@@ -1962,6 +2069,121 @@ raw nested output. A tool with provisional delivery can acknowledge only after
 an exact private text receipt is synced, bounded by the smaller of the sandbox
 output cap and 1 MiB; oversized or failed persistence rolls it back.
 
+### 2.26 Native resource lifecycle (API `0.4`)
+
+The optional `resource_refs_v1` and `operation_descriptors_v1` features add
+extension-local native values to existing tool calls. They do not create a
+remote-method interface. The closed ResourceRef value is
+`{"$resource":"<opaque host token>","type":"Circuit"}`. Type IDs are nominal,
+1–128 ASCII bytes (letter first, then letters/digits/underscore/dot/hyphen);
+tokens are at most 128 ASCII bytes. Native objects never leave the extension.
+
+ToolDefinition's optional `operation` is a closed descriptor with `id`, optional
+`receiver`, `resource_inputs` and `resource_outputs`. Inputs contain
+`{path,type,access:"exclusive"}`; outputs contain `{path,type}`. Paths are fixed
+JSON Pointers through schema object properties, not arrays or wildcards.
+Schemas must declare the exact closed ResourceRef shape and matching nominal
+`type` using `const` or a singleton `enum`. The receiver, when present, names an
+input path; it is presentation metadata, never argument injection or authority.
+Resource-bearing descriptors require both features. Catalog publication validates
+schema, descriptor and frozen handler together, including dynamic mutations.
+
+| Direction/method | Closed params | Result |
+|---|---|---|
+| Extension → host `resource/register` | `{parent_request_id,type}` | Provisional ResourceRef |
+| Extension → host `resource/release` | `{parent_request_id,resource}` | `{retired:true,cleanup:"pending"}` (or retained completed/failed/unknown cleanup status) |
+| Host → extension `resource/dispose` | `{resources:[ResourceRef,...],reason:"retired"}` | `{results:[{resource:ResourceRef,status:"completed"},...]}`; report `failed` for disposer failure |
+
+Reverse requests require a live, host-owned `tool/call` parent and never accept
+caller-supplied session authority. Registration alone grants no access. Complete
+successful parent admission atomically activates declared exports; failure,
+invalid output or cancellation winning first retires all provisional values.
+All input resources are checked and exclusively pinned at actual dispatch,
+including queued calls and non-receiver slots. Cancellation does **not** release
+pins before execution settlement or generation death. Release rejects pinned
+values with `resource_busy`; successful invalidation precedes separate cleanup.
+Unknown cleanup triggers bounded generation termination, not resurrection.
+
+Initialization advertises `protocol.limits.resource_refs_v1` with `max_records`
+(256) and `max_registrations_per_parent` (32); the current implementation uses
+these fixed bounds. Owner changes, accepted reload and host/process restart
+invalidate resources. A failed candidate reload leaves the old generation live.
+See the [normative resource/descriptor contract](../design/extension-values-v1.md).
+
+Host lookup is opt-in through `ExtensionHost::enable_operation_discovery()` and
+its `get_applicable_operations` tool, **not another extension RPC**. It validates
+the resource first, filters exact nominal matches by live policy, then orders by
+operation ID/input path. Default limit is 8 cards, maximum 32, with fenced
+pagination. Only selected exact schemas enter the next model request; in-flight
+handlers stay frozen and live policy still applies. Ordinary/Pi registry and
+active-tool semantics are unchanged.
+
+### 2.27 Immutable bulk (API `0.4`, feature `bulk_objects_v1`)
+
+This optional feature is offered only when the host configures `BulkStorage`.
+Initialization adds `protocol.bulk_objects_v1` with `profile:"local-file.v1"`,
+absolute host-owned `transfer_directory` and finite `limits`. This context is
+transport-only, never model/domain data. A BlobRef is a closed value:
+
+```json
+{"$blob":"<opaque host token>","bytes":1024,"digest":{"algorithm":"sha256","value":"0000000000000000000000000000000000000000000000000000000000000000"},"media_type":"application/octet-stream"}
+```
+
+The example illustrates shape, not an issued grant. Identity is `$blob`, never
+the digest. Bytes are portable nonnegative integers; digests require exactly 64
+lowercase hex digits. Metadata must match the host record. SDK-generated schemas
+use the closed sha256 descriptor; domain wrappers such as WaveformRef remain
+ordinary typed records, not kernel numerical formats.
+
+All four extension → host methods require a live `parent_request_id` belonging
+to an admitted tool call. Request objects are closed; no caller owner/path is
+accepted:
+
+| Method | Params in addition to `parent_request_id` | Result |
+|---|---|---|
+| `bulk/write` | `{profile:"local-file.v1",capacity,media_type}` | `{ticket,profile,locator,capacity}` |
+| `bulk/commit` | `{ticket,bytes,digest}` | Provisional BlobRef |
+| `bulk/read` | `{profile:"local-file.v1",blob:BlobRef}` | `{lease,profile,locator,bytes}` |
+| `bulk/release` | `{id}` (ticket or lease) | `{released:true}` |
+
+A locator is a flat host-created basename in the negotiated transfer directory,
+valid only with its ticket/lease. Resolve without following symlinks; traversal,
+absolute paths and foreign grants are refused. The host copies and verifies a
+private immutable snapshot, so later producer writes cannot alter publication.
+Commit consumes the ticket; it does not yet export the blob. Complete successful
+parent admission publishes resource/blob outputs together; invalid output,
+cancellation or failed publication leaves no exported record. Diagnostic
+attachments alone cannot export provisional blobs. Close files/mappings before
+releasing leases. Known IDs or equal digests never imply authorization.
+
+Default limits are `object_bytes:268435456`, `owner_bytes:536870912`,
+`write_tickets_per_generation:8`, `read_leases_per_generation:32`, and
+`blobs_per_owner:256`. Owner byte/record bounds apply per host session, including
+reservations. Hosts may explicitly configure different finite bulk limits;
+existing media-artifact limits are not raised. These are protocol quotas, not
+OS filesystem confinement of a trusted subprocess.
+
+Retained blobs survive producer restart; tickets/leases and native resources do
+not. Durable host restart recovery requires the owning host's explicit
+`BulkStorage::retain_durable`/`recover_durable` path, verified bytes and fresh
+session authorization. A temporary store refuses durability. No durable-retain
+RPC or automatic native-object restoration exists. Results/model requests carry
+only BlobRef descriptors and bounded summaries, never bytes or locators.
+See the [bulk lifecycle contract](../design/extension-values-v1.md#e-blobref-and-local-filev1).
+
+### Typed diagnostics in tool results
+
+`metadata.octet_diagnostics_v1` holds closed Diagnostic records with required
+`severity`, `code`, `message` and optional `primary`, `related`, `fixes`,
+`attachments`. The profile has at most 32 diagnostics and 64 KiB total. SDKs
+validate it and emit a bounded explicit text summary; the host validates shape
+and independently checks blob/artifact authority. Fixes are suggestions, not
+permission to edit. Failed operations cannot publish new references through
+diagnostics. The [shared SDK contract](../../sdk/conformance/README.md) specifies
+locations, UTF-8 byte spans, revisions, control handling and individual bounds.
+These additions and their [conformance matrix](../design/extension-values-v1-conformance.md)
+do not imply complete Pi compatibility or completed qualification.
+
 ## 3. Standard JSON-RPC errors
 
 | Code | Message | Meaning |
@@ -2052,6 +2274,9 @@ do not negotiate these names.
 | `description` | string | Model-facing description |
 | `parameters` | object | JSON Schema (must be an object type) |
 | `output_schema` | object \| null | API `0.2` schema for required `structured_content`; forbidden in `0.1` |
+| `prompt_snippet` | string \| null | API `0.4` negotiated `tool_prompt_metadata_v1` usage summary; absent/null means no snippet |
+| `prompt_guidelines` | string array | API `0.4` negotiated `tool_prompt_metadata_v1` usage guidance; omitted defaults to empty |
+| `operation` | object \| null | API `0.4` negotiated OperationDescriptor; resource-bearing descriptors also require `resource_refs_v1` |
 
 ### `CommandDefinition`
 

@@ -17,6 +17,9 @@ pub struct ExtensionRuntimeConfig {
     /// Offer API `0.4` request-scoped tool composition. A model-tool parent
     /// must separately supply the host dispatcher through its progress sink.
     pub tool_composition: bool,
+    /// Shared host-owned immutable bulk storage. Only configured API 0.4 peers
+    /// may negotiate bulk_objects_v1; this does not change media artifact limits.
+    pub bulk_store: Option<crate::BulkStorage>,
     /// Optional bounded API 0.3 active-session lifecycle driver. It is offered
     /// only when configured; it remains inactive until the product binds a safe
     /// interactive idle boundary. Legacy processes never retain this service.
@@ -77,6 +80,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
             )
             .field("agent_sessions", &self.agent_sessions)
             .field("tool_composition", &self.tool_composition)
+            .field("bulk_store_configured", &self.bulk_store.is_some())
             .field(
                 "session_lifecycle_configured",
                 &self.session_lifecycle.is_some(),
@@ -116,6 +120,7 @@ impl ExtensionRuntimeConfig {
             flag_values: BTreeMap::new(),
             agent_sessions: false,
             tool_composition: false,
+            bulk_store: None,
             session_lifecycle: None,
             event_bus: None,
             remote_ui: None,
@@ -142,6 +147,7 @@ pub(super) struct OfferedHostServices {
     pub(super) remote_ui: bool,
     pub(super) agent_sessions: bool,
     pub(super) tool_composition: bool,
+    pub(super) bulk_objects: bool,
     pub(super) session_lifecycle: bool,
     pub(super) approvals: bool,
     pub(super) secrets: bool,

@@ -4,6 +4,8 @@ use tempfile::TempDir;
 
 #[path = "cache_warming_tests.rs"]
 mod cache_warming;
+#[path = "prompt_metadata_tests.rs"]
+mod prompt_metadata;
 
 const VALID_MANIFEST: &str = r#"
 name = "git-tools"
@@ -41,6 +43,8 @@ pub(super) fn protocol_read_state_for_test(
     let (catalog_updates, _catalog_update_requests) = mpsc::channel(8);
     (
         ProtocolReadState {
+            resources: Arc::new(StdMutex::new(ResourceRegistry::default())),
+            resource_cleanup_changed: Arc::new(Notify::new()),
             pending: Arc::new(StdMutex::new(HashMap::new())),
             issued_resource_owners: Arc::new(StdMutex::new(HashSet::new())),
             session_leaf: Arc::new(session_leaf::SessionLeafMailbox::default()),
@@ -776,6 +780,7 @@ system_prompt = {system_prompt}
                 version: EXTENSION_API_VERSION_0_2.to_owned(),
                 features,
                 limits: ExtensionProtocolLimits {
+                    resource_refs_v1: None,
                     max_concurrent_requests: 4,
                 },
                 lifecycle_events: Vec::new(),
@@ -784,6 +789,7 @@ system_prompt = {system_prompt}
     }
 
     let no_services = OfferedHostServices {
+        bulk_objects: false,
         remote_ui: false,
         agent_sessions: false,
         tool_composition: false,
@@ -1447,6 +1453,7 @@ fn wave1_request_structs_round_trip_and_deny_unknown_fields() {
             parent_request_id: 7,
             text: "draft".into(),
             resource_owner: None,
+            editor_checkpoint: None,
         },
         serde_json::json!({"parent_request_id": 7, "text": "draft"}),
     );
@@ -2859,6 +2866,9 @@ fn non_tool_input_fails_closed_without_an_event_consumer() {
 #[test]
 fn prospective_tool_catalog_has_one_input_and_output_schema_byte_budget() {
     let tool = |name: &str, bytes: usize| ToolDefinition {
+        prompt_snippet: None,
+        prompt_guidelines: Vec::new(),
+        operation: None,
         name: name.into(),
         description: "bounded definition".into(),
         parameters: serde_json::json!({"type": "object", "description": "x".repeat(bytes)}),
@@ -3796,6 +3806,9 @@ fn handshake_must_exactly_match_manifest_contribution_names() {
     let response = InitializeResponse {
         api_version: manifest.api_version.clone(),
         tools: vec![ToolDefinition {
+            prompt_snippet: None,
+            prompt_guidelines: Vec::new(),
+            operation: None,
             name: "surprise".into(),
             description: "Undeclared".into(),
             parameters: serde_json::json!({"type": "object"}),
@@ -3880,6 +3893,9 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
     let response = InitializeResponse {
         api_version: EXTENSION_API_VERSION_0_4.into(),
         tools: vec![ToolDefinition {
+            prompt_snippet: None,
+            prompt_guidelines: Vec::new(),
+            operation: None,
             name: "echo".into(),
             description: "Echo".into(),
             parameters: serde_json::json!({"type": "object"}),
@@ -3901,6 +3917,7 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
                 .map(|feature| (*feature).to_owned())
                 .collect(),
             limits: ExtensionProtocolLimits {
+                resource_refs_v1: None,
                 max_concurrent_requests: 4,
             },
             lifecycle_events: Vec::new(),
@@ -3973,6 +3990,7 @@ shortcuts = [{ key = "ctrl+shift+p", name = "open_panel", description = "Open th
                 .map(|feature| (*feature).to_owned())
                 .collect(),
             limits: ExtensionProtocolLimits {
+                resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
             lifecycle_events: Vec::new(),
@@ -5389,6 +5407,7 @@ command = "runtime-command-validation"
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
+                resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
             lifecycle_events: Vec::new(),
@@ -5450,6 +5469,7 @@ command = "agent-service"
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
+                resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
             lifecycle_events: Vec::new(),
@@ -5521,6 +5541,7 @@ command = "octet-subagents"
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
+                resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
             lifecycle_events: Vec::new(),
@@ -5620,6 +5641,7 @@ secrets = ["browser.api_token"]
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
+                resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
             lifecycle_events: Vec::new(),
@@ -6126,6 +6148,103 @@ confirmations = true
         .expect("duplicate confirmation response is suppressed");
     assert!(process.shutdown().await);
     assert!(!process.is_running());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_diagnostics_remain_separate_from_tool_progress() {
+    use crate::tool::ToolProgress;
+
+    let temp = TempDir::new().unwrap();
+    write_executable_script(
+        &temp.path().join("diagnostics.sh"),
+        r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.1","tools":[{"name":"held","description":"Held tool","parameters":{"type":"object"}}],"commands":[]}}'
+IFS= read -r tool_call
+printf '%s\n' '{"jsonrpc":"2.0","id":999,"result":{}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"notification","params":{"level":"info","message":"diagnostic barrier"}}'
+IFS= read -r release
+case "$release" in *'"method":"test/release"'*) ;; *) exit 91 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":"released","is_error":false,"metadata":null,"structured_content":null}}'
+IFS= read -r shutdown
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{}}'
+"#,
+    );
+    let manifest = ExtensionManifest::parse(
+        r#"
+name = "diagnostic-routing"
+version = "0.1.0"
+api_version = "0.1"
+[entrypoint]
+command = "diagnostics.sh"
+[contributes]
+tools = ["held"]
+notifications = true
+"#,
+    )
+    .unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.supervise = false;
+    let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), config)
+        .await
+        .unwrap();
+    let mut diagnostics = process.subscribe();
+    let mut host = ExtensionHost::new();
+    host.load(&process);
+    host.finalize_tool_surface();
+    let (_, tools) = host.tool_snapshot();
+    let sandbox = crate::SandboxConfig::new(temp.path());
+    let registered = vec!["held".to_owned()];
+    let (progress, mut callbacks) = ToolProgressSink::bounded_channel();
+    let context = ToolContext {
+        workspace: temp.path(),
+        sandbox: &sandbox,
+        execution_scope: "diagnostic-test",
+        resource_owner: "diagnostic-owner",
+        active_skills: &[],
+        registered_tools: &registered,
+        progress,
+        cancellation: crate::CancellationToken::default(),
+    };
+    let call = tools[0].execute(serde_json::json!({}), &context);
+    tokio::pin!(call);
+    // Both events use the same FIFO process broadcast. Observing the ordinary
+    // notification in the tool stream proves the earlier diagnostic was consumed;
+    // the fixture cannot send the terminal until the explicit release below.
+    let observed = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            event = callbacks.recv() => event.unwrap(),
+            result = &mut call => panic!("tool completed before release: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(observed, ToolProgress::Status(text)
+        if text == "extension notification: diagnostic barrier"));
+    let diagnostic = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let ExtensionEvent::Diagnostic { message } = diagnostics.recv().await.unwrap() {
+                break message;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(diagnostic, "ignored response for unknown request 999");
+    // Fixture-only release over the existing writer, not a product RPC/profile.
+    assert!(read_std_lock(&process.inner.connection)
+        .queue_notification("test/release", serde_json::json!({})));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), &mut call)
+            .await
+            .unwrap()
+            .unwrap()
+            .text,
+        "released"
+    );
+    assert!(callbacks.try_recv().is_err());
+    assert!(process.shutdown().await);
 }
 
 #[cfg(unix)]
@@ -7623,6 +7742,8 @@ fn autocomplete_transport_requires_a_character_boundary_and_plain_choices() {
             value: "file".into(),
             label: "file".into(),
             description: Some("\u{1b}[31munsafe".into()),
+            replace_after_bytes: None,
+            cursor_offset_bytes: None,
         }],
     }
     .validate()

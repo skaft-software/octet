@@ -5,11 +5,12 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, hookEvents, notificationEvents, textOnly } from './api.mjs';
+import { commandCompletions } from './completions.mjs';
 import { RemoteUI } from './remote-ui.mjs';
 import { Timers, deadline } from './timers.mjs';
 
 const retainedMethods = new Set(['ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'tools/set_active']);
-const supportedFeatures = new Set(['request_cancellation', 'content_parts', 'request_progress', 'remote_ui', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools']);
+const supportedFeatures = new Set(['request_cancellation', 'content_parts', 'request_progress', 'remote_ui', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'tool_prompt_metadata_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -53,7 +54,7 @@ export class Runtime {
     this.bus = new SharedBus(this); this.ui = new RemoteUI(this); this.timers = new Timers(this);
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
-    this.maxConcurrent = 8; this.foreground = null;
+    this.maxConcurrent = 8; this.foreground = null; this.autocompleteRegistration = null;
   }
   mouseIntent(enabled) {
     this.require('remote_ui'); const store = this.scope.getStore(); this.assertOwner(store);
@@ -73,12 +74,20 @@ export class Runtime {
     if (this.stopping) throw rpcError(-32002, 'host is draining');
     if (!Number.isSafeInteger(store?.id) || store.id < 0) throw rpcError(-32002, 'active numeric parent_request_id required');
     store.controller.signal.throwIfAborted();
-    const live = this.active.has(store.id) && store.live;
-    if (!live && !retainedMethods.has(method)) throw rpcError(-32002, `not_foreground_owner ${method} requires a live request`);
-    if (retainedMethods.has(method) && method !== 'shortcut/register') this.assertOwner(store);
+    const live = this.active.get(store.id)?.controller === store.controller && store.live;
+    const retained = retainedMethods.has(method) && Boolean(store.state?.owner);
+    if (!live && !retained) throw rpcError(-32002, `not_foreground_owner ${method} requires a live request`);
+    if (retained || retainedMethods.has(method) && method !== 'shortcut/register') this.assertOwner(store);
+    const surface = store.surface, checkpoint = method === 'composer/set' && params.editor_checkpoint;
+    const independentCheckpoint = retained && surface?.store === store && surface.placement === 'editor'
+      && surface.opened && surface.editor && !surface.editor.retired
+      && checkpoint?.surface_id === surface.id && checkpoint.mount_id === surface.mountId;
+    // Only an actual fenced editor checkpoint outlives a still-live origin's
+    // normal settlement (including accepted writes draining a voluntary close).
+    // Other calls keep their live parent. Wire origin/owner and abort signal stay.
     return this.transport.request(method, {
-      parent_request_id: store.id, ...(store.state?.owner && retainedMethods.has(method) ? { resource_owner: store.state.owner } : {}), ...params,
-    }, { parent: live ? store.id : undefined, signal: store.controller.signal });
+      parent_request_id: store.id, ...(retained ? { resource_owner: store.state.owner } : {}), ...params,
+    }, { parent: live && !independentCheckpoint ? store.id : undefined, signal: store.controller.signal });
   }
   track(promise, store = this.scope.getStore()) {
     const p = Promise.resolve(promise);
@@ -129,8 +138,13 @@ export class Runtime {
   metadata() {
     const hooks = [...new Set([...this.events.keys()].filter(e => hookEvents[e]).map(e => hookEvents[e]))];
     if (hooks.includes('session_start') || hooks.includes('session_end')) for (const name of ['session_start', 'session_end']) if (!hooks.includes(name)) hooks.push(name);
+    const completions = [...this.commands].filter(([, command]) => command.definition.getArgumentCompletions).map(([name]) => name);
     return {
-      tools: [...this.tools].map(([name, { definition: d }]) => ({ name, description: d.description, parameters: JSON.parse(JSON.stringify(d.parameters)), ...(d.output_schema ? { output_schema: d.output_schema } : {}) })),
+      ...(completions.length ? { argument_completions: completions } : {}),
+      tools: [...this.tools].map(([name, { definition: d }]) => ({ name, description: d.description, parameters: JSON.parse(JSON.stringify(d.parameters)),
+        ...(d.promptSnippet === undefined ? {} : { prompt_snippet: d.promptSnippet }),
+        ...(d.promptGuidelines === undefined ? {} : { prompt_guidelines: [...d.promptGuidelines] }),
+        ...(d.output_schema ? { output_schema: d.output_schema } : {}) })),
       commands: [...this.commands].map(([name, { definition: d }]) => ({ name, description: d.description || name, ...(d.usage ? { usage: d.usage } : {}) })),
       hooks: hooks.sort(), flags: [...this.flags].map(([name, { definition }]) => ({ name, ...definition })),
       shortcuts: [...this.shortcuts].map(([key, { definition: d }], i) => ({ id: `pi-shortcut:${i}`, key, description: d.description || key })),
@@ -150,6 +164,8 @@ export class Runtime {
     for (const flag of params.flag_values || []) this.flagValues.set(flag.name, flag.value);
     await this.load();
     const metadata = this.metadata(), declared = params.contributes || {};
+    if (metadata.argument_completions?.length) this.require('autocomplete');
+    if (metadata.tools.some(tool => tool.prompt_snippet !== undefined || tool.prompt_guidelines !== undefined)) this.require('tool_prompt_metadata_v1');
     for (const [kind, names] of [['tools', metadata.tools.map(t => t.name)], ['commands', metadata.commands.map(c => c.name)], ['hooks', metadata.hooks], ['tool_renderers', metadata.tool_renderers]]) {
       if (JSON.stringify([...(declared[kind] || [])].sort()) !== JSON.stringify([...names].sort())) invalid(`manifest ${kind} differs from reviewed registrations: ${names.join(', ')}`);
     }
@@ -169,6 +185,17 @@ export class Runtime {
       protocol: { version: '0.4', features: [...this.features], limits: { max_concurrent_requests: this.maxConcurrent },
         ...(this.features.has('lifecycle_events') ? { lifecycle_events: ['turn/started', 'turn/settled', 'tool/started', 'tool/settled'] } : {}) },
     };
+  }
+  registerAutocomplete() {
+    if (!this.metadata().argument_completions?.length) return;
+    // This process-scoped request MUST follow the initialize reply: the host
+    // admits the chain only after startup and its interactive drain are live.
+    this.autocompleteRegistration = this.transport.request('ui/autocomplete/register', { revision: 1 }).then(result => {
+      fields(result, ['accepted'], 'autocomplete registration acknowledgement');
+      if (typeof result.accepted !== 'boolean') invalid('autocomplete registration accepted must be boolean');
+      if (!result.accepted) unsupported('command completions', 'host refused autocomplete registration');
+    });
+    this.autocompleteRegistration.catch(error => this.backgroundError(error));
   }
   bind(params, store) {
     const context = params.context || {};
@@ -222,6 +249,7 @@ export class Runtime {
     const p = message.params;
     if (message.method === 'initialize') return this.initialize(p, store);
     if (!this.initialized) invalid('not initialized');
+    if (message.method === 'ui/autocomplete/complete') return commandCompletions(this, p, store);
     this.bind(p, store);
     if (message.method === 'command/execute') {
       const cmd = this.commands.get(p.name); if (!cmd) invalid(`unknown command ${p.name}`);
@@ -229,7 +257,8 @@ export class Runtime {
       store.factory = cmd.factory;
       const run = this.scope.run(store, async () => {
         if (this.features.has('composer')) {
-          store.state.host.composer_text = (await this.hostCall('composer/get', {}, store)).text;
+          const { text } = await this.hostCall('composer/get', {}, store);
+          if (!this.ui.activeEditor(store)) store.state.host.composer_text = text;
         }
         const result = await cmd.definition.handler((p.arguments || []).join(' '), createContext(this, store));
         if (result !== undefined) unsupported('command result', 'Pi command handlers return void');
@@ -294,23 +323,16 @@ export class Runtime {
       // has issued an owner. There is no retained context to update yet; the
       // first command/editor mount reads the current composer from the host.
       if (!state?.alive) return;
+      if (!Number.isSafeInteger(p.revision) || p.revision < 0) invalid('editor state revision');
       if (state.editorRevision !== undefined && p.revision <= state.editorRevision) return;
       state.editorRevision = p.revision;
       const text = bounded(p.text, 'editor text', 262144);
       const editors = [...this.ui.surfaces.values()].filter(surface => surface.placement === 'editor' && surface.store.state === state);
-      // An echo acknowledges an earlier host checkpoint, not input that is still
-      // in flight. Replacing a newer local draft here drops characters and
-      // causes setText/onChange to send an echo back to the host.
-      if (editors.some(surface => surface.editor?.pending)) return;
+      // This snapshot has no mount/input identity and is never a checkpoint ACK.
+      // Even a late echo after the queue drains must not replace the local draft.
+      // Genuine concurrent native mutations are arbitrated by the host fence.
+      if (editors.length) return;
       state.host.composer_text = text;
-      for (const surface of editors) {
-        const editor = surface.editor;
-        if (editor) editor.applyingHost = true;
-        try {
-          if (surface.component?.getText?.() !== text) surface.component?.setText?.(text);
-        } finally { if (editor) editor.applyingHost = false; }
-        surface.requestRender();
-      }
       return;
     }
     if (message.method.startsWith('ui/')) { this.ui.handle(message.method, p); return; }
@@ -357,7 +379,10 @@ export class Runtime {
     try {
       const result = await this.scope.run(store, () => this.dispatch(message, store));
       store.controller.signal.throwIfAborted();
-      if (!this.stopping) await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
+      if (!this.stopping) {
+        await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
+        if (message.method === 'initialize') this.registerAutocomplete();
+      }
     } catch (error) {
       if (!this.stopping) await this.transport.send({ jsonrpc: '2.0', id: message.id, error: {
         code: store.controller.signal.aborted ? -32800 : (Number.isInteger(error.code) ? error.code : -32603),

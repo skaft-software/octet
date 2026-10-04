@@ -179,6 +179,12 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
+            "bulk/write" | "bulk/commit" | "bulk/read" | "bulk/release" => {
+                dispatch_bulk_request(state, object, method, params)?;
+            }
+            "resource/register" | "resource/release" => {
+                dispatch_resource_request(state, object, method, params)?;
+            }
             methods::COMPOSITION_CONTEXT
             | methods::COMPOSITION_CALL
             | methods::COMPOSITION_STORE => {
@@ -925,7 +931,41 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 ) {
                     return refuse_admitted_request(state, &admitted, failure);
                 }
-                let operation = if method == methods::COMPOSER_SET {
+                let operation = if let Some(checkpoint) = request.editor_checkpoint {
+                    if method != methods::COMPOSER_SET {
+                        return refuse_admitted_request(
+                            state,
+                            &admitted,
+                            (
+                                ExtensionRequestFailure::InvalidRequest,
+                                "editor checkpoints are only permitted on composer/set".into(),
+                            ),
+                        );
+                    }
+                    let checkpoint_supported = {
+                        let protocol = read_std_lock(&state.protocol);
+                        protocol.version == EXTENSION_API_VERSION_0_4
+                            && protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
+                    };
+                    if !checkpoint_supported {
+                        return refuse_admitted_request(
+                            state,
+                            &admitted,
+                            (
+                                ExtensionRequestFailure::UnsupportedFeature,
+                                "editor checkpoints require API 0.4 remote_ui".into(),
+                            ),
+                        );
+                    }
+                    if let Err(failure) = checkpoint.validate() {
+                        return refuse_admitted_request(state, &admitted, failure);
+                    }
+                    ExtensionComposerOperation::Checkpoint {
+                        text: request.text,
+                        owner: admitted.owner.clone(),
+                        checkpoint,
+                    }
+                } else if method == methods::COMPOSER_SET {
                     ExtensionComposerOperation::Set { text: request.text }
                 } else {
                     ExtensionComposerOperation::Insert { text: request.text }
@@ -1793,6 +1833,18 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
         .get("id")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "response requires a numeric id".to_owned())?;
+    if (read_std_lock(&state.protocol)
+        .features
+        .contains(EXTENSION_FEATURE_RESOURCE_REFS_V1)
+        || read_std_lock(&state.protocol)
+            .features
+            .contains(EXTENSION_FEATURE_BULK_OBJECTS_V1))
+        && object.contains_key("result") == object.contains_key("error")
+    {
+        // A malformed envelope is not evidence that native execution ended.
+        // Tear down the whole generation, rather than unlock one execution.
+        return Err("response requires exactly one of result or error".into());
+    }
     let reply = if let Some(error) = object.get("error") {
         if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_3 {
             let error: api_v03::ErrorObject = serde_json::from_value(error.clone())
@@ -1816,6 +1868,14 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     };
     let request = {
         let mut pending = lock_std_mutex(&state.pending);
+        // This recognized terminal settles native execution even if the caller
+        // has gone away or its bounded late-response tombstone was pruned.
+        if lock_std_mutex(&state.resources).settle_execution(id) {
+            let _ = state.events.send(ExtensionEvent::Diagnostic {
+                message: format!("resource execution settled: request={id}"),
+            });
+        }
+        state.resource_cleanup_changed.notify_one();
         let completed = pending.get(&id).is_some_and(|request| {
             request
                 .terminal
@@ -1828,7 +1888,28 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 .is_ok()
         });
         if completed {
-            pending.remove(&id)
+            let request = pending.remove(&id);
+            // Share the checkpoint's pending -> surface disposition through
+            // retirement. A cancelled terminal may not leave a committable
+            // surface behind after releasing the parent lock.
+            state.remote_ui.settle_parent(id, reply.is_err());
+            if matches!(
+                &reply,
+                Err(PendingError::Remote {
+                    code: JSON_RPC_REQUEST_CANCELLED,
+                    ..
+                })
+            ) && read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_REMOTE_UI)
+            {
+                if let Some(owner) = request
+                    .as_ref()
+                    .and_then(|request| request.resource_owner.as_ref())
+                {
+                    lock_std_mutex(&state.issued_resource_owners).remove(owner);
+                    state.remote_ui.discard_owner(owner);
+                }
+            }
+            request
         } else {
             None
         }
@@ -1836,20 +1917,6 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     if let Some(request) = request {
         state.pending_changed.notify_waiters();
         cancel_children_from_reader(state, id, "parent settled");
-        state.remote_ui.settle_parent(id, reply.is_err());
-        if matches!(
-            &reply,
-            Err(PendingError::Remote {
-                code: JSON_RPC_REQUEST_CANCELLED,
-                ..
-            })
-        ) && read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_REMOTE_UI)
-        {
-            if let Some(owner) = &request.resource_owner {
-                lock_std_mutex(&state.issued_resource_owners).remove(owner);
-                state.remote_ui.discard_owner(owner);
-            }
-        }
         let _ = request.sender.send(reply);
     } else if lock_std_mutex(&state.tombstones).remove(id) {
         let _ = state.events.send(ExtensionEvent::Diagnostic {

@@ -5,6 +5,9 @@ use serde_json::{json, Value};
 
 fn definition() -> ToolDefinition {
     ToolDefinition {
+        prompt_snippet: None,
+        prompt_guidelines: Vec::new(),
+        operation: None,
         name: "compose".into(),
         description: "Run a program".into(),
         parameters: json!({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}),
@@ -54,6 +57,7 @@ fn initialize(version: &str, feature: bool) -> InitializeResponse {
             version: version.into(),
             features,
             limits: ExtensionProtocolLimits {
+                resource_refs_v1: None,
                 max_concurrent_requests: 4,
             },
             lifecycle_events: Vec::new(),

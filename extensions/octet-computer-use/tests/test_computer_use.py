@@ -1184,6 +1184,16 @@ class StatusCommandTests(unittest.TestCase):
 
 
 class CursorThemeTests(unittest.TestCase):
+    def setUp(self):
+        # These menu/tool tests mock ComputerUse.provision, not the installer.
+        # Fail before any download if a call accidentally escapes that mock.
+        provision = mock.patch.object(
+            entrypoint.driver_module, "provision",
+            side_effect=AssertionError("cursor theme tests must not provision a real driver"),
+        )
+        provision.start()
+        self.addCleanup(provision.stop)
+
     def test_palette_matches_model_families_and_bundles_every_artifact(self):
         from octet_computer_use import cursor_theme
 
@@ -1204,12 +1214,13 @@ class CursorThemeTests(unittest.TestCase):
 
         extension, computer = entrypoint.create_extension()
         context = {"host": {"model": "claude-sonnet-4"}}
+        report = {"installed": True, "version": "0.29.1", "permissions": "granted",
+                  "runtime": "desktop-host", "cursor_enabled": True,
+                  "cursor_theme": "com.octet.computeruse.anthropic", "cursor_personalized": True}
         with mock.patch.object(computer, "provision", return_value={
                 "provisioned": True, "binary": "/tmp/cua-driver", "version": "0.29.1"}), \
-             mock.patch.object(computer, "publish_status", return_value={
-                "installed": True, "permissions": "granted", "runtime": "desktop-host",
-                "cursor_enabled": True, "cursor_theme": "com.octet.computeruse.anthropic",
-                "cursor_personalized": True}), \
+             mock.patch.object(computer, "publish_status", return_value=report), \
+             mock.patch.object(computer, "status", return_value=report) as status, \
              mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "skipped"}), \
              mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install:
             command = extension._commands["computer-use"].handler
@@ -1219,7 +1230,9 @@ class CursorThemeTests(unittest.TestCase):
             self.assertIn("Cua Driver 0.29.1 is installed.", result["text"])
             install.assert_called_once_with(Path("/tmp/cua-driver"))
             install.reset_mock()
-            extension._tools["computer_use_setup"].handler({}, context)
+            tool = extension._tools["computer_use_setup"].handler({}, context)
+            status.assert_called_once_with()
+            self.assertIn("Cua Driver 0.29.1 is installed.", tool["content"][0]["text"])
             install.assert_not_called()
             install.side_effect = RuntimeError("invalid artifact")
             failed = command(["setup"], context)
@@ -1251,11 +1264,13 @@ class CursorThemeTests(unittest.TestCase):
         from octet_computer_use import cursor_theme, gnome_helper
 
         extension, computer = entrypoint.create_extension()
+        report = {"installed": True, "version": "0.30.2", "permissions": "granted",
+                  "runtime": "direct", "platform": "linux",
+                  "permission_detail": "Wayland (native) reachable"}
         with mock.patch.object(computer, "provision", return_value={
                 "provisioned": True, "binary": "/tmp/cua-driver", "version": "0.30.2"}), \
-             mock.patch.object(computer, "publish_status", return_value={
-                "installed": True, "permissions": "granted", "runtime": "direct",
-                "platform": "linux", "permission_detail": "Wayland (native) reachable"}), \
+             mock.patch.object(computer, "publish_status", return_value=report), \
+             mock.patch.object(computer, "status", return_value=report) as status, \
              mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "skipped"}), \
              mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install, \
              mock.patch.object(gnome_helper, "is_gnome_wayland", return_value=True), \
@@ -1263,12 +1278,16 @@ class CursorThemeTests(unittest.TestCase):
                 "gnome_helper": "restart-required",
                 "gnome_helper_detail": "log out and back in once"}) as helper:
             result = extension._commands["computer-use"].handler(["setup"], {})
+            # Keep both entrypoints inside the offline provisioning/status mocks.
+            # The menu renders text; the agent tool keeps the structured report.
+            # The tool provisions only, so themes and the helper stay command-only.
+            tool = extension._tools["computer_use_setup"].handler({}, {})
         install.assert_called_once_with(Path("/tmp/cua-driver"))
         helper.assert_called_once_with()
-        # The menu renders text; the agent tool keeps the structured report.
-        # The tool provisions only, so themes and the helper stay command-only.
-        tool = extension._tools["computer_use_setup"].handler({}, {})
+        status.assert_called_once_with()
         self.assertTrue(tool["structured_content"]["provisioned"])
+        self.assertIn("Cua Driver 0.30.2 is installed.", tool["content"][0]["text"])
+        self.assertIn("Linux desktop session: Wayland (native) reachable", tool["content"][0]["text"])
         self.assertNotIn("content", result)
         self.assertIn("Cua Driver 0.30.2 is installed.", result["text"])
         install.assert_called_once_with(Path("/tmp/cua-driver"))
@@ -2135,9 +2154,17 @@ class DesktopHostTests(unittest.TestCase):
         from unittest import mock
         from octet_computer_use import driver
 
-        patcher = mock.patch.object(driver.platform, "system", return_value="Darwin")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        # A setup-owned app takes precedence over DESKTOP_APP_CANDIDATES. Keep
+        # bundle-layout fixtures independent of the caller's installed host.
+        for patcher in (
+            mock.patch.object(driver.platform, "system", return_value="Darwin"),
+            mock.patch.object(driver.DriverPaths, "for_home", return_value=
+                              driver.DriverPaths.for_home(Path(temporary.name))),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_desktop_app_is_found_only_when_installed(self):
         from octet_computer_use import driver

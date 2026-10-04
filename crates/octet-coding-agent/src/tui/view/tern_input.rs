@@ -607,6 +607,8 @@ mod tests {
                 value: value.into(),
                 label: value.into(),
                 description: None,
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
             })
             .collect();
         assert!(shell.set_extension_autocomplete(&snapshot, "@".into(), items));

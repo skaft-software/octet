@@ -20,6 +20,10 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 schemars = "=0.8.22"
+sha2 = "=0.10.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
 
 [[example]]
 name = "native-hello"
@@ -28,6 +32,26 @@ path = "../../examples/extensions/native-hello/rust/main.rs"
 [[example]]
 name = "native-probe"
 path = "tests/probe.rs"
+
+[[example]]
+name = "typed-probe"
+path = "tests/typed_probe.rs"
+
+[[example]]
+name = "resource-probe"
+path = "tests/resource_probe.rs"
+
+[[example]]
+name = "resource-hello"
+path = "../../examples/extensions/native-hello/rust/resources.rs"
+
+[[example]]
+name = "bulk-probe"
+path = "tests/bulk_probe.rs"
+
+[[example]]
+name = "bulk-hello"
+path = "../../examples/extensions/native-hello/rust/blobs.rs"
 
 [profile.release]
 panic = "unwind"

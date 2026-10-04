@@ -277,6 +277,49 @@ impl ExecutableExtensions {
                     ExtensionComposerOperation::Get => ExtensionRequestOutcome::Ok(
                         serde_json::json!({ "text": shell.extension_editor_snapshot().text }),
                     ),
+                    ExtensionComposerOperation::Set { .. }
+                    | ExtensionComposerOperation::Insert { .. }
+                        if self.remote_ui.editor_owns_composer() =>
+                    {
+                        ExtensionRequestOutcome::Failed(
+                            ExtensionRequestFailure::InvalidRequest,
+                            "custom-editor composer writes require an editor checkpoint".into(),
+                        )
+                    }
+                    ExtensionComposerOperation::Checkpoint {
+                        text,
+                        owner,
+                        checkpoint,
+                    } => {
+                        if self.resource_owner.as_deref() != Some(owner.session_id.as_str()) {
+                            ExtensionRequestOutcome::Failed(
+                                ExtensionRequestFailure::NotForegroundOwner,
+                                "editor checkpoint owner is no longer foreground".into(),
+                            )
+                        } else {
+                            match pending.process.commit_editor_checkpoint(
+                                &pending.request_id,
+                                pending.generation,
+                                &owner,
+                                &checkpoint,
+                                || {
+                                    self.remote_ui.checkpoint_editor(
+                                        &owner,
+                                        &checkpoint,
+                                        text,
+                                        shell,
+                                    )
+                                },
+                            ) {
+                                // The guarded mutation already admitted the exact
+                                // ACK. Never enqueue a second asynchronous response.
+                                Ok(()) => continue,
+                                Err((failure, detail)) => {
+                                    ExtensionRequestOutcome::Failed(failure, detail)
+                                }
+                            }
+                        }
+                    }
                     ExtensionComposerOperation::Set { text } => {
                         shell.extension_set_editor(text);
                         ExtensionRequestOutcome::Ok(serde_json::json!({}))
@@ -833,7 +876,9 @@ impl ExecutableExtensions {
     /// Revoke before dropping or replacing this binding. Reconciliation alone
     /// cannot find the old grant after a replacement App owns a fresh arbiter.
     pub fn revoke_terminal_grant_for_shell(&mut self, shell: &mut InteractiveShell, reason: &str) {
-        self.remote_ui.revoke(reason);
+        for notice in self.remote_ui.revoke(reason) {
+            shell.notice(notice);
+        }
         shell.set_remote_ui(self.remote_ui.projection());
         if let Some(revoked) = self.terminal_arbiter.revoke_if(|_| false) {
             self.restore_revoked_terminal_grant(shell, revoked, reason);

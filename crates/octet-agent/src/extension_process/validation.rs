@@ -29,6 +29,25 @@ pub(super) fn validate_tool_definitions(
     }
     let mut schema_budget = SchemaByteBudget(MAX_TOOL_CATALOG_SCHEMA_BYTES);
     for tool in tools {
+        validate_tool_prompt_metadata(tool, api_version)?;
+        if tool.prompt_snippet.is_some() || !tool.prompt_guidelines.is_empty() {
+            serde_json::to_writer(
+                &mut schema_budget,
+                &(&tool.prompt_snippet, &tool.prompt_guidelines),
+            )
+            .map_err(|_| {
+                ExtensionRuntimeError::Protocol(
+                    "tool catalog aggregate schema byte limit exceeded".into(),
+                )
+            })?;
+        }
+        if let Some(operation) = &tool.operation {
+            serde_json::to_writer(&mut schema_budget, operation).map_err(|_| {
+                ExtensionRuntimeError::Protocol(
+                    "tool catalog aggregate schema byte limit exceeded".into(),
+                )
+            })?;
+        }
         if let Some(sampling) = &tool.constrained_sampling {
             serde_json::to_writer(&mut schema_budget, sampling).map_err(|_| {
                 ExtensionRuntimeError::Protocol(format!(
@@ -45,7 +64,16 @@ pub(super) fn validate_tool_definitions(
         }
     }
     let mut names = BTreeSet::new();
+    let mut operation_ids = BTreeSet::new();
     for tool in tools {
+        validate_operation_definition(tool, api_version)?;
+        if let Some(operation) = &tool.operation {
+            if !operation_ids.insert(&operation.id) {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "duplicate operation id".into(),
+                ));
+            }
+        }
         if !names.insert(tool.name.clone()) {
             return Err(ExtensionRuntimeError::Protocol(format!(
                 "tool catalog contains duplicate `{}`",
@@ -92,12 +120,65 @@ pub(super) fn validate_tool_definitions_for_protocol(
     protocol: &ExtensionNegotiatedProtocol,
 ) -> Result<(), ExtensionRuntimeError> {
     validate_tool_definitions(tools, &protocol.version)?;
+    for tool in tools {
+        if (tool.prompt_snippet.is_some() || !tool.prompt_guidelines.is_empty())
+            && !protocol.supports(EXTENSION_FEATURE_TOOL_PROMPT_METADATA)
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "tool prompt metadata requires negotiated tool_prompt_metadata_v1".into(),
+            ));
+        }
+        if protocol.supports(EXTENSION_FEATURE_BULK_OBJECTS_V1) {
+            for schema in std::iter::once(&tool.parameters).chain(tool.output_schema.iter()) {
+                validate_bulk_schema(schema)?;
+            }
+        }
+        if let Some(operation) = &tool.operation {
+            if !protocol.supports(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1)
+                || ((!operation.resource_inputs.is_empty()
+                    || !operation.resource_outputs.is_empty())
+                    && !protocol.supports(EXTENSION_FEATURE_RESOURCE_REFS_V1))
+            {
+                return Err(resource_error("unsupported_feature"));
+            }
+        }
+    }
     if tools.iter().any(|tool| tool.composition.is_some())
         && !protocol.supports(EXTENSION_FEATURE_TOOL_COMPOSITION)
     {
         return Err(ExtensionRuntimeError::Protocol(
             "tool composition requires negotiated tool_composition_v1".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_tool_prompt_metadata(
+    tool: &ToolDefinition,
+    api_version: &str,
+) -> Result<(), ExtensionRuntimeError> {
+    let invalid = |reason: &str| {
+        ExtensionRuntimeError::Protocol(format!("tool `{}` prompt metadata: {reason}", tool.name))
+    };
+    if tool.prompt_snippet.is_none() && tool.prompt_guidelines.is_empty() {
+        return Ok(());
+    }
+    if api_version != EXTENSION_API_VERSION_0_4 {
+        return Err(invalid("requires API 0.4"));
+    }
+    if tool.prompt_guidelines.len() > 16 {
+        return Err(invalid("at most 16 guidelines are allowed"));
+    }
+    for text in tool.prompt_snippet.iter().chain(&tool.prompt_guidelines) {
+        if text.len() > 1024 {
+            return Err(invalid("each text must be at most 1024 UTF-8 bytes"));
+        }
+        if text
+            .chars()
+            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\t'))
+        {
+            return Err(invalid("text contains a control character"));
+        }
     }
     Ok(())
 }
@@ -859,6 +940,8 @@ pub(super) fn decode_tool_call_output(
         }
         (None, None) => {}
     }
+    crate::extension_diagnostics::validate_metadata(&wire.metadata)
+        .map_err(ExtensionRuntimeError::Protocol)?;
     let native = ToolOutput::from_content_parts(native_parts)
         .try_with_details(structured_content.clone(), Some(wire.metadata.clone()))
         .map_err(|error| {

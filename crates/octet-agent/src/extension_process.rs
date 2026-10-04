@@ -90,6 +90,7 @@ mod event_bus;
 pub use event_bus::ExtensionEventBus;
 
 mod admission;
+mod bulk;
 mod composition;
 mod connection;
 mod contributions;
@@ -107,6 +108,17 @@ mod protocol_line;
 mod provider_context;
 mod provider_stream;
 mod reader;
+mod resource_validation;
+use bulk::*;
+mod resources;
+use resource_validation::*;
+use resources::*;
+pub use resources::{
+    OperationDescriptor, ResourceAccess, ResourceCleanupStatus, ResourceInput, ResourceOutput,
+    ResourceRef, ResourceReleaseStatus, EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1,
+    EXTENSION_FEATURE_RESOURCE_REFS_V1, MAX_RESOURCE_RECORDS,
+    MAX_RESOURCE_REGISTRATIONS_PER_PARENT,
+};
 mod runtime_config;
 pub mod session_leaf;
 mod spawn;
@@ -173,6 +185,7 @@ pub use self::host_requests::ContextSnapshotRequest;
 pub use self::host_requests::ContextSystemPromptResult;
 pub use self::host_requests::ExtensionActiveSkill;
 pub use self::host_requests::ExtensionContributions;
+pub use self::host_requests::ExtensionEditorCheckpoint;
 pub use self::host_requests::ExtensionExecutionContext;
 pub use self::host_requests::ExtensionHostState;
 pub use self::host_requests::ExtensionModelCost;
@@ -268,6 +281,7 @@ pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
 pub use self::process_group::EXTENSION_FEATURE_APPROVALS;
 pub use self::process_group::EXTENSION_FEATURE_ARTIFACTS;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE;
+pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1;
 pub use self::process_group::EXTENSION_FEATURE_CACHE_WARMING_DECISION;
 pub use self::process_group::EXTENSION_FEATURE_COMPACTION_STRATEGY;
 pub use self::process_group::EXTENSION_FEATURE_COMPOSER;
@@ -367,7 +381,9 @@ pub use self::protocol::ExtensionProtocolRequest;
 pub use self::protocol::ExtensionProtocolResponse;
 pub use self::protocol::ExtensionRequestId;
 pub use self::protocol::RenderedToolCall;
+pub use self::protocol::ResourceProtocolLimits;
 pub use self::protocol::ToolRenderSegment;
+pub use self::protocol::EXTENSION_FEATURE_TOOL_PROMPT_METADATA;
 use self::protocol::*;
 use self::protocol_line::*;
 use self::provider_stream::*;
@@ -616,6 +632,10 @@ impl_owner_scoped_host_request!(ExtensionRemoteUiCloseRequest);
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ui_transport_tests;
 
 #[cfg(all(test, unix))]
 mod remote_ui_tests;
+#[cfg(all(test, unix))]
+mod resources_tests;

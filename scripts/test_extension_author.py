@@ -92,6 +92,27 @@ class AuthorTests(unittest.TestCase):
             self.assertEqual(receive()['id'],3)
             process.stdin.close(); self.assertEqual(process.wait(timeout=5),0, process.stderr.read())
             process.stdout.close(); process.stderr.close()
+    @unittest.skipUnless(os.environ.get('OCTET_PYTHON_HOST_SMOKE'), 'set OCTET_PYTHON_HOST_SMOKE to the built provider-free host probe')
+    def test_real_host_accepts_generated_package_names(self):
+        # The documented wait-extension name must work, not just the historical
+        # wait-tool test fixture. Each subtest uses a real Rust ExtensionProcess.
+        host = str(pathlib.Path(os.environ['OCTET_PYTHON_HOST_SMOKE']).resolve())
+        for name in ('wait-extension', 'wait-tool'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(dir='/private/tmp') as tmp:
+                package = pathlib.Path(tmp) / name
+                generated = subprocess.run([
+                    sys.executable, str(SCRIPT), str(SOURCE), str(package),
+                    '--name', name, '--tool', 'wait',
+                ], capture_output=True, text=True, timeout=10)
+                self.assertEqual(generated.returncode, 0, generated.stderr)
+                env = {key: value for key, value in os.environ.items() if key != 'PYTHONPATH'}
+                result = subprocess.run([host, str(package)], env=env,
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f'PASS discovery does not implicitly enable {name}', result.stdout)
+                self.assertIn('PASS cooperative cancellation and same-generation subsequent tool call', result.stdout)
+                self.assertIn('PASS host-qualified shutdown', result.stdout)
+
     def test_duplicate_invalid_tool_arguments_refused(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as tmp:
             out=pathlib.Path(tmp)/'out'

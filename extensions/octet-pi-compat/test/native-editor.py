@@ -38,6 +38,8 @@ def main():
     parser.add_argument("--adapter", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--node", type=Path, default=Path(shutil.which("node") or "/missing-node"))
     parser.add_argument("--capture", type=Path)
+    parser.add_argument("--burst", action="store_true",
+                        help="rescue as soon as a complete burst-input frame appears; no checkpoint grace period")
     args = parser.parse_args()
     for key in ("binary", "editor", "adapter", "node"):
         setattr(args, key, getattr(args, key).resolve(strict=True))
@@ -49,13 +51,17 @@ def main():
         try:
             terminal.until(lambda s: "probe" in s.text() and "Ctrl+G restore editor" in s.text(), label="foreign editor mounted")
             text = "ultrathink"
-            for char in text:
-                terminal.send(char.encode())
-                terminal.pump(0.012)
+            if args.burst:
+                terminal.send(text.encode())
+            else:
+                for char in text:
+                    terminal.send(char.encode())
+                    terminal.pump(0.012)
             terminal.until(lambda s: text in s.text(), label="complete foreign draft")
-            terminal.pump(0.5)  # allow lossless draft acknowledgements, not just a painted frame
-            terminal.resize(72, 24)
-            terminal.pump(0.3)
+            if not args.burst:
+                terminal.pump(0.5)  # grace period, not a protocol checkpoint acknowledgement
+                terminal.resize(72, 24)
+                terminal.pump(0.3)
             frame = terminal.screen.frames
             terminal.send(b"\x07")
             terminal.until(lambda s: s.frames > frame and "Ctrl+G restore editor" not in s.text(), label="post-rescue native frame")
@@ -63,12 +69,21 @@ def main():
                 raise AssertionError("native rescue lost the complete draft\n" + terminal.screen.text())
             terminal.send(b"-native")
             terminal.until(lambda s: text + "-native" in s.text(), label="recovered native draft remains editable")
+            # Late composer writes can mutate host text without repainting it.
+            # Force a later native edit; do not accept a stale post-rescue frame.
+            terminal.pump(0.5)
+            terminal.send(b"!")
+            terminal.until(lambda s: text + "-native!" in s.text(), label="native draft survives late editor writes")
+            if args.burst:
+                terminal.resize(72, 24)
+                terminal.pump(0.3)
             terminal.send(b"\x03")
             terminal.pump(0.1)
             terminal.close()
             print(json.dumps({"editor": "pass", "entrypoint": str(args.editor),
                 "sha256": hashlib.sha256(args.editor.read_bytes()).hexdigest(),
-                "rescue": "post-rescue native frame + complete editable draft", "resize": "pass",
+                "rescue": "post-rescue native frame + complete editable draft + later edit",
+                "input": "burst without grace period" if args.burst else "paced with grace period", "resize": "pass",
                 "shutdown": "pass", "first_frame_ms": terminal.first_frame_ms,
                 "captured_bytes": len(terminal.capture)}, indent=2))
         finally:
