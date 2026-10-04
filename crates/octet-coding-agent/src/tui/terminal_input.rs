@@ -406,8 +406,10 @@ fn candidate_status(text: &str) -> Candidate {
 ///
 /// Crossterm's EventStream keeps a background read armed after next() is
 /// cancelled. A terminal grant cannot quiesce that reader with an atomic flag.
-/// Poll only with a zero timeout on the frontend thread instead: when we yield,
-/// the terminal has no pending host read and may be handed to another owner.
+/// Poll synchronously for at most 1 ms on the frontend thread instead: when we
+/// yield, the terminal has no pending host read and may be handed to another
+/// owner. The supported level-triggered tty reader needs a positive timeout;
+/// its zero-timeout path does not inspect even already-buffered input.
 #[derive(Default)]
 pub struct ForegroundEvents {
     wake: Option<Pin<Box<Sleep>>>,
@@ -424,7 +426,7 @@ impl Stream for ForegroundEvents {
             }
             this.wake = None;
         }
-        match crossterm::event::poll(Duration::ZERO) {
+        match crossterm::event::poll(Duration::from_millis(1)) {
             Ok(true) => Poll::Ready(Some(crossterm::event::read())),
             Err(error) => Poll::Ready(Some(Err(error))),
             Ok(false) => {

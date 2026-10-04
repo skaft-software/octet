@@ -333,6 +333,13 @@ impl OctetTerminal<Stdout> {
         if capture_mouse {
             execute!(out, event::EnableMouseCapture)?;
         }
+        // Native Tern can change pane/OS focus without changing visibility.
+        // Request the standard notifications consumed by the shared frontend;
+        // native rendering bypasses sexy-tui's terminal startup entirely.
+        if crate::tui::view::tern::enabled_cached() {
+            execute!(out, event::EnableFocusChange)?;
+            lifecycle::mark_focus_reporting_active();
+        }
         // Preserve ordinary text as terminal text. Modified keys still use
         // CSI-u, and REPORT_ALTERNATE_KEYS supplies their layout-resolved
         // character (for example `a:A` and `1:!`) to crossterm. This keeps

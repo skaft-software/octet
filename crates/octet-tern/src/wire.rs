@@ -943,6 +943,14 @@ pub enum Event {
         /// Text length the terminal saw.
         len: usize,
     },
+    /// The user clicked a node requesting keyboard focus. The program retains
+    /// authority to reject it when another input owner or modal is active.
+    Focus {
+        /// Surface id.
+        sf: String,
+        /// Requested node id.
+        id: String,
+    },
     /// The terminal reported an error for a frame.
     Error {
         /// Surface id.
@@ -970,6 +978,22 @@ pub enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_focus_requires_the_surface_and_node_identity() {
+        assert_eq!(
+            serde_json::from_str::<Event>(
+                r#"{"ev":"focus","sf":"octet.session","id":"composer.editor"}"#
+            )
+            .unwrap(),
+            Event::Focus {
+                sf: "octet.session".into(),
+                id: "composer.editor".into(),
+            }
+        );
+        assert!(serde_json::from_str::<Event>(r#"{"ev":"focus","id":"editor"}"#).is_err());
+        assert!(serde_json::from_str::<Event>(r#"{"ev":"focus","sf":"surface"}"#).is_err());
+    }
 
     #[test]
     fn scroll_directions_match_the_wire_schema() {

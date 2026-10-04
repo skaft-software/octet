@@ -1710,6 +1710,57 @@ fn native_secret_setup_input_never_transports_value_or_accepts_native_confirmati
 }
 
 #[test]
+fn native_resize_burst_keeps_protocol_and_fresh_input_live() {
+    let mut pty = NativePty::spawn();
+    pty.ready();
+    for cycle in 0..3 {
+        for cols in [118, 102, 90, 81, 74, 70, 66, 64, 62, 61, 60, 59, 58, 57] {
+            pty.resize(cols, 38);
+        }
+        let marker = format!(" RETURN{cycle}");
+        pty.send(marker.as_bytes());
+        let expected = (0..=cycle)
+            .map(|n| format!(" RETURN{n}"))
+            .collect::<String>();
+        pty.wait(|pty| pty.draft() == expected);
+    }
+    pty.send(&[21]);
+    pty.wait(|pty| pty.draft().is_empty());
+    pty.close();
+}
+
+#[test]
+fn native_pointer_focus_reasserts_host_owner_and_restores_notifications() {
+    let mut pty = NativePty::spawn();
+    pty.ready();
+    assert!(pty.output.windows(8).any(|bytes| bytes == b"\x1b[?1004h"));
+    pty.settle();
+    let frames = pty.frames;
+    pty.event(json!({"ev":"focus","sf":"foreign.surface","id":"composer.editor"}));
+    pty.event(json!({"ev":"focus","sf":"octet.session","id":"unknown.editor"}));
+    pty.settle();
+    assert_eq!(pty.frames, frames);
+    let before = pty.messages.len();
+    pty.event(json!({"ev":"focus","sf":"octet.session","id":"composer.editor"}));
+    pty.wait(|pty| {
+        pty.messages[before..].iter().any(|(verb, body)| {
+            verb == "f"
+                && body["ops"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|op| op == &json!(["focus", "composer.editor"]))
+        })
+    });
+    pty.send(b"fresh");
+    pty.wait(|pty| pty.draft() == "fresh");
+    pty.send(&[21]);
+    pty.wait(|pty| pty.draft().is_empty());
+    pty.close();
+    assert!(pty.output.windows(8).any(|bytes| bytes == b"\x1b[?1004l"));
+}
+
+#[test]
 fn native_resize_focus_visibility_and_eviction_reassert_focus_without_losing_draft() {
     let mut pty = NativePty::spawn();
     pty.ready();

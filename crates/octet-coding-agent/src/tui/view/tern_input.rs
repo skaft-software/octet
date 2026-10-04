@@ -18,11 +18,10 @@ pub(super) struct Mailbox {
     pub(super) messages: VecDeque<Incoming>,
     pub(super) bindings: Option<KeybindingsManager>,
     pub(super) editor_resync: u64,
-    /// OS-level keyboard-focus returns (`FocusGained`) observed by the
-    /// frontend. The native renderer treats a change like `set_visible(true)`:
-    /// it forces a frame and re-asserts `composer.editor` focus, because Tern
-    /// does not always deliver a TSP `Visible(true)` when returning from
-    /// another app or overlay (screen recording, space switch).
+    /// OS-level keyboard-focus returns (`FocusGained`) and accepted TSP
+    /// pointer-focus requests observed by the frontend. The native renderer
+    /// forces a frame and reasserts the current host-selected input owner;
+    /// Tern need not deliver `Visible(true)` for pane or OS-focus returns.
     pub(super) focus_resync: u64,
     pub(super) accepting_input: bool,
     pub(super) scroll_supported: bool,
@@ -90,7 +89,8 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
     if matches!(
         message,
         Incoming::Event(
-            Event::Edit { .. }
+            Event::Focus { .. }
+                | Event::Edit { .. }
                 | Event::Select { .. }
                 | Event::Activate { .. }
                 | Event::Action { .. }
@@ -107,7 +107,7 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
     // Its native cancellation is request-fenced; other controls must never
     // synthesize Enter/Esc into an ordinary or host-private input request.
     if matches!(message, Incoming::Event(
-        Event::Edit { id, .. } | Event::Select { id, .. }
+        Event::Focus { id, .. } | Event::Edit { id, .. } | Event::Select { id, .. }
         | Event::Activate { id, .. } | Event::Action { id, .. }
     ) if !id.starts_with("prompt."))
         && state.borrow().tool_input_prompt.is_some()
@@ -115,6 +115,16 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
         return None;
     }
     match message {
+        Incoming::Event(Event::Focus { sf, id }) if sf == super::tern::SURFACE => {
+            if super::tern::focus_target(&state.borrow()).as_deref() == Some(id.as_str()) {
+                state
+                    .native()
+                    .lock()
+                    .expect("native mailbox poisoned")
+                    .focus_resync += 1;
+            }
+            None
+        }
         Incoming::Event(Event::Select { sf, id, item } | Event::Activate { sf, id, item })
             if sf == super::tern::SURFACE && id.starts_with("completion.") =>
         {
@@ -500,6 +510,46 @@ mod tests {
     }
 
     #[test]
+    fn pointer_focus_reasserts_only_the_current_host_selected_owner() {
+        use super::super::tern::{focus_target, SURFACE};
+        let mut shell = native_slash_shell();
+        let handler = shell.tern_input_handler();
+        let request = |sf: &str, id: &str| {
+            assert!(handler(Incoming::Event(Event::Focus {
+                sf: sf.into(),
+                id: id.into(),
+            }))
+            .is_none());
+        };
+        request("foreign.surface", "composer.editor");
+        request(SURFACE, "unknown.editor");
+        assert_eq!(shell.state.native().lock().unwrap().focus_resync, 0);
+        request(SURFACE, "composer.editor");
+        assert_eq!(shell.state.native().lock().unwrap().focus_resync, 1);
+        assert_eq!(shell.pending(), "/");
+
+        shell.begin_tool_input("Ordinary input", false);
+        let prompt = focus_target(&shell.state.borrow()).unwrap();
+        request(SURFACE, "composer.editor");
+        request(SURFACE, "prompt.stale.editor");
+        assert_eq!(shell.state.native().lock().unwrap().focus_resync, 1);
+        request(SURFACE, &prompt);
+        assert_eq!(shell.state.native().lock().unwrap().focus_resync, 2);
+        assert_eq!(shell.pending(), "/");
+        shell.end_tool_input();
+
+        shell.begin_tool_input("Private input", true);
+        assert!(focus_target(&shell.state.borrow()).is_none());
+        request(SURFACE, "composer.editor");
+        request(SURFACE, &prompt);
+        assert_eq!(shell.state.native().lock().unwrap().focus_resync, 2);
+        shell.end_tool_input();
+        shell.state.native().lock().unwrap().accepting_input = false;
+        request(SURFACE, "composer.editor");
+        assert_eq!(shell.state.native().lock().unwrap().focus_resync, 2);
+    }
+
+    #[test]
     fn native_slash_activation_uses_confirm_instead_of_submit() {
         for name in ["/help", "/exit", "/late-extension"] {
             let mut shell = native_slash_shell();
@@ -806,7 +856,7 @@ mod tests {
             let id = tern_picker::id(&shell.state.borrow());
             shell.begin_tool_input("Current request", secret);
             let handler = shell.tern_input_handler();
-            for verb in ["select", "activate", "action", "edit"] {
+            for verb in ["focus", "select", "activate", "action", "edit"] {
                 let wire = serde_json::json!({"ev":verb,"sf":super::super::tern::SURFACE,
                     "id":id,"item":"1","act":"confirm","from":0,"to":0,"text":"stale",
                     "cursor":5,"len":0});
