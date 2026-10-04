@@ -13,6 +13,9 @@ use super::{
 mod sheet;
 use sheet::node as list_sheet;
 
+#[path = "tern_session_edit.rs"]
+pub(crate) mod session_edit;
+
 pub(super) fn id(shell: &ShellState) -> String {
     // Catalogue refreshes retain the host request, but must fence ordinal
     // gestures so an old reply cannot select a different worker or session.
@@ -79,8 +82,20 @@ pub(super) fn interactive(panel: &Panel) -> bool {
     }
 }
 
+/// The rename editor owns focus; browse lists keep their catalogue identity.
+pub(super) fn focus(shell: &ShellState) -> Option<String> {
+    if matches!(&shell.panel, Some(Panel::SessionPicker { picker }) if picker.rename.is_some()) {
+        session_edit::focus(shell)
+    } else {
+        Some(id(shell))
+    }
+}
+
 pub(super) fn node(shell: &ShellState) -> Option<Node> {
     let panel = shell.panel.as_ref()?;
+    if matches!(panel, Panel::SessionPicker { picker } if picker.rename.is_some()) {
+        return session_edit::node(shell);
+    }
     let safe = |value: &str| sanitize_ordinary_surface_cell(value, shell.theme.unicode());
     if let Panel::ReadOnlyDocument {
         title,
@@ -112,17 +127,7 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
                         )
                         .set("wrap", "word"),
                 ),
-                Node::new(
-                    "panel.document.hint",
-                    Kind::Text,
-                    Props::new().text(
-                        "spans",
-                        vec![Span::styled(
-                            tern_controls::hint(shell, "tui.select.cancel", "close"),
-                            "muted",
-                        )],
-                    ),
-                ),
+                tern_controls::action(shell, &id(shell), "cancel", "Close", "tui.select.cancel"),
             ],
         ));
     }
@@ -544,6 +549,10 @@ fn thinking_node(
 
 /// Only exact controls of the current catalogue and host request can act.
 pub(super) fn owns_action(shell: &ShellState, node: &str) -> bool {
+    // Rename has exact, source-revision-bound controls, never browse controls.
+    if matches!(&shell.panel, Some(Panel::SessionPicker { picker }) if picker.rename.is_some()) {
+        return false;
+    }
     let panel = id(shell);
     node == panel
         || ["sheet", "confirm", "cancel", "up", "down"]

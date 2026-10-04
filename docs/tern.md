@@ -186,9 +186,12 @@ selection exposes workspace, sorting, named/path filters, explicit transcript
 search, rename and delete actions; the selected session previews its saved
 metadata. Scope and filter chips wrap separately from the primary actions.
 Narrow layouts request a below-list preview; Tern may hide that preview at its
-smallest widths, but Resume remains visible. Rename and delete confirmation
-still use the existing host-owned ANSI-content modal flow; native session
-rename is a remaining adapter gap. Settings/help reports are native
+smallest widths, but Resume remains visible. Rename uses a bounded native editor
+with source/catalogue/revision-fenced identities and resolved submit/cancel
+controls; the existing host picker driver persists it. Its field and actions
+precede long metadata in narrow panes. Trash/delete confirmation remains the
+host-owned ANSI-content modal flow, with no new positive pointer authority.
+Settings/help reports are native
 modal content rather than migration `rows` nodes. Internally styled documents
 and approval labels may use native `ansi` content; this never runs or repaints
 an ANSI TUI. A user bubble is filled with the projected `userMessageBg` and carries
@@ -233,8 +236,18 @@ bypass ordinary selection-key normalization, including remapped/disabled picker
 bindings. Native cancellation is request-fenced and returns raw Esc to that private
 owner. No unsupported password property is invented. While temporary
 input, a panel or remote UI owns focus, ordinary composer edits/actions are
-readonly or suppressed. Remote editor/fullscreen placements project their
+readonly or suppressed. Underlying panel gestures cannot synthesize submission
+into a temporary input request. Remote editor/fullscreen placements project their
 validated native ANSI content rather than leaving an active ordinary composer.
+
+ChatGPT sign-in owns a transient native read-only document rather than
+suspending rendering. A task-local single-slot progress channel publishes public
+browser/device instructions, fallback, waiting/exchanging and credential commit
+facts. The frontend owns cancellation/EOF; pre-commit cancellation drops OAuth,
+while a completed save cannot be misreported as cancelled. Draft/caret/chips are
+preserved; instructions and device codes are not stored in history. Documents
+have request-fenced, binding-resolved native close controls. Synthetic owner
+tests do not prove real OAuth, credential saves or native link interactions.
 
 Bash/exec tools and local `!` commands show the FULL command immediately in
 wrapping `code` rails, without line numbers or a collapsible command target.
@@ -242,7 +255,8 @@ Captured output is absent from the native tree and transport until global Ctrl+O
 requests verbose output; this gate includes command-image preparation, hashing
 and blob upload, not just image nodes. Second Ctrl+O removes the output projection
 without discarding captured source. A per-tool disclosure cannot bypass this gate.
-`!!` retains its existing excluded-history semantics.
+`!!` retains its existing exclusion from model context; its output can still be
+stored as non-model-visible configuration presentation metadata.
 
 The command rail retains truthful lifecycle status, available duration and local
 exit code; captured failure output also requires disclosure. Verbose Bash/exec
@@ -281,7 +295,11 @@ returning to the tab forces a frame and re-asserts native keyboard focus.
 An OS focus return that arrives with no TSP `Visible` event (another app or
 overlay was in front, e.g. screen recording) takes the same recovery path via
 the frontend's `FocusGained` signal: the next frame is forced, `composer.editor`
-focus is re-asserted, and the draft is refreshed.
+focus is re-asserted, and the draft is refreshed. A focus return arriving during
+materialization is not consumed by a draft-only refresh. Hidden presentation
+also remains suspended when unused frame credit exists. Actual pane-return
+fresh-input admission remains intermittently unqualified; synthetic focus tests
+or retained pixels do not establish that journey.
 Resize, zoom and appearance events preserve native ownership and retained
 identity. Explicit eviction reopens the surface and replays its regions. Credit
 exhaustion coalesces changes until acknowledgements arrive; negotiation,
@@ -310,8 +328,13 @@ cargo test -p octet-coding-agent --test tern_native_pty --locked
 
 The PTY lane uses the real octet binary and input parser, a synthetic TSP
 terminal, isolated HOME/workspace, and an inert loopback-only provider record.
-It exercises paste, Unicode, fragmented replies, Escape, slash completion,
-settings and theme selection without GUI automation or live provider calls.
+It exercises startup/resume/fork, source-backed catalogue filtering/rename,
+reports, Unicode/UTF-16 edits, remapped/disabled controls, bounded ordinary/private
+input, loopback streaming/cancel, command disclosure and native lifecycle/fallback
+without GUI automation or live provider calls. Resumed and forked active-session
+export have PTY coverage; the earlier lock-deadlock hypothesis was not reproduced
+after correcting the fixture/transport. Actual Tern also exported executed local
+command history from a fresh active session; the full matrix remains unqualified.
 Protocol/tree fixtures cover retained streaming, credit, eviction, appearance,
 prompt provenance, command-output/blob disclosure and acknowledgement-gated
 approval consent. Test commands are qualification entrypoints, not a claim that
@@ -335,10 +358,12 @@ the ANSI renderer. This is distinct from
 running an ANSI TUI. Extension-defined styled rows also remain native ANSI
 content until those extension contracts provide semantic nodes.
 
-All 37 existing octet native surface families remain required, but native auth
-instructions still lack an equivalent while authentication suspends the surface;
-session rename is legacy ANSI content; native paste intent, revision-complete
-edits, semantic navigation/search/selection and pointer geometry remain gaps.
+All 37 existing octet native surface families remain required. Native auth
+progress and semantic session rename are implemented but not fully qualified;
+intermittent actual pane-return input remains a blocker; export's full mutation/
+error matrix remains unqualified.
+Native paste intent, revision-complete composer/temporary edits, semantic
+navigation/search/selection and pointer geometry remain gaps.
 Tern 0.3.1 is untested. This is an independent RAIL implementation deliverable,
 not full-parity or release-ready qualification.
 

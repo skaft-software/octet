@@ -103,6 +103,17 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
     {
         return None;
     }
+    // A temporary input owner supersedes a still-open underlying panel.
+    // Its native cancellation is request-fenced; other controls must never
+    // synthesize Enter/Esc into an ordinary or host-private input request.
+    if matches!(message, Incoming::Event(
+        Event::Edit { id, .. } | Event::Select { id, .. }
+        | Event::Activate { id, .. } | Event::Action { id, .. }
+    ) if !id.starts_with("prompt."))
+        && state.borrow().tool_input_prompt.is_some()
+    {
+        return None;
+    }
     match message {
         Incoming::Event(Event::Select { sf, id, item } | Event::Activate { sf, id, item })
             if sf == super::tern::SURFACE && id.starts_with("completion.") =>
@@ -269,6 +280,37 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             edited.replace_range(from..to, text);
             super::tern_picker::replace_filter(&mut shell, edited);
             None
+        }
+        Incoming::Event(Event::Edit {
+            sf,
+            id,
+            from,
+            to,
+            text,
+            cursor,
+            len,
+        }) if sf == super::tern::SURFACE && id.starts_with("session-edit.") => {
+            super::tern_picker::session_edit::edit(
+                &mut state.borrow_mut(),
+                id,
+                *from,
+                *to,
+                text,
+                *cursor,
+                *len,
+            );
+            None
+        }
+        Incoming::Event(Event::Action {
+            sf, id, act, value, ..
+        }) if sf == super::tern::SURFACE && id.starts_with("session-edit.") => {
+            if value.is_some() {
+                return None;
+            }
+            let shell = state.borrow();
+            let binding = super::tern_picker::session_edit::action(&shell, id, act)?;
+            drop(shell);
+            bound_key(state, binding)
         }
         Incoming::Event(Event::Edit {
             sf,
@@ -703,6 +745,89 @@ mod tests {
         assert_eq!(utf16_boundary("a🦀雪", 3), Some(5));
         assert_eq!(utf16_boundary("a🦀雪", 4), Some(8));
         assert_eq!(utf16_boundary("a🦀雪", 5), None);
+    }
+
+    #[test]
+    fn document_close_is_request_fenced_and_resolves_cancel_binding() {
+        use super::super::{tern_picker, Panel};
+        let mut shell = InteractiveShell::test_shell();
+        shell.state.native().lock().unwrap().accepting_input = true;
+        shell.input_dispatch.bindings = KeybindingsManager::with_platform(
+            "linux",
+            false,
+            std::collections::BTreeMap::from([("tui.select.cancel".into(), vec!["ctrl+y".into()])]),
+        );
+        shell.open_panel(Panel::ReadOnlyDocument {
+            title: "Transient instructions".into(),
+            text: "No credential".into(),
+            styled: false,
+            scroll_from_bottom: 0,
+        });
+        let id = format!("{}.cancel", tern_picker::id(&shell.state.borrow()));
+        let handler = shell.tern_input_handler();
+        let action = Incoming::Event(Event::Action {
+            sf: super::super::tern::SURFACE.into(),
+            id,
+            act: "cancel".into(),
+            value: None,
+            mods: None,
+        });
+        assert_eq!(
+            handler(action.clone()),
+            Some(InputEvent::Key(KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL,
+            )))
+        );
+        shell.state.native().lock().unwrap().bindings = Some(KeybindingsManager::with_platform(
+            "linux",
+            false,
+            std::collections::BTreeMap::from([("tui.select.cancel".into(), Vec::new())]),
+        ));
+        assert!(handler(action.clone()).is_none());
+        shell.close_panel();
+        assert!(handler(action).is_none());
+    }
+
+    #[test]
+    fn temporary_input_rejects_all_underlying_panel_gestures() {
+        use super::super::{tern_picker, OrdinarySurfaceMetadata, Panel, PanelAction};
+        for secret in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.state.native().lock().unwrap().accepting_input = true;
+            shell.open_panel(Panel::SelectList {
+                surface: OrdinarySurfaceMetadata::new("Underlying choice"),
+                items: vec!["First".into(), "Second".into()],
+                descriptions: vec![None, None],
+                selected: 0,
+                filter: String::new(),
+                action: PanelAction::SelectThinking(Vec::new()),
+            });
+            let id = tern_picker::id(&shell.state.borrow());
+            shell.begin_tool_input("Current request", secret);
+            let handler = shell.tern_input_handler();
+            for verb in ["select", "activate", "action", "edit"] {
+                let wire = serde_json::json!({"ev":verb,"sf":super::super::tern::SURFACE,
+                    "id":id,"item":"1","act":"confirm","from":0,"to":0,"text":"stale",
+                    "cursor":5,"len":0});
+                let event = octet_tern::frame::decode_body("e", &wire.to_string()).unwrap();
+                assert!(handler(event).is_none());
+            }
+            let state = shell.state.borrow();
+            let Some(Panel::SelectList {
+                selected, filter, ..
+            }) = &state.panel
+            else {
+                panic!("panel retained")
+            };
+            assert_eq!(*selected, 0);
+            assert_eq!(filter, "");
+            assert_eq!(state.tool_input_prompt.as_deref(), Some("Current request"));
+            assert_eq!(
+                state.tool_input_editor.as_ref().map(|editor| editor.text()),
+                (!secret).then_some("")
+            );
+        }
     }
 
     #[test]

@@ -642,6 +642,95 @@ fn coalesced_drafts_keep_frontend_completion_revisions_and_pointer_selection() {
 }
 
 #[test]
+fn focus_return_during_materialization_is_not_consumed_without_focus() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct FocusWriter {
+        output: Output,
+        state: SharedState,
+        armed: Arc<AtomicBool>,
+    }
+    impl io::Write for FocusWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                self.state.native().lock().unwrap().focus_resync += 1;
+            }
+            self.output.write(bytes)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let shell = InteractiveShell::test_shell();
+    shell.state.borrow_mut().startup_pending = false;
+    shell.state.borrow_mut().render_threaded = true;
+    let output = Output::default();
+    let armed = Arc::new(AtomicBool::new(false));
+    let client = TernClient::with_writer(
+        "test",
+        None,
+        FocusWriter {
+            output: output.clone(),
+            state: shell.state.clone(),
+            armed: armed.clone(),
+        },
+    )
+    .unwrap();
+    let mut surface = TernSurface::with_client(client);
+    surface.observe(&hello(true, 2)).unwrap();
+    surface.flush(&shell.state).unwrap();
+    ack(&shell, 1);
+    // A palette write occurs after the frontend snapshot was captured. Deliver
+    // focus in that gap, deterministically, without a timing-dependent thread.
+    shell.state.borrow_mut().theme_epoch += 1;
+    armed.store(true, Ordering::SeqCst);
+    surface.flush(&shell.state).unwrap();
+    assert!(!armed.load(Ordering::SeqCst));
+    assert!(output.last_frame()["ops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|op| op == &json!(["focus", "composer.editor"])));
+}
+
+#[test]
+fn hidden_pane_with_available_credit_defers_edits_until_visible() {
+    let (shell, mut surface, output) = setup(2);
+    surface.flush(&shell.state).unwrap();
+    surface
+        .observe(&Incoming::Event(Event::Visible {
+            sf: Some(SURFACE.into()),
+            visible: false,
+        }))
+        .unwrap();
+    shell.state.borrow_mut().editor.set_text("hidden draft 🦀");
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 1);
+    assert!(surface.client.has_credit(SURFACE));
+    surface
+        .observe(&Incoming::Event(Event::Visible {
+            sf: Some(SURFACE.into()),
+            visible: true,
+        }))
+        .unwrap();
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 2);
+    assert_eq!(
+        find_node(&surface.sent.dock, "composer.editor")
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["text"],
+        "hidden draft 🦀"
+    );
+    assert!(output.last_frame()["ops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|op| op == &json!(["focus", "composer.editor"])));
+}
+
+#[test]
 fn hidden_pane_keeps_its_place_and_reasserts_focus_on_return() {
     let (shell, mut surface, output) = setup(1);
     surface.flush(&shell.state).unwrap();
