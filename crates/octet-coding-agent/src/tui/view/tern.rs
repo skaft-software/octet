@@ -273,6 +273,7 @@ impl TernSurface {
                 ..
             }) => {
                 self.set_visible(*visible);
+                self.last_key = None;
             }
             Incoming::Event(Event::Resize { .. }) => self.last_key = None,
             Incoming::Event(Event::Toggle {
@@ -341,6 +342,12 @@ impl TernSurface {
                     "Tern did not answer the native hello query",
                 ));
             }
+            return Ok(());
+        }
+        // Hidden panes may still have outstanding credit. Keep accepting
+        // source and acknowledgements, but do not prepare or send presentation
+        // until visibility returns and reasserts the native focus.
+        if !self.visible {
             return Ok(());
         }
         if !self.client.has_credit(SURFACE) {
@@ -520,6 +527,12 @@ impl TernSurface {
             .lock()
             .expect("native mailbox poisoned")
             .focus_resync;
+        if focus_resync_now != self.last_focus_resync {
+            // Focus may arrive while materializing outside the frontend lock.
+            // Never consume that newer counter with a draft refresh alone.
+            self.force_focus = true;
+            self.credit_blocked = None;
+        }
         // A focus return also refreshes the composer draft: the terminal may
         // hold a stale revision after input was impossible, and stale drafts
         // reject gestures on length mismatch.
@@ -748,7 +761,7 @@ fn project(
         out.focus = super::tern_prompt::focus(shell);
         out.layer.push(prompt);
     } else if let Some(picker) = super::tern_picker::node(shell) {
-        out.focus = Some(super::tern_picker::id(shell));
+        out.focus = super::tern_picker::focus(shell);
         out.layer.push(picker);
     } else if let Some(overlay) = report(shell, client.supports(Kind::Table)) {
         out.layer.push(overlay);
@@ -1164,7 +1177,7 @@ fn composer(shell: &ShellState) -> Node {
             "composer.context",
             Kind::Meter,
             Props::new()
-                .role("omp.composer.context")
+                .role("octet.composer.context")
                 .set("style", "bar")
                 .set("value", (used as f64 / total as f64).min(1.0))
                 .set(

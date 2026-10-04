@@ -767,6 +767,7 @@ pub(crate) struct PickerState {
     pub(crate) confirming_delete: bool,
     /// The active rename buffer, when Ctrl+R has entered rename mode.
     pub(crate) rename: Option<String>,
+    pub(crate) rename_state: tern_picker::session_edit::State,
     /// Typed ordinary title, purpose, and lifecycle state. Unlike the former
     /// free-form message tuple, rendering cannot infer tone from its wording.
     pub(crate) surface: OrdinarySurfaceMetadata,
@@ -788,6 +789,7 @@ impl PickerState {
             scroll: 0,
             confirming_delete: false,
             rename: None,
+            rename_state: tern_picker::session_edit::State::default(),
             surface: OrdinarySurfaceMetadata::with_purpose(
                 "Resume Session",
                 "Select a saved session to continue",
@@ -7128,64 +7130,16 @@ impl InteractiveShell {
             Panel::SessionPicker { picker } => {
                 use crossterm::event::{Event, KeyCode, KeyModifiers};
 
+                if picker.rename.is_some() {
+                    if let Some(request) =
+                        tern_picker::session_edit::input(picker, event, usize::from(size.0))
+                    {
+                        state.pending_panel_requests.push(request);
+                    }
+                    return None;
+                }
                 match event {
                     Event::Key(key) if crate::tui::keymap::accepts_key_event(key) => {
-                        // Rename owns the complete key stream until it is
-                        // committed or cancelled. This keeps ordinary picker
-                        // shortcuts from mutating the name buffer.
-                        if picker.rename.is_some() {
-                            match key.code {
-                                KeyCode::Esc if key.modifiers.is_empty() => {
-                                    picker.rename = None;
-                                    picker.surface.lifecycle = OrdinarySurfaceLifecycle::cancelled(
-                                        "rename",
-                                        Instant::now() + Duration::from_secs(2),
-                                    );
-                                }
-                                KeyCode::Backspace if key.modifiers.is_empty() => {
-                                    if let Some(rename) = picker.rename.as_mut() {
-                                        rename.pop();
-                                    }
-                                }
-                                KeyCode::Char(character)
-                                    if !key.modifiers.intersects(
-                                        KeyModifiers::CONTROL
-                                            | KeyModifiers::ALT
-                                            | KeyModifiers::SUPER,
-                                    ) =>
-                                {
-                                    if let Some(rename) = picker.rename.as_mut() {
-                                        rename.push(character);
-                                    }
-                                }
-                                KeyCode::Enter if key.modifiers.is_empty() => {
-                                    let name = picker
-                                        .rename
-                                        .as_deref()
-                                        .map(str::trim)
-                                        .filter(|name| !name.is_empty())
-                                        .map(str::to_owned);
-                                    if let Some(name) = name {
-                                        let ordering = session_picker_ordering(picker);
-                                        if let Some(index) = ordering.get(picker.selected).copied()
-                                        {
-                                            if let Some(meta) = picker.active_rows().get(index) {
-                                                let request = PanelRequest::RenameSession {
-                                                    id: meta.id.clone(),
-                                                    path: meta.path.clone(),
-                                                    name,
-                                                };
-                                                picker.rename = None;
-                                                state.pending_panel_requests.push(request);
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => picker.rename = None,
-                            }
-                            return None;
-                        }
-
                         // Delete confirmation intentionally ignores every key
                         // other than the two terminal decisions.
                         if picker.confirming_delete {
@@ -7257,14 +7211,7 @@ impl InteractiveShell {
                                 picker.show_path = !picker.show_path;
                             }
                             KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => {
-                                let ordering = session_picker_ordering(picker);
-                                if let Some(index) = ordering.get(picker.selected).copied() {
-                                    if let Some(meta) = picker.active_rows().get(index) {
-                                        picker.rename = Some(
-                                            meta.name.clone().unwrap_or_else(|| meta.title.clone()),
-                                        );
-                                    }
-                                }
+                                tern_picker::session_edit::begin(picker);
                             }
                             KeyCode::Delete if key.modifiers.is_empty() => {
                                 let ordering = session_picker_ordering(picker);

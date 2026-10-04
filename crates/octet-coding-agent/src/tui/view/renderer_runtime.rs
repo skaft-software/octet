@@ -553,11 +553,12 @@ pub(super) fn render_loop_with_terminal(
             Err(error) => {
                 // Fallback is explicit and only follows failed negotiation or
                 // protocol I/O. Resizes never create an ANSI presentation.
-                state
-                    .borrow_mut()
-                    .push_block(super::TranscriptBlock::Notice(format!(
-                        "Native Tern rendering unavailable: {error}. Using terminal rendering."
-                    )));
+                // Keep the diagnostic outside pending history installation,
+                // which replaces the startup transcript atomically. The normal
+                // diagnostic queue admits it once startup is ready.
+                crate::output::stderr_line(format!(
+                    "Native Tern rendering unavailable: {error}. Using terminal rendering."
+                ));
                 terminal.show_cursor();
             }
         }

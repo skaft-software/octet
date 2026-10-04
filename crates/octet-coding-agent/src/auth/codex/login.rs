@@ -14,12 +14,68 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use tokio::sync::watch;
 
 use super::store::{CredentialFile, CredentialStore, Tokens};
 use super::{
     browser, oauth, BROWSER_CALLBACK_PORTS, DEVICE_CODE_TIMEOUT_SECS, DEVICE_VERIFICATION_URI,
     MODELS, TOKEN_URL,
 };
+
+/// Transient presentation facts only: never OAuth tokens, verifiers or callback codes.
+/// Each value replaces the previous one in a single-slot watch channel. Device
+/// instruction bytes are bounded by the OAuth decoder and checked before publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoginProgress {
+    Starting,
+    Browser {
+        url: String,
+        callback_port: u16,
+    },
+    Fallback(LoginFallback),
+    Device {
+        user_code: String,
+        phase: DeviceLoginPhase,
+    },
+    /// Authorization succeeded; waiting for the existing private-store lock.
+    Saving,
+    /// The credential commit has completed; cancellation cannot undo it.
+    SignedIn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoginFallback {
+    BusyCallbackPorts,
+    NoBrowserOpener,
+    LimitedCredential,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceLoginPhase {
+    Waiting,
+    SlowDown,
+    Exchanging,
+}
+
+pub(crate) fn login_progress_channel(
+) -> (watch::Sender<LoginProgress>, watch::Receiver<LoginProgress>) {
+    watch::channel(LoginProgress::Starting)
+}
+
+tokio::task_local! {
+    // Browser callbacks call save_tokens through the existing token-validation
+    // path. This task-local scope lets that path publish the exact commit fact
+    // without introducing process-global or shared ShellState authentication.
+    static NATIVE_LOGIN_PROGRESS: watch::Sender<LoginProgress>;
+}
+
+fn publish_progress(progress: LoginProgress) {
+    let _ = NATIVE_LOGIN_PROGRESS.try_with(|sender| sender.send_replace(progress));
+}
+
+fn native_presentation() -> bool {
+    NATIVE_LOGIN_PROGRESS.try_with(|_| ()).is_ok()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LoginMethod {
@@ -61,7 +117,7 @@ fn opener_available() -> bool {
 fn choose_method(headless: bool, ssh: bool, opener: bool, ask: bool) -> Result<LoginMethod> {
     let default = default_method(headless, ssh, opener);
     if headless || !ask || !io::stdin().is_terminal() {
-        if !headless && default == LoginMethod::Browser {
+        if !native_presentation() && !headless && default == LoginMethod::Browser {
             crate::output::stdout_line(
                 "Using browser sign-in. For a device code instead, run `octet --login codex --headless`.",
             );
@@ -95,14 +151,17 @@ async fn browser_listener(ports: &[u16]) -> Result<Option<(tokio::net::TcpListen
             }
         }
     }
-    let ports = ports
-        .iter()
-        .map(u16::to_string)
-        .collect::<Vec<_>>()
-        .join(" and ");
-    crate::output::stdout_line(format!(
-        "Callback port {ports} is already in use; using a device code instead."
-    ));
+    if !native_presentation() {
+        let ports = ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(" and ");
+        crate::output::stdout_line(format!(
+            "Callback port {ports} is already in use; using a device code instead."
+        ));
+    }
+    publish_progress(LoginProgress::Fallback(LoginFallback::BusyCallbackPorts));
     Ok(None)
 }
 
@@ -119,6 +178,28 @@ pub async fn login_without_prompt(store: &CredentialStore) -> Result<()> {
     login_with(store, false, false).await
 }
 
+/// Frontend-owned login: no stdin read or stdout authentication instructions.
+/// Dropping this future cancels pre-commit work. The short credential commit is
+/// synchronous in this scope, so no detached save worker can outlive cancellation;
+/// SignedIn is published immediately after that commit, before the browser's
+/// asynchronous success-page write. CLI login retains its existing output/worker.
+/// Browser opening and provider traffic still belong to the existing OAuth flow.
+pub(crate) async fn login_with_progress(
+    store: &CredentialStore,
+    progress: watch::Sender<LoginProgress>,
+) -> Result<()> {
+    NATIVE_LOGIN_PROGRESS
+        .scope(progress, login_with(store, false, false))
+        .await
+}
+
+fn fallback(reason: LoginFallback, message: &str) {
+    if !native_presentation() {
+        crate::output::stdout_line(message);
+    }
+    publish_progress(LoginProgress::Fallback(reason));
+}
+
 async fn login_with(store: &CredentialStore, headless: bool, ask: bool) -> Result<()> {
     let opener = opener_available();
     let method = choose_method(headless, ssh_session(), opener, ask)?;
@@ -127,9 +208,15 @@ async fn login_with(store: &CredentialStore, headless: bool, ask: bool) -> Resul
             let redirect_uri = browser::redirect_uri(port);
             let authorization = browser::Authorization::generate()?;
             let url = authorization.url(&redirect_uri);
-            crate::output::stdout_multiline(format!(
-                "Opening OpenAI sign-in in your browser. If it does not open, copy this URL:\n\n  {url}\n\nWaiting for a callback on 127.0.0.1:{port} (up to 5 minutes)…"
-            ));
+            if !native_presentation() {
+                crate::output::stdout_multiline(format!(
+                    "Opening OpenAI sign-in in your browser. If it does not open, copy this URL:\n\n  {url}\n\nWaiting for a callback on 127.0.0.1:{port} (up to 5 minutes)…"
+                ));
+            }
+            publish_progress(LoginProgress::Browser {
+                url: url.clone(),
+                callback_port: port,
+            });
             if open_browser(&url) {
                 let http = super::http_client();
                 match browser::serve(
@@ -146,18 +233,23 @@ async fn login_with(store: &CredentialStore, headless: bool, ask: bool) -> Resul
                         signed_in_notice();
                         return Ok(());
                     }
-                    browser::BrowserSignIn::LimitedCredential => crate::output::stdout_line(
+                    browser::BrowserSignIn::LimitedCredential => fallback(
+                        LoginFallback::LimitedCredential,
                         "OpenAI issued a limited (localhost-only) credential through the browser, which cannot reach the ChatGPT model pool; continuing with a device code.",
                     ),
                 }
             } else {
-                crate::output::stdout_line(
+                fallback(
+                    LoginFallback::NoBrowserOpener,
                     "No browser opener could be started; using a device code instead.",
                 );
             }
         }
     } else if method == LoginMethod::Browser {
-        crate::output::stdout_line("No browser opener is available; using a device code instead.");
+        fallback(
+            LoginFallback::NoBrowserOpener,
+            "No browser opener is available; using a device code instead.",
+        );
     }
     login_device(store, headless).await?;
     signed_in_notice();
@@ -176,10 +268,26 @@ pub(super) async fn save_tokens(store: &CredentialStore, tokens: oauth::Tokens) 
         },
         expires_at: tokens.expires_at,
     };
-    let save_store = store.clone();
-    tokio::task::spawn_blocking(move || save_store.save(&credential))
-        .await
-        .context("credential-save worker failed")??;
+    if native_presentation() {
+        publish_progress(LoginProgress::Saving);
+        // Lock contention is cancellable and off the frontend. This worker owns
+        // no credential and can only acquire/release the bounded store lock.
+        let lock_store = store.clone();
+        let lock = tokio::task::spawn_blocking(move || lock_store.lock_refresh())
+            .await
+            .context("credential-lock worker failed")??;
+        // No await between publication and its reported commit fact. A cancelled
+        // frontend must never detach a credential-writing worker. The renderer
+        // remains independently owned and is never suspended.
+        store.save_while_refresh_locked(&credential, &lock)?;
+        publish_progress(LoginProgress::SignedIn);
+        lock.finish()?;
+    } else {
+        let save_store = store.clone();
+        tokio::task::spawn_blocking(move || save_store.save(&credential))
+            .await
+            .context("credential-save worker failed")??;
+    }
     Ok(())
 }
 
@@ -187,11 +295,19 @@ async fn login_device(store: &CredentialStore, headless: bool) -> Result<()> {
     let http = super::http_client();
     let device = oauth::start_device_auth(&http).await?;
 
-    let terminal = crate::output::stdout_is_terminal();
-    let user_code = crate::output::table_field(&device.user_code, terminal);
-    crate::output::stdout_multiline(format!(
-        "Open this URL and enter the code shown below:\n\n  {DEVICE_VERIFICATION_URI}\n\n  Code: {user_code}\n\nWaiting for authorization…"
-    ));
+    if native_presentation() {
+        validate_presented_device_code(&device.user_code)?;
+    } else {
+        let terminal = crate::output::stdout_is_terminal();
+        let user_code = crate::output::table_field(&device.user_code, terminal);
+        crate::output::stdout_multiline(format!(
+            "Open this URL and enter the code shown below:\n\n  {DEVICE_VERIFICATION_URI}\n\n  Code: {user_code}\n\nWaiting for authorization…"
+        ));
+    }
+    publish_progress(LoginProgress::Device {
+        user_code: device.user_code.clone(),
+        phase: DeviceLoginPhase::Waiting,
+    });
     if !headless {
         let _ = open_browser(DEVICE_VERIFICATION_URI);
     }
@@ -210,20 +326,40 @@ async fn login_device(store: &CredentialStore, headless: bool) -> Result<()> {
             oauth::DevicePoll::Pending => {}
             oauth::DevicePoll::SlowDown => {
                 interval = interval.saturating_add(Duration::from_secs(5));
+                publish_progress(LoginProgress::Device {
+                    user_code: device.user_code.clone(),
+                    phase: DeviceLoginPhase::SlowDown,
+                });
             }
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         tokio::time::sleep(interval.min(remaining)).await;
     };
 
+    publish_progress(LoginProgress::Device {
+        user_code: device.user_code.clone(),
+        phase: DeviceLoginPhase::Exchanging,
+    });
     let tokens = oauth::exchange_device_code(&http, &authorization_code, &code_verifier)
         .await
         .context("exchanging the device authorization failed")?;
     save_tokens(store, tokens).await
 }
 
+fn validate_presented_device_code(code: &str) -> Result<()> {
+    // A verification code is public login instruction, not a token or arbitrary
+    // remote document. Reject instead of truncating into an unusable code.
+    if code.len() > 256 || code.chars().any(char::is_control) {
+        bail!("device authorization returned an invalid verification code");
+    }
+    Ok(())
+}
+
 fn signed_in_notice() {
-    crate::output::stdout_multiline(signed_in_message());
+    if !native_presentation() {
+        crate::output::stdout_multiline(signed_in_message());
+    }
+    publish_progress(LoginProgress::SignedIn);
 }
 
 /// GPT-6 routes always register under the provider's namespace, so the
@@ -274,6 +410,43 @@ fn open_browser(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Inert local source fixtures: no OAuth, browser or credential-store access.
+    #[tokio::test]
+    async fn native_progress_scope_is_task_local_and_retains_only_latest_fact() {
+        assert!(!native_presentation());
+        let (sender, mut receiver) = login_progress_channel();
+        NATIVE_LOGIN_PROGRESS
+            .scope(sender, async {
+                assert!(native_presentation());
+                publish_progress(LoginProgress::Fallback(LoginFallback::NoBrowserOpener));
+                publish_progress(LoginProgress::Device {
+                    user_code: "INERT-1234".into(),
+                    phase: DeviceLoginPhase::Waiting,
+                });
+            })
+            .await;
+        assert!(!native_presentation());
+        assert_eq!(
+            *receiver.borrow_and_update(),
+            LoginProgress::Device {
+                user_code: "INERT-1234".into(),
+                phase: DeviceLoginPhase::Waiting,
+            }
+        );
+        assert!(
+            receiver.changed().await.is_err(),
+            "scope dropped the sender"
+        );
+    }
+
+    #[test]
+    fn native_verification_code_rejects_unbounded_or_control_content() {
+        assert!(validate_presented_device_code("INERT-1234").is_ok());
+        assert!(validate_presented_device_code(&"A".repeat(257)).is_err());
+        assert!(validate_presented_device_code("INERT\u{1b}[31m").is_err());
+        assert!(validate_presented_device_code("INERT\n1234").is_err());
+    }
 
     #[test]
     fn ssh_and_no_opener_default_to_device_without_disabling_browser_choice() {

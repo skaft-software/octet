@@ -1391,28 +1391,169 @@ fn validate_provider(provider: Option<&str>) -> anyhow::Result<&str> {
     }
 }
 
-/// Run Codex login outside raw primary-screen rendering and return the
-/// refreshed catalog. The caller decides whether it can install the catalog
-/// into a live Agent or must ask the user to restart from a model-less shell.
-async fn login_codex_catalog(
+fn codex_login_document(progress: &crate::auth::codex::LoginProgress) -> String {
+    use crate::auth::codex::{DeviceLoginPhase, LoginFallback, LoginProgress};
+    let body = match progress {
+        LoginProgress::Starting => "Preparing ChatGPT sign-in…".to_owned(),
+        LoginProgress::Browser { url, callback_port } => format!(
+            "Opening OpenAI sign-in in your browser. If it does not open, copy this URL:\n\n{url}\n\nWaiting for a callback on 127.0.0.1:{callback_port} (up to 5 minutes)…"
+        ),
+        LoginProgress::Fallback(reason) => match reason {
+            LoginFallback::BusyCallbackPorts => "The registered callback ports are busy; using a device code instead.",
+            LoginFallback::NoBrowserOpener => "No browser opener could be started; using a device code instead.",
+            LoginFallback::LimitedCredential => "OpenAI issued a limited browser credential; continuing with a device code. Nothing was saved.",
+        }.to_owned(),
+        LoginProgress::Device { user_code, phase } => {
+            let status = match phase {
+                DeviceLoginPhase::Waiting => "Waiting for authorization (up to 15 minutes)…",
+                DeviceLoginPhase::SlowDown => "Waiting for authorization; OpenAI requested slower polling…",
+                DeviceLoginPhase::Exchanging => "Authorization received; exchanging the device code…",
+            };
+            format!(
+                "Open this URL and enter the code shown below:\n\n{}\n\nCode: {user_code}\n\n{status}",
+                crate::auth::codex::DEVICE_VERIFICATION_URI,
+            )
+        }
+        LoginProgress::Saving => "Authorization received; waiting to save the private credential…".to_owned(),
+        LoginProgress::SignedIn => "Signed in to ChatGPT. The credential has been saved.".to_owned(),
+    };
+    format!("{body}\n\nClose this sheet to cancel while authorization is pending. Ctrl+C also cancels. Your conversation draft is kept.")
+}
+
+/// This is a cancellation-safe, frontend-owned OAuth future, not lifecycle work:
+/// close/EOF must drop it rather than grant a worker time to save credentials.
+/// The panel owns all editing input, keeping the parent draft/caret/chips intact.
+async fn await_codex_login<F, S>(
     shell: &mut InteractiveShell,
-) -> anyhow::Result<Option<octet_ai::ModelCatalog>> {
+    input: &mut S,
+    mut progress: tokio::sync::watch::Receiver<crate::auth::codex::LoginProgress>,
+    operation: F,
+) -> anyhow::Result<Option<()>>
+where
+    F: Future<Output = anyhow::Result<()>>,
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    use crate::auth::codex::LoginProgress;
+    shell.open_panel(Panel::ReadOnlyDocument {
+        title: "ChatGPT sign-in".into(),
+        text: codex_login_document(&progress.borrow_and_update()).into(),
+        styled: false,
+        scroll_from_bottom: 0,
+    });
     shell.set_run_label("signing in to ChatGPT…");
     shell.render();
-    shell.suspend();
-    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
-    let login_result = crate::auth::codex::login_without_prompt(&store).await;
-    // Restoring the terminal is mandatory even when OAuth fails.
-    shell.resume()?;
+    let mut operation = Box::pin(operation);
+    let mut progress_open = true;
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                shell.request_close();
+                break Ok(matches!(*progress.borrow(), LoginProgress::SignedIn).then_some(()));
+            }
+            event = input.next() => {
+                let event = match event {
+                    Some(Ok(event)) => event,
+                    Some(Err(error)) => {
+                        shell.request_close();
+                        if matches!(*progress.borrow(), LoginProgress::SignedIn) {
+                            shell.error(format!("terminal input failed after ChatGPT sign-in: {error}"));
+                            break Ok(Some(()));
+                        }
+                        break Err(error.into());
+                    }
+                    None => {
+                        shell.request_close();
+                        break Ok(matches!(*progress.borrow(), LoginProgress::SignedIn).then_some(()));
+                    }
+                };
+                if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
+                    shell.request_close();
+                    break Ok(matches!(*progress.borrow(), LoginProgress::SignedIn).then_some(()));
+                }
+                if matches!(&event, Event::Key(key) if is_ctrl_c(key))
+                    || shell.panel_input(&event).is_some()
+                {
+                    // A late cancel after the non-yielding credential commit
+                    // is success, never a false claim of cancelled persistence.
+                    break Ok(matches!(*progress.borrow(), LoginProgress::SignedIn).then_some(()));
+                }
+                if matches!(event, Event::FocusGained) {
+                    shell.request_tern_focus_resync();
+                }
+                shell.render();
+            }
+            result = &mut operation => {
+                break if matches!(*progress.borrow(), LoginProgress::SignedIn) {
+                    Ok(Some(()))
+                } else {
+                    result.map(|()| Some(()))
+                };
+            }
+            changed = progress.changed(), if progress_open => {
+                if changed.is_err() {
+                    progress_open = false;
+                } else {
+                    shell.update_read_only_document(codex_login_document(&progress.borrow_and_update()));
+                    shell.render();
+                }
+            }
+        }
+    };
+    // Drop OAuth before restoring the composer; nothing can save in the gap.
+    drop(operation);
+    shell.close_panel();
     shell.set_run_label("idle");
+    shell.request_tern_focus_resync();
+    shell.render();
+    outcome
+}
 
-    if let Err(error) = login_result {
-        shell.error(format!("ChatGPT login failed: {error:#}"));
-        shell.render();
-        return Ok(None);
+#[cfg(test)]
+#[path = "interactive/tests/native_auth_tests.rs"]
+mod native_auth_tests;
+
+/// Render transient sign-in instructions without suspending the renderer, then
+/// refresh the catalog. No instructions/code enter the transcript or session.
+async fn login_codex_catalog<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<Option<octet_ai::ModelCatalog>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
+    let (sender, progress) = crate::auth::codex::login_progress_channel();
+    match await_codex_login(
+        shell,
+        input,
+        progress,
+        crate::auth::codex::login_with_progress(&store, sender),
+    )
+    .await
+    {
+        Ok(Some(())) if !shell.close_requested() => {}
+        Ok(Some(())) => return Ok(None),
+        Ok(None) => {
+            shell.notice("ChatGPT login cancelled; no credential was saved");
+            shell.render();
+            return Ok(None);
+        }
+        Err(error) => {
+            shell.error(format!("ChatGPT login failed: {error:#}"));
+            shell.render();
+            return Ok(None);
+        }
     }
 
-    let catalog = match crate::app::bootstrap::model_catalog() {
+    let catalog = match run_blocking_lifecycle(
+        shell,
+        input,
+        "reloading models…",
+        crate::app::bootstrap::model_catalog,
+    )
+    .await
+    {
         Ok(catalog) => catalog,
         Err(error) => {
             shell.error(format!(
@@ -1433,10 +1574,14 @@ async fn login_codex_catalog(
     Ok(Some(catalog))
 }
 
-/// Run device-code login outside raw primary-screen rendering, then make the new
-/// models available immediately without restarting the current Agent.
-async fn login_codex(app: &mut App, shell: &mut InteractiveShell) -> anyhow::Result<()> {
-    if let Some(catalog) = login_codex_catalog(shell).await? {
+/// Keep sign-in native, then make the new models available immediately without
+/// restarting the current Agent.
+async fn login_codex(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+) -> anyhow::Result<()> {
+    if let Some(catalog) = login_codex_catalog(shell, input).await? {
         app.catalog = catalog;
         shell.clear_error();
         shell.notice("signed in to ChatGPT; use /model to select a Codex model");
@@ -6251,7 +6396,7 @@ async fn apply_pending_actions(
         };
         match action {
             PendingIdleAction::Login(provider) => match validate_provider(provider.as_deref()) {
-                Ok("codex") => login_codex(&mut app, shell).await?,
+                Ok("codex") => login_codex(&mut app, shell, input).await?,
                 Ok("custom") => login_custom(shell)?,
                 Ok(_) => unreachable!(),
                 Err(e) => shell.error(e.to_string()),
@@ -7855,7 +8000,7 @@ async fn run_idle_command_inner(
         }
         Command::Exit => return Ok(IdleCommandOutcome::Quit(Box::new(app))),
         Command::Login(provider) => match validate_provider(provider.as_deref()) {
-            Ok("codex") => login_codex(&mut app, shell).await?,
+            Ok("codex") => login_codex(&mut app, shell, input).await?,
             Ok("custom") => login_custom(shell)?,
             Ok(_) => unreachable!(),
             Err(e) => shell.error(e.to_string()),
@@ -8880,7 +9025,7 @@ async fn run_interactive_without_model(
                 }
                 Command::Login(provider) => match validate_provider(provider.as_deref()) {
                     Ok("codex") => {
-                        if let Some(catalog) = login_codex_catalog(shell).await? {
+                        if let Some(catalog) = login_codex_catalog(shell, input).await? {
                             boot.catalog = catalog;
                             shell.clear_error();
                             shell.notice(
@@ -9051,6 +9196,9 @@ async fn guided_provider_setup(
 ) -> anyhow::Result<Option<CompletedSetup>> {
     let mut replace_existing = false;
     'setup: loop {
+        if shell.close_requested() {
+            return Ok(None);
+        }
         let Some(preset) = provider_setup_picker(
             shell,
             input,

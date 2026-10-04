@@ -16,6 +16,9 @@ mod resolver;
 mod store;
 
 pub use login::{login, login_without_prompt, logout};
+pub(crate) use login::{
+    login_progress_channel, login_with_progress, DeviceLoginPhase, LoginFallback, LoginProgress,
+};
 pub(crate) use oauth::{ChatGptPlan, SubscriptionClaims};
 pub use resolver::CodexResolver;
 pub(crate) use store::REFRESH_LOCK_WAIT;

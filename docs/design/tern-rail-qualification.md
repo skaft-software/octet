@@ -77,10 +77,14 @@ than inventing states:
   `tern_prompt.rs`: ordinary choices/fields use existing owners; keys remain
   host-private. No actual provider save or onboarding execution is asserted.
 - **S04 — Login/logout, browser/device auth, credential precedence/replacement,
-  retry/error/cancel. Preserved; blocked/unverified.**
-  `modes/interactive.rs::login_codex_catalog`, `auth/codex/login.rs`: auth
-  suspends native rendering. A native instruction/progress/link/code equivalent
-  has not been established; browser and OS effects retain external ownership.
+  retry/error/cancel. Changed/preserved; partially evidenced, unverified.**
+  `modes/interactive.rs::await_codex_login`/`login_codex_catalog`,
+  `auth/codex/login.rs`: task-local single-slot progress owns a transient native
+  document without suspending rendering or storing instructions in history.
+  Public browser/device instructions, fallback and save/commit phases have
+  synthetic owner tests; pre-commit cancellation drops OAuth and a late cancel
+  cannot misreport a completed credential save. Real OAuth, credential saves,
+  native link interactions and OS browser effects remain unqualified.
 - **S05 — Model catalogue/provider scopes/current facts, cycling and deferred
   switch. Preserved/fenced; unverified.** `tern_picker.rs`, `tern_input.rs`:
   source-backed public-facts preview and first-selectable focus; catalogue
@@ -106,10 +110,16 @@ than inventing states:
   is not a conversation preview; refresh and cross-workspace routes need checks.
 - **S10 — Rename/name, recoverable trash/delete consent, current protection,
   fork/whole conversation, clone/export. Preserved; blocked/unverified.**
-  `tern_picker.rs::interactive`, `tui/view.rs`, `modes/interactive.rs`: fork
-  picker/export owners remain; session rename/trash still project legacy native
-  ANSI modal content. A semantic native rename field is not implemented; no
-  restore browser or permanent deletion is claimed.
+  `tern_session_edit.rs`, `tern_picker.rs`, `tui/view.rs`, `modes/interactive.rs`:
+  native rename has a bounded, source/catalogue/revision-fenced editor and
+  resolved controls; persistence remains with the existing host picker driver.
+  Its field/actions precede long metadata in narrow panes. Trash consent remains
+  native ANSI content with no new positive pointer authority. PTY covers resumed
+  and forked active-session export; the earlier lock-deadlock hypothesis was not
+  reproduced after correcting the session fixture/transport. Actual Tern also
+  exported executed local-command history from a fresh active session; the
+  complete mutation/error matrix remains unqualified. No restore browser or
+  permanent deletion is claimed.
 
 ### Composer and conversation
 
@@ -239,8 +249,11 @@ than inventing states:
   `modes/interactive.rs`: shared epoch-fenced 4096-byte ordinary editor; parent
   draft untouched. Secrets HOST-PRIVATE, no editor/value/mask/native confirm;
   secret characters and raw Enter/Esc bypass remapped/disabled picker bindings.
-  Full prompt transport, close/EOF/overflow and sequential-request routes need
-  real PTY/native checks; same-length edit revision remains unsolved.
+  Underlying panel gestures are suppressed while a temporary owner is active,
+  so their controls cannot synthesize submission into a secret request.
+  PTY covers bounded ordinary/secret input, overflow recovery, sequential
+  request fencing and close; actual native prompt/secret journeys and
+  same-length edit revision remain unqualified.
 - **S35 — Provider save/replacement, session trash and non-typed decisions.
   Preserved; unverified.** `modes/interactive/onboarding.rs`, `tui/view.rs`: explicitly scoped
   existing confirmations keep owner/default/consequence. They must not inherit
@@ -252,8 +265,13 @@ than inventing states:
   suspend/external editor, resize/focus/hide/eviction/credits/fallback.
   Preserved; unverified.** `tern.rs`, `tern_input.rs`, `tui/keymap.rs`,
   `tui/terminal/lifecycle.rs`: one input/render owner, retained history,
-  bounded coalescing and explicit fallback. Escape/Enter remain context-owned;
-  actual draft/payload recovery and cancellation settlement require qualification.
+  bounded coalescing and explicit fallback. Hidden presentation is suspended
+  even with remaining credit. A focus counter arriving during materialization
+  cannot be consumed without reasserting focus (deterministic regression).
+  PTY resize/focus/visibility/eviction passes; actual Tern pane-return fresh input
+  remains intermittent/unqualified, despite one passing run. Retained pixels
+  alone are not recovery. Escape/Enter remain context-owned; every applicable
+  recovery and cancellation-settlement journey still requires qualification.
 - **S37 — Accessibility/IME, intrinsic diff/image actions, typography/zoom,
   window/file/system permissions. Preserved terminal ownership;
   blocked/unverified dimensions.** `tern.rs`, `crates/octet-tern/src/wire.rs`:
@@ -289,32 +307,68 @@ campaign was undertaken by this documentation deliverable.
 
 ## Observed integrated-candidate checks
 
+Current follow-up (partial evidence, not family-wide passes):
+
 - TSP client crate: **23 unit tests and 1 doc test passed**.
-- TUI library lane: **920 passed, 1 deliberately ignored** fixture exporter.
-- Active tool input: **6 passed**, including secret remapped/disabled confirmation
-  and overflow recovery. Both secret input drivers have regression coverage.
-- Real octet binary / synthetic TSP terminal: **3 native PTY tests passed**,
-  including complete multiline command input and pre-Ctrl+O output exclusion.
+- TUI library lane: **936 passed, 1 deliberately ignored** fixture exporter.
+- Native auth owner fixtures: **7 passed**; auth progress/CLI policy fixtures:
+  **6 passed**. No OAuth, real credential save or browser authorization was run.
+- Active tool input: **6 passed**.
+- Real octet binary / synthetic TSP terminal: **29 passed, 0 ignored**.
+  This covers fresh/model-less/resumed/forked startup, local reports,
+  source-backed catalogue filtering/rename persistence, resumed/forked export,
+  Unicode/UTF-16 editing, remapped/disabled controls, ordinary and
+  host-private input, loopback streaming/reasoning/cancel/follow-up recall,
+  command success/failure/disclosure, credits/visibility/eviction, optional
+  kinds/fallback and untrusted extension menus. Loopback responses are synthetic
+  protocol evidence, not a real provider or worker campaign. Excluded `!!`
+  output is durable non-model-visible configuration metadata, not absent storage.
+- Compiled binary + actual Tern **0.4.0** developer headless runtime:
+  **57 checks passed**, owned serve exited 0. Observed native mount/context
+  alignment, Unicode draft, fresh-geometry model pointer/filter/cancel,
+  local reports, real session rename typing/cancel/pointer-save with durable
+  metadata, actual local process output mount/unmount via Ctrl+O, and native
+  export with a durable redacted package containing the executed command history.
+  Wide/narrow/short and font-zoom captures were retained privately; the narrow
+  rename field/actions were visually inspected after moving long facts below.
+  Native ANSI pixels do not expose their terminal text in the DOM, so output
+  checks assert body mount/unmount plus inspected pixels, not invented DOM text.
+- Separate consecutive-character native rename lane: **10 checks passed**, owned
+  serve exited 0; individual edits without explicit frame waits persisted every
+  character through the real host driver. This is not IME/full keyboard coverage.
+- Separate actual pane-return runs **failed fresh-input admission**, including
+  after pointer reselect; a single earlier passing run does not clear this
+  intermittent lifecycle gate. These failures are retained, not part of the
+  57 passing checks. IME/accessibility, consent geometry, real auth/grants/workers
+  and Tern 0.3.1 remain unqualified. Accessibility snapshots alone are not passes.
+- Formatting and whitespace checks passed. Full workspace and strict Clippy
+  were not rerun as passing checks; their inherited blockers remain separate.
+
+Historical baseline fixture evidence (not refreshed runtime qualification):
+
 - Ignored compiled-renderer exporter: **1 passed**, producing eight fixture
   states, not executed commands or provider conversations.
 - Tern **0.4.0** offscreen native render: **64 captures** across eight compiled
   fixture states, light/dark, 1200×820, 375×820, 700×420 and narrow font zoom
-  16→20. The wide, short and zoomed-narrow contact sheets were visually inspected:
-  full multiline commands wrap, ordinary selected details remain readable and
-  secret sheets contain no answer editor. This is fixture pixel evidence only,
-  not actual runtime grant/auth/input/pointer execution or 0.3.1 qualification.
+  16→20. Wide/short/zoomed-narrow contact sheets were visually inspected. This
+  remains fixture pixel evidence, not runtime authority or 0.3.1 qualification.
 
-These partial results do not clear any of the required S01–S37 journeys above.
-Private screenshots and logs are deliberately not published with product source.
+No family has its complete universal matrix cleared by these partial results.
+Private screenshots, ingress records and logs are deliberately not published.
 
 ## Exact remaining gate
 
-Complete the missing auth native equivalent and semantic session rename route;
-resolve protocol-bound paste intent, same-length stale edit revision and semantic
-pointer geometry; qualify navigation/search/selection/prompt jumps and the
-advertised-only scroll bridge. Execute every applicable state/input/lifecycle/
-authority dimension above on the final integrated candidate, including Tern
-0.3.1, and record actual results rather than fixture counts. Preserve the full
-S01–S37 scope and separately resolve inherited release blockers. Until then,
-RAIL is an independent implementation deliverable, **not all-surface parity,
-not terminal-version qualification and not release readiness**.
+Qualify the implemented auth and rename routes in every applicable dimension;
+resolve the intermittent actual pane-return input failure without hiding it.
+Active-session export passes resumed/forked PTY cases and a fresh-session actual
+native journey without backend edits; its full error/mutation matrix still needs
+qualification. Native paste intent, same-length stale
+composer/temporary edits, semantic pointer geometry, navigation/search/selection/
+prompt jumps and full scroll/reader-position parity remain blocked or unqualified.
+Execute every applicable state/input/lifecycle/authority dimension above on the
+final integrated candidate, including Tern 0.3.1, and record actual results rather
+than fixture counts. Real OAuth, grants, secrets and paid-provider campaigns were
+not authorized or performed. Preserve the full S01–S37 scope and separately
+resolve inherited release blockers. Until then, RAIL is an independent
+implementation deliverable, **not all-surface parity, not terminal-version
+qualification and not release readiness**.
