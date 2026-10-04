@@ -125,9 +125,12 @@ than inventing states:
 
 - **S11 — Multiline editor/caret/selection, word/line/seek, kill/yank, undo/redo,
   recall and external editor. Preserved; blocked/unverified dimensions.**
-  `tern.rs::composer`, `tern_input.rs`, `tui/keymap.rs`: UTF-16 boundaries and
-  stale lengths checked. Same-length stale native edits lack source revision
-  in the wire; request epochs do not solve it. IME/wrapping remain terminal-owned.
+  `tern.rs::composer`, `tern_input.rs`, `tui/keymap.rs`: program hello advertises
+  `edit`, as required by the current official Tern docs and installed runtime.
+  Actual pointer caret/selection replacement and host undo pass. Native edits
+  now preserve host undo history; UTF-16/grapheme boundaries and stale lengths
+  are checked. Same-length stale edits still lack source revision in the wire;
+  request epochs do not solve it. IME/wrapping remain terminal-owned.
 - **S12 — Slash/dynamic commands, skills/templates, @ files and all existing
   path forms/chaining/escaping. Preserved/fenced; unverified.**
   `tern_completion.rs`, `tern_input.rs`: source IDs, highlight versus activation
@@ -136,7 +139,10 @@ than inventing states:
   PDF reference and chip delete/undo/recall. Preserved; blocked/unverified.**
   `tui/composer/attachments.rs`, `tui/composer/composition.rs`, `tern_input.rs`: host paste
   ledger remains; native Edit has no paste intent and cannot stand in for media
-  admission or chip-aware editing. Typing a path never implies upload consent.
+  admission. Native mutations touching admitted chip masks are rejected/resynced
+  until ledger-aware chip deletion/undo is implemented. This is a local
+  implementation gap, not a claim that Tern cannot report the selection.
+  Typing a path never implies upload consent.
 - **S14 — FIFO follow-ups, steering/claim/recall, queued commands, /answer,
   goals and deferred model/session/settings/reload. Preserved; unverified.**
   `tern.rs::project`, `modes/interactive.rs`, `tui/view.rs`: compact native ANSI
@@ -315,12 +321,15 @@ campaign was undertaken by this documentation deliverable.
 
 Current follow-up (partial evidence, not family-wide passes):
 
-- TSP client crate: **24 unit tests and 1 doc test passed**.
-- TUI library lane: **938 passed, 1 deliberately ignored** fixture exporter.
+- TSP client crate: **25 unit tests and 1 doc test passed**.
+- TUI library lane: **940 passed, 1 deliberately ignored** fixture exporter.
+- Shared TUI library: **252 passed**; focused text-editor lane: **46 passed**,
+  including native range-edit undo/redo, caret-only history preservation and
+  invalid grapheme-boundary rejection.
 - Native auth owner fixtures: **7 passed**; auth progress/CLI policy fixtures:
   **6 passed**. No OAuth, real credential save or browser authorization was run.
 - Active tool input: **6 passed**.
-- Real octet binary / synthetic TSP terminal: **31 passed, 0 ignored**.
+- Real octet binary / synthetic TSP terminal: **32 passed, 0 ignored**.
   This covers fresh/model-less/resumed/forked startup, local reports,
   source-backed catalogue filtering/rename persistence, resumed/forked export,
   Unicode/UTF-16 editing, remapped/disabled controls, ordinary and
@@ -330,8 +339,9 @@ Current follow-up (partial evidence, not family-wide passes):
   protocol evidence, not a real provider or worker campaign. Excluded `!!`
   output is durable non-model-visible configuration metadata, not absent storage.
 - Compiled binary + actual Tern **0.4.0** developer headless runtime:
-  **57 checks passed**, owned serve exited 0. Observed native mount/context
-  alignment, Unicode draft, fresh-geometry model pointer/filter/cancel,
+  **61 checks passed**, owned serve exited 0. Observed native mount/context
+  alignment, Unicode draft, native pointer range replacement with actual `edit`
+  ingress and matching host output, resolved host undo, model pointer/filter/cancel,
   local reports, real session rename typing/cancel/pointer-save with durable
   metadata, actual local process output mount/unmount via Ctrl+O, and native
   export with a durable redacted package containing the executed command history.
@@ -359,6 +369,18 @@ Current follow-up (partial evidence, not family-wide passes):
   actual pointer runs did not emit that event and are not proof of its emission.
   OS-app switching, IME/accessibility, consent geometry, real auth/grants/workers
   and Tern 0.3.1 remain untested. Accessibility snapshots alone are not passes.
+- Documentation-led protocol comparison: three isolated actual-Tern/synthetic-
+  client probes confirmed hello omission disables native selection edits, `edit`
+  enables them, and `undo` separately enables native undo events. Earlier
+  ordinary-typing journeys did not prove pointer-selection editing. The previous
+  OMP-derived schema omitted this required opt-in. Octet now advertises only
+  `edit`; raw host undo remains binding-resolved. Hello/undo-history regressions
+  failed before the fix and passed after. An initial actual-journey exact-text
+  assertion failed because Tern's tree inserts a separator around the caret;
+  inspected pixels and host bytes showed the correct text. The corrected check
+  moves the caret to the end before asserting exact native text.
+- After edit opt-in, pane-return **18 checks** and rapid rename **10 checks**
+  passed again, with both owned serves exiting 0.
 - Formatting and whitespace checks passed. Full workspace and strict Clippy
   were not rerun as passing checks; their inherited blockers remain separate.
 
@@ -380,9 +402,10 @@ Complete the implemented auth and rename test matrices; extend the repaired
 0.4.0 pane-return path to the remaining lifecycle/platform/version cases.
 Active-session export passes resumed/forked PTY cases and a fresh-session actual
 native journey without backend edits; its full error/mutation matrix still needs
-qualification. Native paste intent, same-length stale
-composer/temporary edits, semantic pointer geometry, navigation/search/selection/
-prompt jumps and full scroll/reader-position parity remain blocked or unqualified.
+qualification. Native chip mutation/undo, paste intent, same-length stale
+composer/temporary edits, semantic transcript pointer geometry, navigation/search/
+selection/prompt jumps and full scroll/reader-position parity remain unfinished
+or untested. Ordinary editor pointer range replacement is no longer a gap.
 Execute every applicable state/input/lifecycle/authority dimension above on the
 final integrated candidate, including Tern 0.3.1, and record actual results rather
 than fixture counts. Real OAuth, grants, secrets and paid-provider campaigns were

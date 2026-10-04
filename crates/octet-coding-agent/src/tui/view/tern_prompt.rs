@@ -178,10 +178,9 @@ pub(crate) fn edit(
         shell.tool_input_revision = shell.tool_input_revision.saturating_add(1);
         return None;
     }
-    if !editor.replace_range(from..to, &replacement) {
+    if !editor.edit_range(from..to, &replacement, cursor) {
         return None;
     }
-    editor.set_cursor(cursor);
     shell.tool_input_revision = shell.tool_input_revision.saturating_add(1);
     Some(())
 }

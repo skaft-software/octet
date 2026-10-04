@@ -574,6 +574,28 @@ impl TextEditor {
         true
     }
 
+    /// Apply a user range edit as one undo unit, then place the caret at the
+    /// given byte offset in the result. Invalid grapheme endpoints are rejected
+    /// without touching history. Caret-only edits preserve undo and redo.
+    /// Unlike [`Self::replace_range`], this is not a programmatic buffer reset.
+    pub fn edit_range(&mut self, range: Range<usize>, replacement: &str, cursor: usize) -> bool {
+        if range.start > range.end
+            || !is_grapheme_boundary(&self.text, range.start)
+            || !is_grapheme_boundary(&self.text, range.end)
+        {
+            return false;
+        }
+        let changed = &self.text[range.clone()] != replacement;
+        if changed {
+            self.push_undo();
+            self.text.replace_range(range, replacement);
+        }
+        self.finish_after_edit(cursor, changed);
+        self.last_action = None;
+        self.last_yank = None;
+        true
+    }
+
     /// Normalize terminal paste line endings without changing other text.
     #[must_use]
     pub fn normalize_paste(text: &str) -> String {

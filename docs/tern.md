@@ -36,12 +36,28 @@ ESC _ tsp ; <verb> [; k=v]* ; <body> ESC \
 
 | verb | body |
 | --- | --- |
-| `q` | `{q:"hello",v:[1],app,ver}` or `{q:"blobs",ids}` |
+| `q` | `{q:"hello",v:[1],app,ver?,features?}` or `{q:"blobs",ids}` |
 | `o` | `{id,mode:"inline"\|"screen",title?,role?,adopt?}` |
 | `t` | `{sf,dark?:{token:#rrggbb},light?:{…},name?:{dark?,light?}}` |
 | `f` | `{sf,s,ops:[…]}` — `s` is a monotonic per-surface sequence |
 | `x` | `{id,keep:bool}` |
 | `b` | a base64 blob, with `id`/`mime` params |
+
+### Program input features
+
+The program's hello must opt in to native input events. Octet advertises
+`features:["edit"]`, enabling pointer caret placement and replacement of native
+editor selections. This is separate from features in the **terminal's reply**
+(such as `scroll`). Standalone clients advertise no input features by default.
+The [official Tern Host API](https://docs.stencil.so/tern/reference/api-host.html#uievent)
+documents `edit` and `undo` opt-ins; isolated probes verified both gates in the
+installed 0.4.0 runtime. The audited OMP snapshot lacks these hello declarations
+and is not an exhaustive protocol specification.
+
+Octet does not advertise `undo`: resolved host keyboard bindings retain that
+operation. Accepted native text replacements are one host undo unit; caret-only
+edits preserve undo/redo. Actual octet/Tern pointer-selection replacement and
+host undo have been exercised, not merely injected as synthetic TSP events.
 
 ### Ops
 
@@ -226,7 +242,11 @@ Identified protocol fragments, malformed messages and oversized assemblies
 are consumed rather than replayed into a draft. Only an ambiguous opening
 Escape prefix has a short input-latency timeout. Genuine bracketed paste and
 Enter/Escape keys remain frontend input. Native text Edit events do not carry
-paste intent and must not be treated as attachment/upload consent.
+paste intent and must not be treated as attachment/upload consent. Native edits
+that mutate an admitted attachment chip are currently rejected and resynced:
+ledger-aware chip deletion/undo is unfinished implementation, not a Tern protocol
+limitation. Surrounding prose and caret movement remain editable; existing host
+chip deletion remains available.
 
 Ordinary tool/extension input owns an epoch-fenced temporary native editor, shared
 with raw-key editing and bounded to 4096 UTF-8 bytes. Range replacements are
@@ -357,7 +377,11 @@ establish a particular Tern version's pixels or complete interactions. See the
 ## Limits
 
 TSP v1 has no arbitrary CSS or per-node RGB card styles. Tern owns fonts,
-spacing, corner radii and base widget chrome; octet theme geometry and surface
+spacing, corner radii and base widget chrome through the ordinary TSP client.
+Tern separately supports [plugin CSS](https://docs.stencil.so/tern/guides/chrome.html#global-css),
+including role selectors; that requires a Tern plugin installation rather than
+an invented node property. No plugin or global configuration change is part of
+this deliverable. Octet theme geometry and surface
 recipes cannot be reproduced cell for cell. Octet supplies resolved dark/light
 semantic colors, model accents, native structure and its own identity. ANSI16
 and indexed colors expand through the standard xterm table; terminal-default
@@ -373,8 +397,10 @@ All 37 existing octet native surface families remain required. Native auth
 progress and semantic session rename are implemented but their full test matrices
 are unfinished; repaired pane-return input has current 0.4.0 runtime evidence,
 not full lifecycle/version coverage; export's mutation/error matrix is unfinished.
-Native paste intent, revision-complete composer/temporary edits, semantic
-navigation/search/selection and pointer geometry remain gaps.
+Native attachment-chip editing, paste intent, revision-complete composer/temporary
+edits and semantic transcript navigation/search/selection remain gaps. Ordinary
+editor pointer placement/range replacement is implemented; do not conflate it
+with transcript pointer geometry.
 Tern 0.3.1 is untested. This is an independent RAIL implementation deliverable,
 not full-parity or release-ready qualification.
 

@@ -384,11 +384,15 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             let raw_cursor = utf16_boundary(&edited, *cursor)?;
             let cursor = sexy_tui_rs::TextEditor::normalize_paste(&edited[..raw_cursor]).len();
             let text = sexy_tui_rs::TextEditor::normalize_paste(text);
-            let text_revision = shell.editor.text_revision();
-            if !shell.editor.replace_range(from..to, &text) {
+            if source[from..to] != text && shell.ledger.edit_touches_chip(source, from, to) {
+                // Native chip mutation still needs ledger-aware undo. Until
+                // then resync instead of corrupting or orphaning a payload.
                 return None;
             }
-            shell.editor.set_cursor(cursor);
+            let text_revision = shell.editor.text_revision();
+            if !shell.editor.edit_range(from..to, &text, cursor) {
+                return None;
+            }
             shell.prompt_history_navigation = None;
             shell.composer_preferred_column = None;
             if shell.editor.text_revision() != text_revision {
@@ -655,6 +659,83 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn native_range_edit_and_caret_moves_preserve_host_undo() {
+        use sexy_tui_rs::TextEditAction;
+        let shell = native_slash_shell();
+        shell
+            .state
+            .borrow_mut()
+            .editor
+            .apply(TextEditAction::Paste("abc".into()), 80);
+        let handler = shell.tern_input_handler();
+        for (from, to, text, cursor) in [(2, 3, "Q", 3), (1, 1, "", 1)] {
+            handler(Incoming::Event(Event::Edit {
+                sf: super::super::tern::SURFACE.into(),
+                id: "composer.editor".into(),
+                from,
+                to,
+                text: text.into(),
+                cursor,
+                len: 4,
+            }));
+        }
+        let mut state = shell.state.borrow_mut();
+        assert_eq!(state.editor.text(), "/aQc");
+        assert!(state.editor.apply(TextEditAction::Undo, 80));
+        assert_eq!(state.editor.text(), "/abc");
+        assert!(state.editor.apply(TextEditAction::Undo, 80));
+        assert_eq!(state.editor.text(), "/");
+        assert!(state.editor.apply(TextEditAction::Redo, 80));
+        assert!(state.editor.apply(TextEditAction::Redo, 80));
+        assert_eq!(state.editor.text(), "/aQc");
+    }
+
+    #[test]
+    fn native_edits_cannot_corrupt_or_revoke_admitted_chip_payloads() {
+        let shell = native_slash_shell();
+        let chip = shell
+            .state
+            .borrow_mut()
+            .ledger
+            .attach_pasted_text("private payload".into());
+        let draft = format!("before {chip} after");
+        shell.state.borrow_mut().editor.set_text(&draft);
+        let handler = shell.tern_input_handler();
+        for (from, to, text) in [(9, 10, ""), (9, 9, "Q"), (7, 7 + chip.len(), "")] {
+            handler(Incoming::Event(Event::Edit {
+                sf: super::super::tern::SURFACE.into(),
+                id: "composer.editor".into(),
+                from,
+                to,
+                text: text.into(),
+                cursor: from + text.len(),
+                len: draft.len(),
+            }));
+            assert_eq!(shell.pending(), draft);
+            assert!(!shell.state.borrow().ledger.is_empty());
+        }
+        // Plain surrounding prose stays editable; typing never admits a file.
+        handler(Incoming::Event(Event::Edit {
+            sf: super::super::tern::SURFACE.into(),
+            id: "composer.editor".into(),
+            from: 0,
+            to: 6,
+            text: "/tmp/image.png".into(),
+            cursor: 14,
+            len: draft.len(),
+        }));
+        assert_eq!(shell.pending(), format!("/tmp/image.png {chip} after"));
+        let mut state = shell.state.borrow_mut();
+        let text = state.editor.text().to_owned();
+        let composed = crate::tui::composer::compose(text, &mut state.ledger);
+        assert_eq!(
+            composed.transcript_text,
+            "/tmp/image.png private payload after"
+        );
+        assert_eq!(composed.attachments.len(), 1);
     }
 
     #[test]

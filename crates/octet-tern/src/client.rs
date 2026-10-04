@@ -53,22 +53,29 @@ impl TernClient {
     ///
     /// No surface is opened yet; call [`TernClient::open`] then send a frame.
     pub fn connect(app: &str, version: Option<&str>) -> io::Result<TernClient> {
-        let mut client = Self::connect_shared_input(app, version)?;
+        let mut client = Self::connect_shared_input(app, version, &[])?;
         client._raw = tty::RawGuard::enable(0)?;
         Ok(client)
     }
 
     /// Announce without owning stdin or changing its modes. The application's
     /// single input owner must deliver replies through [`Self::observe`].
-    pub fn connect_shared_input(app: &str, version: Option<&str>) -> io::Result<TernClient> {
-        Self::with_writer(app, version, io::stdout())
+    /// Advertise only the event features that owner actually handles.
+    pub fn connect_shared_input(
+        app: &str,
+        version: Option<&str>,
+        features: &[&str],
+    ) -> io::Result<TernClient> {
+        Self::with_writer(app, version, features, io::stdout())
     }
 
     /// Announce through a terminal-owned output sink without taking stdin.
     /// Replies must be supplied by the application's input owner via `observe`.
+    /// `features` advertises program-handled input, not terminal capabilities.
     pub fn with_writer(
         app: &str,
         version: Option<&str>,
+        features: &[&str],
         output: impl Write + Send + 'static,
     ) -> io::Result<Self> {
         let mut client = TernClient {
@@ -96,6 +103,10 @@ impl TernClient {
                 v: vec![TSP_VERSION],
                 app: app.to_owned(),
                 ver: version.map(str::to_owned),
+                features: features
+                    .iter()
+                    .map(|feature| (*feature).to_owned())
+                    .collect(),
             },
         )?;
         Ok(client)
@@ -382,7 +393,7 @@ mod tests {
     #[test]
     fn credit_and_sequences_advance_only_after_successful_writes() {
         let fail = Arc::new(AtomicBool::new(false));
-        let mut client = TernClient::with_writer("test", None, Output(fail.clone())).unwrap();
+        let mut client = TernClient::with_writer("test", None, &[], Output(fail.clone())).unwrap();
         fail.store(true, Ordering::Relaxed);
         assert!(client.frame_ops_now("test", Vec::new()).is_err());
         assert!(!client.seq.contains_key("test"));
@@ -413,7 +424,8 @@ mod tests {
     }
     #[test]
     fn features_require_advertisement_in_the_latest_hello() {
-        let mut client = TernClient::with_writer("test", None, io::sink()).unwrap();
+        let mut client = TernClient::with_writer("test", None, &["edit"], io::sink()).unwrap();
+        assert!(!client.supports_feature("edit"));
         assert!(!client.supports_feature("scroll"));
         assert!(!client.supports_feature("unknown"));
 
@@ -458,7 +470,7 @@ mod tests {
 
     #[test]
     fn native_blob_headers_and_bodies_cannot_inject_escape_sequences() {
-        let mut client = TernClient::with_writer("test", None, io::sink()).unwrap();
+        let mut client = TernClient::with_writer("test", None, &[], io::sink()).unwrap();
         let hash = "f".repeat(64);
         assert!(client.blob(&hash, "image/png", "YWJj").is_ok());
         assert!(client.blob("wrong", "image/png", "YWJj").is_err());
