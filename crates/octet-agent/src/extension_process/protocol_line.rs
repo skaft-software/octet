@@ -1520,6 +1520,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         idempotency_key: request.idempotency_key,
                         policy: Box::new(policy),
                     },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_MESSAGE => {
@@ -1544,6 +1545,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         target: request.target,
                         message: request.message,
                     },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_FOLLOW_UP => {
@@ -1568,6 +1570,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         target: request.target,
                         message: request.message,
                     },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_MODELS => {
@@ -1598,6 +1601,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         query: request.query,
                         limit: request.limit.unwrap_or(50),
                     },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_LIST => {
@@ -1619,6 +1623,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.parent_request_id,
                     methods::AGENT_LIST,
                     AgentSessionOperation::List,
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_WAIT => {
@@ -1646,6 +1651,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.parent_request_id,
                     methods::AGENT_WAIT,
                     AgentSessionOperation::Wait { timeout },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_INTERRUPT => {
@@ -1669,7 +1675,57 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     AgentSessionOperation::Interrupt {
                         target: request.target,
                     },
+                    request.resource_owner,
                 )?;
+            }
+            methods::AGENT_EVENTS | methods::AGENT_STOP => {
+                let id = parse_child_request_id(object, method)?;
+                let feature = if method == methods::AGENT_EVENTS {
+                    EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1
+                } else {
+                    EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1
+                };
+                if read_std_lock(&state.protocol).version != EXTENSION_API_VERSION_0_4
+                    || require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS).is_err()
+                    || require_feature(state, feature).is_err()
+                {
+                    return reject_typed_child_request(
+                        state, id, ExtensionRequestFailure::UnsupportedFeature,
+                        format!("{method} requires API 0.4 agent_sessions and {feature}"),
+                    );
+                }
+                let (parent, owner, method, operation) = if method == methods::AGENT_EVENTS {
+                    let request: AgentSessionEventsRequest = match serde_json::from_value(params) {
+                        Ok(request) => request,
+                        Err(error) => return reject_typed_child_request(
+                            state, id, ExtensionRequestFailure::InvalidRequest,
+                            format!("invalid agent events request: {error}"),
+                        ),
+                    };
+                    if request.timeout_ms > 25_000 {
+                        return reject_typed_child_request(
+                            state, id, ExtensionRequestFailure::InvalidRequest,
+                            "child event wait must not exceed 25000 milliseconds",
+                        );
+                    }
+                    (request.parent_request_id, request.resource_owner, methods::AGENT_EVENTS,
+                        AgentSessionOperation::Events {
+                            target: request.target,
+                            after_sequence: request.after_sequence,
+                            timeout: Duration::from_millis(request.timeout_ms),
+                        })
+                } else {
+                    let request: AgentSessionTargetRequest = match serde_json::from_value(params) {
+                        Ok(request) => request,
+                        Err(error) => return reject_typed_child_request(
+                            state, id, ExtensionRequestFailure::InvalidRequest,
+                            format!("invalid agent stop request: {error}"),
+                        ),
+                    };
+                    (request.parent_request_id, request.resource_owner, methods::AGENT_STOP,
+                        AgentSessionOperation::Stop { target: request.target })
+                };
+                queue_agent_session_operation(state, id, parent, method, operation, owner)?;
             }
             methods::SECRET_GET => {
                 require_feature(state, EXTENSION_FEATURE_SECRETS)?;

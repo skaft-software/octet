@@ -457,6 +457,10 @@ pub(super) async fn spawn_connection(
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
         optional_features.push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.to_owned());
+        if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+            optional_features.push(EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1.to_owned());
+            optional_features.push(EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1.to_owned());
+        }
     }
     if offered_host_services.approvals {
         optional_features.push(EXTENSION_FEATURE_APPROVALS.to_owned());

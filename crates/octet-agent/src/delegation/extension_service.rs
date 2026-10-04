@@ -511,6 +511,20 @@ impl ExtensionDelegationService {
         Ok(())
     }
 
+    pub(crate) fn shutdown_owner(&self, resource_owner: &str) {
+        let roots = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .owners
+            .get(resource_owner)
+            .map(|owner| owner.owned_agents.clone())
+            .unwrap_or_default();
+        if let Some(manager) = self.manager.upgrade() {
+            manager.request_shutdown_agent_trees(&roots);
+        }
+    }
+
     pub(crate) fn shutdown_owned(&self) {
         let roots = self
             .state

@@ -271,7 +271,12 @@ it only when it was offered. The service is bound after the Agent is
 constructed; calls without a bound service/resource owner fail deterministically
 with `-32002`. When `agent_sessions` is offered, the host also offers
 `agent_model_selection_v1`; negotiating the latter requires `agent_sessions`.
-It enables bounded configured-model discovery and explicit child model selection,
+API `0.4` additionally offers `agent_session_events_v1` and
+`agent_session_lifetime_v1` at that same authorized service boundary; each
+requires `agent_sessions`. These features do not enable child authority for Pi
+factories or other packages in the coding host. Embedders must explicitly bind
+the native child service; feature names alone grant nothing.
+The model-selection feature enables bounded configured-model discovery and explicit child model selection,
 not extension-supplied provider transports or credentials.
 
 The host likewise appends `approvals` only when single-use approval issuance is
@@ -1471,7 +1476,8 @@ next-boundary rule.
 ### 2.13 `agent/spawn` (API `0.2`)
 
 Requires the conditionally offered `agent_sessions` feature and an active
-host model-tool or declared-command parent. Create one bounded in-harness child
+host model-tool or declared-command parent, unless the additive API `0.4`
+retained-owner contract below was negotiated. Create one bounded in-harness child
 model session:
 
 ```json
@@ -1500,8 +1506,9 @@ model session:
 }
 ```
 
-The host derives the resource owner from `parent_request_id`; the extension
-cannot submit an owner. `policy` is mandatory. Its tools are a non-empty,
+The host derives the resource owner from `parent_request_id`; callers cannot
+invent an owner. API `0.4` `agent_session_lifetime_v1` permits returning the
+original host-issued owner as described below. `policy` is mandatory. Its tools are a non-empty,
 duplicate-free subset of `read`, `search`, `edit`, `write`, and `bash`
 (the first-party extension defaults to all five; explicitly select
 `read`/`search` for read-only work); depth is exactly one;
@@ -1574,8 +1581,9 @@ Requires both `agent_sessions` and `agent_model_selection_v1`. Request:
 ```
 
 The active host model-tool or declared-command parent supplies the resource
-owner; callers cannot submit an owner. Discovery is root-owner-only and retains
-the same principal, process-generation, and active-parent fences as other
+owner; only negotiated API `0.4` retained calls may return an explicit issued
+owner. Discovery is root-owner-only and retains
+the same principal and process-generation fences as other
 `agent/*` requests. Missing, foreign, or inactive owners fail closed.
 
 `query` is optional/null, a case-insensitive model/provider/display-name search
@@ -1733,6 +1741,48 @@ create octet child conversations.
 Observe their state through `agent/list`/`agent/wait`. Delegated child turns do
 not currently emit extension `session/*` or `turn/*` lifecycle notifications;
 that notification stream covers the owning/root product session.
+
+### API `0.4` child observations and retained lifetime
+
+`agent_session_lifetime_v1` allows `agent/*` requests to include the original
+host-issued `resource_owner` alongside the required `parent_request_id`. Its
+session, extension-instance, and process-generation tuple must still be issued
+on this connection. With a live parent, the owner must match and normal parent
+cancellation/settlement applies. With no active parent, a still-issued session
+owner permits a new call; a known cancellation tombstone refuses that parent
+reference. This is session-scoped authority: cancelling one request does not
+revoke the owner's ability to make new calls. Retire the owner to revoke it.
+Without an explicit owner, the existing active-parent contract is unchanged.
+Owner retirement invalidates further calls, wakes in-flight waits and requests
+shutdown of only that owner's child trees. This is not an editor-checkpoint
+exception, a new grant, or permission to bypass native delegation limits.
+
+With `agent_session_events_v1`, `agent/events` accepts:
+
+```json
+{"parent_request_id":2,"target":"agent-1","after_sequence":0,"timeout_ms":25000}
+```
+
+`after_sequence` is a required nonnegative integer; `timeout_ms` defaults to
+zero and is bounded to 25,000 ms (not silently clamped). Success returns
+`agent_id`, nullable native `session_id`, `events` (`{sequence,event}` records),
+`next_sequence`, `has_more`, and tagged native `status`. Cursors are
+non-consuming and ordered, not transcript offsets. Future or expired cursors
+fail rather than fabricate missing observations. Each batch contains at most
+256 records and 512 KiB of event bodies; the retained log is bounded to 4,096
+records / 2 MiB. Event bodies over 256 KiB become explicit `observation_error`
+records. Native facts include model-turn start/finish, output delta/discard,
+tool start/finish and run finish, with timestamps. Unsupported media,
+compaction-mirror replacement and uncertain usage are explicit observation
+errors, not a claim of full Pi message projection.
+
+With `agent_session_lifetime_v1`, `agent/stop` accepts
+`{"parent_request_id":2,"target":"agent-1"}` and returns
+`{"agent_id":"agent-1","shutdown_requested":true}`. It requests shutdown of
+that owned tree, not unrelated siblings. The acknowledgement does **not** mean
+settlement, cleanup completion or rollback; observe native state separately.
+Both methods enforce the same principal/owner target isolation and request
+bounds as the existing child service. They are unavailable in API `0.2`/`0.3`.
 
 ### 2.19 `composer/get`, `composer/set`, `composer/insert` (API `0.2`, feature `composer`)
 
@@ -2402,6 +2452,8 @@ The encoded menu is at most 256 KiB.
 | `dynamic_tools` | no | Transactional `tools/register`, `tools/unregister`, and revision-pinned `tool/call` |
 | `runtime_commands` | no | Initialize-time authoritative fixed command catalog for compatibility runtimes; no live mutations |
 | `agent_sessions` | conditional | Principal/owner-scoped `agent/*` child model-session service |
+| `agent_session_events_v1` | API 0.4, conditional | Bounded native `agent/events` cursor observations; requires `agent_sessions` |
+| `agent_session_lifetime_v1` | API 0.4, conditional | Explicit issued-owner retained child calls and owned-tree `agent/stop`; requires `agent_sessions` |
 | `agent_model_selection_v1` | conditional | Bounded `agent/models`, `policy.model_selection`, and host-confirmed `resolved_model`; also requires `agent_sessions` |
 | `delegation_telemetry_v1` | conditional first-party requirement | Native owner-run `AgentEvent::DelegationUpdated` child telemetry; required by `octet-subagents` when `agent_sessions` is offered |
 | `approvals` | conditional | Original-intent/active-owner-bound single-use `policy/evaluate` retry tokens; also requires `policy_intents` |

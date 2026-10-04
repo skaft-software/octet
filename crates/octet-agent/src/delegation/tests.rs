@@ -2,6 +2,9 @@ use super::*;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "tests/child_sessions.rs"]
+mod child_sessions;
+
 #[test]
 fn delegation_agent_error_conversion_keeps_the_result_error_small() {
     let error: DelegationError = AgentError::Delegation("conversion fixture".into()).into();

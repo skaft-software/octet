@@ -2,6 +2,8 @@ use super::*;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
+#[path = "agent_sessions/tests.rs"]
+mod agent_sessions;
 #[path = "cache_warming_tests.rs"]
 mod cache_warming;
 #[path = "prompt_metadata_tests.rs"]

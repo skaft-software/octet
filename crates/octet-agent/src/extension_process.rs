@@ -90,6 +90,7 @@ mod event_bus;
 pub use event_bus::ExtensionEventBus;
 
 mod admission;
+mod agent_sessions;
 mod bulk;
 mod composition;
 mod connection;
@@ -134,6 +135,7 @@ mod validation;
 
 pub use self::admission::validate_extension_flag_value;
 use self::admission::*;
+use self::agent_sessions::register_agent_session_request;
 use self::composition::*;
 use self::connection::*;
 pub use self::contributions::CommandOutput;
@@ -173,6 +175,7 @@ pub use self::contributions::ExtensionUiContribution;
 pub use self::contributions::ExtensionUserBash;
 pub use self::contributions::ExtensionWidgetPlacement;
 pub use self::contributions::TerminalGrantLost;
+pub use self::host_requests::AgentSessionEventsRequest;
 pub use self::host_requests::AgentSessionListRequest;
 pub use self::host_requests::AgentSessionMessageRequest;
 pub use self::host_requests::AgentSessionModelsRequest;
@@ -284,6 +287,8 @@ pub use self::process_group::EXTENSION_API_VERSION_0_3;
 pub use self::process_group::EXTENSION_API_VERSION_0_4;
 pub use self::process_group::EXTENSION_FEATURE_ACTIVE_TOOLS;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1;
+pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1;
+pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
 pub use self::process_group::EXTENSION_FEATURE_APPROVALS;
 pub use self::process_group::EXTENSION_FEATURE_ARTIFACTS;
@@ -534,6 +539,10 @@ pub mod methods {
     pub const AGENT_WAIT: &str = "agent/wait";
     /// Extension request to interrupt an owned child-session tree.
     pub const AGENT_INTERRUPT: &str = "agent/interrupt";
+    /// API 0.4 loss-detecting observation of an owned child session.
+    pub const AGENT_EVENTS: &str = "agent/events";
+    /// API 0.4 shutdown of one owned child-session tree (not settlement).
+    pub const AGENT_STOP: &str = "agent/stop";
     /// Observational session start.
     pub const SESSION_STARTED: &str = "session/started";
     /// Observational session terminal boundary.

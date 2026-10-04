@@ -188,7 +188,8 @@ pub use extension_presentation::{
 };
 pub use extension_process::{
     default_extension_roots, discover_extension_manifests, load_extension_manifest_paths,
-    AgentSessionListRequest, AgentSessionMessageRequest, AgentSessionSpawnRequest,
+    AgentSessionEventsRequest, AgentSessionListRequest, AgentSessionMessageRequest,
+    AgentSessionSpawnRequest,
     AgentSessionTargetRequest, AgentSessionWaitRequest,
     CommandDefinition as ExtensionCommandDefinition, CommandOutput as ExtensionCommandOutput,
     ConfirmationRequest as ExtensionConfirmationRequest,
@@ -213,7 +214,8 @@ pub use extension_process::{
     ToolDefinition as ExtensionToolDefinition, ToolRegistrationRequest, ToolRenderSegment,
     DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION, EXTENSION_API_VERSION_0_1,
     EXTENSION_API_VERSION_0_2, EXTENSION_API_VERSION_0_3, EXTENSION_API_VERSION_0_4,
-    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_APPROVALS, EXTENSION_FEATURE_ARTIFACTS,
+    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1,
+    EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1, EXTENSION_FEATURE_APPROVALS, EXTENSION_FEATURE_ARTIFACTS,
     EXTENSION_FEATURE_COMPACTION_STRATEGY, EXTENSION_FEATURE_CONTENT_PARTS,
     EXTENSION_FEATURE_DELEGATION_TELEMETRY, EXTENSION_FEATURE_DYNAMIC_TOOLS,
     EXTENSION_FEATURE_LIFECYCLE_EVENTS, EXTENSION_FEATURE_POLICY_INTENTS,

@@ -328,6 +328,10 @@ pub(super) fn negotiate_contributions_with_host_services(
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
                 allowed.insert(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1);
+                if manifest.api_version == EXTENSION_API_VERSION_0_4 {
+                    allowed.insert(EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1);
+                    allowed.insert(EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1);
+                }
                 if manifest.name == "octet-subagents" {
                     allowed.insert(EXTENSION_FEATURE_DELEGATION_TELEMETRY);
                 }
@@ -404,12 +408,18 @@ pub(super) fn negotiate_contributions_with_host_services(
                     "autocomplete_edit_v1 negotiation requires autocomplete".into(),
                 ));
             }
-            if features.contains(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
-                && !features.contains(EXTENSION_FEATURE_AGENT_SESSIONS)
-            {
-                return Err(ExtensionRuntimeError::Protocol(
-                    "agent_model_selection_v1 negotiation requires agent_sessions".into(),
-                ));
+            for feature in [
+                EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1,
+                EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1,
+                EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1,
+            ] {
+                if features.contains(feature)
+                    && !features.contains(EXTENSION_FEATURE_AGENT_SESSIONS)
+                {
+                    return Err(ExtensionRuntimeError::Protocol(format!(
+                        "{feature} negotiation requires agent_sessions"
+                    )));
+                }
             }
             if features.contains(EXTENSION_FEATURE_APPROVALS)
                 && !features.contains(EXTENSION_FEATURE_POLICY_INTENTS)

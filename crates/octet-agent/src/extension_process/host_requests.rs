@@ -120,6 +120,9 @@ impl From<AgentSessionPolicy> for ExtensionAgentSessionPolicy {
 pub struct AgentSessionSpawnRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     /// Unique task label under the calling owner.
     pub task_name: String,
     /// Optional bounded presentation profile retained by the host for restart
@@ -144,6 +147,9 @@ pub struct AgentSessionSpawnRequest {
 pub struct AgentSessionMessageRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     /// Agent ID or path returned by `agent/spawn`.
     pub target: String,
     /// Message or follow-up task to deliver.
@@ -156,6 +162,9 @@ pub struct AgentSessionMessageRequest {
 pub struct AgentSessionTargetRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     /// Agent ID or path returned by `agent/spawn`.
     pub target: String,
 }
@@ -166,6 +175,9 @@ pub struct AgentSessionTargetRequest {
 pub struct AgentSessionListRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
 }
 
 /// Owner-bound, bounded configured-model discovery.
@@ -174,6 +186,9 @@ pub struct AgentSessionListRequest {
 pub struct AgentSessionModelsRequest {
     /// Active host request defining the resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     #[serde(default)]
     /// Optional case-insensitive search, at most 128 bytes.
     pub query: Option<String>,
@@ -188,9 +203,30 @@ pub struct AgentSessionModelsRequest {
 pub struct AgentSessionWaitRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     /// Bounded wait duration. Defaults to 30 seconds and is capped at 60.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+}
+
+/// API 0.4 bounded, loss-detecting observation of one owned child session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionEventsRequest {
+    /// Active or originating host request for the issued owner.
+    pub parent_request_id: u64,
+    /// Previously issued owner; requires agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+    /// Agent ID or path returned by agent/spawn.
+    pub target: String,
+    /// Last delivered sequence; zero requests the retained beginning.
+    pub after_sequence: u64,
+    /// Maximum wait in milliseconds, 0 through 25000; default zero.
+    #[serde(default)]
+    pub timeout_ms: u64,
 }
 
 /// API `0.2` request for the current host composer snapshot.

@@ -63,6 +63,12 @@ pub const EXTENSION_FEATURE_AGENT_SESSIONS: &str = "agent_sessions";
 /// Host-confirmed configured worker routing and bounded discovery.
 pub const EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1: &str = "agent_model_selection_v1";
 
+/// API 0.4 bounded, owner-scoped child observations with loss-detecting cursors.
+pub const EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1: &str = "agent_session_events_v1";
+
+/// API 0.4 retained issued-owner child calls and explicit owned-tree shutdown.
+pub const EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1: &str = "agent_session_lifetime_v1";
+
 /// API `0.2` first-party delegation telemetry contract.
 pub const EXTENSION_FEATURE_DELEGATION_TELEMETRY: &str = "delegation_telemetry_v1";
 

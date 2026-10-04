@@ -554,7 +554,18 @@ impl ExtensionProcess {
     /// Immediate owner invalidation, independent of frontend and hook subscriptions.
     pub fn retire_resource_owner(&self, session_id: &str) {
         let connection = read_std_lock(&self.inner.connection).clone();
+        // Bulk/resource retirement still needs the issued tuples to invalidate
+        // their backing stores. Revoke reverse-request issuance afterwards.
         lock_std_mutex(&connection.resources).retire_owner(session_id);
+        lock_std_mutex(&connection.issued_resource_owners)
+            .retain(|owner| owner.session_id != session_id);
+        // Retained child calls share the same issued-owner lifetime as other
+        // reverse requests. Wake in-flight waits and stop only this owner's
+        // worker trees; requesting shutdown is not a settlement receipt.
+        connection.pending_changed.notify_waiters();
+        if let Some(service) = read_std_lock(&self.inner.delegation_service).clone() {
+            service.shutdown_owner(session_id);
+        }
         connection.resource_cleanup_changed.notify_one();
         let _ = connection.events.send(ExtensionEvent::Diagnostic {
             message: "resource owner retired; existing executions draining".into(),

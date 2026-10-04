@@ -79,6 +79,14 @@ pub(super) enum AgentSessionOperation {
     Interrupt {
         target: String,
     },
+    Events {
+        target: String,
+        after_sequence: u64,
+        timeout: Duration,
+    },
+    Stop {
+        target: String,
+    },
 }
 
 pub(super) async fn execute_agent_session_operation(
@@ -124,6 +132,10 @@ pub(super) async fn execute_agent_session_operation(
         AgentSessionOperation::Interrupt { target } => {
             service.interrupt(&resource_owner, &target).await
         }
+        AgentSessionOperation::Events { target, after_sequence, timeout } => {
+            service.events(&resource_owner, &target, after_sequence, timeout, &cancellation).await
+        }
+        AgentSessionOperation::Stop { target } => service.stop(&resource_owner, &target),
     }
 }
 
@@ -133,14 +145,19 @@ pub(super) fn queue_agent_session_operation(
     parent_request_id: u64,
     method: &'static str,
     operation: AgentSessionOperation,
+    explicit_owner: Option<ExtensionResourceOwner>,
 ) -> Result<(), String> {
-    let Some(registered) =
-        register_child_request(state, request_id.clone(), Some(parent_request_id), method)?
-    else {
+    let Some(registered) = register_agent_session_request(
+        state, request_id.clone(), parent_request_id, method, explicit_owner,
+    )? else {
         return Ok(());
     };
     let response_state = registered.response_state;
-    let resource_owner = registered.resource_owner.map(|owner| owner.session_id);
+    let resource_owner = registered.resource_owner;
+    let issued_resource_owners = Arc::clone(&state.issued_resource_owners);
+    let closed = Arc::clone(&state.closed);
+    let draining = Arc::clone(&state.draining);
+    let owner_changed = Arc::clone(&state.pending_changed);
     let service = read_std_lock(&state.delegation_service).clone();
     let worker = match state.child_work_slots.clone().try_acquire_owned() {
         Ok(worker) => worker,
@@ -173,17 +190,43 @@ pub(super) fn queue_agent_session_operation(
     tokio::spawn(async move {
         let cancellation = CancellationToken::default();
         let result = if let (Some(service), Some(resource_owner)) = (service, resource_owner) {
-            tokio::select! {
-                result = execute_agent_session_operation(
-                    service,
-                    resource_owner,
-                    operation,
-                    cancellation.clone(),
-                ) => result,
-                _ = child_response_settled(Arc::clone(&response_state)) => {
-                    cancellation.cancel();
-                    drop(worker);
-                    return;
+            if closed.load(Ordering::Acquire)
+                || draining.load(Ordering::Acquire)
+                || !lock_std_mutex(&issued_resource_owners).contains(&resource_owner)
+            {
+                Err("child session owner retired before dispatch".to_owned())
+            } else {
+                let retired = async {
+                    loop {
+                        let changed = owner_changed.notified();
+                        tokio::pin!(changed);
+                        changed.as_mut().enable();
+                        if closed.load(Ordering::Acquire)
+                            || draining.load(Ordering::Acquire)
+                            || !lock_std_mutex(&issued_resource_owners).contains(&resource_owner)
+                        {
+                            return;
+                        }
+                        changed.await;
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    _ = retired => {
+                        cancellation.cancel();
+                        Err("child session owner retired during dispatch".to_owned())
+                    }
+                    _ = child_response_settled(Arc::clone(&response_state)) => {
+                        cancellation.cancel();
+                        drop(worker);
+                        return;
+                    }
+                    result = execute_agent_session_operation(
+                        service,
+                        resource_owner.session_id.clone(),
+                        operation,
+                        cancellation.clone(),
+                    ) => result,
                 }
             }
         } else {
