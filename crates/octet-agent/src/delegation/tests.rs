@@ -6579,6 +6579,40 @@ fn allowed_worker_outputs_compose_with_durable_roster_budget() {
     assert!(encode_durable_fleet(oversized_metadata).is_err());
 }
 
+#[tokio::test]
+async fn child_event_service_is_owner_fenced_non_consuming_and_cancellable() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let binding = manager.root_binding();
+    let service = binding.extension_service("child-observer", "parent-session", "root-owner").unwrap();
+    let foreign = binding.extension_service("foreign-observer", "parent-session", "root-owner").unwrap();
+    let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+    {
+        let mut state = manager.state.lock().unwrap();
+        let record = state.records.get_mut(&identity.id).unwrap();
+        record.extension_policy = Some(test_extension_policy());
+        record.extension_principal = Some("child-observer".into());
+        record.usage.input_tokens = 17;
+    }
+    service.state.lock().unwrap().owners.entry("root-owner".into()).or_default().owned_agents.insert(identity.id.clone());
+    manager.record_child_event(&identity.id, json!({"kind": "run_started", "message": "real accepted input"}));
+    let cancellation = crate::CancellationToken::default();
+    let first = service.events("root-owner", &identity.id, 0, Duration::ZERO, &cancellation).await.unwrap();
+    let again = service.events("root-owner", &identity.id, 0, Duration::ZERO, &cancellation).await.unwrap();
+    assert_eq!(first, again, "reading is not an acknowledgement or accounting mutation");
+    assert_eq!(first["events"][0]["sequence"], 1);
+    assert_eq!(manager.extension_usage_records(ROOT_AGENT_ID)[0].usage.input_tokens, 17);
+    assert!(foreign.events("root-owner", &identity.id, 0, Duration::ZERO, &cancellation).await.is_err());
+    assert!(service.events("foreign-owner", &identity.id, 0, Duration::ZERO, &cancellation).await.is_err());
+    cancellation.cancel();
+    assert!(service.events("root-owner", &identity.id, 1, Duration::from_secs(1), &cancellation).await.unwrap_err().contains("cancelled"));
+    assert!(foreign.stop("root-owner", &identity.id).is_err());
+    service.stop("root-owner", &identity.id).unwrap();
+    service.stop("root-owner", &identity.id).unwrap();
+    assert!(manager.state.lock().unwrap().records[&identity.id].shutdown.is_cancelled());
+    assert_eq!(manager.extension_usage_records(ROOT_AGENT_ID)[0].usage.input_tokens, 17);
+}
+
 #[test]
 fn bounded_text_preserves_utf8_boundaries() {
     let input = "é".repeat(MAX_PROVENANCE_TEXT_BYTES);

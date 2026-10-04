@@ -131,8 +131,8 @@ pub use responses::{
     ResponsesItemError, ResponsesOptions, ResponsesOutput, ResponsesReplayItem,
 };
 pub use runtime::{
-    HeaderTransform, HookModelContext, HostRequestOptions, PayloadHook, ResponseHook,
-    MAX_RUNTIME_METADATA_BYTES, MAX_RUNTIME_METADATA_ENTRIES,
+    HeaderTransform, HookModelContext, HostRequestOptions, PayloadHook, ProviderRequestContext,
+    ProviderRequestHook, ResponseHook, MAX_RUNTIME_METADATA_BYTES, MAX_RUNTIME_METADATA_ENTRIES,
 };
 pub use steering::{
     SteeringControl, SteeringEvent, SteeringSession, SteeringState, SteeringUpdate,

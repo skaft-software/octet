@@ -289,6 +289,8 @@ pub use self::process_group::EXTENSION_FEATURE_APPROVALS;
 pub use self::process_group::EXTENSION_FEATURE_ARTIFACTS;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1;
+pub use self::process_group::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1;
+pub use self::process_group::EXTENSION_FEATURE_PIPELINE_HOOKS_V1;
 pub use self::process_group::EXTENSION_FEATURE_CACHE_WARMING_DECISION;
 pub use self::process_group::EXTENSION_FEATURE_COMPACTION_STRATEGY;
 pub use self::process_group::EXTENSION_FEATURE_COMPOSER;

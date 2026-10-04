@@ -579,6 +579,9 @@ impl ImageGenerationOptions {
     /// Rejects unbounded, hostile, or host-owned options before dispatch.
     pub fn validate(&self) -> Result<(), AiError> {
         self.runtime.validate()?;
+        if !self.runtime.provider_hooks.is_empty() {
+            return Err(ConfigError::Parse("async provider hooks are not supported for image requests".into()).into());
+        }
         if self.runtime.fetch.is_some() {
             return Err(ConfigError::Parse(
                 "image generation does not support a per-request fetch transport".to_owned(),
@@ -1019,8 +1022,9 @@ impl AiClient {
                 api: model.spec.api.as_str().to_owned(),
             };
             transform.transform_headers(&mut headers, &context)?;
-            for name in headers.keys() {
-                if crate::runtime::is_reserved_header(name) && before.get(name) != headers.get(name)
+            for name in before.keys().chain(headers.keys()) {
+                if crate::runtime::is_reserved_header(name)
+                    && !before.get_all(name).iter().eq(headers.get_all(name).iter())
                 {
                     return Err(ConfigError::ReservedHeader(name.clone()).into());
                 }

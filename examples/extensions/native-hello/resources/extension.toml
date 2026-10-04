@@ -12,4 +12,4 @@ process = false
 network = false
 
 [contributes]
-tools = ["counter_create", "counter_add"]
+tools = ["counter_create", "counter_add", "counter_release_last"]

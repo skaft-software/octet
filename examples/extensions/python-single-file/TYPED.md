@@ -66,6 +66,35 @@ revoking the session's retained blob. Unit and raw subprocess checks also cover
 path traversal/symlink refusal, finite caller bounds, parser failures and ticket /
 lease cleanup; they are not production storage/admission evidence.
 
+## Additional matrix tests (source; native run required)
+
+The same `--test typed` target now includes `values_matrix`, `resource_matrix`,
+and `bulk_matrix` modules. Their twenty additional methods use three actual SDK
+executables beside the original fixtures:
+
+- `values_matrix_fixture.py`: exact shared schema comparison (only documented
+  annotation/order normalization), required-nullable omission, non-null defaults,
+  independent mutable defaults, and hostile invalid/oversized/EOF/duplicate
+  terminals. A test-only stdout adapter faults SDK-generated terminal bytes;
+  initialize, typed dispatch, correlation and shutdown still use the real SDK.
+- `resource_matrix_fixture.py`: captured provisional tokens, invalid/RPC-failed
+  parents, two-output atomic refusal, parent/generation quotas and recovery,
+  provisional invocation/discovery refusal, cancellation before terminal,
+  accepted reload and failed candidate preservation. File barriers order races.
+  Retirement is observed before polling repeated release for cleanup status.
+- `bulk_matrix_fixture.py`: real scratch-file length/oversize corruption, wrong
+  commit digest, abandoned writes and cancellation before commit. The private
+  host store permits only one ticket/blob and 64 bytes; tests assert transfer/
+  backing cleanup and a subsequent full-capacity publication and verified read.
+  Only descriptors and summaries are tool results; scratch locators stay local.
+
+These additions are not a complete matrix claim. Cancellation before SDK terminal
+is not the hostile late-success R09 oracle; pre-commit cancellation is not the
+host-copy/publication B06 barrier. Generation quota also exercises the SDK's own
+finite guard. Active-execution reload, crash supervision, host restart, cleanup
+hang, descriptor mutation and disk-failure coverage remain separate work. Native
+compilation/execution must be recorded independently of raw Python unit checks.
+
 No external provider/network, install, global configuration, or simulator is needed;
 the Agent capture uses only a private local scripted HTTP server.
 Unsupported secure local-file platforms fail closed; no platform matrix is

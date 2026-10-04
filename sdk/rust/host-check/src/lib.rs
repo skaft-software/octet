@@ -1,5 +1,7 @@
 //! Qualification against the production host, with a local scripted provider for projection tests.
 #[cfg(test)]
+mod author_examples;
+#[cfg(test)]
 mod typed_tests;
 #[cfg(test)]
 mod resource_tests;

@@ -103,6 +103,10 @@ pub enum ExtensionPostMutationDisposition {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionHookOutput {
+    /// Per-run composed system replacement, accepted only by a negotiated
+    /// before_prompt_state_v1 frontend. Empty text is an explicit replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     /// Canonical messages/system proposal accepted only by the API 0.4
     /// provider_context preparation driver, never a provider payload override.
     #[serde(default, skip_serializing_if = "Option::is_none")]

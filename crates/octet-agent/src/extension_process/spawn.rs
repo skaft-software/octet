@@ -414,6 +414,11 @@ pub(super) async fn spawn_connection(
         optional_features.push(EXTENSION_FEATURE_TOOL_PROMPT_METADATA.to_owned());
         optional_features.push(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1.to_owned());
     }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor.manifest.capabilities.system_prompt
+        && descriptor.manifest.contributes.hooks.contains(&ExtensionHook::BeforePrompt) {
+        optional_features.push(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1.to_owned());
+    }
     if offered_host_services.provider_pipeline
         && descriptor
             .manifest

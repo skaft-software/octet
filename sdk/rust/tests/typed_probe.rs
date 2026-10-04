@@ -20,6 +20,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("HOME", &workspace);
     std::fs::write(workspace.join("fixture.cir"), b"* fixture\nR1 a b 1k\n")?;
     let mut extension = Extension::new();
+    if std::env::args().nth(2).as_deref() == Some("--no-progress") {
+        extension.request_progress(false);
+    }
     extension.typed_tool::<Record, Record, _>("typed", "Typed conformance record", move |mut input, call| {
         let mut log = OpenOptions::new().create(true).append(true).open(workspace.join("calls.jsonl")).unwrap();
         writeln!(log, "{}", serde_json::json!({"pid":std::process::id(),"name":input.name})).unwrap();

@@ -74,6 +74,8 @@ pub(super) struct AgentRecord {
     pub(super) tool_call_count: u64,
     pub(super) active_tools: BTreeMap<String, String>,
     pub(super) recent_tools: VecDeque<ChildToolActivity>,
+    /// Process-local bounded observations; never another authoritative transcript.
+    pub(super) child_events: ChildEventLog,
     pub(super) usage: Usage,
     /// Process-local provisional generation; never part of durable/billable usage.
     pub(super) streamed_output_bytes: u64,

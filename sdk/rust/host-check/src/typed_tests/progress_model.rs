@@ -1,5 +1,6 @@
 //! A07: real SDK -> ExtensionProcess -> registered tool -> Agent -> HTTP provider.
 //! Only the provider's two responses are scripted; neither SDK nor host is a fake.
+mod unnegotiated;
 use super::{record, shutdown, start};
 use octet_agent::{
     Agent, AgentConfig, AgentEvent, EffectBroker, EffectPolicy, EntryValue, ExtensionHost,

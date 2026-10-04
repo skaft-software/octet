@@ -443,6 +443,7 @@ fn initialize(extension: &Extension, params: &Value) -> Result<Value, Error> {
     let required = names(&protocol["required_features"])?;
     let optional = names(&protocol["optional_features"])?;
     if !required.is_disjoint(&optional)
+        || (extension.progress_disabled && required.contains("request_progress"))
         || required.iter().any(|s| !FEATURES.contains(s) && *s != "request_progress" && !(uses_resources && *s == resource::FEATURES[0]) && !(uses_operations && *s == resource::FEATURES[1]) && !(uses_bulk && *s == bulk::FEATURE))
         || FEATURES.iter().any(|s| !required.contains(s))
     {
@@ -460,7 +461,7 @@ fn initialize(extension: &Extension, params: &Value) -> Result<Value, Error> {
         ));
     }
     let mut features = FEATURES.to_vec();
-    if required.contains("request_progress") || optional.contains("request_progress") {
+    if !extension.progress_disabled && (required.contains("request_progress") || optional.contains("request_progress")) {
         features.push("request_progress");
     }
     let mut limits = json!({"max_concurrent_requests":1});
@@ -712,6 +713,20 @@ impl<'de> Visitor<'de> for UniqueVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_author_policy_respects_optional_and_required_offers() {
+        let mut offer = json!({"api_version":"0.4","workspace":"/fixture","octet_version":"0.8.2", "extension":{},"capabilities":{},"host":{},"contributes":{"tools":[]}, "protocol":{"version":"0.4","required_features":["request_cancellation","content_parts"],"optional_features":["request_progress"],"limits":{"max_concurrent_requests":1}}});
+        let mut extension = Extension::new();
+        assert!(initialize(&extension, &offer).unwrap()["protocol"]["features"].as_array().unwrap().contains(&json!("request_progress")));
+        extension.request_progress(false);
+        assert!(!initialize(&extension, &offer).unwrap()["protocol"]["features"].as_array().unwrap().contains(&json!("request_progress")));
+        offer["protocol"]["optional_features"] = json!([]);
+        offer["protocol"]["required_features"] = json!(["request_cancellation","content_parts","request_progress"]);
+        assert_eq!(initialize(&extension, &offer).unwrap_err().code, -32000);
+        extension.request_progress(true);
+        assert!(initialize(&extension, &offer).is_ok());
+    }
     #[test]
     fn framing_bounds_are_exact() {
         let exact = vec![b' '; MAX_FRAME_BYTES];

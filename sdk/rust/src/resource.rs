@@ -91,7 +91,7 @@ impl<T: ResourceType> JsonSchema for Resource<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupStatus {
     Pending,
@@ -99,7 +99,7 @@ pub enum CleanupStatus {
     Failed,
     Unknown,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseStatus {
     pub retired: bool,
@@ -509,6 +509,15 @@ impl CallContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn release_status_has_one_typed_output_schema() {
+        let schema = crate::schema::typed_generated::<ReleaseStatus>(false).unwrap();
+        for cleanup in [CleanupStatus::Pending, CleanupStatus::Completed, CleanupStatus::Failed, CleanupStatus::Unknown] {
+            let value = crate::values::encode(&ReleaseStatus { retired: true, cleanup }).unwrap();
+            crate::schema::arguments(&schema, &value).unwrap();
+            assert_eq!(serde_json::from_value::<ReleaseStatus>(value).unwrap().cleanup, cleanup);
+        }
+    }
     struct Counter;
     impl ResourceType for Counter {
         const TYPE_ID: &'static str = "demo.Counter";

@@ -192,6 +192,11 @@ impl CallContext {
     pub fn host_context(&self) -> &Value {
         &self.host_context
     }
+    /// Whether this invocation negotiated progress. This does not imply that a
+    /// cancelled or settled invocation may still emit it.
+    pub fn supports_progress(&self) -> bool {
+        self.progress.is_some()
+    }
     /// Emit a bounded ephemeral status, only while negotiated and active.
     /// Sequences begin at one. Progress never extends a deadline or becomes output.
     pub fn progress(&self, message: impl Into<String>) -> Result<u64, Error> {
@@ -235,11 +240,22 @@ pub(crate) struct Tool {
 #[derive(Default)]
 pub struct Extension {
     pub(crate) tools: BTreeMap<String, Arc<Tool>>,
+    progress_disabled: bool,
 }
 impl Extension {
     /// Construct an exact API 0.4 tool-only process. No fallback to earlier wires.
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Enable or decline optional request progress during initialization.
+    ///
+    /// Enabled by default. Set to `false` before `run` for a deliberately quiet
+    /// extension. Progress helpers then refuse without emitting notifications.
+    /// A host requiring progress (rather than offering it optionally) is rejected;
+    /// cancellation, typed results, resources and blobs are unaffected.
+    pub fn request_progress(&mut self, enabled: bool) -> &mut Self {
+        self.progress_disabled = !enabled;
+        self
     }
     /// Generate a legitimate input schema from a typed Serde/Schemars struct.
     /// Unsupported schema vocabulary/recursive types fail at registration.

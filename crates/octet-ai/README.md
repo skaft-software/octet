@@ -121,6 +121,18 @@ not own. Non-empty `metadata` is refused until a codec declares the wire field;
 `RequestOverrides` still owns the data-only sampling/header/env/timeout/retry
 surface, and nonzero retry controls stay refused as host-owned.
 
+The optional async `ProviderRequestHook` chain now mediates actual encoded
+conversation/compact HTTP bodies, mutable headers (including deletions), and real
+response headers before body consumption. It uses bounded cancellable futures,
+not blocking RPC inside the synchronous hooks. An owner-bound client clone or
+`HostRequestOptions.provider_hooks` installs it; absence leaves the native path
+unchanged. Authentication/signing remains authoritative and reserved-header
+protection includes deletion and repeated values. Preferred Responses WebSockets
+use HTTP with this chain; opaque host transports and native steering refuse it,
+never approximating a wire payload or fabricating response metadata. See the
+[wire and integration contract](docs/provider-pipeline.md) for native process
+binding, explicit gaps, and the focused test locations (not a qualification claim).
+
 ## Deferred responses and the faux provider
 
 A provider may park a request instead of completing it. The transport half is

@@ -8,7 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn log(path: &Path, kind: &str, name: &str) {
-    let event = json!({"pid":std::process::id(),"kind":kind,"name":name,"thread":std::thread::current().name()});
+    record(path, json!({"kind":kind,"name":name}));
+}
+fn record(path: &Path, mut event: serde_json::Value) {
+    event["pid"] = json!(std::process::id());
+    event["thread"] = json!(std::thread::current().name());
     std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -44,6 +48,11 @@ struct Created {
     counter: Resource<Counter>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
+struct Pair {
+    first: Resource<Counter>,
+    second: Resource<Counter>,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct Input {
     counter: Resource<Counter>,
     delta: i64,
@@ -64,6 +73,9 @@ struct Empty {}
 
 fn main() -> Result<(), Error> {
     let workspace = PathBuf::from(std::env::args_os().nth(1).expect("private workspace"));
+    if workspace.join("reject-start").exists() {
+        return Err(Error::tool("fixture refuses candidate initialization"));
+    }
     let saved = Arc::new(Mutex::new(None::<Resource<Counter>>));
     let mut extension = Extension::new();
     let path = workspace.clone();
@@ -73,20 +85,44 @@ fn main() -> Result<(), Error> {
         "Create native counter",
         move |input, call| {
             log(&path, "call", "create");
+            if input.name == "quota-parent" {
+                for index in 0..33 {
+                    let name = format!("quota-parent-{index}");
+                    let reference = call.export(Counter {
+                        value: 0,
+                        mode: name.clone(),
+                        path: path.clone(),
+                    })?;
+                    record(
+                        &path,
+                        json!({"kind":"exported","name":name,"resource":reference}),
+                    );
+                }
+                unreachable!("SDK per-parent quota is 32");
+            }
             let counter = call.export(Counter {
                 value: 0,
                 mode: input.name.clone(),
                 path: path.clone(),
             })?;
             *keep.lock().unwrap() = Some(counter.clone());
-            log(&path, "exported", &input.name);
+            record(
+                &path,
+                json!({"kind":"exported","name":input.name,"resource":counter}),
+            );
+            if input.name.starts_with("hold") {
+                while !path.join("allow-terminal").exists() {
+                    call.wait(Duration::from_millis(2))?;
+                }
+                log(&path, "allow_terminal", &input.name);
+            }
             if input.name == "cancel" {
                 call.wait(Duration::from_secs(30))?;
             }
-            if input.name == "invalid-output" {
+            if input.name == "invalid-output" || input.name == "hold-invalid" {
                 return ToolResult::structured(Count { value: 1 }, "Invalid fixture output");
             }
-            if input.name == "error" {
+            if input.name == "error" || input.name == "hold-error" {
                 return Err(Error::tool("Fixture failed after registration"));
             }
             ToolResult::structured(Created { counter }, "Counter created")
@@ -103,6 +139,13 @@ fn main() -> Result<(), Error> {
                 call.release(&input.counter)?;
             }
             let value = call.with_resource(&input.counter, |native| {
+                if input.mode == "hold" {
+                    log(&path, "holding", "add");
+                    while !path.join("allow-terminal").exists() {
+                        call.wait(Duration::from_millis(2))?;
+                    }
+                    log(&path, "settled", "add");
+                }
                 if input.mode == "cancel" {
                     log(&path, "holding", "add");
                     while !call.is_cancelled() {
@@ -135,6 +178,32 @@ fn main() -> Result<(), Error> {
                 },
                 "Counters summed",
             )
+        },
+    )?;
+    let path = workspace.clone();
+    extension.typed_tool::<Create, Pair, _>(
+        "pair",
+        "Create two native outputs atomically",
+        move |input, call| {
+            log(&path, "call", "pair");
+            let first = call.export(Counter {
+                value: 0,
+                mode: "pair-first".into(),
+                path: path.clone(),
+            })?;
+            let second = call.export(Counter {
+                value: 0,
+                mode: "pair-second".into(),
+                path: path.clone(),
+            })?;
+            record(&path, json!({"kind":"pair","first":first,"second":second}));
+            if input.name == "invalid" {
+                return ToolResult::structured(
+                    json!({"first":first,"second":{"$resource":"invalid","type":"wrong.Type"}}),
+                    "Invalid pair",
+                );
+            }
+            ToolResult::structured(Pair { first, second }, "Two counters created")
         },
     )?;
     extension.operation::<Empty, Count, _>(

@@ -121,6 +121,21 @@ tools = {}
         if matches!(script, "bulk_fixture.py" | "progress_fixture.py") {
             config.bulk_store = Some(octet_agent::BulkStorage::new().unwrap());
         }
+        if script == "bulk_matrix_fixture.py" {
+            config.bulk_store = Some(
+                octet_agent::BulkStorage::with_root_and_limits(
+                    root.join("bulk-store"),
+                    octet_agent::BulkLimits {
+                        object_bytes: 64,
+                        owner_bytes: 64,
+                        write_tickets_per_generation: 1,
+                        read_leases_per_generation: 1,
+                        blobs_per_owner: 1,
+                    },
+                )
+                .unwrap(),
+            );
+        }
         let process = ExtensionProcess::start(descriptor, config).await.unwrap();
         assert_eq!(process.api_version(), "0.4");
         Self { root, process }
@@ -681,3 +696,12 @@ mod resource_scope;
 
 #[path = "support/progress_unnegotiated.rs"]
 mod progress_unnegotiated;
+
+#[path = "support/values_matrix.rs"]
+mod values_matrix;
+
+#[path = "support/resource_matrix.rs"]
+mod resource_matrix;
+
+#[path = "support/bulk_matrix.rs"]
+mod bulk_matrix;

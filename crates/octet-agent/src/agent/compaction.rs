@@ -1,6 +1,108 @@
 //! Context compaction: policy, summaries, native compaction and the capacity cache.
 
 use super::*;
+use crate::compaction::{
+    run_session_operation_hooks, session_operation_branch, SessionCompactionReason,
+    SessionCompactionReplacement, SessionOperation, SessionOperationDecision,
+    SessionOperationError, SessionOperationHook, SessionSourceRevision,
+};
+
+const COMPACTION_VETO: &str = "compaction cancelled by extension";
+const SESSION_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[cfg(test)]
+mod session_tests;
+
+fn session_operation_error(error: SessionOperationError) -> AgentError {
+    match error {
+        SessionOperationError::Cancelled => AgentError::Cancelled,
+        other => AgentError::InvalidCompactionPolicy(other.to_string()),
+    }
+}
+
+fn compaction_reason(reason: CompactionReason) -> SessionCompactionReason {
+    match reason {
+        CompactionReason::Threshold => SessionCompactionReason::Threshold,
+        CompactionReason::Overflow => SessionCompactionReason::Overflow,
+    }
+}
+
+fn is_compaction_veto(error: &AgentError) -> bool {
+    matches!(error, AgentError::InvalidCompactionPolicy(reason) if reason == COMPACTION_VETO)
+}
+
+async fn intercept_compaction(
+    session: &mut Session,
+    hooks: &[Arc<dyn SessionOperationHook>],
+    first_kept: &EntryId,
+    reason: SessionCompactionReason,
+    instructions: Option<&str>,
+    cancellation: &CancellationToken,
+) -> Result<Option<SessionCompactionReplacement>, AgentError> {
+    if hooks.is_empty() {
+        return Ok(None);
+    }
+    let operation = SessionOperation::BeforeCompact {
+        reason,
+        first_kept: first_kept.clone(),
+        preparation: prepare_handoff(session, first_kept)?,
+        branch_entries: session_operation_branch(session).map_err(session_operation_error)?,
+        custom_instructions: instructions.map(str::to_owned),
+    };
+    match run_session_operation_hooks(
+        session,
+        hooks,
+        &operation,
+        cancellation,
+        SESSION_OPERATION_TIMEOUT,
+    )
+    .await
+    .map_err(session_operation_error)?
+    {
+        SessionOperationDecision::Continue => Ok(None),
+        SessionOperationDecision::Cancel => {
+            Err(AgentError::InvalidCompactionPolicy(COMPACTION_VETO.into()))
+        }
+        SessionOperationDecision::ReplaceCompaction { replacement } => Ok(Some(replacement)),
+    }
+}
+
+async fn observe_compaction(
+    session: &mut Session,
+    hooks: &[Arc<dyn SessionOperationHook>],
+    reason: SessionCompactionReason,
+    from_extension: bool,
+    cancellation: &CancellationToken,
+) -> Result<(), AgentError> {
+    if hooks.is_empty() {
+        return Ok(());
+    }
+    let entry = session
+        .head_ref()
+        .and_then(|id| session.entry(id))
+        .expect("successful compaction publishes its entry")
+        .clone();
+    let committed_id = entry.id.clone();
+    run_session_operation_hooks(
+        session,
+        hooks,
+        &SessionOperation::Compacted {
+            reason,
+            entry,
+            from_extension,
+        },
+        cancellation,
+        SESSION_OPERATION_TIMEOUT,
+    )
+    .await
+    .map_err(|_| {
+        AgentError::InvalidCompactionPolicy(format!(
+            "compaction committed as {}; post-commit session hook failed; do not retry",
+            committed_id.0
+        ))
+    })?;
+    Ok(())
+}
 
 pub(super) fn assistant_text(response: &octet_ai::Response) -> Option<String> {
     let text = response
@@ -39,6 +141,7 @@ pub(super) struct CompactionContext<'a> {
     pub(super) resource_owner: &'a str,
     pub(super) retry_hooks: &'a [Arc<dyn ProviderRetryHook>],
     pub(super) compaction_strategy: Option<&'a Arc<dyn CompactionStrategy>>,
+    pub(super) session_operation_hooks: &'a [Arc<dyn SessionOperationHook>],
     pub(super) max_network_wait: Option<Duration>,
     pub(super) provider_retries_enabled: bool,
     pub(super) client: &'a AiClient,
@@ -693,6 +796,26 @@ impl CompactionContext<'_> {
         tools: &[ToolDef],
         reason: CompactionReason,
     ) -> Result<CompactionInfo, AgentError> {
+        if !self.session_operation_hooks.is_empty() {
+            let first_kept = self.session.head().ok_or_else(|| {
+                AgentError::InvalidCompactionPolicy("no history to compact".into())
+            })?;
+            if intercept_compaction(
+                self.session,
+                self.session_operation_hooks,
+                &first_kept,
+                compaction_reason(reason),
+                None,
+                &self.abort.cancellation,
+            )
+            .await?
+            .is_some()
+            {
+                return Err(AgentError::InvalidCompactionPolicy(
+                    "text replacement cannot replace a native Responses checkpoint".into(),
+                ));
+            }
+        }
         let id = self.begin_compaction(system, tools, reason)?;
         // Row 3.5: one compaction boundary. Dropped guards settle as
         // errors, so the explicit settle below marks only real success.
@@ -861,6 +984,16 @@ impl CompactionContext<'_> {
 
         self.finish_compaction(id, system, tools, reason, &operation, self.model);
         compaction_guard.finish(operation.is_err());
+        if operation.is_ok() {
+            observe_compaction(
+                self.session,
+                self.session_operation_hooks,
+                compaction_reason(reason),
+                false,
+                &self.abort.cancellation,
+            )
+            .await?;
+        }
         operation
     }
 
@@ -871,6 +1004,19 @@ impl CompactionContext<'_> {
         tools: &[ToolDef],
         reason: CompactionReason,
     ) -> Result<CompactionInfo, AgentError> {
+        let replacement = intercept_compaction(
+            self.session,
+            self.session_operation_hooks,
+            &first_kept,
+            compaction_reason(reason),
+            None,
+            &self.abort.cancellation,
+        )
+        .await?;
+        let from_extension = replacement.is_some();
+        let first_kept = replacement
+            .as_ref()
+            .map_or(first_kept, |value| value.first_kept.clone());
         let id = self.begin_compaction(system, tools, reason)?;
         // Row 3.5: one compaction boundary. Dropped guards settle as
         // errors, so the explicit settle below marks only real success.
@@ -896,6 +1042,15 @@ impl CompactionContext<'_> {
                         .limits
                         .context_window
                         .saturating_sub(self.model.spec.limits.max_output_tokens),
+                });
+            }
+            if let Some(replacement) = replacement {
+                validate_compaction_summary_part(&replacement.summary)?;
+                if self.abort.is_set() { return Err(AgentError::Cancelled); }
+                self.session.compact_with_details(replacement.summary.clone(), first_kept.clone(), preparation.details)?;
+                return Ok(CompactionInfo {
+                    kind: CompactionKind::Local, summary: replacement.summary, first_kept,
+                    usage: Usage::default(), elapsed: Duration::ZERO, cost_microdollars: None,
                 });
             }
             if self.compaction_strategy.is_some()
@@ -960,11 +1115,24 @@ impl CompactionContext<'_> {
                 .as_ref()
                 .filter(|_| self.run_cost.unpriced_operations == unpriced_before)
                 .map(|_| self.run_cost.microdollars.saturating_sub(cost_before));
+            if from_extension {
+                info.cost_microdollars = None;
+            }
         }
 
         self.telemetry = turn_scope;
         self.finish_compaction(id, system, tools, reason, &operation, self.compaction_model);
         compaction_guard.finish(operation.is_err());
+        if operation.is_ok() {
+            observe_compaction(
+                self.session,
+                self.session_operation_hooks,
+                compaction_reason(reason),
+                from_extension,
+                &self.abort.cancellation,
+            )
+            .await?;
+        }
         operation
     }
 
@@ -1079,8 +1247,19 @@ impl CompactionContext<'_> {
                     }
                     return Ok(resolve(estimate, active_system, effective_request));
                 }
-                self.compact_native_responses(&active_system, tools, reason)
-                    .await?;
+                match self
+                    .compact_native_responses(&active_system, tools, reason)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) if is_compaction_veto(&error) => {
+                        if over_capacity {
+                            return Err(AgentError::ContextExceeded { estimate, budget });
+                        }
+                        return Ok(resolve(estimate, active_system, effective_request));
+                    }
+                    Err(error) => return Err(error),
+                }
                 native_attempted = true;
                 continue;
             }
@@ -1091,9 +1270,21 @@ impl CompactionContext<'_> {
                 .preferred_boundary()?
                 .or_else(|| self.oldest_reducible_boundary());
             if let Some(first_kept) = boundary {
-                self.compact_boundary(first_kept, &active_system, tools, reason)
-                    .await?;
-                continue;
+                match self
+                    .compact_boundary(first_kept, &active_system, tools, reason)
+                    .await
+                {
+                    Ok(_) => continue,
+                    Err(error) if is_compaction_veto(&error) => {
+                        // A veto suppresses threshold compaction, not the host's
+                        // hard context bound, and must not re-run the same hook.
+                        if over_capacity {
+                            return Err(AgentError::ContextExceeded { estimate, budget });
+                        }
+                        return Ok(resolve(estimate, active_system, effective_request));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if estimate <= budget {
                 return Ok(resolve(estimate, active_system, effective_request));
@@ -1309,6 +1500,240 @@ impl Agent {
         agent_compaction_reserve_tokens(&self.model, &self.reasoning)
     }
 
+    /// Perform one idle local compaction through awaited session interception.
+    /// The host idle driver owns this call; a transport task must not mutate the
+    /// Agent directly. A successful return follows the durable checkpoint and
+    /// its after-hook. After-hook errors explicitly retain the committed ID.
+    pub async fn compact_session_with_instructions(
+        &mut self,
+        instructions: Option<&str>,
+        cancellation: CancellationToken,
+        mut on_event: impl FnMut(AgentEvent),
+    ) -> Result<CompactionInfo, AgentError> {
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        let instructions = instructions
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if instructions.is_some_and(|value| {
+            value.len() > 16 * 1024
+                || value
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        }) {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "invalid compaction instructions".into(),
+            ));
+        }
+        if self.auto_compaction_mode == AgentCompactionMode::NativeResponses {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "cancellable manual session compaction requires local mode".into(),
+            ));
+        }
+        self.cache_warmer
+            .cancel(&mut self.session, "manual session compaction")?;
+        let started = std::time::Instant::now();
+        let usage_start = self.session.usage_records().len();
+        let cost_before = self.session.total_cost_microdollars();
+        let first_kept = choose_first_kept_by_tokens(
+            &self.session,
+            self.compaction_keep_recent_tokens,
+            |message| estimate_messages_tokens(std::slice::from_ref(message)),
+        )?
+        .filter(|id| {
+            prepare_handoff(&self.session, id).is_ok_and(|preparation| {
+                !preparation.messages.is_empty() || !preparation.turn_prefix_messages.is_empty()
+            })
+        })
+        .or_else(|| turn_starts(&self.session).get(1).cloned())
+        .ok_or_else(|| AgentError::InvalidCompactionPolicy("no safe history to compact".into()))?;
+        let replacement = intercept_compaction(
+            &mut self.session,
+            &self.extensions.session_operation_hooks,
+            &first_kept,
+            SessionCompactionReason::Manual,
+            instructions,
+            &cancellation,
+        )
+        .await?;
+        let from_extension = replacement.is_some();
+        let first_kept = replacement
+            .as_ref()
+            .map_or(first_kept, |value| value.first_kept.clone());
+        let preparation = prepare_handoff(&self.session, &first_kept)?;
+        if preparation.messages.is_empty() && preparation.turn_prefix_messages.is_empty() {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "compaction would make no progress".into(),
+            ));
+        }
+        let source_head = self.session.head();
+        let summary = match replacement {
+            Some(replacement) => {
+                validate_compaction_summary_part(&replacement.summary)?;
+                replacement.summary
+            }
+            None => {
+                let model = self
+                    .compaction_model
+                    .clone()
+                    .unwrap_or_else(|| self.model.clone());
+                let system = match instructions {
+                    Some(instructions) => format!("{SUMMARIZATION_SYSTEM_PROMPT}\n\nAdditional user instructions for this handoff:\n{instructions}"),
+                    None => SUMMARIZATION_SYSTEM_PROMPT.to_owned(),
+                };
+                let mut summary = if preparation.messages.is_empty() {
+                    preparation
+                        .previous_summary
+                        .clone()
+                        .unwrap_or_else(|| "No prior history.".into())
+                } else {
+                    self.summarize_with_retry(
+                        &model,
+                        &system,
+                        vec![build_handoff_message(&preparation)],
+                        SUMMARY_OUTPUT_TOKENS,
+                        cancellation.clone(),
+                        &mut on_event,
+                    )
+                    .await?
+                };
+                if !preparation.turn_prefix_messages.is_empty() {
+                    let prefix = self
+                        .summarize_with_retry(
+                            &model,
+                            &system,
+                            vec![build_turn_prefix_handoff_message(
+                                &preparation.turn_prefix_messages,
+                            )],
+                            TURN_PREFIX_OUTPUT_TOKENS,
+                            cancellation.clone(),
+                            &mut on_event,
+                        )
+                        .await?;
+                    append_compaction_turn_prefix(&mut summary, &prefix)?;
+                }
+                finish_validated_compaction_handoff(summary, &preparation.details)?
+            }
+        };
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        if self.session.head() != source_head {
+            return Err(session_operation_error(SessionOperationError::StaleSource));
+        }
+        // Summary calls can append real accounting, but never change the source
+        // branch. The sole writer's append fence rejects concurrent file writers.
+        self.session.compact_with_details(
+            summary.clone(),
+            first_kept.clone(),
+            preparation.details,
+        )?;
+        let mut usage = Usage::default();
+        let records = &self.session.usage_records()[usage_start..];
+        for record in records {
+            add_usage(&mut usage, &record.usage);
+        }
+        let cost_microdollars = (!from_extension
+            && records
+                .iter()
+                .all(|record| record.cost.is_some() || record.cost_microdollars.is_some()))
+        .then(|| {
+            self.session
+                .total_cost_microdollars()
+                .saturating_sub(cost_before)
+        });
+        let info = CompactionInfo {
+            kind: CompactionKind::Local,
+            summary,
+            first_kept,
+            usage,
+            elapsed: started.elapsed(),
+            cost_microdollars,
+        };
+        observe_compaction(
+            &mut self.session,
+            &self.extensions.session_operation_hooks,
+            SessionCompactionReason::Manual,
+            from_extension,
+            &cancellation,
+        )
+        .await?;
+        Ok(info)
+    }
+
+    /// Navigate an existing session tree at the host's idle boundary. Before
+    /// hooks may veto; the after-event follows the real synced head record.
+    /// Summary-producing navigation requires a separate durable record contract
+    /// and is not silently emulated by an invented user/assistant message.
+    pub async fn navigate_session_tree(
+        &mut self,
+        target: Option<EntryId>,
+        cancellation: CancellationToken,
+    ) -> Result<(), AgentError> {
+        if let Some(id) = &target {
+            if self.session.entry(id).is_none() {
+                return Err(SessionError::UnknownEntry(id.clone()).into());
+            }
+        }
+        self.cache_warmer
+            .cancel(&mut self.session, "session tree navigation")?;
+        let old_head = self.session.head();
+        let before = SessionOperation::BeforeTree {
+            target_id: target.clone(),
+            old_head: old_head.clone(),
+        };
+        match run_session_operation_hooks(
+            &mut self.session,
+            &self.extensions.session_operation_hooks,
+            &before,
+            &cancellation,
+            SESSION_OPERATION_TIMEOUT,
+        )
+        .await
+        .map_err(session_operation_error)?
+        {
+            SessionOperationDecision::Continue => {}
+            SessionOperationDecision::Cancel => {
+                return Err(AgentError::InvalidCompactionPolicy(
+                    "tree navigation cancelled by extension".into(),
+                ))
+            }
+            SessionOperationDecision::ReplaceCompaction { .. } => {
+                unreachable!("driver validates event-specific decisions")
+            }
+        }
+        let revision =
+            SessionSourceRevision::capture(&self.session).map_err(session_operation_error)?;
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        revision
+            .validate(&self.session)
+            .map_err(session_operation_error)?;
+        match &target {
+            Some(id) => self.session.checkout(id.clone())?,
+            None => self.session.checkout_root()?,
+        }
+        run_session_operation_hooks(
+            &mut self.session,
+            &self.extensions.session_operation_hooks,
+            &SessionOperation::Tree {
+                old_head,
+                new_head: target,
+            },
+            &cancellation,
+            SESSION_OPERATION_TIMEOUT,
+        )
+        .await
+        .map_err(|_| {
+            AgentError::InvalidCompactionPolicy(
+                "tree navigation committed; post-commit session hook failed; do not retry".into(),
+            )
+        })?;
+        Ok(())
+    }
+
     /// Runs a tool-free summary through the same cancellable retry, hard-budget,
     /// telemetry and durable usage path as autonomous compaction. Retries are
     /// delivered as `ProviderOperationRetry`, not compaction failures. The
@@ -1395,6 +1820,7 @@ impl Agent {
             resource_owner: &self.resource_owner,
             retry_hooks: &self.extensions.provider_retry_hooks,
             compaction_strategy: self.extensions.compaction_strategy.as_ref(),
+            session_operation_hooks: &self.extensions.session_operation_hooks,
             max_network_wait: self.max_network_wait,
             provider_retries_enabled: self.provider_retries_enabled,
             client: &self.client,
@@ -1444,6 +1870,26 @@ impl Agent {
     /// The complete unpruned provider output is durably appended as a
     /// route-affine branch checkpoint and becomes the next replay base.
     pub async fn compact_responses_native(&mut self) -> Result<CompactionInfo, AgentError> {
+        if !self.extensions.session_operation_hooks.is_empty() {
+            let first_kept = self.session.head().ok_or_else(|| {
+                AgentError::InvalidCompactionPolicy("no history to compact".into())
+            })?;
+            if intercept_compaction(
+                &mut self.session,
+                &self.extensions.session_operation_hooks,
+                &first_kept,
+                SessionCompactionReason::Manual,
+                None,
+                &CancellationToken::default(),
+            )
+            .await?
+            .is_some()
+            {
+                return Err(AgentError::InvalidCompactionPolicy(
+                    "text replacement cannot replace a native Responses checkpoint".into(),
+                ));
+            }
+        }
         if self.model.spec.protocol != Protocol::OpenAiResponses {
             return Err(AgentError::InvalidCompactionPolicy(
                 "native Responses compaction requires an OpenAI Responses model route".to_owned(),
@@ -1591,6 +2037,14 @@ impl Agent {
             self.model.spec.id.clone(),
             response.output,
         )?;
+        observe_compaction(
+            &mut self.session,
+            &self.extensions.session_operation_hooks,
+            SessionCompactionReason::Manual,
+            false,
+            &CancellationToken::default(),
+        )
+        .await?;
         Ok(CompactionInfo {
             kind: CompactionKind::NativeResponses {
                 checkpoint,

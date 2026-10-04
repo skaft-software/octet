@@ -49,3 +49,48 @@ extension.typedTool({name: 'square', description: 'Typed result',
 extension.typedTool({name: 'invalid-output', description: 'Output type check', parameters: {type: 'object'}, outputSchema: {type: 'integer'}},
   // @ts-expect-error A string is not an integer output.
   () => 'not a number', String);
+
+const recordSchema = {type: 'object', properties: {
+  count: {type: 'integer'}, note: {type: 'null'}, label: {type: 'string'},
+  mode: {type: 'string', enum: ['ready', 'empty']},
+  rows: {type: 'array', items: {type: 'object', properties: {ok: {type: 'boolean'}}, required: ['ok']}},
+}, required: ['count', 'note', 'mode', 'rows'], additionalProperties: false} as const;
+const record: InferSchema<typeof recordSchema> = {count: 1, note: null, mode: 'ready', rows: [{ok: true}]};
+// @ts-expect-error Missing is not silently converted into explicit null.
+const missingNull: InferSchema<typeof recordSchema> = {count: 1, mode: 'empty', rows: []};
+// @ts-expect-error An optional string is not nullable.
+const nullableLabel: InferSchema<typeof recordSchema> = {...record, label: null};
+// @ts-expect-error Homogeneous array items retain the nested record schema.
+const wrongRow: InferSchema<typeof recordSchema> = {...record, rows: [{ok: 1}]};
+// @ts-expect-error Scalar enum inference preserves its literal alternatives.
+const wrongMode: InferSchema<typeof recordSchema> = {...record, mode: 'other'};
+void [missingNull, nullableLabel, wrongRow, wrongMode];
+
+extension.typedTool({name: 'record', description: 'Nested structured output',
+  parameters: {type: 'object'}, outputSchema: recordSchema,
+}, async (_args, context) => {
+  context.throwIfCancelled();
+  return record;
+}, result => {
+  const count: number = result.count;
+  const note: null = result.note;
+  const label: string | undefined = result.label;
+  const mode: 'ready' | 'empty' = result.mode;
+  const rows: {ok: boolean}[] = result.rows;
+  return `${count} ${note} ${label} ${mode} ${rows.length}`;
+});
+extension.typedTool({name: 'null', description: 'Explicit null', parameters: {type: 'object'}, outputSchema: {type: 'null'}},
+  () => null, value => { const explicitNull: null = value; return String(explicitNull); });
+extension.tool({name: 'lower-null', description: 'Low-level null', parameters: {type: 'object'}, outputSchema: {type: 'null'}},
+  () => ({text: 'No value', structuredContent: null}));
+extension.tool({name: 'lower-invalid', description: 'Low-level output inference', parameters: {type: 'object'}, outputSchema: {type: 'integer'}},
+  // @ts-expect-error The lower-level API also checks schema-inferred output values.
+  () => ({text: 'Invalid', structuredContent: 'wrong'}));
+// @ts-expect-error typedTool requires an output schema even if the handler returns a value.
+extension.typedTool({name: 'missing-output-schema', description: 'Missing', parameters: {type: 'object'}}, () => null, String);
+// @ts-expect-error A model-facing text projection must be explicit, not auto-stringified JSON.
+extension.typedTool({name: 'missing-projection', description: 'Missing', parameters: {type: 'object'}, outputSchema: {type: 'null'}}, () => null);
+extension.typedTool({name: 'wrong-projection', description: 'Projection type check', parameters: {type: 'object'}, outputSchema: {type: 'integer'}},
+  () => 1,
+  // @ts-expect-error A projection must return text rather than another structured value.
+  value => ({value}));

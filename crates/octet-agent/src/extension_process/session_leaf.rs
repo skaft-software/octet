@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+mod session_operations;
+
 use super::ExtensionResourceOwner;
 use super::*;
 use crate::session_leaf::{
@@ -188,6 +190,7 @@ pub struct SessionLeafProcessLease {
     process: ExtensionProcess,
     connection: Arc<ProcessConnection>,
     bound: Arc<BoundLeaf>,
+    host_snapshot: Option<serde_json::Value>,
 }
 
 impl ExtensionProcess {
@@ -230,11 +233,43 @@ impl ExtensionProcess {
             process: self.clone(),
             connection,
             bound,
+            host_snapshot: None,
         })
     }
 }
 
 impl SessionLeafProcessLease {
+    /// Attach an authoritative native session mirror before dispatch. These are
+    /// native records, not Pi-file ABI records; adapters translate them locally.
+    /// Snapshot failure revokes this activation without dispatching a callback.
+    pub fn with_session_snapshot(
+        mut self,
+        session: &crate::Session,
+    ) -> Result<Self, ExtensionRuntimeError> {
+        if session.resource_owner_key() != self.bound.snapshot.owner.session_id {
+            return Err(ExtensionRuntimeError::Protocol(
+                "session snapshot owner changed".into(),
+            ));
+        }
+        let namespace = &self.process.descriptor().manifest.name;
+        let entries = session
+            .entries()
+            .iter()
+            .map(|entry| session_entry_for_namespace(entry, namespace))
+            .collect::<Result<Vec<_>, _>>()?;
+        let branch = crate::compaction::session_operation_branch(session)
+            .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))?
+            .iter()
+            .map(|entry| session_entry_for_namespace(entry, namespace))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.host_snapshot = Some(serde_json::json!({
+            "session_entries": entries,
+            "session_branch": branch,
+            "session_leaf_id": session.head(),
+            "session_file": session.path(),
+        }));
+        Ok(self)
+    }
     /// Initial immutable grant snapshot for the owned hook request.
     pub fn grant_snapshot(&self) -> &SessionLeafGrantSnapshot {
         &self.bound.snapshot
@@ -249,6 +284,17 @@ impl SessionLeafProcessLease {
         payload: serde_json::Value,
         context: ExtensionExecutionContext,
     ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
+        serde_json::from_value(self.run_hook_value(hook, payload, context).await?).map_err(|_| {
+            ExtensionRuntimeError::Protocol("invalid private session hook response".into())
+        })
+    }
+
+    async fn run_hook_value(
+        self,
+        hook: ExtensionHook,
+        payload: serde_json::Value,
+        context: ExtensionExecutionContext,
+    ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         if hook.is_session_hook()
             || !self.process.inner.contributions.hooks.contains(&hook)
             || context.resource_owner.as_ref() != Some(&self.bound.snapshot.owner)
@@ -268,6 +314,13 @@ impl SessionLeafProcessLease {
         .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         params["session_leaf"] = serde_json::to_value(&self.bound.snapshot)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        if let Some(snapshot) = &self.host_snapshot {
+            let host = params["context"]["host"]
+                .as_object_mut()
+                .expect("execution host serializes to an object");
+            host.extend(snapshot.as_object().expect("host snapshot object").clone());
+        }
+        validate_session_snapshot_size(&params, self.connection.max_message_bytes())?;
         self.process
             .request_typed_on_connection(
                 Arc::clone(&self.connection),
@@ -276,6 +329,150 @@ impl SessionLeafProcessLease {
                 Some(self.bound.snapshot.owner.clone()),
             )
             .await
+    }
+}
+
+/// Owner-filtered native record. Private metadata never crosses namespaces,
+/// including through compaction preparation or full session mirrors.
+fn session_entry_for_namespace(
+    entry: &crate::session::Entry,
+    namespace: &str,
+) -> Result<crate::session::Entry, ExtensionRuntimeError> {
+    let mut entry = entry.clone();
+    if let Some(metadata) = &mut entry.metadata {
+        metadata
+            .extension_metadata
+            .retain(|owner, value| value.public || owner == namespace);
+        let mut total = 0usize;
+        if metadata.extension_metadata.len()
+            > crate::session::MAX_EXTENSION_ENTRY_METADATA_NAMESPACES
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "session metadata exceeds namespace limit".into(),
+            ));
+        }
+        for value in metadata.extension_metadata.values() {
+            let bytes = serde_json::to_vec(&value.value)
+                .map_err(|_| {
+                    ExtensionRuntimeError::Protocol("session metadata unavailable".into())
+                })?
+                .len();
+            total = total.saturating_add(bytes);
+            if bytes > crate::session::MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES
+                || total > crate::session::MAX_EXTENSION_ENTRY_METADATA_BYTES
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "session metadata exceeds durable bounds".into(),
+                ));
+            }
+        }
+    }
+    Ok(entry)
+}
+
+fn validate_session_snapshot_size(
+    value: &impl Serialize,
+    limit: usize,
+) -> Result<(), ExtensionRuntimeError> {
+    struct Count {
+        bytes: usize,
+        limit: usize,
+    }
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.limit.saturating_sub(self.bytes) {
+                return Err(std::io::Error::other("session snapshot exceeds wire bound"));
+            }
+            self.bytes += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Count { bytes: 0, limit }, value).map_err(|_| {
+        ExtensionRuntimeError::Protocol(
+            "session snapshot exceeds wire bound; no entries truncated".into(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod session_snapshot_tests {
+    use super::*;
+    use crate::session::{
+        Entry, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
+        ExtensionMetadataProvenance,
+    };
+
+    fn entry() -> Entry {
+        let mut metadata = EntryMetadata::default();
+        for (namespace, public) in [
+            ("owner.one", false),
+            ("owner.two", false),
+            ("owner.public", true),
+        ] {
+            metadata.extension_metadata.insert(
+                namespace.into(),
+                ExtensionEntryMetadata {
+                    public,
+                    value: serde_json::json!({"data":format!("private:{namespace}")}),
+                    provenance: ExtensionMetadataProvenance {
+                        extension: namespace.into(),
+                        process_generation: Some(1),
+                    },
+                },
+            );
+        }
+        Entry {
+            id: EntryId("001".into()),
+            parent: None,
+            timestamp_unix_ms: None,
+            value: EntryValue::Config {
+                model: None,
+                reasoning: None,
+                reasoning_mode: None,
+            },
+            metadata: Some(metadata),
+        }
+    }
+
+    #[test]
+    fn snapshot_retains_only_receivers_private_metadata_and_public_values() {
+        let original = entry();
+        let projected = session_entry_for_namespace(&original, "owner.one").unwrap();
+        let values = &projected.metadata.as_ref().unwrap().extension_metadata;
+        assert!(values.contains_key("owner.one"));
+        assert!(values.contains_key("owner.public"));
+        assert!(!values.contains_key("owner.two"));
+        assert!(original
+            .metadata
+            .as_ref()
+            .unwrap()
+            .extension_metadata
+            .contains_key("owner.two"));
+        assert!(!serde_json::to_string(&projected)
+            .unwrap()
+            .contains("private:owner.two"));
+    }
+
+    #[test]
+    fn oversized_visible_metadata_and_wire_snapshots_refuse_without_truncation() {
+        let mut oversized = entry();
+        oversized
+            .metadata
+            .as_mut()
+            .unwrap()
+            .extension_metadata
+            .get_mut("owner.one")
+            .unwrap()
+            .value = serde_json::Value::String(
+            "x".repeat(crate::session::MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES),
+        );
+        assert!(session_entry_for_namespace(&oversized, "owner.one").is_err());
+        let value = serde_json::json!({"session_entries":[entry(),entry()]});
+        assert!(validate_session_snapshot_size(&value, 8).is_err());
+        assert!(validate_session_snapshot_size(&value, 16 * 1024).is_ok());
     }
 }
 

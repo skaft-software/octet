@@ -148,7 +148,12 @@ Use `Diagnostic::new(Severity::Error, "solver.failed", "No convergence")` and
 revision-bound context. Omit unavailable locations. Fixes are suggestions, not
 filesystem authority; references do not create objects or grant access.
 
-When the host offers `request_progress`, the SDK selects it. During the call,
+By default, when the host offers `request_progress`, the SDK selects it.
+For a deliberately quiet extension, call `extension.request_progress(false)`
+before `run`: optional progress is declined, and a host requiring it fails
+initialization rather than overriding your policy. Cancellation/results/resources/blobs
+are unaffected. `call.supports_progress()` lets a reusable handler check negotiation.
+During the call,
 `call.progress("Working")?` or `progress_status(message, current, total, unit)`
 emits a bounded status with a monotonically increasing request-local sequence.
 Unnegotiated, cancelled or settled calls refuse progress. These statuses are
@@ -158,6 +163,12 @@ host deadline. Cancellation and terminal selection retain their existing race.
 `CallContext::host_context()` exposes read-only opaque **host-issued** context,
 not an owner inferred from model arguments. Context alone conveys no reverse
 service authority. This initial C/C++ surface does not expose host context.
+
+Runnable ordinary typed recipe: [rust/typed.rs](../../examples/extensions/native-hello/rust/typed.rs)
+(Cargo example `typed-hello`, staged bundle `native-hello/typed`). It summarizes
+bounded finite samples, preserves an optional unit, conditionally emits progress,
+checks cancellation, and returns a structured diagnostic for empty samples.
+It requires no resource/bulk configuration.
 
 ### Native resources and operations
 
@@ -197,11 +208,14 @@ nonreused child IDs per process, a 30-second ceiling, and cooperative cancellati
 A late registration response cannot publish or restore a locally disposed value;
 unknown disposal identities report failed, never falsely acknowledge cleanup.
 
-Runnable two-tool example: [rust/resources.rs](../../examples/extensions/native-hello/rust/resources.rs)
+Runnable create/update/release example: [rust/resources.rs](../../examples/extensions/native-hello/rust/resources.rs)
 (Cargo example `resource-hello`). `examples/extensions/native-hello/build.sh`
 stages a package-local executable for its checked-in `resources/extension.toml`.
-That manifest declares `counter_create` and `counter_add`; start it through the
-API 0.4 host with a session-owned context. No hand-written schema/slot list or
+That manifest declares `counter_create`, `counter_add`, and `counter_release_last`;
+start it through the API 0.4 host with a session-owned context. The lifecycle tool
+releases a saved unpinned identity, not a Resource argument that admission would pin.
+`ReleaseStatus` / `CleanupStatus` are serializable, schema-generating output types;
+retirement acknowledgment is distinct from pending/completed/failed/unknown cleanup. No hand-written schema/slot list or
 second transport is needed.
 
 ### Immutable binary data
@@ -247,7 +261,8 @@ Rust additions only; C/C++ ABI1 remains the existing text-result authoring API.
   [wire reference](../../docs/extensions/PROTOCOL-REFERENCE.md) and
   [version policy](../../docs/extensions/API-0.4-REFERENCE.md).
 - The host must offer required `request_cancellation` and `content_parts`;
-  `request_progress` is additionally selected only when offered. Resource/operation
+  `request_progress` is additionally selected only when offered and author-enabled
+  (enabled by default). Resource/operation
   features are selected only for author-declared operations. Unsupported required, duplicate/overlapping feature lists,
   invalid concurrency, nonmatching tool declarations and non-tool contributions
   fail explicitly. Unknown optional features are not selected. Concurrency is
@@ -321,7 +336,8 @@ python3 scripts/generate-extension-api-v03.py --check
 The companion test workspace uses the **actual `octet-agent::ExtensionProcess`**
 (start/negotiation/tool decoder, writer cancellation, tombstones and shutdown),
 and **`octet-ai::validate_tool_arguments`** for generated schema acceptance,
-without a provider/model or full root-workspace test run. Actual catalog/default
+with a local scripted HTTP provider for Agent/progress projection cases (no paid
+inference), without a full root-workspace test run. Actual catalog/default
 policy checks reject disabled and untrusted global-source descriptors before
 starting the checked-in relative entrypoint with an exact source grant. This
 qualifies the library-level host, not every product frontend policy. It also preserves the

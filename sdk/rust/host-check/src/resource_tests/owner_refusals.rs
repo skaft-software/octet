@@ -5,11 +5,15 @@ use octet_agent::{ExtensionHostState, ExtensionProcess};
 use serde_json::{json, Value};
 use std::path::Path;
 
-fn log_bytes(workspace: &Path) -> Vec<u8> {
+pub(super) fn log_bytes(workspace: &Path) -> Vec<u8> {
     std::fs::read(workspace.join("resources.jsonl")).unwrap()
 }
 
-async fn create_owned(process: &ExtensionProcess, owner: &str, name: &str) -> ResourceRef {
+pub(super) async fn create_owned(
+    process: &ExtensionProcess,
+    owner: &str,
+    name: &str,
+) -> ResourceRef {
     let output = call(process, owner, "create", json!({"name":name}))
         .await
         .unwrap();
@@ -29,7 +33,7 @@ fn fabricated(workspace: &Path, nominal: &str) -> ResourceRef {
     }
 }
 
-async fn unavailable(
+pub(super) async fn unavailable(
     process: &ExtensionProcess,
     workspace: &Path,
     owner: &str,
@@ -67,7 +71,7 @@ async fn unavailable(
     envelope
 }
 
-async fn add(
+pub(super) async fn add(
     process: &ExtensionProcess,
     owner: &str,
     reference: &ResourceRef,
@@ -87,7 +91,7 @@ async fn add(
     assert_eq!(output.structured_content, Some(json!({"value":expected})));
 }
 
-fn child_pid(workspace: &Path) -> u64 {
+pub(super) fn child_pid(workspace: &Path) -> u64 {
     let entries = events(workspace);
     let pid = entries[0]["pid"].as_u64().unwrap();
     assert!(pid > 0);
@@ -96,7 +100,12 @@ fn child_pid(workspace: &Path) -> u64 {
     pid
 }
 
-fn still_same_process(process: &ExtensionProcess, workspace: &Path, generation: u64, pid: u64) {
+pub(super) fn still_same_process(
+    process: &ExtensionProcess,
+    workspace: &Path,
+    generation: u64,
+    pid: u64,
+) {
     assert!(process.is_running());
     assert_eq!(process.health_snapshot().generation, generation);
     assert_eq!(child_pid(workspace), pid);

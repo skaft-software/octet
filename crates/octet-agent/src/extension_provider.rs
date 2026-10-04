@@ -11,6 +11,18 @@ use std::time::{Duration, Instant};
 
 use crate::extension_api_v03 as api_v03;
 
+/// Binds private HTTP hooks to one authoritative session owner before an attempt.
+/// A process implementation also pins its current connection/generation here;
+/// callbacks must never follow a reload into a different owner or generation.
+pub trait ProviderRequestHookFactory: Send + Sync {
+    /// Create the request-local hook. Failure aborts preparation, never silently
+    /// omits a declared transformation or substitutes canonical request data.
+    fn bind_provider_request_hook(
+        &self,
+        resource_owner: &str,
+    ) -> Result<Arc<dyn octet_ai::ProviderRequestHook>, octet_ai::AiError>;
+}
+
 /// Identity of the extension generation which owns a provider catalog entry.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtensionProviderOwner {
@@ -76,6 +88,9 @@ pub struct ExtensionProviderCatalogEntry {
 /// Route selected for a currently callable extension-provider model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtensionProviderRoute {
+    /// Monotonic identity of this registration/authorization revision. Even an
+    /// identical replacement or revoke/ready cycle invalidates an older route.
+    pub registration_revision: usize,
     /// Generation that owns the provider stream endpoint.
     pub owner: ExtensionProviderOwner,
     /// Secret-free provider declaration.
@@ -118,6 +133,7 @@ pub enum ExtensionProviderRegistryError {
 
 #[derive(Clone)]
 struct ProviderRecord {
+    revision: usize,
     owner: ExtensionProviderOwner,
     provider: api_v03::ProviderDefinition,
     models: BTreeMap<String, api_v03::ProviderModelDefinition>,
@@ -371,6 +387,7 @@ impl ExtensionProviderRegistry {
                     .models
                     .get(model_id)
                     .map(|model| ExtensionProviderRoute {
+                        registration_revision: record.revision,
                         owner: record.owner.clone(),
                         provider: record.provider.clone(),
                         model: model.clone(),
@@ -390,6 +407,7 @@ impl ExtensionProviderRegistry {
             return false;
         };
         state.initial_catalog_complete.contains(&route.owner)
+            && record.revision == route.registration_revision
             && record.owner == route.owner
             && record.authorization == ExtensionProviderAuthorizationStatus::Ready
             && record.provider == route.provider
@@ -407,6 +425,7 @@ impl ExtensionProviderRegistry {
         status: ExtensionProviderAuthorizationStatus,
     ) -> Result<(), ExtensionProviderRegistryError> {
         let mut state = lock_registry(&self.state);
+        let revision = state.revision.saturating_add(1);
         let record = state
             .providers
             .get_mut(provider_id)
@@ -417,7 +436,8 @@ impl ExtensionProviderRegistry {
         let changed = record.authorization != status;
         if changed {
             record.authorization = status;
-            state.revision = state.revision.saturating_add(1);
+            record.revision = revision;
+            state.revision = revision;
         }
         drop(state);
         if changed {
@@ -545,16 +565,18 @@ impl ExtensionProviderRegistry {
                 "provider models",
             ));
         }
+        let revision = state.revision.saturating_add(1);
         state.providers.insert(
             provider_id.clone(),
             ProviderRecord {
+                revision,
                 owner,
                 provider,
                 models: model_map,
                 authorization,
             },
         );
-        state.revision = state.revision.saturating_add(1);
+        state.revision = revision;
         let result = catalog_result(state.revision, vec![provider_id], model_ids);
         drop(state);
         self.changed.notify_all();
@@ -961,6 +983,29 @@ mod tests {
             registry.resolve("fixture", "model").unwrap().owner,
             owner(1)
         );
+    }
+
+    #[test]
+    fn identical_replacement_and_authorization_aba_cannot_revive_a_route() {
+        let registry = ExtensionProviderRegistry::new();
+        registry.register(owner(1), register_params("fixture", "model")).unwrap();
+        registry.complete_initial_catalog(&owner(1));
+        let original = registry.resolve("fixture", "model").unwrap();
+        registry.update(owner(1), api_v03::ProviderUpdateParams {
+            provider: provider(), models: vec![model()],
+        }).unwrap();
+        let replacement = registry.resolve("fixture", "model").unwrap();
+        assert!(!registry.route_is_active(&original));
+        assert!(registry.route_is_active(&replacement));
+        assert_ne!(original.registration_revision, replacement.registration_revision);
+        registry.set_authorization_status(&owner(1), "fixture", ExtensionProviderAuthorizationStatus::Revoked).unwrap();
+        registry.set_authorization_status(&owner(1), "fixture", ExtensionProviderAuthorizationStatus::Ready).unwrap();
+        assert!(!registry.route_is_active(&replacement));
+        let authorized = registry.resolve("fixture", "model").unwrap();
+        registry.unregister(&owner(1), "fixture").unwrap();
+        registry.register(owner(1), register_params("fixture", "model")).unwrap();
+        assert!(!registry.route_is_active(&authorized));
+        assert!(registry.route_is_active(&registry.resolve("fixture", "model").unwrap()));
     }
 
     #[test]

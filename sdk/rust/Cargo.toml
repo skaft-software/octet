@@ -38,6 +38,10 @@ name = "typed-probe"
 path = "tests/typed_probe.rs"
 
 [[example]]
+name = "typed-hello"
+path = "../../examples/extensions/native-hello/rust/typed.rs"
+
+[[example]]
 name = "resource-probe"
 path = "tests/resource_probe.rs"
 

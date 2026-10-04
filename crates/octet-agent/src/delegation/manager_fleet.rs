@@ -316,6 +316,7 @@ impl DelegationManager {
             tool_call_count: durable.tool_call_count,
             active_tools: BTreeMap::new(),
             recent_tools: VecDeque::new(),
+            child_events: ChildEventLog::default(),
             usage: durable.usage,
             streamed_output_bytes: 0,
             usage_uncertain: durable.usage_uncertain,

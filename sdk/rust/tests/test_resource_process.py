@@ -24,7 +24,7 @@ class ResourceProcess(unittest.TestCase):
 
     def initialize(self, features=True):
         params = offer()
-        params["contributes"]["tools"] = ["create", "add", "combine", "release_saved"]
+        params["contributes"]["tools"] = ["create", "add", "combine", "release_saved", "pair"]
         params["workspace"] = str(self.workspace)
         if features:
             params["protocol"]["optional_features"] += FEATURES

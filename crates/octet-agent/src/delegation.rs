@@ -34,6 +34,7 @@ use crate::telemetry::{
 };
 use crate::tool::{Tool, ToolContext, ToolError, ToolOutput};
 
+mod child_events;
 mod collaboration_tools;
 mod commands;
 mod extension_service;
@@ -50,6 +51,7 @@ mod tasks;
 mod template;
 
 pub(crate) use self::collaboration_tools::enable_root_delegation;
+use self::child_events::ChildEventLog;
 use self::collaboration_tools::*;
 use self::commands::*;
 pub(crate) use self::extension_service::ExtensionAgentSessionPolicy;

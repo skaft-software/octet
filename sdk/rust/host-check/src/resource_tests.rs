@@ -1,4 +1,5 @@
 //! Production host + SDK resource authoring. No hand-written JSON-RPC child.
+mod lifecycle_matrix;
 mod owner_refusals;
 
 use octet_agent::extension_process::{ResourceRef, ToolCallOutput};
@@ -14,7 +15,7 @@ async fn start(workspace: &Path) -> ExtensionProcess {
         .join("../target/debug/examples/resource-probe")
         .canonicalize()
         .expect("build SDK resource-probe; missing executable is a failure");
-    let source = format!("name='resource-rust'\nversion='0.1.0'\napi_version='0.4'\n[entrypoint]\ncommand={}\nargs=[{}]\n[entrypoint.env]\nHOME={}\n[contributes]\ntools=['create','add','combine','release_saved']\n", json!(binary), json!(workspace), json!(workspace));
+    let source = format!("name='resource-rust'\nversion='0.1.0'\napi_version='0.4'\n[entrypoint]\ncommand={}\nargs=[{}]\n[entrypoint.env]\nHOME={}\n[contributes]\ntools=['create','add','combine','release_saved','pair']\n", json!(binary), json!(workspace), json!(workspace));
     let manifest_path = workspace.join("extension.toml");
     std::fs::write(&manifest_path, &source).unwrap();
     let descriptor = DiscoveredExtension {

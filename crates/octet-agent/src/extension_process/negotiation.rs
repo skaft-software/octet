@@ -261,6 +261,11 @@ pub(super) fn negotiate_contributions_with_host_services(
                 ));
             }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest.capabilities.system_prompt
+                && manifest.contributes.hooks.contains(&ExtensionHook::BeforePrompt) {
+                allowed.insert(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1);
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
                 && offered_host_services.provider_pipeline
                 && manifest
                     .contributes

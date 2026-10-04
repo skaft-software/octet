@@ -25,7 +25,7 @@ class BulkProcess(unittest.TestCase):
 
     def initialize(self, bulk=True):
         params = offer()
-        params["contributes"]["tools"] = ["write", "read", "joint"]
+        params["contributes"]["tools"] = ["write", "read", "joint", "rewrite_saved"]
         params["workspace"] = str(self.workspace)
         params["protocol"]["optional_features"] += FEATURES
         params["protocol"]["limits"]["resource_refs_v1"] = LIMITS

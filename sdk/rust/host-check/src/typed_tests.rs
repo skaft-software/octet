@@ -13,11 +13,19 @@ fn fixture() -> Value {
     serde_json::from_str(include_str!("../../../conformance/typed-values-v1.json")).unwrap()
 }
 async fn start(workspace: &Path) -> ExtensionProcess {
+    start_with_progress(workspace, true).await
+}
+async fn start_with_progress(workspace: &Path, progress: bool) -> ExtensionProcess {
     let binary = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../target/debug/examples/typed-probe")
         .canonicalize()
         .expect("build SDK examples; a missing executable is not a skipped test");
-    let source = format!("name = \"typed-rust\"\nversion = \"0.1.0\"\napi_version = \"0.4\"\n[entrypoint]\ncommand = {}\nargs = [{}]\n[contributes]\ntools = [\"typed\"]\n", json!(binary), json!(workspace));
+    let args = if progress {
+        json!([workspace])
+    } else {
+        json!([workspace, "--no-progress"])
+    };
+    let source = format!("name = \"typed-rust\"\nversion = \"0.1.0\"\napi_version = \"0.4\"\n[entrypoint]\ncommand = {}\nargs = {}\n[contributes]\ntools = [\"typed\"]\n", json!(binary), args);
     let manifest_path = workspace.join("extension.toml");
     std::fs::write(&manifest_path, &source).unwrap();
     let descriptor = DiscoveredExtension {

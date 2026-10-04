@@ -150,6 +150,9 @@ pub const EXTENSION_FEATURE_CACHE_WARMING_DECISION: &str = "cache_warming_decisi
 /// API 0.4 host-owned local compaction replacement (vision models only).
 pub const EXTENSION_FEATURE_COMPACTION_STRATEGY: &str = "compaction_strategy";
 
+/// API 0.4 before-prompt system disclosure and per-run replacement.
+pub const EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1: &str = "before_prompt_state_v1";
+
 /// API 0.4 real encoded provider request, header and response hooks.
 pub const EXTENSION_FEATURE_PIPELINE_HOOKS_V1: &str = "pipeline_hooks_v1";
 
