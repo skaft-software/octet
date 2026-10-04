@@ -28,8 +28,9 @@ use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::app::bootstrap::{
-    build_app, effective_compaction_threshold_fraction, estimate_text_tokens, open_launch_session,
-    rebuild_app, resolve_launch_interactive, terminal_goal_session_id, Bootstrap, SessionSelection,
+    build_app_with_resource_consumer as build_app, effective_compaction_threshold_fraction,
+    estimate_text_tokens, open_launch_session, rebuild_app, resolve_launch_interactive,
+    terminal_goal_session_id, Bootstrap, SessionSelection,
 };
 use crate::app::{
     apply_reconfig, level_from_reasoning, reasoning_label, requested_thinking_to_reasoning,
@@ -1189,6 +1190,8 @@ fn settle_active_clipboard_read(
 }
 
 mod clipboard_read;
+mod resource_paths;
+use resource_paths::{refresh_resource_paths, reload_resource_processes};
 
 /// Forward only normalized, bounded observations. Extensions never receive the
 /// terminal event itself and cannot influence the host keymap or resize path.
@@ -4145,16 +4148,17 @@ where
         .revoke_terminal_grant_for_shell(shell, "the application resources are being reloaded");
     let _diagnostics = crate::output::defer_tui_diagnostics();
     let background = shell.theme().background();
-    let (app, theme) = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
+    let mut app = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
         let mut app = app;
         app.system = compose_instructions(&app.config)?;
         app.system_tokens = estimate_text_tokens(&app.system);
-        let app = rebuild_app(app, None, None, None, None)?;
-        let theme = load_theme_for_background(&app.config, background);
-        Ok((app, theme))
+        let mut app = rebuild_app(app, None, None, None, None)?;
+        app.mark_resource_paths_reload();
+        Ok(app)
     })
     .await?;
-    shell.set_theme(theme);
+    refresh_resource_paths(&mut app, shell, input).await?;
+    shell.set_theme(load_theme_for_background(&app.config, background));
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
     shell.hydrate(app.agent.session())?;
@@ -4573,10 +4577,7 @@ async fn apply_live_reload_plan(
     if wants_extensions && pending_reexec.is_none() {
         app.executable_extensions
             .revoke_terminal_grant_for_shell(shell, "the extensions are being reloaded");
-        let result = await_lifecycle(shell, input, "reloading extensions…", async {
-            Ok(app.executable_extensions.reload_report().await)
-        })
-        .await?;
+        let result = reload_resource_processes(&mut app, shell, input).await?;
         let failed = result.processes.iter().any(|(_, result)| result.is_err());
         for notice in extension_reload_notices(reload, result, plan.is_forced()) {
             shell.notice(notice);
@@ -5796,6 +5797,7 @@ where
         apply_reconfig(app, reconfig)
     })
     .await?;
+    refresh_resource_paths(&mut app, shell, input).await?;
     shell.hydrate(app.agent.session())?;
     let session_id = herdr_session_id(&app);
     if session_id != previous_session_id {
@@ -5970,6 +5972,14 @@ async fn execute_extension_session_lifecycle(
     }
     let operation = request.operation().clone();
     let mut result = match operation.clone() {
+        ExtensionSessionLifecycleOperation::WaitForIdle => app
+            .agent
+            .session()
+            .path()
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(|id| Some(id.to_owned()))
+            .ok_or_else(|| anyhow::anyhow!("active session has no durable identifier")),
         ExtensionSessionLifecycleOperation::Create => {
             create_extension_session(app, shell, input).await.map(Some)
         }
@@ -5986,9 +5996,9 @@ async fn execute_extension_session_lifecycle(
     let active_session_operation = match &operation {
         ExtensionSessionLifecycleOperation::Switch { .. }
         | ExtensionSessionLifecycleOperation::Reload => true,
-        ExtensionSessionLifecycleOperation::Create | ExtensionSessionLifecycleOperation::Fork => {
-            false
-        }
+        ExtensionSessionLifecycleOperation::WaitForIdle
+        | ExtensionSessionLifecycleOperation::Create
+        | ExtensionSessionLifecycleOperation::Fork => false,
     };
     let active_session_replaced =
         active_session_operation && result.as_ref().is_ok_and(|session_id| session_id.is_some());
@@ -6003,6 +6013,7 @@ async fn execute_extension_session_lifecycle(
         return active_session_replaced;
     }
     let method = match operation {
+        ExtensionSessionLifecycleOperation::WaitForIdle => "wait_for_idle",
         ExtensionSessionLifecycleOperation::Create => "create",
         ExtensionSessionLifecycleOperation::Fork => "fork",
         ExtensionSessionLifecycleOperation::Switch { .. } => "switch",
@@ -6013,7 +6024,9 @@ async fn execute_extension_session_lifecycle(
             request.respond(Ok(session_id));
             request_extension_ui(shell, app);
             update_status(shell, app);
-            shell.notice(format!("extension session {method} completed"));
+            if method != "wait_for_idle" {
+                shell.notice(format!("extension session {method} completed"));
+            }
         }
         Ok(None) => return false,
         Err(error) => {
@@ -6187,6 +6200,7 @@ async fn apply_pending_actions(
     reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<App> {
     while !shell.close_requested() {
+        refresh_resource_paths(&mut app, shell, input).await?;
         let Some(action) = pending_actions.pop_front() else {
             break;
         };
@@ -7552,6 +7566,7 @@ async fn run_idle_command_inner(
     reexec: Option<&mut crate::reexec::ReexecController>,
     reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<IdleCommandOutcome> {
+    refresh_resource_paths(&mut app, shell, input).await?;
     match command {
         Command::Changelog => shell.show_changelog(),
         Command::Hotkeys => show_hotkeys(shell),
@@ -7716,10 +7731,7 @@ async fn run_idle_command_inner(
         Command::Extensions(commands::ExtensionsSubcommand::Reload) => {
             app.executable_extensions
                 .revoke_terminal_grant_for_shell(shell, "the extensions are being reloaded");
-            let report = await_lifecycle(shell, input, "reloading extensions…", async {
-                Ok(app.executable_extensions.reload_report().await)
-            })
-            .await?;
+            let report = reload_resource_processes(&mut app, shell, input).await?;
             let mut messages = extension_reload_notices(reload, report, true);
             let catalog = app
                 .executable_extensions
@@ -9583,6 +9595,7 @@ async fn run_interactive_once(
             }
         }
     }
+    refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
     let mut startup_prompt = initial_prompt;
     if let Some(name) = app.config.prompt_template.clone() {
         let arguments = startup_prompt.take().unwrap_or_default();
@@ -9660,6 +9673,7 @@ async fn run_interactive_once(
             shutdown_for_exit(&mut app, &mut shell).await;
             break;
         }
+        refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
         let queued_input = if startup_input.is_none() {
             shell.take_ready_follow_up()
         } else {
@@ -9684,6 +9698,9 @@ async fn run_interactive_once(
                 .await?
             }
         };
+        if !matches!(&idle, Idle::Quit) && !shell.close_requested() {
+            refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
+        }
         match idle {
             Idle::Quit => {
                 shutdown_for_exit(&mut app, &mut shell).await;

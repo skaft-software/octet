@@ -186,9 +186,11 @@ pub(super) async fn spawn_connection(
     )));
     let resource_cleanup_changed = Arc::new(Notify::new());
     let api_v03_contract = Arc::new(StdRwLock::new(None));
-    // Keep active-host lifecycle authority out of every legacy process even
-    // when a generic caller supplied a runtime service configuration.
-    let session_lifecycle = if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_3 {
+    // Binding-specific lifecycle authority is available only to modern peers.
+    let session_lifecycle = if matches!(
+        descriptor.manifest.api_version.as_str(),
+        EXTENSION_API_VERSION_0_3 | EXTENSION_API_VERSION_0_4
+    ) {
         config.session_lifecycle.clone()
     } else {
         None
@@ -361,6 +363,10 @@ pub(super) async fn spawn_connection(
     artifact_guard.disarm();
     let offered_host_services = OfferedHostServices {
         remote_ui: config.remote_ui.is_some(),
+        provider_pipeline: config.provider_pipeline
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
+        resource_paths: config.resource_paths
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         bulk_objects: config.bulk_store.is_some()
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         agent_sessions: config.agent_sessions,
@@ -407,6 +413,30 @@ pub(super) async fn spawn_connection(
         optional_features.push(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1.to_owned());
         optional_features.push(EXTENSION_FEATURE_TOOL_PROMPT_METADATA.to_owned());
         optional_features.push(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1.to_owned());
+    }
+    if offered_host_services.provider_pipeline
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .iter()
+            .any(|hook| hook.is_provider_pipeline())
+    {
+        optional_features.push(EXTENSION_FEATURE_PIPELINE_HOOKS_V1.to_owned());
+    }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && offered_host_services.session_lifecycle
+    {
+        optional_features.push(EXTENSION_FEATURE_SESSION_CONTROL_V1.to_owned());
+    }
+    if offered_host_services.resource_paths
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::ResourcesDiscover)
+    {
+        optional_features.push(EXTENSION_FEATURE_RESOURCE_PATHS.to_owned());
     }
     if offered_host_services.bulk_objects {
         optional_features.push(EXTENSION_FEATURE_BULK_OBJECTS_V1.to_owned());

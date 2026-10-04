@@ -108,6 +108,13 @@ mod protocol_line;
 mod provider_context;
 mod provider_stream;
 mod reader;
+mod resource_paths;
+mod session_control;
+pub use resource_paths::{
+    ExtensionResourceDiscoveryReason, ExtensionResourcePaths, EXTENSION_FEATURE_RESOURCE_PATHS,
+};
+use session_control::dispatch_session_control;
+pub use session_control::EXTENSION_FEATURE_SESSION_CONTROL_V1;
 mod resource_validation;
 use bulk::*;
 mod resources;

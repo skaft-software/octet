@@ -54,6 +54,9 @@ struct RuntimeKey {
     extension: String,
     content_digest: String,
     scope: RuntimeScope,
+    // An authorized filesystem consumer cannot be inherited by a consumer-less binding.
+    resource_paths_consumer: bool,
+    provider_pipeline_consumer: bool,
 }
 
 struct ManagedRuntime {
@@ -620,6 +623,8 @@ impl ExtensionRuntimeManager {
         &self,
         entry: &ExtensionRuntimeCatalogEntry,
         binding: &ExtensionSessionBinding,
+        resource_paths_consumer: bool,
+        provider_pipeline_consumer: bool,
     ) -> RuntimeKey {
         let scope = match entry.sharing() {
             ExtensionRuntimeSharing::Workspace => RuntimeScope::Shared,
@@ -635,6 +640,8 @@ impl ExtensionRuntimeManager {
             extension: entry.descriptor.manifest.name.clone(),
             content_digest: entry.content_digest.as_str().to_owned(),
             scope,
+            resource_paths_consumer,
+            provider_pipeline_consumer,
         }
     }
 
@@ -1390,7 +1397,12 @@ impl ExtensionSessionBinding {
             .cloned()
             .ok_or(ExtensionRuntimeManagerError::UnknownExtension)?;
         let provenance = self.manager.provenance(&entry);
-        let key = self.manager.runtime_key(&entry, self);
+        let key = self.manager.runtime_key(
+            &entry,
+            self,
+            config.resource_paths,
+            config.provider_pipeline,
+        );
         if !ExtensionRuntimeManager::entry_is_eligible(&entry) {
             self.manager.record_recent(
                 provenance,

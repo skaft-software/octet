@@ -404,7 +404,20 @@ pub(super) fn queue_api_v03_session_lifecycle_operation(
     operation: ExtensionSessionLifecycleOperation,
 ) -> Result<(), String> {
     let registered = register_unparented_api_v03_child_request(state, request_id.clone())?;
-    let response_state = registered.response_state;
+    queue_registered_session_lifecycle_operation(
+        state,
+        request_id,
+        operation,
+        registered.response_state,
+    )
+}
+
+pub(super) fn queue_registered_session_lifecycle_operation(
+    state: &ProtocolReadState,
+    request_id: ExtensionRequestId,
+    operation: ExtensionSessionLifecycleOperation,
+    response_state: Arc<ChildResponseState>,
+) -> Result<(), String> {
     let writer = state.writer.clone();
     let frame_limit = Arc::clone(&state.frame_limit);
     let child_requests = Arc::clone(&state.child_requests);

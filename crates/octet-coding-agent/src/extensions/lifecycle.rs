@@ -47,6 +47,7 @@ impl ExecutableExtensions {
             host,
             runtime_manager,
             ExtensionProviderRuntime::default(),
+            crate::app::resource_paths::ResourceConsumerCapability::Disabled,
         )
     }
 
@@ -64,6 +65,7 @@ impl ExecutableExtensions {
         host: &mut ExtensionHost,
         runtime_manager: Option<ExtensionRuntimeManager>,
         provider_runtime: ExtensionProviderRuntime,
+        resource_consumer: crate::app::resource_paths::ResourceConsumerCapability,
     ) -> Self {
         let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
         let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
@@ -307,6 +309,10 @@ impl ExecutableExtensions {
                     let starts = binding
                         .activate_eager(startable_names, |entry| {
                             let mut runtime = ExtensionRuntimeConfig::new(workspace.clone());
+                            // Admission is supplied by the actual App consumer constructor,
+                            // never inferred from Mode, an enabled factory or a manifest.
+                            runtime.resource_paths = resource_consumer == crate::app::resource_paths::ResourceConsumerCapability::AppFrontend;
+                            runtime.provider_pipeline = true;
                             runtime.host_state = state.clone();
                             runtime.remote_ui = remote_ui_wake.clone();
                             // Generic request-scoped composition is offered to
@@ -823,6 +829,8 @@ impl ExecutableExtensions {
     }
 
     pub(super) fn retire_active_resources(&self) {
+        self.resource_paths_live
+            .store(false, std::sync::atomic::Ordering::Release);
         // Authority ends before fallible observational hooks or native cleanup.
         if let Some(owner) = &self.resource_owner {
             for process in &self.processes {
@@ -900,40 +908,66 @@ impl ExecutableExtensions {
     }
 
     pub(crate) async fn reload_report(&mut self) -> ExtensionReloadReport {
+        let results = self.prepare_resource_process_reload().await;
+        self.finish_resource_process_reload(results).await
+    }
+
+    /// Borrow-free replacement: the existing terminal owner must pump reverse
+    /// UI while the new generation's session_start is awaited inside reload.
+    pub(crate) fn prepare_resource_process_reload(
+        &mut self,
+    ) -> impl Future<
+        Output = Vec<(
+            String,
+            Result<octet_agent::extension_process::ExtensionReloadReport, String>,
+        )>,
+    > + Send
+           + 'static {
+        self.resource_paths_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.cancel_background_work();
-        // Both runtime ownership modes settle through the same notification
-        // boundary. In particular, the product's manager-backed path must not
-        // skip PostMutation delivery after a successful generation replacement.
-        let results = if let Some(manager) = self.runtime_manager.clone() {
-            let names = self
-                .processes
-                .iter()
-                .map(|process| process.descriptor().manifest.name.clone())
-                .collect::<BTreeSet<_>>();
-            futures_util::future::join_all(names.into_iter().map(|name| {
-                let manager = manager.clone();
-                async move { (name.clone(), manager.reload(&name).await) }
-            }))
-            .await
-            .into_iter()
-            .flat_map(|(name, results)| {
-                results
-                    .into_iter()
-                    .map(move |result| (name.clone(), result.map_err(|error| error.to_string())))
-            })
-            .collect::<Vec<_>>()
-        } else {
-            let reloads = self.processes.iter().cloned().map(|process| async move {
-                let name = process.descriptor().manifest.name.clone();
-                (
-                    name,
-                    process.reload().await.map_err(|error| error.to_string()),
-                )
-            });
-            // Concurrent polling preserves input order without serializing
-            // unrelated extension reloads behind a hung child.
-            futures_util::future::join_all(reloads).await
-        };
+        let manager = self.runtime_manager.clone();
+        let processes = self.processes.clone();
+        async move {
+            if let Some(manager) = manager {
+                let names = processes
+                    .iter()
+                    .map(|process| process.descriptor().manifest.name.clone())
+                    .collect::<BTreeSet<_>>();
+                futures_util::future::join_all(names.into_iter().map(|name| {
+                    let manager = manager.clone();
+                    async move { (name.clone(), manager.reload(&name).await) }
+                }))
+                .await
+                .into_iter()
+                .flat_map(|(name, results)| {
+                    results.into_iter().map(move |result| {
+                        (name.clone(), result.map_err(|error| error.to_string()))
+                    })
+                })
+                .collect::<Vec<_>>()
+            } else {
+                let reloads = processes.into_iter().map(|process| async move {
+                    let name = process.descriptor().manifest.name.clone();
+                    (
+                        name,
+                        process.reload().await.map_err(|error| error.to_string()),
+                    )
+                });
+                // Concurrent polling preserves input order without serializing
+                // unrelated extension reloads behind a hung child.
+                futures_util::future::join_all(reloads).await
+            }
+        }
+    }
+
+    pub(crate) async fn finish_resource_process_reload(
+        &mut self,
+        results: Vec<(
+            String,
+            Result<octet_agent::extension_process::ExtensionReloadReport, String>,
+        )>,
+    ) -> ExtensionReloadReport {
         let mut output = ExtensionReloadReport::default();
         let mut reloaded = BTreeSet::new();
         let mut completed_mutations = Vec::new();

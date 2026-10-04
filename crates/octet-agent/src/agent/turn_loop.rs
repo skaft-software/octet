@@ -229,7 +229,11 @@ impl Agent {
         // Disjoint borrows: the run stream owns clones of everything except
         // the session, which it borrows mutably for the run's lifetime —
         // preserving one authoritative head.
-        let client = self.client.clone();
+        let client = provider_context::provider_request_client(
+            &self.client,
+            &self.extensions.provider_request_hooks,
+            &self.resource_owner,
+        )?;
         let model = self.model.clone();
         let compaction_model = self
             .compaction_model
@@ -372,6 +376,8 @@ impl Agent {
             let mut native = native_steering::NativeState::default();
             let (native_updates_tx, mut native_updates_rx) = mpsc::channel(128);
             let native_enabled = model.responses_features().steering
+                && extension_host.provider_request_hooks.is_empty()
+                && extension_host.provider_context_hooks.is_empty()
                 && model.endpoint.transport == octet_ai::EndpointTransport::WebSocketPreferred
                 && max_session_tokens.is_none() && max_session_cost_microdollars.is_none();
             let mut background_tools = background_tools::BackgroundTools::new(parallel_read_wave_width);
@@ -715,6 +721,7 @@ impl Agent {
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
                         compaction_strategy: extension_host.compaction_strategy.as_ref(),
+                        session_operation_hooks: &extension_host.session_operation_hooks,
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -1072,6 +1079,7 @@ impl Agent {
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
                         compaction_strategy: extension_host.compaction_strategy.as_ref(),
+                        session_operation_hooks: &extension_host.session_operation_hooks,
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -1331,6 +1339,7 @@ impl Agent {
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
                         compaction_strategy: extension_host.compaction_strategy.as_ref(),
+                        session_operation_hooks: &extension_host.session_operation_hooks,
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,

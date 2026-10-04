@@ -1035,6 +1035,9 @@ pub struct ExtensionHost {
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
     pub(crate) cache_warming_decision_hooks: Vec<Arc<dyn CacheWarmingDecisionHook>>,
     pub(crate) provider_context_hooks: Vec<Arc<dyn ProviderContextHook>>,
+    pub(crate) session_operation_hooks: Vec<Arc<dyn crate::compaction::SessionOperationHook>>,
+    pub(crate) provider_request_hooks:
+        Vec<Arc<dyn crate::extension_provider::ProviderRequestHookFactory>>,
     pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub(crate) duplicate_compaction_strategy: bool,
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
@@ -1052,6 +1055,8 @@ impl Default for ExtensionHost {
             provider_retry_hooks: Vec::new(),
             cache_warming_decision_hooks: Vec::new(),
             provider_context_hooks: Vec::new(),
+            session_operation_hooks: Vec::new(),
+            provider_request_hooks: Vec::new(),
             compaction_strategy: None,
             duplicate_compaction_strategy: false,
             persistence_metadata_hooks: Vec::new(),
@@ -1167,6 +1172,22 @@ impl ExtensionHost {
         self.provider_context_hooks.push(Arc::new(hook));
     }
 
+    /// Register cancellable compaction and durable tree operation callbacks.
+    pub fn session_operation_hook(
+        &mut self,
+        hook: impl crate::compaction::SessionOperationHook + 'static,
+    ) {
+        self.session_operation_hooks.push(Arc::new(hook));
+    }
+
+    /// Register real encoded HTTP request/response hooks, bound per run owner.
+    pub fn provider_request_hook(
+        &mut self,
+        factory: impl crate::extension_provider::ProviderRequestHookFactory + 'static,
+    ) {
+        self.provider_request_hooks.push(Arc::new(factory));
+    }
+
     /// Register the one active local-compaction strategy. Competing providers
     /// are rejected when the Agent is constructed instead of depending on load order.
     pub fn compaction_strategy(&mut self, strategy: impl CompactionStrategy + 'static) {
@@ -1275,6 +1296,8 @@ impl ExtensionHost {
         scoped.provider_retry_hooks = self.provider_retry_hooks.clone();
         scoped.cache_warming_decision_hooks = self.cache_warming_decision_hooks.clone();
         scoped.provider_context_hooks = self.provider_context_hooks.clone();
+        scoped.session_operation_hooks = self.session_operation_hooks.clone();
+        scoped.provider_request_hooks = self.provider_request_hooks.clone();
         scoped.compaction_strategy = self.compaction_strategy.clone();
         scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();

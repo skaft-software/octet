@@ -249,6 +249,63 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 allowed.insert(EXTENSION_FEATURE_CACHE_WARMING_DECISION);
             }
+            if manifest
+                .contributes
+                .hooks
+                .iter()
+                .any(|hook| hook.is_session_operation())
+                && !features.contains(EXTENSION_FEATURE_SESSION_ENTRIES)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "session operation hooks require negotiated session_entries".into(),
+                ));
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && offered_host_services.provider_pipeline
+                && manifest
+                    .contributes
+                    .hooks
+                    .iter()
+                    .any(|hook| hook.is_provider_pipeline())
+            {
+                allowed.insert(EXTENSION_FEATURE_PIPELINE_HOOKS_V1);
+            }
+            if manifest
+                .contributes
+                .hooks
+                .iter()
+                .any(|hook| hook.is_provider_pipeline())
+                && !features.contains(EXTENSION_FEATURE_PIPELINE_HOOKS_V1)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "provider pipeline hooks require a negotiated pipeline_hooks_v1 consumer"
+                        .into(),
+                ));
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && offered_host_services.session_lifecycle
+            {
+                allowed.insert(EXTENSION_FEATURE_SESSION_CONTROL_V1);
+            }
+            if offered_host_services.resource_paths
+                && manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::ResourcesDiscover)
+            {
+                allowed.insert(EXTENSION_FEATURE_RESOURCE_PATHS);
+            }
+            if manifest
+                .contributes
+                .hooks
+                .contains(&ExtensionHook::ResourcesDiscover)
+                && !features.contains(EXTENSION_FEATURE_RESOURCE_PATHS)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "resources_discover requires a negotiated resource_paths_v1 consumer".into(),
+                ));
+            }
             if offered_host_services.bulk_objects
                 && manifest.api_version == EXTENSION_API_VERSION_0_4
             {

@@ -231,6 +231,20 @@ impl Extension for ExtensionProcess {
                 .inner
                 .contributions
                 .hooks
+                .iter()
+                .any(|hook| hook.is_session_operation())
+        {
+            host.session_operation_hook(self.clone());
+        }
+        if self.has_provider_pipeline_hooks() {
+            host.provider_request_hook(self.clone());
+        }
+        if self.api_version() == EXTENSION_API_VERSION_0_4
+            && self.supports_feature(EXTENSION_FEATURE_SESSION_ENTRIES)
+            && self
+                .inner
+                .contributions
+                .hooks
                 .contains(&ExtensionHook::ProviderContext)
         {
             host.provider_context_hook(self.clone());

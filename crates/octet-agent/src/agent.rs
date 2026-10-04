@@ -711,6 +711,7 @@ impl Agent {
             // This synchronous optional setup cannot await context preparation.
             // Real inference and its exact cache refresh remain hook-driven.
             || !self.extensions.provider_context_hooks.is_empty()
+            || !self.extensions.provider_request_hooks.is_empty()
         {
             return Ok(None);
         }

@@ -789,6 +789,8 @@ system_prompt = {system_prompt}
     }
 
     let no_services = OfferedHostServices {
+        resource_paths: false,
+        provider_pipeline: false,
         bulk_objects: false,
         remote_ui: false,
         agent_sessions: false,

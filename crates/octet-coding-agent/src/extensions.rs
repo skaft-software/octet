@@ -12,6 +12,7 @@ pub mod serve;
 
 mod mutation_resources;
 pub(crate) mod remote_ui;
+pub(crate) mod resource_paths;
 
 use octet_agent::extension_remote_ui::{ExtensionRemoteUiOperation, EXTENSION_FEATURE_REMOTE_UI};
 
@@ -256,11 +257,13 @@ fn active_session_lifecycle_enabled(config: &Config) -> bool {
 }
 
 /// A lifecycle driver belongs to exactly one interactive session, so it may
-/// only be injected into an isolated API 0.3 process. Shared and legacy
+/// only be injected into an isolated API 0.3/0.4 process. Shared and legacy
 /// processes must never retain a binding-specific reverse service.
 fn extension_session_lifecycle_eligible(descriptor: &DiscoveredExtension) -> bool {
-    descriptor.manifest.api_version == EXTENSION_API_VERSION_0_3
-        && descriptor.manifest.runtime.sharing == ExtensionRuntimeSharing::Isolated
+    matches!(
+        descriptor.manifest.api_version.as_str(),
+        EXTENSION_API_VERSION_0_3 | octet_agent::extension_process::EXTENSION_API_VERSION_0_4
+    ) && descriptor.manifest.runtime.sharing == ExtensionRuntimeSharing::Isolated
 }
 
 #[derive(serde::Serialize)]
@@ -335,6 +338,8 @@ pub struct ExecutableExtensions {
     telemetry_rejected: u64,
     telemetry_error: Option<std::io::ErrorKind>,
     processes: Vec<ExtensionProcess>,
+    resource_paths_epoch: Arc<std::sync::atomic::AtomicU64>,
+    resource_paths_live: Arc<std::sync::atomic::AtomicBool>,
     provider_runtime: ExtensionProviderRuntime,
     runtime_manager: Option<ExtensionRuntimeManager>,
     runtime_binding: Option<ExtensionSessionBinding>,
@@ -417,6 +422,8 @@ impl Default for ExecutableExtensions {
             telemetry_rejected: 0,
             telemetry_error: None,
             processes: Vec::new(),
+            resource_paths_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            resource_paths_live: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             provider_runtime: ExtensionProviderRuntime::default(),
             runtime_manager: None,
             runtime_binding: None,
@@ -487,6 +494,8 @@ fn shutdown_telemetry_observer(observer: octet_agent::TelemetryObserver) {
 
 impl Drop for ExecutableExtensions {
     fn drop(&mut self) {
+        self.resource_paths_live
+            .store(false, std::sync::atomic::Ordering::Release);
         self.deactivate_session_lifecycle_driver();
         self.cancel_background_work();
         if !self.processes.is_empty() || self.telemetry.is_some() {

@@ -348,6 +348,7 @@ impl ExtensionProcess {
                 return Ok(());
             }
             let binding = ActiveSessionHookBinding {
+                start_outcome: Arc::new(SessionHookStartOutcome::default()),
                 session_id: session_id.clone(),
                 started_at: Instant::now(),
                 endpoint: LifecycleEndpoint {
@@ -436,6 +437,7 @@ impl ExtensionProcess {
             .into_iter()
             .map(|binding| {
                 let replacement = ActiveSessionHookBinding {
+                    start_outcome: Arc::new(SessionHookStartOutcome::default()),
                     session_id: binding.session_id,
                     started_at: Instant::now(),
                     endpoint: endpoint.clone(),
@@ -450,21 +452,27 @@ impl ExtensionProcess {
         &self,
         binding: &ActiveSessionHookBinding,
     ) -> Result<(), ExtensionRuntimeError> {
-        if !self
-            .inner
-            .contributions
-            .hooks
-            .contains(&ExtensionHook::SessionStart)
-        {
-            return Ok(());
+        let attempt = SessionHookStartAttempt(binding.start_outcome.clone());
+        let result = async {
+            if !self
+                .inner
+                .contributions
+                .hooks
+                .contains(&ExtensionHook::SessionStart)
+            {
+                return Ok(());
+            }
+            let params = api_v03::SessionHookParams::SessionStart {
+                payload: api_v03::SessionStart {
+                    binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
+                },
+            };
+            self.dispatch_session_hook(&binding.endpoint, &binding.session_id, params)
+                .await
         }
-        let params = api_v03::SessionHookParams::SessionStart {
-            payload: api_v03::SessionStart {
-                binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
-            },
-        };
-        self.dispatch_session_hook(&binding.endpoint, &binding.session_id, params)
-            .await
+        .await;
+        attempt.finish(result.is_ok());
+        result
     }
 
     pub(super) async fn dispatch_session_hook_end(
@@ -938,6 +946,19 @@ impl ExtensionProcess {
         payload: serde_json::Value,
         context: ExtensionExecutionContext,
     ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
+        if hook.is_provider_pipeline()
+            || hook.is_session_operation()
+            || hook == ExtensionHook::ProviderContext
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "this hook requires its owning provider or session driver".into(),
+            ));
+        }
+        if hook == ExtensionHook::ResourcesDiscover {
+            return Err(ExtensionRuntimeError::Protocol(
+                "resources_discover is host-owned; use discover_resource_paths".into(),
+            ));
+        }
         if hook.is_session_hook() {
             return Err(ExtensionRuntimeError::Protocol(
                 "session_start and session_end are host-owned API 0.3/0.4 lifecycle hooks".into(),

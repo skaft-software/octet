@@ -232,6 +232,8 @@ impl ExtensionOperationToken {
 /// the API 0.2 `agent/*` service which manages extension-owned child sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtensionSessionLifecycleOperation {
+    /// Resolve only at an observed idle foreground boundary; does not mutate state.
+    WaitForIdle,
     /// Create a durable session without switching to it.
     Create,
     /// Fork the active durable session without switching to the fork.
@@ -266,6 +268,7 @@ pub(super) struct SessionLifecycleDriverState {
 /// mutate. Deactivation fences queued work from a previous app generation.
 #[derive(Clone)]
 pub struct ExtensionSessionLifecycleService {
+    capacity: Arc<Semaphore>,
     pub(super) sender: mpsc::Sender<ExtensionSessionLifecycleRequest>,
     pub(super) state: Arc<SessionLifecycleDriverState>,
 }
@@ -273,11 +276,13 @@ pub struct ExtensionSessionLifecycleService {
 /// Receiver half held exclusively by the product's idle-boundary driver.
 pub struct ExtensionSessionLifecycleReceiver {
     pub(super) receiver: mpsc::Receiver<ExtensionSessionLifecycleRequest>,
+    deferred: Option<ExtensionSessionLifecycleRequest>,
     pub(super) state: Arc<SessionLifecycleDriverState>,
 }
 
 /// A single admitted request awaiting an active-session outcome.
 pub struct ExtensionSessionLifecycleRequest {
+    _capacity: tokio::sync::OwnedSemaphorePermit,
     pub(super) operation: ExtensionSessionLifecycleOperation,
     pub(super) epoch: u64,
     pub(super) response: oneshot::Sender<Result<String, ExtensionSessionLifecycleError>>,
@@ -304,10 +309,15 @@ impl ExtensionSessionLifecycleService {
         });
         Ok((
             Self {
+                capacity: Arc::new(Semaphore::new(capacity)),
                 sender,
                 state: Arc::clone(&state),
             },
-            ExtensionSessionLifecycleReceiver { receiver, state },
+            ExtensionSessionLifecycleReceiver {
+                receiver,
+                deferred: None,
+                state,
+            },
         ))
     }
 
@@ -337,8 +347,14 @@ impl ExtensionSessionLifecycleService {
         if !self.state.active.load(Ordering::Acquire) {
             return Err(SessionLifecycleSubmitError::Unavailable);
         }
+        let capacity = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SessionLifecycleSubmitError::Full)?;
         let (response, receiver) = oneshot::channel();
         let request = ExtensionSessionLifecycleRequest {
+            _capacity: capacity,
             operation,
             epoch,
             response,
@@ -354,15 +370,33 @@ impl ExtensionSessionLifecycleService {
 }
 
 impl ExtensionSessionLifecycleReceiver {
+    /// Take an idle barrier without reordering an earlier session mutation.
+    /// The foreground command pump uses this only while its shell reports no run.
+    pub fn try_next_idle_wait(&mut self) -> Option<ExtensionSessionLifecycleRequest> {
+        let request = self.try_next()?;
+        if matches!(
+            request.operation(),
+            ExtensionSessionLifecycleOperation::WaitForIdle
+        ) {
+            Some(request)
+        } else {
+            self.deferred = Some(request);
+            None
+        }
+    }
+
     /// Returns the next live request. Stale, deactivated, and cancelled requests
     /// are terminalized without exposing them to a replacement app binding.
     pub fn try_next(&mut self) -> Option<ExtensionSessionLifecycleRequest> {
         loop {
-            let request = match self.receiver.try_recv() {
-                Ok(request) => request,
-                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                    return None
-                }
+            let request = match self.deferred.take() {
+                Some(request) => request,
+                None => match self.receiver.try_recv() {
+                    Ok(request) => request,
+                    Err(
+                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
+                    ) => return None,
+                },
             };
             let current = self.state.active.load(Ordering::Acquire)
                 && self.state.epoch.load(Ordering::Acquire) == request.epoch;

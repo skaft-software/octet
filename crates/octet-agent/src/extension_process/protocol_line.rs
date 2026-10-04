@@ -179,6 +179,15 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
+            "session/wait_for_idle"
+            | "session/create"
+            | "session/fork"
+            | "session/reload"
+            | "session/switch"
+                if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 =>
+            {
+                dispatch_session_control(state, object, method, params)?;
+            }
             "bulk/write" | "bulk/commit" | "bulk/read" | "bulk/release" => {
                 dispatch_bulk_request(state, object, method, params)?;
             }

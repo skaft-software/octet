@@ -17,10 +17,16 @@ pub struct ExtensionRuntimeConfig {
     /// Offer API `0.4` request-scoped tool composition. A model-tool parent
     /// must separately supply the host dispatcher through its progress sink.
     pub tool_composition: bool,
+    /// Offer resource_paths_v1 only when a product owns discovery ordering and
+    /// consumes replies with real skill, prompt and theme loaders.
+    pub resource_paths: bool,
+    /// Offer encoded provider hooks only when this host registers the process
+    /// with an Agent that binds its request-local HTTP pipeline.
+    pub provider_pipeline: bool,
     /// Shared host-owned immutable bulk storage. Only configured API 0.4 peers
     /// may negotiate bulk_objects_v1; this does not change media artifact limits.
     pub bulk_store: Option<crate::BulkStorage>,
-    /// Optional bounded API 0.3 active-session lifecycle driver. It is offered
+    /// Optional bounded API 0.3/0.4 active-session lifecycle driver. It is offered
     /// only when configured; it remains inactive until the product binds a safe
     /// interactive idle boundary. Legacy processes never retain this service.
     pub session_lifecycle: Option<ExtensionSessionLifecycleService>,
@@ -80,6 +86,8 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
             )
             .field("agent_sessions", &self.agent_sessions)
             .field("tool_composition", &self.tool_composition)
+            .field("resource_paths", &self.resource_paths)
+            .field("provider_pipeline", &self.provider_pipeline)
             .field("bulk_store_configured", &self.bulk_store.is_some())
             .field(
                 "session_lifecycle_configured",
@@ -120,6 +128,8 @@ impl ExtensionRuntimeConfig {
             flag_values: BTreeMap::new(),
             agent_sessions: false,
             tool_composition: false,
+            resource_paths: false,
+            provider_pipeline: false,
             bulk_store: None,
             session_lifecycle: None,
             event_bus: None,
@@ -147,6 +157,8 @@ pub(super) struct OfferedHostServices {
     pub(super) remote_ui: bool,
     pub(super) agent_sessions: bool,
     pub(super) tool_composition: bool,
+    pub(super) resource_paths: bool,
+    pub(super) provider_pipeline: bool,
     pub(super) bulk_objects: bool,
     pub(super) session_lifecycle: bool,
     pub(super) approvals: bool,

@@ -431,6 +431,14 @@ impl ExecutableExtensions {
             let mut events_open = true;
             let result = loop {
                 if let Some(shell) = confirmations.command_shell() {
+                    if !shell.is_agent_run_active() {
+                        if let Some(request) = self.session_lifecycle_receiver.as_mut()
+                            .and_then(ExtensionSessionLifecycleReceiver::try_next_idle_wait) {
+                            request.respond(self.session_id.clone().ok_or(
+                                octet_agent::extension_process::ExtensionSessionLifecycleError::Unavailable,
+                            ));
+                        }
+                    }
                     for message in self.drain_events_for_shell(shell) { shell.notice(message); }
                     if self.sync_semantic_ui(shell) { shell.render(); }
                 }

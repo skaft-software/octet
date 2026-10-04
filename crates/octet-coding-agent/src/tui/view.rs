@@ -3447,6 +3447,11 @@ impl InteractiveShell {
         }
     }
 
+    /// Whether the foreground driver still owns an active agent run.
+    pub(crate) fn is_agent_run_active(&self) -> bool {
+        self.state.borrow().run.is_active()
+    }
+
     /// Observe authoritative shell settlement while a driver owns `&mut Self`.
     #[cfg(all(test, unix))]
     pub(crate) fn test_run_active_probe(&self) -> impl Fn() -> bool {
