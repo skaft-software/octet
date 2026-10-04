@@ -187,7 +187,7 @@ mod tests {
 
     fn sink() -> (TernClient, Output) {
         let output = Output::default();
-        let client = TernClient::with_writer("test", None, output.clone()).unwrap();
+        let client = TernClient::with_writer("test", None, &[], output.clone()).unwrap();
         (client, output)
     }
 

@@ -299,10 +299,9 @@ pub(crate) fn edit(
     edited.replace_range(from..to, text);
     let cursor = utf16_boundary(&edited, cursor)?;
     let mut next = current(picker)?.editor.clone();
-    if !next.replace_range(from..to, text) {
+    if !next.edit_range(from..to, text, cursor) {
         return None;
     }
-    next.set_cursor(cursor);
     if next.cursor() != cursor {
         return None;
     }

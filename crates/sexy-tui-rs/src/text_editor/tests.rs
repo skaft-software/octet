@@ -51,6 +51,27 @@ fn projection_rows(text: &str, projection: &TextEditorProjection, marker: &str) 
 }
 
 #[test]
+fn user_range_edits_preserve_history_and_reject_invalid_ranges() {
+    let mut editor = TextEditor::with_text("a🦀e\u{301}");
+    let original = editor.text().to_owned();
+    assert!(editor.edit_range(1..5, "雪", 4));
+    assert_eq!(editor.text(), "a雪e\u{301}");
+    assert!(editor.cursor_is_valid());
+    // Byte offsets inside UTF-8 or a combining grapheme must not change undo.
+    assert!(!editor.edit_range(2..3, "x", 3));
+    assert!(!editor.edit_range(4..5, "x", 5));
+    assert!(!editor.edit_range(0..100, "x", 1));
+    assert!(editor.edit_range(0..0, "", 0));
+    assert!(editor.apply(TextEditAction::Undo, 80));
+    assert_eq!(editor.text(), original);
+    // A caret move after undo must not clear the redo branch.
+    assert!(editor.edit_range(0..0, "", 1));
+    assert!(editor.apply(TextEditAction::Redo, 80));
+    assert_eq!(editor.text(), "a雪e\u{301}");
+    assert_eq!(editor.cursor(), 0);
+}
+
+#[test]
 fn empty_text_and_boundary_actions_keep_a_valid_cursor() {
     let mut editor = TextEditor::new();
     for action in [

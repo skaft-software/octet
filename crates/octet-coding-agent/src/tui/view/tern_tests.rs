@@ -60,7 +60,7 @@ fn setup(credits: u32) -> (InteractiveShell, TernSurface, Output) {
         state.render_threaded = true;
     }
     let output = Output::default();
-    let client = TernClient::with_writer("test", None, output.clone()).unwrap();
+    let client = TernClient::with_writer("test", None, &["edit"], output.clone()).unwrap();
     let mut surface = TernSurface::with_client(client);
     surface.observe(&hello(true, credits)).unwrap();
     (shell, surface, output)
@@ -696,6 +696,7 @@ fn focus_return_during_materialization_is_not_consumed_without_focus() {
     let client = TernClient::with_writer(
         "test",
         None,
+        &["edit"],
         FocusWriter {
             output: output.clone(),
             state: shell.state.clone(),

@@ -145,6 +145,7 @@ impl TernSurface {
         Ok(Self::with_client(TernClient::connect_shared_input(
             "octet",
             Some(env!("CARGO_PKG_VERSION")),
+            &["edit"],
         )?))
     }
 

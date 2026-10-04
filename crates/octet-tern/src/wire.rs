@@ -685,6 +685,10 @@ pub enum Query {
         /// Program version.
         #[serde(skip_serializing_if = "Option::is_none")]
         ver: Option<String>,
+        /// Program-handled event features, such as `edit`. These opt in to
+        /// terminal input behavior; they are not the terminal's reply features.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     /// Ask which blob ids the terminal already has.
     Blobs {
@@ -978,6 +982,21 @@ pub enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn program_hello_features_are_explicit_and_optional() {
+        let old = serde_json::json!({"q":"hello", "v":[1], "app":"test"});
+        let mut query: Query = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&query).unwrap(), old);
+        let Query::Hello { features, .. } = &mut query else {
+            unreachable!()
+        };
+        features.push("edit".into());
+        assert_eq!(
+            serde_json::to_value(query).unwrap(),
+            serde_json::json!({"q":"hello", "v":[1], "app":"test", "features":["edit"]})
+        );
+    }
 
     #[test]
     fn pointer_focus_requires_the_surface_and_node_identity() {

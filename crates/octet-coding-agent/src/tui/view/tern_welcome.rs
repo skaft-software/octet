@@ -296,7 +296,7 @@ mod tests {
         let shell = InteractiveShell::test_shell();
         shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
         let output = Output::default();
-        let mut client = TernClient::with_writer("test", None, output.clone()).unwrap();
+        let mut client = TernClient::with_writer("test", None, &[], output.clone()).unwrap();
         let mut brand = Brand::default();
         brand.prepare(&shell.state.borrow(), &mut client).unwrap();
         brand.prepare(&shell.state.borrow(), &mut client).unwrap();
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn brand_uses_background_balanced_model_colors_and_custom_theme_precedence() {
         let output = Output::default();
-        let mut client = TernClient::with_writer("test", None, output.clone()).unwrap();
+        let mut client = TernClient::with_writer("test", None, &[], output.clone()).unwrap();
         let mut brand = Brand::default();
         let mut addresses = Vec::new();
         for background in [TerminalBackground::Light, TerminalBackground::Dark] {

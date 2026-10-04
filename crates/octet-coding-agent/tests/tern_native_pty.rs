@@ -667,6 +667,19 @@ fn cancel_setup(pty: &mut NativePty) {
 }
 
 #[test]
+fn native_hello_advertises_only_implemented_program_edit_features() {
+    let mut pty = NativePty::spawn();
+    pty.ready();
+    let (_, hello) = pty
+        .messages
+        .iter()
+        .find(|(verb, body)| verb == "q" && body["q"] == "hello")
+        .expect("program hello");
+    assert_eq!(hello["features"], json!(["edit"]));
+    pty.close();
+}
+
+#[test]
 fn native_keys_paste_escape_and_protocol_fragments_never_become_draft_escape_text() {
     let mut pty = NativePty::spawn();
     pty.wait(|pty| pty.hello && pty.nodes.contains_key("composer.editor"));
