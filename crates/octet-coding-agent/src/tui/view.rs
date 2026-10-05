@@ -7850,6 +7850,7 @@ mod assistant_block;
 mod bash_render;
 #[path = "view/shell_chrome.rs"]
 mod builtin_shell_chrome;
+mod codemode_render;
 mod input_dispatch;
 mod input_overlays;
 mod native_scrollback;
@@ -7884,6 +7885,7 @@ mod tern_completion;
 mod tern_controls;
 mod tern_images;
 pub(crate) mod tern_input;
+mod tern_pending;
 mod tern_picker;
 pub(crate) mod tern_prompt;
 mod tern_sessions;

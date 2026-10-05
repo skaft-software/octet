@@ -283,12 +283,29 @@ without discarding captured source. A per-tool disclosure cannot bypass this gat
 `!!` retains its existing exclusion from model context; its output can still be
 stored as non-model-visible configuration presentation metadata.
 
+Bash, Codemode and other tools share the native inline tool header: glyph,
+display label, lifecycle status and duration metadata. Read paths appear once in
+that header, with the existing file-link target, not in a second file row.
+Command source sits beneath its header without duplicating the title or target.
 The command rail retains truthful lifecycle status, available duration and local
 exit code; captured failure output also requires disclosure. Verbose Bash/exec
 output patches one stable native text leaf as chunks arrive, including partial
 lines, without a streaming cursor or changing to a diff widget for diff-like
 command output. Non-command tools preserve deterministic display labels,
 progress, file/diff projections and grouped-child disclosure.
+
+Codemode has an octet-owned JavaScript rail: the complete sanitized `code`
+source is a wrapping native code node, never a truncated argument envelope.
+Its literal output occupies a separate native code surface with a default
+preview of at most five source lines / 600 Unicode characters, including long
+single-line JSON. Ctrl+O reveals the complete retained output; hiding it restores
+the preview without changing source, results or execution. JSON and diff-like
+output remain literal data, not inferred Markdown or an edit diff.
+
+Pending steering/follow-ups use a read-only native card with a queue-state badge,
+one clipped preview and overflow count. A native keycap uses the actual resolved
+recall binding only when a queued message remains editable. No ANSI elbow,
+click-to-recall action, new queue owner or dispatch authority is introduced.
 
 Tool images respect the existing opt-in image preference. Validated bounded
 payloads are hashed and uploaded once per content address; retained frames

@@ -709,11 +709,13 @@ fn project(
     for (id, rows) in [
         ("extension.header", &chrome.header),
         ("extension.above", &chrome.extension_above),
-        ("pending", &chrome.pending),
     ] {
         if !rows.is_empty() {
             out.dock.push(ansi_rows(id, rows));
         }
+    }
+    if let Some(pending) = super::tern_pending::node(shell) {
+        out.dock.push(pending);
     }
     let remote_editor = shell
         .extension_ui
@@ -1550,6 +1552,7 @@ fn tool_node(
     // expanded independently: Tern ellipsizes command targets on collapsed cards.
     // Ctrl+O owns output disclosure; captured output stays in the semantic model.
     let command_output = matches!(panel.name.as_str(), "bash" | "exec");
+    let script_output = panel.name == "codemode";
     let collapsed = if command_output {
         !verbose
     } else {
@@ -1566,7 +1569,7 @@ fn tool_node(
         && target_kind == "path";
     // Bash stays a single text leaf even when its output resembles a diff.
     // Changing kinds mid-stream would replace the displayed body.
-    let diff = (!command_output)
+    let diff = (!command_output && !script_output)
         .then(|| super::tool_render::tool_diff(panel))
         .flatten();
     if let Some(diff) = diff {
@@ -1579,20 +1582,32 @@ fn tool_node(
         ));
     } else if !compact_read
         && !panel.output.trim().is_empty()
-        && (!collapsed || (panel.is_error && !command_output))
+        && (script_output || !collapsed || (panel.is_error && !command_output))
     {
         // Collapsed successful tools project summary-only (header/target):
         // mounting the full output in the same frame that flips `collapsed`
         // paints one expanded frame before the terminal hides it. Bash failures
         // retain their reason in metadata; full output requires disclosure.
-        let shown = sanitize_for_terminal(&panel.output);
-        body.push(Node::new(
-            id(index, "out"),
-            Kind::Text,
-            Props::new()
-                .text("spans", vec![Span::styled(shown, "toolOutput")])
-                .set("wrap", "word"),
-        ));
+        if script_output {
+            body.push(Node::new(
+                id(index, "out"),
+                Kind::Code,
+                Props::new()
+                    .set("text", super::codemode_render::output_text(panel, verbose))
+                    .set("lang", "text")
+                    .set("wrap", true)
+                    .set("numbers", false),
+            ));
+        } else {
+            let shown = sanitize_for_terminal(&panel.output);
+            body.push(Node::new(
+                id(index, "out"),
+                Kind::Text,
+                Props::new()
+                    .text("spans", vec![Span::styled(shown, "toolOutput")])
+                    .set("wrap", "word"),
+            ));
+        }
     }
 
     for (image_index, image) in panel
@@ -1616,34 +1631,6 @@ fn tool_node(
             )
         }));
     }
-    if compact_read {
-        body.insert(
-            0,
-            Node::with_children(
-                id(index, "file"),
-                Kind::Row,
-                Props::new()
-                    .role("omp.tool.file")
-                    .set("gap", "xs")
-                    .set("href", &href)
-                    .set("actions", json!({"click":"open"})),
-                vec![
-                    Node::new(
-                        id(index, "file.icon"),
-                        Kind::Icon,
-                        Props::new().set("name", "file"),
-                    ),
-                    Node::new(
-                        id(index, "file.name"),
-                        Kind::Text,
-                        Props::new()
-                            .text("spans", vec![Span::styled(&target, "strong")])
-                            .set("truncate", "middle"),
-                    ),
-                ],
-            ),
-        );
-    }
     if let Some(decoration) = panel
         .progress_decoration
         .as_ref()
@@ -1666,12 +1653,24 @@ fn tool_node(
                 .set("wrap", "word"),
         ));
     }
+    if script_output {
+        let source = super::codemode_render::source(panel).unwrap_or_default();
+        return command_node(
+            index,
+            "tool",
+            ("codemode", "Codemode"),
+            (&source, "javascript"),
+            status,
+            meta,
+            body,
+        );
+    }
     if command_output {
         return command_node(
             index,
             "tool",
-            &tool_title(&panel.display.label),
-            &target,
+            (&panel.name, &tool_title(&panel.display.label)),
+            (&target, "bash"),
             status,
             meta,
             body,
@@ -1725,71 +1724,56 @@ fn shell_node(index: u64, shell: &super::ShellOutput, verbose: bool) -> Node {
     command_node(
         index,
         "shell",
-        "Bash",
-        &sanitize_for_terminal(&shell.command),
+        ("bash", "Bash"),
+        (&sanitize_for_terminal(&shell.command), "bash"),
         status,
         meta,
         body,
     )
 }
 
-/// A command rail cannot collapse or ellipsize its input. Captured output has
-/// already been admitted by global verbosity before it reaches this builder.
+/// A source rail cannot collapse or ellipsize its input. The caller owns
+/// output admission: shell disclosure or a bounded Codemode output preview.
 fn command_node(
     index: u64,
     suffix: &str,
-    title: &str,
-    command: &str,
+    tool: (&str, &str),
+    source: (&str, &str),
     status: &str,
     meta: Vec<Text>,
     mut body: Vec<Node>,
 ) -> Node {
-    let mut heading = vec![
-        Span::styled(title, "accent"),
-        Span::styled(
-            format!(" · {status}"),
-            if status == "error" { "error" } else { "muted" },
-        ),
-    ];
-    for item in meta {
-        if let Text::Plain(text) = item {
-            heading.push(Span::styled(format!(" · {text}"), "muted"));
-        }
-    }
     body.insert(
         0,
         Node::new(
             id(index, "command"),
             Kind::Code,
             Props::new()
-                .set("text", command)
-                .set("lang", "bash")
+                .set("text", source.0)
+                .set("lang", source.1)
                 .set("wrap", true)
                 .set("numbers", false),
         ),
     );
-    Node::with_children(
+    let mut node = octet_tern::scene::tool_card(
         id(index, suffix),
-        Kind::Row,
-        Props::new()
-            .role("octet.command")
-            .set("gap", "sm")
-            .set("align", "start")
-            .set("wrap", true),
-        vec![
-            Node::new(
-                id(index, "command.label"),
-                Kind::Text,
-                Props::new().text("spans", heading).set("wrap", "word"),
-            ),
-            Node::with_children(
-                id(index, "command.body"),
-                Kind::Col,
-                Props::new().set("gap", "xs").set("grow", 1),
-                body,
-            ),
-        ],
-    )
+        tool.0,
+        tool.1,
+        "",
+        "text",
+        status,
+        meta,
+        body,
+    );
+    node.p = Some(
+        node.p
+            .unwrap_or_default()
+            .role(format!("omp.tool.{}", tool.0))
+            .set("frame", "inline")
+            .set("collapsible", false)
+            .set("collapsed", false),
+    );
+    node
 }
 
 fn tool_title(name: &str) -> String {

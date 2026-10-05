@@ -431,6 +431,16 @@ search output, Bash commands, Bash/local-shell output, and edit/write diffs.
 `/verbose [on|off]` controls the same mode. Expansion cannot recover capture bytes that the tool
 already discarded.
 
+Codemode renders its documented JavaScript `code` field with literal syntax
+highlighting instead of flattening it into an extension-argument summary. ANSI
+terse mode shows three wrapped source rows and an explicit hidden-row hint;
+Ctrl+O reveals the complete source. Literal output has a bounded default preview
+(five source lines / 600 Unicode characters) and full disclosure through the same
+toggle. Output is not interpreted as Markdown or an edit diff. Semantic copy
+includes the complete sanitized script, not argument envelopes, output or preview
+hints. Disclosure-sensitive Codemode blocks remain atomic at history commits.
+Native Tern uses its own semantic code/queued-input chrome; see [Tern](../tern.md).
+
 Final structured tool results remain provider-visible and persisted when the
 agent protocol requires them to continue a tool turn. This is operational
 model context, not a TUI disclosure channel. Live `ToolProgress` is ephemeral

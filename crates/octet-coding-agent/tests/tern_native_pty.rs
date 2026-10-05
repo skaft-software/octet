@@ -716,10 +716,8 @@ fn native_shell_keeps_full_command_and_never_sends_output_before_ctrl_o() {
     pty.send(b"\r");
     pty.wait(|pty| {
         pty.nodes.values().any(|node| {
-            node["id"]
-                .as_str()
-                .is_some_and(|id| id.ends_with(".command.label"))
-                && node["p"]["spans"][1]["t"] == " · done"
+            node["id"].as_str().is_some_and(|id| id.ends_with(".shell"))
+                && node["p"]["status"] == "done"
         })
     });
     let command_leaf = pty.nodes.values().find(|node| node["k"] == "code").unwrap();
@@ -732,10 +730,12 @@ fn native_shell_keeps_full_command_and_never_sends_output_before_ctrl_o() {
         .strip_suffix(".command")
         .unwrap();
     let rail = &pty.nodes[&format!("{prefix}.shell")];
-    assert_eq!(rail["k"], "row");
-    assert_eq!(rail["p"]["role"], "octet.command");
-    assert!(rail["p"].get("collapsed").is_none());
-    assert!(rail["p"].get("collapsible").is_none());
+    assert_eq!(rail["k"], "tool");
+    assert_eq!(rail["p"]["role"], "omp.tool.bash");
+    assert_eq!(rail["p"]["name"], "bash");
+    assert_eq!(rail["p"]["frame"], "inline");
+    assert_eq!(rail["p"]["collapsed"], false);
+    assert_eq!(rail["p"]["collapsible"], false);
     let output_id = format!("{prefix}.out");
     let command_id = command_leaf["id"].as_str().unwrap().to_owned();
     // Inspect all emitted frames, not only the final tree: no transient mount.
@@ -1184,10 +1184,9 @@ fn native_shell_failure_disclosure_and_excluded_history_are_real_local_execution
     pty.command("!printf 'failure-output'; exit 7");
     pty.wait(|pty| {
         pty.nodes.values().any(|node| {
-            node["id"]
-                .as_str()
-                .is_some_and(|id| id.ends_with(".command.label"))
-                && serde_json::to_string(node).unwrap().contains("exit 7")
+            node["id"].as_str().is_some_and(|id| id.ends_with(".shell"))
+                && node["p"]["status"] == "error"
+                && node["p"]["meta"] == json!(["exit 7"])
         })
     });
     let command = pty.node_kind("code").unwrap().clone();
@@ -1222,10 +1221,8 @@ fn native_shell_failure_disclosure_and_excluded_history_are_real_local_execution
         pty.nodes
             .values()
             .filter(|node| {
-                node["id"]
-                    .as_str()
-                    .is_some_and(|id| id.ends_with(".command.label"))
-                    && serde_json::to_string(node).unwrap().contains("done")
+                node["id"].as_str().is_some_and(|id| id.ends_with(".shell"))
+                    && node["p"]["status"] == "done"
             })
             .count()
             == 1

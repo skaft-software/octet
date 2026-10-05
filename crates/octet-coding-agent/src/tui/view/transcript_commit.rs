@@ -115,6 +115,8 @@ fn finalized_tool_rows_are_stable(panel: &ToolPanel) -> bool {
     }
 
     let disclosure_sensitive = match panel.name.as_str() {
+        // Both the source preview and the output preview can expand.
+        "codemode" => true,
         "bash" | "exec" => {
             panel.display.shell_command.is_some() && bash_output_changes_when_expanded(panel)
         }
@@ -375,6 +377,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let six_lines = format!("{five_lines}\nline 5");
+
+        let codemode = finalized_tool(
+            "codemode",
+            serde_json::json!({"code":"return 1"}),
+            "short output",
+            false,
+        );
+        assert!(!finalized_block_rows_are_stable(&codemode));
 
         let short_bash = finalized_tool(
             "bash",
