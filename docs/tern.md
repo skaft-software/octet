@@ -158,11 +158,13 @@ move the preceding history.
 - `dock` owns working status and the composer.
 - `layer` owns native autocomplete, picker sheets and report overlays.
 
-RAIL uses one responsive `96ch` reading measure for transcript, welcome and
-live composer chrome. The character-relative bound scales with Tern's font
-and shrinks in narrow panes. The composer is an integrated, borderless `col`
-with a separating `rule`, native editor, model and effort controls, context
-meter, session cost and Send/Stop; it is not an `omp.editor` card.
+RAIL uses the pane's full available width for transcript, welcome and live
+composer chrome, without a separate character-capped reading column at default
+zoom. The composer is an integrated, borderless `col` with a separating `rule`,
+native editor, model and effort controls, context meter, session cost and
+Send/Stop; it is not an `omp.editor` card. A native medium gap separates its
+context meter, editor and button row so the editor has breathing room above
+and below. Typography and global Tern settings are unchanged.
 
 The welcome is a compact conversation-local wrapping row. It uploads immutable,
 content-addressed PNG bytes from the canonical byte-mark rasterizer and requests

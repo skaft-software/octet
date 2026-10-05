@@ -190,7 +190,7 @@ than inventing states:
 - **S15 — Assistant/user Markdown, code/tables/math/links/diagrams,
   live/final/replayed prose. Changed; unverified.** `tern.rs::assistant_node`
   and `block_node`: unboxed Col/direct stable Md, `omp.user` right bubble and
-  96ch measure. Tightening preserves fence contents; diagram/fence dialect,
+  full available pane width. Tightening preserves fence contents; diagram/fence dialect,
   streaming/replay and native copy need actual checks. Per-turn tint remains limited.
 - **S16 — Real reasoning, live/settled/partial/interrupted/failed traces,
   headings/code/math/lists/quotes and global/per-trace expansion.

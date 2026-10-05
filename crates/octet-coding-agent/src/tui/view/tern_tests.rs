@@ -100,7 +100,22 @@ fn composer_uses_native_layout_hooks_with_octet_controls_and_no_rows() {
             "borderless composer: {removed}"
         );
     }
-    assert_eq!(composer.c.as_ref().unwrap()[0].id, "composer.rule");
+    assert_eq!(props["gap"], "md", "space above and below the editor");
+    assert_eq!(
+        composer
+            .c
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "composer.rule",
+            "composer.context",
+            "composer.line",
+            "composer.bar"
+        ],
+    );
     assert_eq!(
         find_node(&projection.dock, "composer.rule").unwrap().k,
         Kind::Rule
@@ -1426,7 +1441,7 @@ fn welcome_uploads_identical_hashed_bytes_once_and_replays_after_eviction() {
 }
 
 #[test]
-fn native_transcript_and_composer_share_the_rail_responsive_measure() {
+fn native_transcript_and_composer_use_the_full_available_pane_width() {
     let (shell, mut surface, _) = setup(8);
     {
         let mut state = shell.state.borrow_mut();
@@ -1437,12 +1452,13 @@ fn native_transcript_and_composer_share_the_rail_responsive_measure() {
         shell.state.borrow_mut().size = (cols, 40);
         surface.flush(&shell.state).unwrap();
         for node in &surface.sent.main {
-            assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], "96ch");
+            assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], 1.0);
             assert!(node.p.as_ref().unwrap().as_map().get("min").is_none());
         }
         let dock = find_node(&surface.sent.dock, "dock.content").unwrap();
         let composer = find_node(dock.c.as_deref().unwrap(), "composer").unwrap();
-        assert_eq!(composer.p.as_ref().unwrap().as_map()["max"]["w"], "96ch");
+        assert_eq!(composer.p.as_ref().unwrap().as_map()["max"]["w"], 1.0);
+        assert_eq!(composer.p.as_ref().unwrap().as_map()["gap"], "md");
     }
 }
 
@@ -1632,7 +1648,7 @@ fn native_agents_keep_one_retained_transcript_with_authoritative_live_token_line
     let dock = find_node(&surface.sent.dock, "dock.content").unwrap();
     assert!(dock.p.as_ref().unwrap().as_map().get("role").is_none());
     for node in dock.c.as_ref().unwrap() {
-        assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], "96ch");
+        assert_eq!(node.p.as_ref().unwrap().as_map()["max"]["w"], 1.0);
     }
     walk(&surface.sent.dock, &mut |node| {
         assert_ne!(node.k, Kind::Agent);

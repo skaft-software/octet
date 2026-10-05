@@ -385,6 +385,7 @@ fn export_native_renderer_fixtures() {
             }
             "codemode-quiet" | "codemode-verbose" => {
                 shell.state.borrow_mut().workspace = Some("/tmp/native-fixture".into());
+                shell.state.borrow_mut().context_estimate = Some((24000, 200000));
                 let read_args = json!({"path":"src/main.rs"});
                 let mut read = ToolPanel::new(
                     ToolCallId("fixture-read".into()), "read".into(), read_args.to_string(),

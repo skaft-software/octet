@@ -745,14 +745,14 @@ fn project(
             out.dock.push(ansi_rows(id, rows));
         }
     }
-    // TSP's character-relative bound grows with Tern's font/zoom and still
-    // shrinks in small panes. Use one measure for history and live chrome.
+    // Override Tern's default reader-column cap with the full available width.
+    // A relative bound follows pane resize without a character/zoom-dependent cap.
     for node in out.main.iter_mut().chain(&mut out.dock) {
         node.p = Some(
             node.p
                 .take()
                 .unwrap_or_default()
-                .set("max", json!({"w":"96ch"})),
+                .set("max", json!({"w":1.0})),
         );
     }
     // The neutral dock column is Tern's native shared-column layout hook.
@@ -1397,7 +1397,7 @@ fn composer(shell: &ShellState) -> Node {
     Node::with_children(
         "composer",
         Kind::Col,
-        Props::new().set("gap", "xs"),
+        Props::new().set("gap", "md"),
         children,
     )
 }
