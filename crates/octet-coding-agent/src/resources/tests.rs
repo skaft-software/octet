@@ -216,7 +216,7 @@ fn embedded_documentation_preserves_current_public_source_text() {
         "extensions/octet-browse/extension.py",
         "crates/octet-coding-agent/src/main.rs",
         // The retired parity inventory is not part of the public package.
-        "docs/reference/pi-compat/profiles/0.84.4.json",
+        "docs/reference/pi-compat/profiles/1.0.2.json",
         "docs/private.md",
         "sdk/private.so",
     ] {

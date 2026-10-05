@@ -1,12 +1,13 @@
 {
   "schema_version": 1,
-  "pi_package": "@earendil-works/pi-coding-agent@0.84.4",
-  "inventory_basis": "The target package is pinned above. The exact 0.84.4 npm artifact was unavailable in this offline workspace, so the 31 observed IDs are carried from local @mariozechner/pi-ai@0.73.1 and ant-ling is included from Issue #252 scope. This ledger is an integration assumption, not evidence that 0.73.1 equals the target package.",
+  "pi_package": "@earendil-works/pi-coding-agent@1.0.2",
+  "inventory_basis": "Provider IDs, APIs, base URLs and API-key variables are read from Pi 1.0.2 source (packages/ai/src/providers/*.ts and all.ts at tag v1.0.2, commit cd32f7725fdbddbaecdff5b1e68491563394e0ca), the release whose @earendil-works/pi-ai@1.0.2 package octet 0.8.2 is pinned to.",
   "expected_provider_ids": [
     "amazon-bedrock",
-    "anthropic",
     "ant-ling",
+    "anthropic",
     "azure-openai-responses",
+    "baseten",
     "cerebras",
     "cloudflare-ai-gateway",
     "cloudflare-workers-ai",
@@ -18,29 +19,38 @@
     "groq",
     "huggingface",
     "kimi-coding",
+    "meta",
     "minimax",
     "minimax-cn",
     "mistral",
     "moonshotai",
     "moonshotai-cn",
+    "nvidia",
     "openai",
     "openai-codex",
     "opencode",
     "opencode-go",
     "openrouter",
+    "qwen-token-plan",
+    "qwen-token-plan-cn",
+    "qwen-token-plan-individual",
+    "radius",
+    "together",
+    "typesafe",
     "vercel-ai-gateway",
     "xai",
     "xiaomi",
     "xiaomi-token-plan-ams",
     "xiaomi-token-plan-cn",
     "xiaomi-token-plan-sgp",
-    "zai"
+    "zai",
+    "zai-coding-cn"
   ],
   "providers": [
     {
       "id": "amazon-bedrock",
       "label": "Amazon Bedrock",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/amazon-bedrock.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "amazon-bedrock-declaration-route",
@@ -58,9 +68,20 @@
       }
     },
     {
+      "id": "ant-ling",
+      "label": "ANT Ling",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/ant-ling.ts declares this provider; octet has no native declaration for it yet.",
+      "decision": {
+        "kind": "unsupported",
+        "fixture_id": "ant-ling-unsupported-decision",
+        "missing_primitive": "ANT Ling request/stream schema and credential presentation",
+        "release_blocker": "#252"
+      }
+    },
+    {
       "id": "anthropic",
       "label": "Anthropic",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/anthropic.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "anthropic-declaration-route",
@@ -77,20 +98,9 @@
       }
     },
     {
-      "id": "ant-ling",
-      "label": "ANT Ling",
-      "evidence": "Pinned issue inventory entry; exact Pi package evidence is required before a native declaration.",
-      "decision": {
-        "kind": "unsupported",
-        "fixture_id": "ant-ling-unsupported-decision",
-        "missing_primitive": "ANT Ling request/stream schema and credential presentation",
-        "release_blocker": "#252"
-      }
-    },
-    {
       "id": "azure-openai-responses",
       "label": "Azure OpenAI Responses",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/azure-openai-responses.ts routes azure-openai-responses; octet sends Responses to the Azure deployment endpoint.",
       "decision": {
         "kind": "declared",
         "fixture_id": "azure-openai-responses-declaration-route",
@@ -110,9 +120,28 @@
       }
     },
     {
+      "id": "baseten",
+      "label": "Baseten",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/baseten.ts; octet's declaration matches its base URL, API and key variable.",
+      "decision": {
+        "kind": "declared",
+        "fixture_id": "baseten-declaration-route",
+        "provider_id": "baseten",
+        "fixture": {
+          "registration": "discovered",
+          "model_id": "baseten-fixture",
+          "protocol": "openai_chat",
+          "endpoint_id": "baseten",
+          "auth_presentation": "bearer",
+          "base_url": "https://inference.baseten.co/v1/",
+          "environment_variable": "BASETEN_API_KEY"
+        }
+      }
+    },
+    {
       "id": "cerebras",
       "label": "Cerebras",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/cerebras.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "cerebras-declaration-route",
@@ -131,7 +160,7 @@
     {
       "id": "cloudflare-ai-gateway",
       "label": "Cloudflare AI Gateway",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/cloudflare-ai-gateway.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "cloudflare-ai-gateway-declaration-route",
@@ -151,7 +180,7 @@
     {
       "id": "cloudflare-workers-ai",
       "label": "Cloudflare Workers AI",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/cloudflare-workers-ai.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "cloudflare-workers-ai-declaration-route",
@@ -171,7 +200,7 @@
     {
       "id": "deepseek",
       "label": "DeepSeek",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/deepseek.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "deepseek-declaration-route",
@@ -190,7 +219,7 @@
     {
       "id": "fireworks",
       "label": "Fireworks AI",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/fireworks.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "fireworks-declaration-route",
@@ -209,11 +238,11 @@
     {
       "id": "github-copilot",
       "label": "GitHub Copilot",
-      "evidence": "The embedding-only octet seam has deterministic fake Chat/Responses stream fixtures, but that is neither exact Pi 0.84.4 package evidence nor live GitHub OAuth validation.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/github-copilot.ts. The embedding-only octet seam has deterministic fake Chat/Responses stream fixtures, not live GitHub OAuth validation.",
       "decision": {
         "kind": "unsupported",
         "fixture_id": "github-copilot-host-owned-seam-decision",
-        "missing_primitive": "Exact Pi 0.84.4 Copilot route/auth evidence and live GitHub OAuth endpoint validation",
+        "missing_primitive": "Live GitHub OAuth endpoint validation for the Pi 1.0.2 Copilot route",
         "release_blocker": "#249",
         "note": "The host-owned seam keeps device login, exchange, refresh, and dynamic headers in an embedding host; it is not a built-in CLI or configuration preset."
       }
@@ -221,7 +250,7 @@
     {
       "id": "google",
       "label": "Google Generative AI",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/google.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "google-declaration-route",
@@ -241,7 +270,7 @@
     {
       "id": "google-vertex",
       "label": "Google Vertex AI",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/google-vertex.ts routes the google-vertex API; octet sends Gemini generateContent to the Vertex endpoint.",
       "decision": {
         "kind": "declared",
         "fixture_id": "google-vertex-declaration-route",
@@ -261,7 +290,7 @@
     {
       "id": "groq",
       "label": "Groq",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/groq.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "groq-declaration-route",
@@ -280,7 +309,7 @@
     {
       "id": "huggingface",
       "label": "Hugging Face",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/huggingface.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "huggingface-declaration-route",
@@ -299,7 +328,7 @@
     {
       "id": "kimi-coding",
       "label": "Kimi Coding",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/kimi-coding.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "kimi-coding-declaration-route",
@@ -316,9 +345,28 @@
       }
     },
     {
+      "id": "meta",
+      "label": "Meta",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/meta.ts; octet's declaration matches its base URL, API and key variable.",
+      "decision": {
+        "kind": "declared",
+        "fixture_id": "meta-declaration-route",
+        "provider_id": "meta",
+        "fixture": {
+          "registration": "discovered",
+          "model_id": "muse-spark-fixture",
+          "protocol": "openai_responses",
+          "endpoint_id": "meta",
+          "auth_presentation": "bearer",
+          "base_url": "https://api.meta.ai/v1/",
+          "environment_variable": "META_API_KEY"
+        }
+      }
+    },
+    {
       "id": "minimax",
       "label": "MiniMax",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/minimax.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "minimax-declaration-route",
@@ -337,7 +385,7 @@
     {
       "id": "minimax-cn",
       "label": "MiniMax China",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/minimax-cn.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "minimax-cn-declaration-route",
@@ -356,7 +404,7 @@
     {
       "id": "mistral",
       "label": "Mistral",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/mistral.ts routes the mistral-conversations API; octet covers the OpenAI Chat subset.",
       "decision": {
         "kind": "declared_subset",
         "fixture_id": "mistral-declaration-route",
@@ -381,7 +429,7 @@
     {
       "id": "moonshotai",
       "label": "Moonshot AI",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/moonshotai.ts.",
       "decision": {
         "kind": "declared_subset",
         "fixture_id": "moonshotai-declaration-route",
@@ -406,7 +454,7 @@
     {
       "id": "moonshotai-cn",
       "label": "Moonshot AI China",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/moonshotai-cn.ts.",
       "decision": {
         "kind": "declared_subset",
         "fixture_id": "moonshotai-cn-declaration-route",
@@ -428,9 +476,28 @@
       }
     },
     {
+      "id": "nvidia",
+      "label": "NVIDIA",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/nvidia.ts; octet's declaration matches its base URL, API and key variable.",
+      "decision": {
+        "kind": "declared",
+        "fixture_id": "nvidia-declaration-route",
+        "provider_id": "nvidia",
+        "fixture": {
+          "registration": "discovered",
+          "model_id": "nvidia-fixture",
+          "protocol": "openai_chat",
+          "endpoint_id": "nvidia",
+          "auth_presentation": "bearer",
+          "base_url": "https://integrate.api.nvidia.com/v1/",
+          "environment_variable": "NVIDIA_API_KEY"
+        }
+      }
+    },
+    {
       "id": "openai",
       "label": "OpenAI",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/openai.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "openai-declaration-route",
@@ -449,7 +516,7 @@
     {
       "id": "openai-codex",
       "label": "OpenAI Codex",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/openai-codex.ts routes openai-codex-responses on https://chatgpt.com/backend-api; octet sends Responses to the Codex backend.",
       "decision": {
         "kind": "declared",
         "fixture_id": "openai-codex-declaration-route",
@@ -469,7 +536,7 @@
     {
       "id": "opencode",
       "label": "OpenCode Zen",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/opencode.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "opencode-declaration-route",
@@ -488,7 +555,7 @@
     {
       "id": "opencode-go",
       "label": "OpenCode Zen Go",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/opencode-go.ts.",
       "decision": {
         "kind": "declared_subset",
         "fixture_id": "opencode-go-declaration-route",
@@ -513,7 +580,7 @@
     {
       "id": "openrouter",
       "label": "OpenRouter",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/openrouter.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "openrouter-declaration-route",
@@ -530,9 +597,107 @@
       }
     },
     {
+      "id": "qwen-token-plan",
+      "label": "Qwen Token Plan",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/qwen-token-plan.ts; octet's declaration matches its base URL, API and key variable.",
+      "decision": {
+        "kind": "declared",
+        "fixture_id": "qwen-token-plan-declaration-route",
+        "provider_id": "qwen-token-plan",
+        "fixture": {
+          "registration": "discovered",
+          "model_id": "qwen-token-plan-fixture",
+          "protocol": "openai_chat",
+          "endpoint_id": "qwen-token-plan",
+          "auth_presentation": "bearer",
+          "base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+          "environment_variable": "QWEN_TOKEN_PLAN_API_KEY"
+        }
+      }
+    },
+    {
+      "id": "qwen-token-plan-cn",
+      "label": "Qwen Token Plan CN",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/qwen-token-plan-cn.ts; octet's declaration matches its base URL, API and key variable.",
+      "decision": {
+        "kind": "declared",
+        "fixture_id": "qwen-token-plan-cn-declaration-route",
+        "provider_id": "qwen-token-plan-cn",
+        "fixture": {
+          "registration": "discovered",
+          "model_id": "qwen-token-plan-cn-fixture",
+          "protocol": "openai_chat",
+          "endpoint_id": "qwen-token-plan-cn",
+          "auth_presentation": "bearer",
+          "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/",
+          "environment_variable": "QWEN_TOKEN_PLAN_CN_API_KEY"
+        }
+      }
+    },
+    {
+      "id": "qwen-token-plan-individual",
+      "label": "Qwen Token Plan Individual",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/qwen-token-plan-individual.ts; octet's declaration matches its base URL, API and key variable.",
+      "decision": {
+        "kind": "declared",
+        "fixture_id": "qwen-token-plan-individual-declaration-route",
+        "provider_id": "qwen-token-plan-individual",
+        "fixture": {
+          "registration": "discovered",
+          "model_id": "qwen-token-plan-individual-fixture",
+          "protocol": "openai_chat",
+          "endpoint_id": "qwen-token-plan-individual",
+          "auth_presentation": "bearer",
+          "base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+          "environment_variable": "QWEN_TOKEN_PLAN_API_KEY"
+        }
+      }
+    },
+    {
+      "id": "radius",
+      "label": "Radius",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/radius.ts declares this provider; octet has no native declaration for it yet.",
+      "decision": {
+        "kind": "unsupported",
+        "fixture_id": "radius-unsupported-decision",
+        "missing_primitive": "Pi messages wire protocol (pi-messages) with Radius gateway OAuth and a dynamically refreshed catalog",
+        "release_blocker": "#252"
+      }
+    },
+    {
+      "id": "together",
+      "label": "Together AI",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/together.ts; octet's declaration matches its base URL, API and key variable.",
+      "decision": {
+        "kind": "declared",
+        "fixture_id": "together-declaration-route",
+        "provider_id": "together",
+        "fixture": {
+          "registration": "discovered",
+          "model_id": "together-fixture",
+          "protocol": "openai_chat",
+          "endpoint_id": "together",
+          "auth_presentation": "bearer",
+          "base_url": "https://api.together.ai/v1/",
+          "environment_variable": "TOGETHER_API_KEY"
+        }
+      }
+    },
+    {
+      "id": "typesafe",
+      "label": "TypeSafe",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/typesafe.ts declares this provider; octet has no native declaration for it yet.",
+      "decision": {
+        "kind": "unsupported",
+        "fixture_id": "typesafe-unsupported-decision",
+        "missing_primitive": "Classifier API (typesafe-system-one); the provider has no chat models and octet has no classifier route",
+        "release_blocker": "#252"
+      }
+    },
+    {
       "id": "vercel-ai-gateway",
       "label": "Vercel AI Gateway",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/vercel-ai-gateway.ts.",
       "decision": {
         "kind": "declared_subset",
         "fixture_id": "vercel-ai-gateway-declaration-route",
@@ -557,7 +722,7 @@
     {
       "id": "xai",
       "label": "xAI",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/xai.ts declares openai-responses; octet routes xAI through the Responses API.",
       "decision": {
         "kind": "declared",
         "fixture_id": "xai-declaration-route",
@@ -565,7 +730,7 @@
         "fixture": {
           "registration": "discovered",
           "model_id": "grok-fixture",
-          "protocol": "openai_chat",
+          "protocol": "openai_responses",
           "endpoint_id": "xai",
           "auth_presentation": "bearer",
           "base_url": "https://api.x.ai/v1/",
@@ -576,7 +741,7 @@
     {
       "id": "xiaomi",
       "label": "Xiaomi",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/xiaomi.ts.",
       "decision": {
         "kind": "declared",
         "fixture_id": "xiaomi-declaration-route",
@@ -595,7 +760,7 @@
     {
       "id": "xiaomi-token-plan-ams",
       "label": "Xiaomi Token Plan (AMS)",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/xiaomi-token-plan-ams.ts routes openai-completions at https://token-plan-ams.xiaomimimo.com/v1; octet routes the same plan through its Anthropic-compatible endpoint.",
       "decision": {
         "kind": "declared",
         "fixture_id": "xiaomi-token-plan-ams-declaration-route",
@@ -614,7 +779,7 @@
     {
       "id": "xiaomi-token-plan-cn",
       "label": "Xiaomi Token Plan (CN)",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/xiaomi-token-plan-cn.ts routes openai-completions at https://token-plan-cn.xiaomimimo.com/v1; octet routes the same plan through its Anthropic-compatible endpoint.",
       "decision": {
         "kind": "declared",
         "fixture_id": "xiaomi-token-plan-cn-declaration-route",
@@ -633,7 +798,7 @@
     {
       "id": "xiaomi-token-plan-sgp",
       "label": "Xiaomi Token Plan (SGP)",
-      "evidence": "Reference evidence: local @mariozechner/pi-ai@0.73.1 generated inventory; the exact @earendil-works/pi-coding-agent@0.84.4 package was unavailable locally.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/xiaomi-token-plan-sgp.ts routes openai-completions at https://token-plan-sgp.xiaomimimo.com/v1; octet routes the same plan through its Anthropic-compatible endpoint.",
       "decision": {
         "kind": "declared",
         "fixture_id": "xiaomi-token-plan-sgp-declaration-route",
@@ -652,12 +817,31 @@
     {
       "id": "zai",
       "label": "Z.ai",
-      "evidence": "Pinned issue inventory entry; exact Pi package evidence is required before a native declaration.",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/zai.ts declares this provider; octet has no native declaration for it yet.",
       "decision": {
         "kind": "unsupported",
         "fixture_id": "zai-unsupported-decision",
         "missing_primitive": "ZAI thinking-format encoding and fragmented ZAI tool-stream decoder",
         "release_blocker": "#252"
+      }
+    },
+    {
+      "id": "zai-coding-cn",
+      "label": "Z.AI Coding CN",
+      "evidence": "Pi 1.0.2 (tag v1.0.2, cd32f772) packages/ai/src/providers/zai-coding-cn.ts; octet's declaration matches its base URL, API and key variable.",
+      "decision": {
+        "kind": "declared",
+        "fixture_id": "zai-coding-cn-declaration-route",
+        "provider_id": "zai-coding-cn",
+        "fixture": {
+          "registration": "discovered",
+          "model_id": "zai-coding-cn-fixture",
+          "protocol": "openai_chat",
+          "endpoint_id": "zai-coding-cn",
+          "auth_presentation": "bearer",
+          "base_url": "https://open.bigmodel.cn/api/coding/paas/v4/",
+          "environment_variable": "ZAI_CODING_CN_API_KEY"
+        }
       }
     }
   ]

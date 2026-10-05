@@ -752,9 +752,9 @@ impl RemoteUiMailbox {
                 );
             }
             ExtensionRemoteUiOperation::Close { surface_id } => {
-                if !surfaces
+                if surfaces
                     .get(&(owner.clone(), surface_id.clone()))
-                    .is_some_and(|surface| surface.geometry.is_some())
+                    .is_none_or(|surface| surface.geometry.is_none())
                 {
                     return Err(invalid("remote UI surface is not open for this owner"));
                 }

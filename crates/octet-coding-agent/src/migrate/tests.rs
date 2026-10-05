@@ -463,7 +463,31 @@ fn classifies_pi_0844_surfaces_and_fails_closed_on_unknown_apis() {
     assert!(report
         .reasons
         .iter()
-        .any(|reason| reason.contains("outside the pinned Pi 0.84.4 compatibility profile")));
+        .any(|reason| reason.contains("outside the pinned Pi 1.0.2 compatibility profile")));
+
+    // Names Pi 1.0.2 added are inside the pinned profile, not blocked.
+    let current = root.join("current.ts");
+    write(
+        &current,
+        r#"export default (pi) => {
+                 pi.on("provider_stream_event", () => {});
+                 pi.on("agent_before_settle", () => {});
+                 pi.registerToolRenderer(() => undefined);
+                 pi.registerMcpServer("docs", { command: "docs-mcp" });
+                 pi.getSettings();
+               };"#,
+    );
+    let report = analyze_extension(&current, root, &mut diagnostics);
+    assert_ne!(
+        report.migration,
+        MigrationPath::Blocked,
+        "{:?}",
+        report.reasons
+    );
+    assert!(!report
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("compatibility profile")));
 }
 
 #[test]

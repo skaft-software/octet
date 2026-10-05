@@ -2,15 +2,17 @@
 //! classification it feeds.
 //!
 //! Why this is a separate module: reading an extension's source is its own
-//! pipeline - a bounded AST walk over the entrypoint's import graph, the pi 0.84.4
+//! pipeline - a bounded AST walk over the entrypoint's import graph, the pi 1.0.2
 //! event and UI vocabulary the findings are matched against, and the classifier
 //! that turns those findings into a [`MigrationPath`]. None of it is report
 //! assembly, and running it against its own [`AnalysisBudget`] is what stops a
 //! hostile tree from turning the scanner into an unbounded reader.
 //!
-//! The classification vocabulary (`PI_0_84_4_EVENTS`, `PI_0_84_4_UI_METHODS`,
-//! `PI_0_84_4_RENDERER_FIELDS`, `PI_0_84_4_REGISTRATIONS`) is data about one
-//! specific pi release, so it sits next to the only code that reads it.
+//! The classification vocabulary (`PI_1_0_2_EVENTS`, `PI_1_0_2_UI_METHODS`,
+//! `PI_1_0_2_RENDERER_FIELDS`, `PI_1_0_2_REGISTRATIONS`, `PI_1_0_2_API_METHODS`)
+//! is data about one specific pi release, the one octet 0.8.2 is pinned to,
+//! taken from `packages/coding-agent/src/core/extensions/types.ts` at `v1.0.2`.
+//! It sits next to the only code that reads it.
 
 use std::collections::VecDeque;
 
@@ -496,18 +498,7 @@ fn inspect_call(
                 .insert(format!("unknown:events.{event_bus_method}"));
         }
     }
-    if matches!(
-        method,
-        "registerTool"
-            | "registerCommand"
-            | "registerShortcut"
-            | "registerFlag"
-            | "registerProvider"
-            | "unregisterProvider"
-            | "registerMessageRenderer"
-            | "registerMarkdownTransformer"
-            | "registerEntryRenderer"
-    ) {
+    if PI_1_0_2_REGISTRATIONS.contains(&method) {
         accumulator.registrations.insert(method.to_owned());
     }
     if method == "exec" {
@@ -548,35 +539,7 @@ fn inspect_call(
         accumulator.actions.insert(method.to_owned());
     }
     let direct_pi_method = is_extension_api_direct_method(&chain, method, api_bindings);
-    if direct_pi_method
-        && !matches!(
-            method,
-            "on" | "registerTool"
-                | "registerCommand"
-                | "registerShortcut"
-                | "registerFlag"
-                | "registerProvider"
-                | "unregisterProvider"
-                | "registerMessageRenderer"
-                | "registerMarkdownTransformer"
-                | "registerEntryRenderer"
-                | "exec"
-                | "appendEntry"
-                | "setSessionName"
-                | "getSessionName"
-                | "setLabel"
-                | "getActiveTools"
-                | "setActiveTools"
-                | "getAllTools"
-                | "getCommands"
-                | "getFlag"
-                | "sendMessage"
-                | "sendUserMessage"
-                | "setModel"
-                | "getThinkingLevel"
-                | "setThinkingLevel"
-        )
-    {
+    if direct_pi_method && !PI_1_0_2_API_METHODS.contains(&method) {
         accumulator.actions.insert(format!("unknown:{method}"));
     }
     if let Some((owner, ui_suffix)) = chain.split_once(".ui.") {
@@ -685,87 +648,140 @@ fn is_private_pi_import(module: &str) -> bool {
         || module.starts_with("@earendil-works/pi-tui/src/")
 }
 
-const PI_0_84_4_EVENTS: &[&str] = &[
-    "project_trust",
-    "resources_discover",
-    "session_start",
-    "session_info_changed",
-    "session_before_switch",
-    "session_before_fork",
-    "session_before_compact",
-    "session_compact",
-    "session_compact_failed",
-    "session_shutdown",
-    "session_before_tree",
-    "session_tree",
-    "context",
-    "before_provider_request",
-    "before_provider_headers",
+/// Every `pi.on(...)` event in Pi 1.0.2.
+const PI_1_0_2_EVENTS: &[&str] = &[
     "after_provider_response",
-    "before_agent_start",
-    "agent_start",
+    "agent_before_settle",
     "agent_end",
     "agent_settled",
-    "ui_prompt_start",
-    "ui_prompt_end",
-    "turn_start",
-    "turn_end",
+    "agent_start",
+    "before_agent_start",
+    "before_provider_headers",
+    "before_provider_request",
+    "cache_warming_decision",
+    "context",
+    "context_with_system",
+    "input",
+    "mcp_servers_change",
+    "message_end",
     "message_start",
     "message_update",
-    "message_end",
+    "model_select",
+    "project_trust",
+    "provider_stream_event",
+    "resources_discover",
+    "session_before_compact",
+    "session_before_fork",
+    "session_before_switch",
+    "session_before_tree",
+    "session_compact",
+    "session_compact_failed",
+    "session_info_changed",
+    "session_shutdown",
+    "session_start",
+    "session_tree",
+    "thinking_level_select",
+    "tool_call",
+    "tool_execution_end",
     "tool_execution_start",
     "tool_execution_update",
-    "tool_execution_end",
-    "model_select",
-    "thinking_level_select",
-    "user_bash",
-    "input",
-    "tool_call",
     "tool_result",
+    "turn_end",
+    "turn_start",
+    "ui_prompt_end",
+    "ui_prompt_start",
+    "user_bash",
 ];
 
-const PI_0_84_4_UI_METHODS: &[&str] = &[
-    "select",
+/// Every `ExtensionUIContext` member in Pi 1.0.2.
+const PI_1_0_2_UI_METHODS: &[&str] = &[
+    "addAutocompleteProvider",
     "confirm",
-    "input",
+    "custom",
     "editor",
+    "getAllThemes",
+    "getEditorComponent",
+    "getEditorText",
+    "getTheme",
+    "getToolsExpanded",
+    "input",
     "notify",
     "onTerminalInput",
-    "setStatus",
-    "setWorkingMessage",
-    "setWorkingVisible",
-    "setWorkingIndicator",
-    "setHiddenThinkingLabel",
-    "setWidget",
+    "pasteToEditor",
+    "select",
+    "setEditorComponent",
+    "setEditorText",
     "setFooter",
     "setHeader",
-    "setTitle",
-    "custom",
-    "pasteToEditor",
-    "setEditorText",
-    "getEditorText",
-    "addAutocompleteProvider",
-    "setEditorComponent",
-    "getEditorComponent",
-    "getAllThemes",
-    "getTheme",
+    "setHiddenThinkingLabel",
+    "setStatus",
     "setTheme",
-    "getToolsExpanded",
+    "setTitle",
     "setToolsExpanded",
+    "setWidget",
+    "setWorkingIndicator",
+    "setWorkingMessage",
+    "setWorkingVisible",
+    "theme",
 ];
 
-const PI_0_84_4_RENDERER_FIELDS: &[&str] = &["renderCall", "renderResult", "renderMessage"];
+/// Tool and message renderer fields in Pi 1.0.2 (`ToolRenderers` plus messages).
+const PI_1_0_2_RENDERER_FIELDS: &[&str] =
+    &["renderCall", "renderResult", "renderShell", "renderMessage"];
 
-const PI_0_84_4_REGISTRATIONS: &[&str] = &[
-    "registerTool",
+/// Every `ExtensionAPI` registration method in Pi 1.0.2.
+const PI_1_0_2_REGISTRATIONS: &[&str] = &[
     "registerCommand",
-    "registerShortcut",
-    "registerFlag",
-    "registerProvider",
-    "unregisterProvider",
-    "registerMessageRenderer",
-    "registerMarkdownTransformer",
     "registerEntryRenderer",
+    "registerFlag",
+    "registerMarkdownTransformer",
+    "registerMcpServer",
+    "registerMessageRenderer",
+    "registerProvider",
+    "registerShortcut",
+    "registerTool",
+    "registerToolRenderer",
+    "registerVirtualModel",
+    "unregisterMcpServer",
+    "unregisterProvider",
+    "unregisterVirtualModel",
+];
+
+/// Every `ExtensionAPI` member in Pi 1.0.2.
+const PI_1_0_2_API_METHODS: &[&str] = &[
+    "appendEntry",
+    "events",
+    "exec",
+    "getActiveTools",
+    "getAllTools",
+    "getCommands",
+    "getFlag",
+    "getMcpServers",
+    "getSessionName",
+    "getSettings",
+    "getThinkingLevel",
+    "on",
+    "registerCommand",
+    "registerEntryRenderer",
+    "registerFlag",
+    "registerMarkdownTransformer",
+    "registerMcpServer",
+    "registerMessageRenderer",
+    "registerProvider",
+    "registerShortcut",
+    "registerTool",
+    "registerToolRenderer",
+    "registerVirtualModel",
+    "sendMessage",
+    "sendUserMessage",
+    "setActiveTools",
+    "setLabel",
+    "setModel",
+    "setSessionName",
+    "setThinkingLevel",
+    "unregisterMcpServer",
+    "unregisterProvider",
+    "unregisterVirtualModel",
 ];
 
 fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<String>) {
@@ -780,7 +796,7 @@ fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<
         .collect::<Vec<_>>();
     if !private_pi_imports.is_empty() {
         reasons.push(format!(
-            "imports Pi private/internal modules outside the public 0.84.4 compatibility profile: {}",
+            "imports Pi private/internal modules outside the public 1.0.2 compatibility profile: {}",
             private_pi_imports.join(", ")
         ));
         return (MigrationPath::Blocked, reasons);
@@ -788,22 +804,22 @@ fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<
     let unknown_events = accumulator
         .events
         .iter()
-        .filter(|event| !PI_0_84_4_EVENTS.contains(&event.as_str()))
+        .filter(|event| !PI_1_0_2_EVENTS.contains(&event.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     let unknown_ui = accumulator
         .ui
         .iter()
         .filter(|method| {
-            !PI_0_84_4_UI_METHODS.contains(&method.as_str())
-                && !PI_0_84_4_RENDERER_FIELDS.contains(&method.as_str())
+            !PI_1_0_2_UI_METHODS.contains(&method.as_str())
+                && !PI_1_0_2_RENDERER_FIELDS.contains(&method.as_str())
         })
         .cloned()
         .collect::<Vec<_>>();
     let unknown_registrations = accumulator
         .registrations
         .iter()
-        .filter(|method| !PI_0_84_4_REGISTRATIONS.contains(&method.as_str()))
+        .filter(|method| !PI_1_0_2_REGISTRATIONS.contains(&method.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     let unknown_actions = accumulator
@@ -818,25 +834,25 @@ fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<
     {
         if !unknown_events.is_empty() {
             reasons.push(format!(
-                "uses event names outside the pinned Pi 0.84.4 compatibility profile: {}",
+                "uses event names outside the pinned Pi 1.0.2 compatibility profile: {}",
                 unknown_events.join(", ")
             ));
         }
         if !unknown_ui.is_empty() {
             reasons.push(format!(
-                "uses UI methods outside the pinned Pi 0.84.4 compatibility profile: {}",
+                "uses UI methods outside the pinned Pi 1.0.2 compatibility profile: {}",
                 unknown_ui.join(", ")
             ));
         }
         if !unknown_registrations.is_empty() {
             reasons.push(format!(
-                "uses registrations outside the pinned Pi 0.84.4 compatibility profile: {}",
+                "uses registrations outside the pinned Pi 1.0.2 compatibility profile: {}",
                 unknown_registrations.join(", ")
             ));
         }
         if !unknown_actions.is_empty() {
             reasons.push(format!(
-                "uses ExtensionAPI methods outside the pinned Pi 0.84.4 compatibility profile: {}",
+                "uses ExtensionAPI methods outside the pinned Pi 1.0.2 compatibility profile: {}",
                 unknown_actions.join(", ")
             ));
         }
@@ -871,12 +887,19 @@ fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<
     let provider = accumulator.registrations.iter().any(|registration| {
         matches!(
             registration.as_str(),
-            "registerProvider" | "unregisterProvider"
+            "registerProvider"
+                | "unregisterProvider"
+                | "registerVirtualModel"
+                | "unregisterVirtualModel"
         )
     }) || accumulator.events.iter().any(|event| {
         matches!(
             event.as_str(),
-            "before_provider_request" | "before_provider_headers" | "after_provider_response"
+            "before_provider_request"
+                | "before_provider_headers"
+                | "after_provider_response"
+                | "provider_stream_event"
+                | "cache_warming_decision"
         )
     });
     let message_renderer = accumulator.registrations.iter().any(|registration| {
@@ -930,10 +953,12 @@ fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<
         return (MigrationPath::Manual, reasons);
     }
 
-    let unsupported_registration = accumulator
-        .registrations
-        .iter()
-        .any(|registration| matches!(registration.as_str(), "registerShortcut" | "registerFlag"));
+    let unsupported_registration = accumulator.registrations.iter().any(|registration| {
+        matches!(
+            registration.as_str(),
+            "registerShortcut" | "registerFlag" | "registerMcpServer" | "unregisterMcpServer"
+        )
+    });
     let unsupported_event = accumulator.events.iter().any(|event| {
         matches!(
             event.as_str(),
@@ -943,6 +968,9 @@ fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<
                 | "before_agent_start"
                 | "tool_result"
                 | "context"
+                | "context_with_system"
+                | "agent_before_settle"
+                | "mcp_servers_change"
                 | "message_start"
                 | "message_update"
                 | "message_end"
@@ -977,10 +1005,12 @@ fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<
                 | "shutdown"
         )
     });
-    let custom_tool_renderer = accumulator
-        .ui
-        .iter()
-        .any(|surface| matches!(surface.as_str(), "renderCall" | "renderResult"));
+    let custom_tool_renderer = accumulator.ui.iter().any(|surface| {
+        matches!(
+            surface.as_str(),
+            "renderCall" | "renderResult" | "renderShell"
+        )
+    }) || accumulator.registrations.contains("registerToolRenderer");
     let semantic_ui_port = imports_tui
         || message_renderer
         || accumulator

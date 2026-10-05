@@ -222,8 +222,13 @@ Source/catalog changes retire shared runtimes fail-closed. Runtime status and
 `resource_exhausted` expose extension/digest provenance, not workspace paths,
 trust inputs, child stderr, or secrets.
 
-Bare commands resolve beside the manifest, then through `PATH`. Arguments pass
-directly without a shell; the child's working directory is the active workspace.
+Bare commands resolve beside the manifest, then through absolute `PATH`
+entries. A file shipped inside the extension directory is copied to private
+storage (at most 64 MiB) and run from there. An installed runtime such as
+`node`, `bun` or `python3`, found on `PATH` or named by an absolute path outside
+the extension directory, runs in place and is not copied or hashed. Arguments
+pass directly without a shell; the child's working directory is the active
+workspace.
 The host supplies `OCTET_EXTENSION_API_VERSION`, `OCTET_EXTENSION_NAME`,
 `OCTET_EXTENSION_DIR`, `OCTET_EXTENSION_MANIFEST`, `OCTET_WORKSPACE`, and
 `OCTET_EXTENSION_SCRATCH` for host-verified artifact publication each generation.

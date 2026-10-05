@@ -1,5 +1,5 @@
 // Pi context ordering/custom-message conversion follows pinned Pi 1.0
-// 581e7ba78141a4d8b61cc9d11b8b22ae7e59195e (runner.ts/messages.ts), MIT LICENSE.pi.
+// cd32f7725fdbddbaecdff5b1e68491563394e0ca (runner.ts/messages.ts), MIT LICENSE.pi.
 // Canonical request projection only: never mutate tools, routing or the Session.
 import { bounded, fields, invalid, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
@@ -26,7 +26,7 @@ function variant(value, label) {
 }
 const name = value => bounded(value, 'context name', 256);
 
-// Pi 1.0 ImageContent can represent inline images only. URL/provider references,
+// Pi 1.0.2 ImageContent can represent inline images only. URL/provider references,
 // detail hints and audio need a native replay binding, not an invented Pi field.
 function imageData(value) {
   const data = bounded(value, 'context image data', 786432);
@@ -41,7 +41,7 @@ function imageType(value) {
 }
 function mediaToPi(media) {
   const [kind, value] = variant(media, 'canonical media');
-  if (kind !== 'Image') unsupported(`context media ${kind}`, 'Pi 1.0 has no audio content type');
+  if (kind !== 'Image') unsupported(`context media ${kind}`, 'Pi 1.0.2 has no audio content type');
   record(value, ['source', 'media_type', 'detail'], 'canonical image');
   if (value.detail != null) unsupported('context image detail', 'Pi ImageContent has no detail hint');
   const [source, data] = variant(value.source, 'canonical image source');

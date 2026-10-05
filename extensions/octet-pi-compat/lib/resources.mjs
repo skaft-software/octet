@@ -15,7 +15,7 @@ function pathText(value, label) {
   return value;
 }
 
-// Path normalization adapted from Pi 1.0 (581e7ba78141a4d8b61cc9d11b8b22ae7e59195e),
+// Path normalization adapted from Pi 1.0.2 (cd32f7725fdbddbaecdff5b1e68491563394e0ca),
 // packages/coding-agent/src/utils/paths.ts and core/resource-loader.ts.
 // Copyright (c) 2025 Mario Zechner. MIT, see ../LICENSE.pi.
 // Lexical only: do not follow symlinks or assume host filesystem admission.

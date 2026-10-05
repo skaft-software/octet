@@ -11,7 +11,10 @@ custom-editor draft restoration still fails qualification; full Pi API parity
 and a startup-speed comparison are not established.
 
 The contract is **Pi 1.0.2's public extension API**, replicated under Octet's
-subprocess JSON-RPC protocol. The [27-row ledger](pi-extension-api.md) is the
+subprocess JSON-RPC protocol. octet 0.8.2 is pinned to exactly Pi 1.0.2: the
+adapter ships the dependency versions Pi 1.0.2 ships (jiti 2.7.0, TypeBox
+1.3.27, pi-tui 1.0.2) and resolves imports through the same module table as Pi
+1.0.2's extension loader. The [27-row ledger](pi-extension-api.md) is the
 bounded scope and distinguishes implementation from real-host acceptance.
 Arbitrary third-party extensions, private Pi internals, the Pi CLI and child SDK
 are not targets. The [package README](../extensions/octet-pi-compat/README.md)
@@ -77,12 +80,12 @@ If a reviewed factory imports a Pi export that Octet's shims lack, or one of Pi'
 built-in tool factories (`createBashTool`, `createReadToolDefinition`, …), the
 adapter refuses to start it and reports `pi_compat_fallback_eligible` with the
 names it found. You can then load that bridge against the Pi packages from your
-managed Pi install (`~/.pi/agent`, Pi 1.0.x only) with `--pi-runtime installed`
+managed Pi install (`~/.pi/agent`, Pi 1.0.2 only) with `--pi-runtime installed`
 or `"pi_runtime": "installed"` in `bridge.json`. No Octet prompt offers this
 yet; a permission prompt is planned.
 
-This runs unpinned code from your installed `@earendil-works/pi-coding-agent`,
-`pi-ai` and `pi-tui` inside the extension process:
+This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
+`pi-agent-core`, `pi-ai` and `pi-tui`) inside the extension process:
 
 - Pi's built-in tool factories run commands and file reads/writes in that
   process, outside Octet's per-command tool policy, other extensions'
@@ -93,8 +96,8 @@ This runs unpinned code from your installed `@earendil-works/pi-coding-agent`,
   terminal. Pi functions that would start Pi sessions or agents, call models,
   read credentials, write Pi config or trust, start MCP servers, or own the
   terminal or clipboard are refused, as are names Octet has not classified.
-- A missing Pi install, or one outside 1.0.x, fails loudly; nothing falls back
-  silently.
+- A missing Pi install, or any version other than 1.0.2, fails loudly; nothing
+  falls back silently.
 
 ## Qualification and reproduction
 

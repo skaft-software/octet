@@ -1539,6 +1539,10 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
     })();
     match app {
         Ok(app) => {
+            // Stdout is the JSONL protocol; startup notices go to stderr.
+            for notice in app.executable_extensions.startup_failure_notices() {
+                crate::output::stderr!("warning: {notice}");
+            }
             let result = run_rpc_loop(app, spawn_input_reader(), RpcOutput::new()).await;
             finish_rpc_accounting(result)
         }

@@ -31,9 +31,10 @@ use crate::providers::catalog::{
 
 const PINNED_PI_PROVIDER_IDS: &[&str] = &[
     "amazon-bedrock",
-    "anthropic",
     "ant-ling",
+    "anthropic",
     "azure-openai-responses",
+    "baseten",
     "cerebras",
     "cloudflare-ai-gateway",
     "cloudflare-workers-ai",
@@ -45,16 +46,24 @@ const PINNED_PI_PROVIDER_IDS: &[&str] = &[
     "groq",
     "huggingface",
     "kimi-coding",
+    "meta",
     "minimax",
     "minimax-cn",
     "mistral",
     "moonshotai",
     "moonshotai-cn",
+    "nvidia",
     "openai",
     "openai-codex",
     "opencode",
     "opencode-go",
     "openrouter",
+    "qwen-token-plan",
+    "qwen-token-plan-cn",
+    "qwen-token-plan-individual",
+    "radius",
+    "together",
+    "typesafe",
     "vercel-ai-gateway",
     "xai",
     "xiaomi",
@@ -62,6 +71,7 @@ const PINNED_PI_PROVIDER_IDS: &[&str] = &[
     "xiaomi-token-plan-cn",
     "xiaomi-token-plan-sgp",
     "zai",
+    "zai-coding-cn",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -620,25 +630,6 @@ fn declaration_for_fixture(provider_id: &str) -> &'static ProviderDeclaration {
         .unwrap_or_else(|| panic!("missing declaration for fixture provider {provider_id}"))
 }
 
-// Keep pi-0.84.4.json as historical evidence. Apply only named changes
-// justified by the newer pinned reference when exercising current octet.
-// xAI: Pi 8a7b0c03dfb702663acafb6dc29f8acaa4ffe391,
-// packages/ai/src/providers/xai.ts, declares openai-responses.
-fn current_fixture_with_named_differences(
-    pi_provider_id: &str,
-    historical: &PiRouteFixture,
-) -> PiRouteFixture {
-    let mut current = historical.clone();
-    if pi_provider_id == "xai" {
-        assert_eq!(
-            historical.protocol, "openai_chat",
-            "historical xAI Chat fixture must not be rewritten as a current-reference fact"
-        );
-        current.protocol = "openai_responses".to_owned();
-    }
-    current
-}
-
 fn assert_declared_fixture(
     pi_provider_id: &str,
     fixture_id: &str,
@@ -670,8 +661,8 @@ fn assert_declared_fixture(
         });
     assert_eq!(
         route.protocol,
-        fixture_protocol(&current_fixture_with_named_differences(pi_provider_id, fixture).protocol,),
-        "{fixture_id}: {pi_provider_id} protocol drifted beyond the named reference update"
+        fixture_protocol(&fixture.protocol),
+        "{fixture_id}: {pi_provider_id} protocol drifted"
     );
     assert_eq!(
         route.endpoint_id, fixture.endpoint_id,
@@ -747,12 +738,12 @@ fn assert_declared_fixture(
 #[test]
 fn pinned_pi_provider_inventory_has_tested_decisions() {
     let inventory: PiProviderInventory =
-        serde_json::from_str(include_str!("../../../fixtures/providers/pi-0.84.4.json"))
+        serde_json::from_str(include_str!("../../../fixtures/providers/pi-1.0.2.json"))
             .expect("valid Pi provider compatibility fixture");
     assert_eq!(inventory.schema_version, 1);
     assert_eq!(
         inventory.pi_package,
-        "@earendil-works/pi-coding-agent@0.84.4"
+        "@earendil-works/pi-coding-agent@1.0.2"
     );
     assert_eq!(
         inventory.expected_provider_ids,
@@ -863,7 +854,7 @@ struct ExpectedFixtureRequest {
 #[tokio::test]
 async fn pinned_pi_provider_fixtures_send_declared_routes_without_network_access() {
     let inventory: PiProviderInventory =
-        serde_json::from_str(include_str!("../../../fixtures/providers/pi-0.84.4.json"))
+        serde_json::from_str(include_str!("../../../fixtures/providers/pi-1.0.2.json"))
             .expect("valid Pi provider compatibility fixture");
     let server = MockServer::start().await;
     let client = AiClient::new();
@@ -885,9 +876,6 @@ async fn pinned_pi_provider_fixtures_send_declared_routes_without_network_access
             | PiProviderDecision::DeclaredSubset { .. }
             | PiProviderDecision::Unsupported { .. } => continue,
         };
-        // Exercise the current route without mutating the historical inventory.
-        let current_fixture = current_fixture_with_named_differences(&provider.id, fixture);
-        let fixture = &current_fixture;
         let declaration = declaration_for_fixture(provider_id);
         let fixture_base_url = fixture_resolved_base_url(declaration, fixture_id, fixture);
         let base_url = fixture_base_at_server(&server, &fixture_base_url);

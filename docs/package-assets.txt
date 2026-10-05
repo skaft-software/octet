@@ -24,7 +24,7 @@ text crates/sexy-tui-rs/README.md
 text crates/sexy-tui-rs/VENDORED.md
 text crates/sexy-tui-rs/docs/octet-integration.md
 text crates/sexy-tui-rs/docs/rich-rendering.md
-text crates/sexy-tui-rs/upstream/pi-tui-0.84.4.json
+text crates/sexy-tui-rs/upstream/pi-tui-1.0.2.json
 text docs/CHANGELOG-POLICY.md
 text docs/README.md
 text docs/assets/evidence/README.md

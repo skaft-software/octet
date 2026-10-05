@@ -686,7 +686,8 @@ pub(super) fn stage_entrypoint(path: &Path) -> std::io::Result<Option<ResolvedEn
     let metadata = source.metadata()?;
     if metadata.len() > MAX_STAGED_ENTRYPOINT_BYTES {
         return Err(std::io::Error::other(
-            "extension entrypoint exceeds the 64 MiB staging limit",
+            "extension entrypoint exceeds the 64 MiB staging limit for files shipped \
+             inside an extension; launch an installed runtime by name or absolute path instead",
         ));
     }
     let temporary = tempfile::Builder::new()
@@ -810,13 +811,48 @@ pub(super) fn windows_script_launch(
     ))
 }
 
+/// Whether an absolute entrypoint lies outside the extension's own directory.
+///
+/// Such a command is an installed interpreter (`node`, `bun`, `python3`), not
+/// extension source: it is launched in place, exactly like a PATH lookup, and
+/// is neither staged nor hashed. Staging guards the bytes an extension ships;
+/// copying the user's runtime protects nothing and cost a full copy (and a
+/// hard size limit) on every launch.
+pub(crate) fn entrypoint_outside_extension(directory: &Path, command: &Path) -> bool {
+    if !command.is_absolute() {
+        return false;
+    }
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    !canonical(command).starts_with(canonical(directory))
+}
+
+/// Runs an installed interpreter in place once it is known to be a file.
+fn installed_interpreter(path: PathBuf) -> std::io::Result<Option<ResolvedEntrypoint>> {
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(Some(ResolvedEntrypoint {
+            command: path,
+            _staging: None,
+        })),
+        Ok(_) => Err(std::io::Error::other(
+            "extension entrypoint is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn resolve_entrypoint_command(
     directory: &Path,
     entrypoint: &ExtensionEntrypoint,
 ) -> std::io::Result<ResolvedEntrypoint> {
     let configured = PathBuf::from(&entrypoint.command);
     if configured.is_absolute() {
-        return stage_entrypoint(&configured)?.ok_or_else(|| {
+        let resolved = if entrypoint_outside_extension(directory, &configured) {
+            installed_interpreter(configured)?
+        } else {
+            stage_entrypoint(&configured)?
+        };
+        return resolved.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "extension entrypoint is missing",
@@ -844,7 +880,8 @@ pub(super) fn resolve_entrypoint_command(
     if configured.components().count() == 1 {
         if let Some(path) = std::env::var_os("PATH") {
             for directory in std::env::split_paths(&path) {
-                #[cfg(windows)]
+                // An empty or relative PATH entry would resolve against the
+                // (possibly untrusted) workspace, never an installed runtime.
                 if !directory.is_absolute() {
                     continue;
                 }
@@ -855,8 +892,10 @@ pub(super) fn resolve_entrypoint_command(
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                         Err(error) => return Err(error),
                     };
-                    if let Some(staged) = stage_entrypoint(&resolved)? {
-                        return Ok(staged);
+                    // A PATH match is the user's installed runtime, resolved to
+                    // an absolute path here so the OS never searches further.
+                    if let Some(interpreter) = installed_interpreter(resolved)? {
+                        return Ok(interpreter);
                     }
                 }
             }
@@ -903,6 +942,56 @@ mod windows_resolution_tests {
             ..Default::default()
         };
         assert!(resolve_entrypoint_command(directory.path(), &missing).is_err());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod interpreter_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn installed_interpreters_run_in_place_and_shipped_files_are_staged() {
+        let extension = tempfile::tempdir().unwrap();
+        let runtimes = tempfile::tempdir().unwrap();
+        // Larger than the staging limit, as official Node and Bun builds are.
+        let interpreter = runtimes.path().join("node");
+        std::fs::File::create(&interpreter)
+            .unwrap()
+            .set_len(MAX_STAGED_ENTRYPOINT_BYTES + 1)
+            .unwrap();
+        let entrypoint = ExtensionEntrypoint {
+            command: interpreter.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let resolved = resolve_entrypoint_command(extension.path(), &entrypoint).unwrap();
+        assert_eq!(resolved.command, interpreter);
+        assert!(resolved._staging.is_none());
+        assert!(entrypoint_outside_extension(extension.path(), &interpreter));
+
+        // A file the extension ships is still copied before it runs.
+        let shipped = extension.path().join("launcher");
+        std::fs::write(&shipped, b"#!/bin/sh\n").unwrap();
+        let entrypoint = ExtensionEntrypoint {
+            command: shipped.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let resolved = resolve_entrypoint_command(extension.path(), &entrypoint).unwrap();
+        assert_ne!(resolved.command, shipped);
+        assert!(resolved._staging.is_some());
+        assert!(!entrypoint_outside_extension(extension.path(), &shipped));
+
+        let missing = ExtensionEntrypoint {
+            command: runtimes
+                .path()
+                .join("absent")
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
+        };
+        let error = resolve_entrypoint_command(extension.path(), &missing)
+            .err()
+            .expect("a missing interpreter fails");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 }
 

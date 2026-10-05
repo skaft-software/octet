@@ -165,10 +165,10 @@ test('pending provider snapshots remain independent and replacement rejects old 
 });
 
 const repo = process.env.PI_REFERENCE_REPO;
-test('exact native edits differential against pinned Pi 1.0 applyCompletion source', {
+test('exact native edits differential against pinned Pi 1.0.2 applyCompletion source', {
   skip: !repo && 'set PI_REFERENCE_REPO to the reviewed offline Pi checkout',
 }, async () => {
-  const source = execFileSync('git', ['-C', repo, 'show', '581e7ba78141a4d8b61cc9d11b8b22ae7e59195e:packages/tui/src/autocomplete.ts'], { encoding: 'utf8' });
+  const source = execFileSync('git', ['-C', repo, 'show', 'cd32f7725fdbddbaecdff5b1e68491563394e0ca:packages/tui/src/autocomplete.ts'], { encoding: 'utf8' });
   assert.equal(createHash('sha256').update(source).digest('hex'), '7391902f35b60c3467ceb5eccc86e0954a388ea1012455c1a7ea8f7325de773b');
   const pure = stripTypeScriptTypes(source.slice(source.indexOf('export class CombinedAutocompleteProvider')));
   const { CombinedAutocompleteProvider } = await import(`data:text/javascript;base64,${Buffer.from(pure).toString('base64')}`);

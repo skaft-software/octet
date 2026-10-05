@@ -83,21 +83,18 @@ count or treat inventory classification as executable compatibility.
 
 ### Source profile
 
-- The local Pi checkout is now **1.0.0** at
-  `7fbbd5f4a1d982bb02d63472dde0774fa639f99b`, not the versions in old plans.
-- Local tag **v0.84.4** resolves to
-  `b79e4cc834970cca69daebffab7df1da7d1e52c4` and was inspected via `git show`.
+- octet 0.8.2 is pinned to **Pi 1.0.2**, tag `v1.0.2` at
+  `cd32f7725fdbddbaecdff5b1e68491563394e0ca`. The adapter's dependencies, its
+  module table, the installed-Pi fallback and the migration scanner all use
+  this one release; another installed Pi version is refused.
 - `pi-background-tasks` declares Pi peer ranges `^0.81.1 || ^0.82.1 || ^0.83.0 ||
-  ^0.84.0`, excluding 1.0.0. Other selected coding-agent peer ranges admit
-  0.84.4. Therefore **0.84.4 is the first candidate qualification profile**,
-  not proof all package features work on it. Resolve transitive dependencies
-  and runtime exports before freezing that profile. Add 1.0.0 as a separately
-  tested profile; do not silently widen a version range.
+  ^0.84.0`, which exclude 1.0.x. A peer range is not proof either way: qualify
+  each package against the 1.0.2 profile instead of widening or narrowing it.
 
 ### Important callsite evidence
 
-Paths below are relative to `$PI_CORPUS`; Pi references marked `v0.84.4:` refer
-to the immutable Git source, not the current checkout's different line numbers.
+Paths below are relative to `$PI_CORPUS`; Pi references marked `v1.0.2:` refer
+to the immutable Git source at that tag, not a checkout's current line numbers.
 
 - `pi-agent-extensions/extensions/handoff/index.ts:112,202` uses session context
   projection and `newSession`; `extensions/sessions/index.ts:856` switches a
@@ -380,8 +377,8 @@ translation remains adapter-local.
 | `before_provider_headers` | Awaited request with the mutable header value returned explicitly by the adapter after handlers finish, despite handlers returning `undefined`. Apply deletion (`null`) and insertion semantics. |
 | `after_provider_response` | Real status/headers at the HTTP response boundary, before body consumption. Preserve the profile's callback/order behavior; do not invent this event at stream completion. |
 
-In Pi v0.84.4 `types.ts:700–706` the header event mutates in place and ignores
-return values; `runner.ts:1100–1128` awaits handlers. The old plan's rule
+In Pi v1.0.2 `types.ts:883–891` the header event mutates in place and ignores
+return values; `runner.ts:1392–1418` awaits handlers. The old plan's rule
 “events with Result types are requests, others are notifications” is therefore
 incorrect. Similarly, tool-call argument mutations cannot be discarded because
 a handler only returned a block decision.

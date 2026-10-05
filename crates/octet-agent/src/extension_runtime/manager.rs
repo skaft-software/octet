@@ -1111,6 +1111,7 @@ impl ExtensionRuntimeManager {
                 self.record_reload_failure(&key, automatic, &provenance, &error);
                 Err(ExtensionRuntimeManagerError::Failed {
                     failure: classify_process_failure(&error),
+                    detail: launch_detail(&error),
                 })
             }
             Err(_) => {
@@ -1216,6 +1217,15 @@ impl ExtensionRuntimeManager {
             }
             .into()),
         }
+    }
+}
+
+/// The host's own launch message (for example a missing or oversized
+/// executable). Protocol and child-reported errors stay classified only.
+fn launch_detail(error: &ProcessRuntimeError) -> Option<String> {
+    match error {
+        ProcessRuntimeError::Spawn { message, .. } => Some(message.clone()),
+        _ => None,
     }
 }
 
@@ -1509,6 +1519,7 @@ impl ExtensionSessionBinding {
                     } else if runtime.state == ExtensionManagedRuntimeState::Parked {
                         return Err(ExtensionRuntimeManagerError::Failed {
                             failure: ExtensionRuntimeFailure::Launch,
+                            detail: None,
                         });
                     } else {
                         // Reload holds this gate while the old generation is
@@ -1650,7 +1661,10 @@ impl ExtensionSessionBinding {
                     None,
                     Some(failure),
                 );
-                return Err(ExtensionRuntimeManagerError::Failed { failure });
+                return Err(ExtensionRuntimeManagerError::Failed {
+                    failure,
+                    detail: launch_detail(&error),
+                });
             }
             Err(_) => {
                 let exhausted = ExtensionRuntimeManager::startup_timeout_exhaustion(
@@ -1802,12 +1816,19 @@ impl ExtensionSessionBinding {
                             process: Some(lease.process),
                             shared: lease.shared,
                             outcome: ExtensionRuntimeActivationOutcome::Ready,
+                            detail: None,
                         },
                         Err(error) => ExtensionRuntimeActivation {
                             extension: name,
                             provenance: Some(provenance),
                             process: None,
                             shared: false,
+                            detail: match &error {
+                                ExtensionRuntimeManagerError::Failed { detail, .. } => {
+                                    detail.clone()
+                                }
+                                _ => None,
+                            },
                             outcome: activation_outcome(error),
                         },
                     }
@@ -1896,7 +1917,7 @@ fn activation_outcome(error: ExtensionRuntimeManagerError) -> ExtensionRuntimeAc
         ExtensionRuntimeManagerError::ResourceExhausted(exhausted) => {
             ExtensionRuntimeActivationOutcome::ResourceExhausted(exhausted)
         }
-        ExtensionRuntimeManagerError::Failed { failure } => {
+        ExtensionRuntimeManagerError::Failed { failure, .. } => {
             ExtensionRuntimeActivationOutcome::Failed(failure)
         }
         ExtensionRuntimeManagerError::ManagerClosed => {

@@ -199,6 +199,9 @@ pub enum ExtensionRuntimeManagerError {
     Failed {
         /// Bounded secret-safe failure class.
         failure: ExtensionRuntimeFailure,
+        /// Host-generated launch detail (a missing or unusable executable),
+        /// never child output.
+        detail: Option<String>,
     },
 }
 
@@ -302,6 +305,8 @@ pub struct ExtensionRuntimeActivation {
     pub shared: bool,
     /// Typed visible outcome.
     pub outcome: ExtensionRuntimeActivationOutcome,
+    /// Host-generated launch detail for a failed activation, never child output.
+    pub detail: Option<String>,
 }
 
 /// Typed eager activation outcome.

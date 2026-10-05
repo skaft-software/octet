@@ -1,5 +1,5 @@
-//! Pi 1.0 perceptual theme colors, ported from packages/tui/src/{colors,oklab}.ts
-//! at 581e7ba78141a4d8b61cc9d11b8b22ae7e59195e. Keep the pinned coefficients,
+//! Pi 1.0.2 perceptual theme colors, ported from packages/tui/src/{colors,oklab}.ts
+//! at cd32f7725fdbddbaecdff5b1e68491563394e0ca. Keep the pinned coefficients,
 //! 20-step OKLCH gamut mapping and OKHSL Halley steps, not an HSL approximation.
 //! Source hashes and shared oracle vectors: extensions/octet-pi-compat/test/fixtures/theme-colors.json.
 //!

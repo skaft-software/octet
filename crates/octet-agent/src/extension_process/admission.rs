@@ -70,7 +70,7 @@ pub(super) fn validate_remote_ui_envelope(
     request: bool,
 ) -> Result<(), String> {
     if object.keys().any(|key| {
-        !matches!(key.as_str(), "jsonrpc" | "method" | "params") && !(request && key == "id")
+        !(matches!(key.as_str(), "jsonrpc" | "method" | "params") || request && key == "id")
     }) {
         return Err("remote UI envelope contains unknown fields".into());
     }

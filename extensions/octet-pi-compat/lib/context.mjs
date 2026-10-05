@@ -1,4 +1,4 @@
-// Pure helpers adapted from Pi 1.0, commit 581e7ba78141a4d8b61cc9d11b8b22ae7e59195e:
+// Pure helpers adapted from Pi 1.0.2, commit cd32f7725fdbddbaecdff5b1e68491563394e0ca:
 // packages/coding-agent/src/core/{compaction/compaction,session-manager,messages}.ts
 // Copyright (c) 2025 Mario Zechner. MIT; see ../LICENSE.pi.
 // These operate on caller-supplied Pi data, not octet's live/canonical session.

@@ -3,7 +3,6 @@ import { createJiti } from 'jiti';
 import { readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { fileURLToPath } from 'node:url';
 import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions, retireAutocomplete } from './completions.mjs';
@@ -24,6 +23,7 @@ import { RemoteUI } from './remote-ui.mjs';
 import { TranscriptRenderers } from './transcript-renderers.mjs';
 import { Timers, deadline } from './timers.mjs';
 import { activateInstalledPi, classifyLoadFailure, fallbackData, installedPiAliases, piRuntimeMode } from './installed-pi.mjs';
+import { emulatedPiAliases, typeboxAliases } from './pi-modules.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active']);
 const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
@@ -174,17 +174,14 @@ export class Runtime {
     if (this.loaded) return;
     const extensions = this.config.extensions;
     if (!Array.isArray(extensions) || extensions.length > 64 || extensions.some(p => typeof p !== 'string')) invalid('bridge extensions must be an explicit list');
-    const aliases = {};
-    for (const prefix of ['@earendil-works', '@mariozechner']) {
-      for (const [pkg, shim] of [['pi-coding-agent', 'coding-agent'], ['pi-ai', 'ai'], ['pi-tui', 'tui']]) aliases[`${prefix}/${pkg}`] = fileURLToPath(new URL(`../shims/${shim}.mjs`, import.meta.url));
-    }
-    // These are different schema libraries, not interchangeable version aliases.
-    aliases.typebox = fileURLToPath(new URL('../node_modules/typebox/build/index.mjs', import.meta.url));
-    aliases['@sinclair/typebox'] = fileURLToPath(new URL('../node_modules/@sinclair/typebox/build/esm/index.mjs', import.meta.url));
+    // The module table Pi 1.0.2's own loader uses: Pi packages resolve to the
+    // emulated shims, and both TypeBox spellings to the TypeBox Pi ships.
+    const aliases = { ...typeboxAliases(), ...emulatedPiAliases() };
     // Path B is explicit opt-in only (host-approved); it fails loudly, never silently.
     const installed = piRuntimeMode(this.config) === 'installed' ? installedPiAliases() : null;
     if (installed) Object.assign(aliases, installed.aliases);
-    this.jiti = createJiti(import.meta.url, { alias: aliases, moduleCache: true, fsCache: false, tryNative: false });
+    // jiti's default content-hashed transform cache, as in Pi 1.0.2.
+    this.jiti = createJiti(import.meta.url, { alias: aliases, moduleCache: true, tryNative: false });
     if (installed) await activateInstalledPi(this.jiti, installed.install);
     for (let factory = 0; factory < extensions.length; factory++) {
       const entry = realpathSync(extensions[factory]);

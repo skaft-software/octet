@@ -101,7 +101,7 @@ test('known native gaps stay explicit: mixed durable identities, opaque replay, 
     const part = image(); Object.assign(part.Media.Image, patch);
     assert.throws(() => canonicalToPi([user([part])]), /unsupported_feature/);
   }
-  assert.throws(() => canonicalToPi([user([{ Media: { Audio: { payload: { Inline: 'AAAA' }, format: 'Wav', transcript: null } } }])]), /Pi 1.0 has no audio content type/);
+  assert.throws(() => canonicalToPi([user([{ Media: { Audio: { payload: { Inline: 'AAAA' }, format: 'Wav', transcript: null } } }])]), /Pi 1.0.2 has no audio content type/);
   const opaque = { Assistant: { model: 'model', protocol: 'anthropic_messages', content: [{ Reasoning: { text: 'reason', state: { protocol: 'anthropic_messages', model: 'model', kind: { AnthropicRedacted: { data: 'private' } } } } }] } };
   assert.throws(() => canonicalToPi([opaque]), /opaque reasoning continuation/);
 });

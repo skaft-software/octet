@@ -122,10 +122,10 @@ test('both coding-agent aliases expose working pure helpers at factory time and 
 // Optional, offline differential oracle. Extract only the pinned pure function
 // declarations, never import/execute upstream's agent, session store, or SDK.
 const referenceRepo = process.env.PI_REFERENCE_REPO;
-test('pure helper results match source-extracted Pi 1.0 reference functions', {
+test('pure helper results match source-extracted Pi 1.0.2 reference functions', {
   skip: !referenceRepo && 'set PI_REFERENCE_REPO to a local reviewed Pi checkout containing the pinned commit',
 }, async () => {
-  const ref = '581e7ba78141a4d8b61cc9d11b8b22ae7e59195e';
+  const ref = 'cd32f7725fdbddbaecdff5b1e68491563394e0ca';
   function source(path, hash) {
     const text = execFileSync('git', ['-C', referenceRepo, 'show', `${ref}:packages/coding-agent/src/core/${path}.ts`], { encoding: 'utf8', timeout: 10000 });
     assert.equal(createHash('sha256').update(text).digest('hex'), hash);

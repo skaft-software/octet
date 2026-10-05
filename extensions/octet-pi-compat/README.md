@@ -4,8 +4,9 @@ One optional Node process loads an **explicit reviewed list** of unchanged Pi
 extension factories. Rust still owns octet's agent, sessions, approvals, terminal,
 keyboard focus and shutdown. This package never imports or starts the Pi
 coding-agent runtime. It is not an OS sandbox or universal Pi compatibility claim.
-Full stable Pi 1.0 compatibility remains the target; this source preview does not
-qualify that target, and new generic resource APIs do not substitute for Pi parity.
+Full stable Pi 1.0.2 compatibility remains the target; this source preview does
+not qualify that target, and new generic resource APIs do not substitute for Pi
+parity.
 
 ## Local setup and configuration
 
@@ -42,14 +43,19 @@ explicit reconfiguration. These hashes are change detection, not a sandbox or
 an integrity claim over an extension's entire import graph. The shipped config
 is empty and does not discover/import any Pi user installation.
 
-Dependencies are pinned to jiti 2.6.1, `typebox` 1.1.12, legacy
-`@sinclair/typebox` 0.34.41 and selected MIT Pi TUI 0.85.0 modules. The two
-TypeBox packages remain distinct; both `@earendil-works` and old `@mariozechner`
-Pi imports alias to the same host facades. Setup uses `npm ci --ignore-scripts`, without global
-installs, asset downloads, providers or model calls. There is no coding-agent npm
-dependency. jiti's disk transpilation cache is disabled. Pure context helpers
-and command-argument parsing/path normalization are adapted from Pi 1.0 commit `581e7ba78141a4d8b61cc9d11b8b22ae7e59195e`
-under its [MIT license](LICENSE.pi); no Pi session store or agent runtime is imported.
+octet 0.8.2 is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
+1.0.2 ships: jiti 2.7.0, `typebox` 1.3.27 and selected MIT Pi TUI 1.0.2 modules.
+Imports resolve through the same module table as Pi 1.0.2's extension loader:
+`@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`
+root and `pi-ai/compat` share one entry, and both `@earendil-works` and old
+`@mariozechner` Pi imports alias to the same host facades. `pi-agent-core`,
+`pi-ai/oauth` and `pi-ai/providers/all` come only from the installed Pi 1.0.2.
+Setup uses `npm ci --ignore-scripts`, without global installs, asset downloads,
+providers or model calls. There is no coding-agent npm dependency. jiti keeps
+its default content-hashed transpile cache, as in Pi. Pure context helpers and
+command-argument parsing/path normalization are adapted from Pi 1.0.2 (tag
+`v1.0.2`, commit `cd32f7725fdbddbaecdff5b1e68491563394e0ca`) under its [MIT
+license](LICENSE.pi); no Pi session store or agent runtime is imported.
 
 ## Implemented surface
 
@@ -403,8 +409,9 @@ UTF-8/count/control limits and unchanged manifest shape. These are not native
 completion-UI or effective-prompt qualification.
 Resource tests execute real factory subprocesses with nonempty paths, deterministic
 ordering/cancellation barriers, strict envelopes/bounds, capture equality and a
-source-hash-verified Pi 1.0 normalization oracle. They do not prove native filesystem
-admission, App publication, prompt projection, theme parsing or CLM gate 1.
+source-hash-verified Pi 1.0.2 normalization oracle. They do not prove native
+filesystem admission, App publication, prompt projection, theme parsing or CLM
+gate 1.
 Optional acceptance tests load original files unchanged via `PI_DOOM_PATH` /
 `PI_DOOM_WAD`, `PI_FOOTER_PATH`, `PI_DRAW_PATH`, and `PI_RAINBOW_PATH`. They skip
 when sources/assets are unavailable, never download or copy them, and exercise
@@ -437,7 +444,7 @@ python3 extensions/octet-pi-compat/test/native-editor.py /absolute/octet \
 # Required outstanding gate: rescue immediately after a complete burst-input frame.
 python3 extensions/octet-pi-compat/test/native-editor.py /absolute/octet \
   --editor /absolute/reviewed/rainbow-editor.ts --burst
-# Optional offline comparison against source-extracted pure Pi 1.0 functions:
+# Optional offline comparison against source-extracted pure Pi 1.0.2 functions:
 PI_REFERENCE_REPO=/absolute/reviewed/pi-checkout \
   node --test extensions/octet-pi-compat/test/context.test.mjs
 # Source-hash-verified pinned commands.ts and Pi1.0 completion parser/apply oracle:

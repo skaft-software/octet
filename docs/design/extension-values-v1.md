@@ -10,7 +10,7 @@ The user approved this architectural direction and subsequently authorized imple
 
 ## Scope and priority
 
-Full stable Pi 1.0 extension compatibility is the primary compatibility contract. These additions MUST NOT require annotations in existing Pi extensions, narrow Pi registry/active-tool semantics, or substitute for completing the non-tool Pi API. JavaScript objects, callbacks and synchronous behavior MAY remain local to the Pi adapter; they MUST NOT be presented as ResourceRefs merely because they are objects. Ordinary Pi tools retain ordinary existing behavior. Resource-aware Octet operations opt into additional metadata and lazy projection.
+Full stable Pi 1.0.2 extension compatibility is the primary compatibility contract. These additions MUST NOT require annotations in existing Pi extensions, narrow Pi registry/active-tool semantics, or substitute for completing the non-tool Pi API. JavaScript objects, callbacks and synchronous behavior MAY remain local to the Pi adapter; they MUST NOT be presented as ResourceRefs merely because they are objects. Ordinary Pi tools retain ordinary existing behavior. Resource-aware Octet operations opt into additional metadata and lazy projection.
 
 The complete new domain primitives are OperationDescriptor, ResourceRef, BlobRef and Diagnostic. Existing typed JSON values, tool/call, catalog revisions, progress and cancellation are reused. V1 MUST NOT add reliable streams, shared resource access, jobs, remote objects/method invocation, reflection, inheritance, distributed GC, unit/tensor algebra or a second RPC system. ArrayRef, WaveformRef and TableRef are SDK/domain profiles over BlobRef, not kernel concepts. Native resources MUST NOT persist or resurrect.
 

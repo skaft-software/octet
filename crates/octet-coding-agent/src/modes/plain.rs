@@ -659,6 +659,9 @@ pub async fn run_plain(boot: Bootstrap, initial_prompt: Option<String>) -> anyho
     let launch = resolve_launch_print(&boot, &timestamp())?;
     let system = compose_instructions(&boot.config)?;
     let mut app = build_app(boot, launch, system)?;
+    for notice in app.executable_extensions.startup_failure_notices() {
+        crate::output::stderr!("warning: {notice}");
+    }
     app.refresh_resource_paths_headless().await?;
     let mut theme = crate::tui::theme::load_theme(&app.config);
     crate::tui::theme::apply_model_lab(&mut theme, crate::tui::theme::model_lab(&app.model));
