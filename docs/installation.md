@@ -127,7 +127,7 @@ need Git for Windows or another Bash-compatible shell.
 
 ## Optional packages
 
-Executable extension bundles and the separate Serve application are pinned to
+Executable extension bundles are pinned to
 the host version. After publication, install assets matching octet `0.8.2` from
 its version-pinned release. Until then, run reviewed source extensions from this
 checkout with `--extension-dir ./extensions`. The 0.8.0 bundles need their 0.8.0 host.
@@ -147,24 +147,22 @@ selected source; ungranted sources stay stopped. `--trust-extension`, an explici
 authority, but never enables a bundle. `--no-process`/`--no-shell`, workspace trust,
 and compatibility/integrity checks still apply. Granted code runs with your OS
 permissions outside the tool-effect broker: safe mode is not an OS sandbox.
-Executable bundles are separate from the terminal binary and graphical Serve app. [Resource
+Executable bundles are separate from the terminal binary. [Resource
 discovery](resources.md) covers source selection, and
 [extensions](extensions.md) covers packaging, trust, atomic update and removal.
 Catalog install and update select the package that matches the running octet
 version. The command forms are in the [CLI
-reference](cli.md#packages-and-serve).
+reference](cli.md#packages).
 
 | Package | What it adds |
 | --- | --- |
 | `octet-web-search` | Public web search and fetch, via [Brave Search (recommended) or SearXNG](../extensions/octet-web-search/README.md). Not a browser. |
-| `octet-browse` | **Deprecated**, still installable. A [visible, isolated browser](../extensions/octet-browse/README.md) you sign in to yourself. Prefer the computer-use extension for new automation ([deprecation notes](../extensions/octet-browse/README.md#deprecation)). |
 | `octet-computer-use` | [Native desktop control](../extensions/octet-computer-use/README.md) (macOS, Windows, Linux) through a locally installed, MIT-licensed Cua Driver. Provisioning is explicit, and the OS permissions are yours to grant. |
 | `octet-codemode` | [Pi's offline JavaScript tool composition](../extensions/octet-codemode/README.md), with QuickJS/WASM and Node 22.19+. Explicitly enabled tools retain normal host policy and budgets. |
 | `octet-mcp` | An [MCP bridge](../extensions/octet-mcp/README.md). Local stdio works. Remote Streamable HTTP is blocked by default. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
-| `octet-serve` | A [graphical interface on loopback](experimental/octet-serve/README.md). A separate, version-matched application package, not an executable-extension activation target. |
 
-The six executable-bundle manifests declare API `0.4`, distribution version
+The five executable-bundle manifests declare API `0.4`, distribution version
 `0.8.2`, and require octet `=0.8.2`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for

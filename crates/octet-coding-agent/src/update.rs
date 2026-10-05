@@ -1018,13 +1018,6 @@ async fn run_update(
     crate::output::stdout_line(format!(
         "octet updated to {latest}. Restart octet to use it."
     ));
-    if let Some(serve_version) = crate::extension_package::installed_version() {
-        if serve_version != *latest {
-            crate::output::stdout_line(format!(
-                "octet Serve is still at {serve_version}. Run `octet extension update octet-serve` to match the new release."
-            ));
-        }
-    }
     for extension in crate::extension_package::installed_official_bundle_ids() {
         crate::output::stdout_line(format!(
             "Run `octet extension update {extension}` to install the bundle matching octet {latest}."

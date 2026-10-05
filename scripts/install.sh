@@ -482,7 +482,6 @@ crates/sexy-tui-rs/upstream/pi-tui-0.84.4.json
 evaluation/harbor/README.md
 evaluation/harbor/config.py
 evaluation/harbor/requirements.txt
-extensions/octet-browse/README.md
 extensions/octet-codemode/README.md
 extensions/octet-pi-compat/README.md
 scripts/bench-startup-resume.py
@@ -502,14 +501,10 @@ extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-MIT
 extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-fts-musl-fts-COPYING
 extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-libc-bottom-half-cloudlibc-LICENSE
 extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-libc-top-half-musl-COPYRIGHT
-extensions/octet-browse/REFERENCE.md
-extensions/octet-browse/CONNECTORS.md
-extensions/octet-browse/QUALIFICATION.md
 extensions/octet-computer-use/README.md
 extensions/octet-mcp/README.md
 extensions/octet-mcp/REFERENCE.md
 extensions/octet-mcp/fixtures/tls/README.md
-extensions/octet-serve/README.md
 extensions/octet-snap-compact/README.md
 extensions/octet-subagents/README.md
 extensions/octet-subagents/REFERENCE.md

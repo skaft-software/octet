@@ -159,25 +159,6 @@ pub enum TopLevelCommand {
         #[command(flatten)]
         options: SetupCommand,
     },
-    /// Launch the loopback-only octet Serve application.
-    ///
-    /// Default builds dispatch to the installed extension runtime; builds with
-    /// the `serve` feature run the embedded implementation.
-    Serve {
-        /// Do not open the graphical client in the default browser.
-        #[arg(long)]
-        no_open: bool,
-        /// Loopback TCP port. Zero asks the operating system for a free port.
-        #[arg(long, default_value_t = 31415)]
-        port: u16,
-        /// Directory containing a development graphical shell.
-        #[arg(long, value_name = "DIR")]
-        web_root: Option<PathBuf>,
-        /// Name for the first provisional session created by this Serve launch.
-        /// Empty or whitespace-only input means "no name".
-        #[arg(long, value_name = "NAME")]
-        name: Option<String>,
-    },
 }
 
 /// Command-line launcher for `octet`.

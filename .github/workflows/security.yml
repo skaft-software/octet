@@ -13,11 +13,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version-file: apps/web/.node-version
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
       - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
         with:
@@ -25,13 +20,7 @@ jobs:
       # cargo-audit validates Cargo.lock by default; unlike Cargo, current
       # cargo-audit releases do not accept Cargo's `--locked` flag.
       - run: cargo audit
-      - run: cargo audit --file extensions/octet-serve/Cargo.lock
       - run: cargo deny check
-      - run: cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
-      - run: npm ci
-        working-directory: apps/web
-      - run: npm audit --audit-level=high
-        working-directory: apps/web
 
   fuzz-session-records:
     runs-on: ubuntu-24.04

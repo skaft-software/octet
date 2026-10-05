@@ -140,25 +140,6 @@ flags = [{ name = "fixture-option", type = "boolean", default = false }]
     assert!(config.invocation_trusted_extensions.is_empty());
 }
 
-#[cfg(all(unix, feature = "serve"))]
-#[test]
-fn subagents_preflight_uses_full_access_trust_without_enabling() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut config =
-        executable_extension_config(temp.path(), temp.path(), SUBAGENTS_EXTENSION_NAME);
-    config.invocation_trusted_extensions.clear();
-    config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
-    assert!(subagents_extension_activation_configured(&config));
-    config.effect_policy = octet_agent::EffectPolicy::ControlledBashApproval;
-    assert!(!subagents_extension_activation_configured(&config));
-    config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
-    config.sandbox.allow_process = false;
-    assert!(!subagents_extension_activation_configured(&config));
-    config.sandbox.allow_process = true;
-    config.enabled_extensions.clear();
-    assert!(!subagents_extension_activation_configured(&config));
-}
-
 #[cfg(unix)]
 #[test]
 fn active_session_lifecycle_is_offered_only_to_interactive_frontends() {

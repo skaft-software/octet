@@ -1,78 +1,14 @@
-//! Tests for extension package install/uninstall: tarball unpacking, manifest
-//! parsing, checksum verification, and directory synchronisation.
+//! Tests for shared extension release downloads and checksum verification.
 //!
-//! Moved out of extension_package.rs so the extraction and installation code
-//! stays readable on its own. The suite exercises archive and registry
-//! behaviour end to end, which is a different concern from the packaging
-//! primitives the rest of this file exposes.
+//! Kept separate from extension_package.rs to exercise redirect trust, bounded
+//! downloads, retry budgets, and terminal validation failures end to end.
 
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-fn package_manifest(binary: &[u8]) -> String {
-    let digest = digest_hex(Sha256::digest(binary).as_slice());
-    format!(
-        "schema_version = 1\n\
-         id = \"octet-serve\"\n\
-         version = \"{}\"\n\
-         requires_octet = \"={}\"\n\
-         target = \"{}\"\n\n\
-         [entrypoint]\n\
-         path = \"bin/octet-serve-runtime\"\n\
-         args = [\"serve\"]\n\
-         sha256 = \"{digest}\"\n\n\
-         [capabilities]\n\
-         network = \"loopback\"\n\
-         process = true\n\
-         filesystem = \"workspace\"\n",
-        env!("CARGO_PKG_VERSION"),
-        env!("CARGO_PKG_VERSION"),
-        target_triple().unwrap()
-    )
-}
-
-fn create_package(directory: &Path, binary: &[u8]) -> PathBuf {
-    let path = directory.join("package.tar.gz");
-    let file = File::create(&path).unwrap();
-    let encoder = GzEncoder::new(file, Compression::default());
-    let mut archive = tar::Builder::new(encoder);
-    append(
-        &mut archive,
-        PACKAGE_MANIFEST,
-        package_manifest(binary).as_bytes(),
-    );
-    append(&mut archive, ENTRYPOINT, binary);
-    let encoder = archive.into_inner().unwrap();
-    encoder.finish().unwrap();
-    path
-}
-
-fn append<W: Write>(archive: &mut tar::Builder<W>, relative: &str, bytes: &[u8]) {
-    let mut header = tar::Header::new_gnu();
-    header.set_mode(0o644);
-    header.set_size(bytes.len() as u64);
-    header.set_cksum();
-    archive
-        .append_data(&mut header, format!("{PACKAGE_ID}/{relative}"), bytes)
-        .unwrap();
-}
-
-fn append_directory<W: Write>(archive: &mut tar::Builder<W>, relative: &str) {
-    let mut header = tar::Header::new_gnu();
-    header.set_entry_type(tar::EntryType::Directory);
-    header.set_mode(0o755);
-    header.set_size(0);
-    header.set_cksum();
-    archive
-        .append_data(&mut header, relative, std::io::empty())
-        .unwrap();
-}
 
 fn is_trusted_test_release_url(url: &reqwest::Url) -> bool {
     url.scheme() == "http" && url.host_str() == Some("127.0.0.1")
@@ -655,11 +591,11 @@ async fn release_download_file_creation_errors_are_terminal_and_preserve_existin
 }
 
 #[tokio::test]
-async fn release_download_checksum_and_archive_validation_are_terminal() {
+async fn release_download_checksum_validation_is_terminal() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_string("not a release archive"))
-        .expect(2)
+        .expect(1)
         .mount(&server)
         .await;
     let client = test_download_client(None);
@@ -668,27 +604,6 @@ async fn release_download_checksum_and_archive_validation_are_terminal() {
         checksum_for_asset(std::str::from_utf8(&checksums).unwrap(), "archive").unwrap_err();
     assert!(!retryable_download_error(&error));
 
-    let directory = tempfile::tempdir().unwrap();
-    let archive = directory.path().join("archive");
-    let digest = download_file_with_client(
-        &client,
-        reqwest::Url::parse(&server.uri()).unwrap(),
-        &archive,
-        64,
-        is_trusted_test_release_url,
-        TEST_RETRY_POLICY,
-    )
-    .await
-    .unwrap();
-    let root = directory.path().join("extensions");
-    let checksum_error =
-        install_archive(&root, &archive, &server.uri(), &"0".repeat(64), false).unwrap_err();
-    assert!(format!("{checksum_error:#}").contains("changed before extraction"));
-    assert!(!retryable_download_error(&checksum_error));
-    let archive_error =
-        install_archive(&root, &archive, &server.uri(), &digest, false).unwrap_err();
-    assert!(!retryable_download_error(&archive_error));
-    assert!(!root.join(PACKAGE_ID).exists());
     server.verify().await;
 }
 
@@ -708,187 +623,4 @@ async fn release_download_rejects_untrusted_initial_urls_before_sending() {
     }
     assert!(server.received_requests().await.unwrap().is_empty());
     assert!(!destination.exists());
-}
-
-// No octet Serve package is published for this target
-// (`target_triple` errs); local-install logic is covered on distributed
-// targets.
-#[cfg_attr(
-    not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "macos", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
-    )),
-    ignore = "no octet Serve package is published for this target"
-)]
-#[test]
-fn local_archive_classifier_keeps_application_and_bundle_formats_distinct() {
-    let directory = tempfile::tempdir().unwrap();
-    let application = create_package(directory.path(), b"runtime");
-    assert_eq!(
-        resolve_local_archive_path_from(Path::new("package.tar.gz"), directory.path()).unwrap(),
-        application.canonicalize().unwrap()
-    );
-    #[cfg(unix)]
-    {
-        let linked_parent = directory.path().join("linked-parent");
-        std::os::unix::fs::symlink(directory.path(), &linked_parent).unwrap();
-        assert_eq!(
-            resolve_local_archive_path_from(
-                &linked_parent.join("package.tar.gz"),
-                directory.path()
-            )
-            .unwrap(),
-            application.canonicalize().unwrap()
-        );
-    }
-    assert_eq!(
-        classify_local_archive(&application).unwrap(),
-        LocalArchiveKind::Application
-    );
-
-    let bundle = directory.path().join("bundle.tar.gz");
-    let encoder = GzEncoder::new(File::create(&bundle).unwrap(), Compression::default());
-    let mut archive = tar::Builder::new(encoder);
-    append_directory(&mut archive, "example");
-    let mut header = tar::Header::new_gnu();
-    header.set_mode(0o644);
-    header.set_size(0);
-    header.set_cksum();
-    archive
-        .append_data(&mut header, "example/extension.toml", std::io::empty())
-        .unwrap();
-    let encoder = archive.into_inner().unwrap();
-    encoder.finish().unwrap();
-    assert_eq!(
-        classify_local_archive(&bundle).unwrap(),
-        LocalArchiveKind::ExecutableBundle
-    );
-}
-
-// See `local_archive_classifier_keeps_application_and_bundle_formats_distinct`.
-#[cfg_attr(
-    not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "macos", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
-    )),
-    ignore = "no octet Serve package is published for this target"
-)]
-#[test]
-fn local_archive_installs_expected_shape_and_can_be_replaced() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join("extensions");
-    let first = create_package(directory.path(), b"first runtime");
-    let digest = sha256_file_bounded(&first, MAX_ARCHIVE_BYTES).unwrap();
-    let manifest = install_archive(&root, &first, "test", &digest, false).unwrap();
-    assert_eq!(manifest.id, PACKAGE_ID);
-    assert!(root.join(PACKAGE_ID).join(PACKAGE_MANIFEST).is_file());
-    assert!(root.join(PACKAGE_ID).join(INSTALL_RECORD).is_file());
-    assert_eq!(
-        fs::read(root.join(PACKAGE_ID).join(ENTRYPOINT)).unwrap(),
-        b"first runtime"
-    );
-    assert!(install_archive(&root, &first, "test", &digest, false).is_err());
-
-    fs::write(
-        root.join(PACKAGE_ID).join(PACKAGE_MANIFEST),
-        "damaged = [\n",
-    )
-    .unwrap();
-    fs::remove_file(&first).unwrap();
-    let second = create_package(directory.path(), b"second runtime");
-    let digest = sha256_file_bounded(&second, MAX_ARCHIVE_BYTES).unwrap();
-    install_archive(&root, &second, "test", &digest, true).unwrap();
-    assert_eq!(
-        fs::read(root.join(PACKAGE_ID).join(ENTRYPOINT)).unwrap(),
-        b"second runtime"
-    );
-
-    fs::write(
-        root.join(PACKAGE_ID).join(PACKAGE_MANIFEST),
-        "damaged = [\n",
-    )
-    .unwrap();
-    remove_installed(&root).unwrap();
-    assert!(!root.join(PACKAGE_ID).exists());
-}
-
-#[test]
-fn archive_rejects_unexpected_and_nonportable_members() {
-    assert!(archive_member(Path::new("../escape")).is_err());
-    assert!(archive_member(Path::new("/absolute")).is_err());
-
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("bad.tar.gz");
-    let encoder = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
-    let mut archive = tar::Builder::new(encoder);
-    append(&mut archive, "extra", b"bad");
-    let encoder = archive.into_inner().unwrap();
-    encoder.finish().unwrap();
-    let output = directory.path().join("output");
-    fs::create_dir(&output).unwrap();
-    assert!(extract_archive(&path, &output).is_err());
-}
-
-#[test]
-fn archive_rejects_duplicate_directories() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("duplicate.tar.gz");
-    let encoder = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
-    let mut archive = tar::Builder::new(encoder);
-    append_directory(&mut archive, PACKAGE_ID);
-    append_directory(&mut archive, PACKAGE_ID);
-    let encoder = archive.into_inner().unwrap();
-    encoder.finish().unwrap();
-    let output = directory.path().join("output");
-    fs::create_dir(&output).unwrap();
-    assert!(extract_archive(&path, &output).is_err());
-}
-
-// See `local_archive_classifier_keeps_application_and_bundle_formats_distinct`.
-#[cfg_attr(
-    not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "macos", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
-    )),
-    ignore = "no octet Serve package is published for this target"
-)]
-#[test]
-fn incompatible_manifest_is_rejected() {
-    let manifest: PackageManifest = toml::from_str(&package_manifest(b"runtime")).unwrap();
-    validate_manifest(&manifest).unwrap();
-
-    let incompatible = package_manifest(b"runtime").replace(
-        &format!("requires_octet = \"={}\"", env!("CARGO_PKG_VERSION")),
-        "requires_octet = \">=0.1.0\"",
-    );
-    let manifest: PackageManifest = toml::from_str(&incompatible).unwrap();
-    assert!(validate_manifest(&manifest).is_err());
-}
-
-// See `local_archive_classifier_keeps_application_and_bundle_formats_distinct`.
-#[cfg_attr(
-    not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "macos", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
-    )),
-    ignore = "no octet Serve package is published for this target"
-)]
-#[test]
-fn removal_does_not_touch_data_outside_the_package() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join("extensions");
-    let archive = create_package(directory.path(), b"runtime");
-    let digest = sha256_file_bounded(&archive, MAX_ARCHIVE_BYTES).unwrap();
-    install_archive(&root, &archive, "test", &digest, false).unwrap();
-    let data = directory.path().join("serve-data");
-    fs::write(&data, "keep").unwrap();
-
-    remove_installed(&root).unwrap();
-
-    assert!(!root.join(PACKAGE_ID).exists());
-    assert_eq!(fs::read_to_string(data).unwrap(), "keep");
 }

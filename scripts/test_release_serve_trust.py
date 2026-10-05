@@ -33,7 +33,7 @@ class ServeReleaseTrustTests(unittest.TestCase):
                 self.assertNotIn("always()", job)
 
     def test_dispatch_executes_trigger_sha_not_input_selected_source(self):
-        for name in ("security", "build", "build-bundles", "publish", "verify-published"):
+        for name in ("security", "launcher", "build-bundles", "publish", "verify-published"):
             with self.subTest(job=name):
                 checkouts = re.findall(
                     r"^      - uses: actions/checkout@[^\n]+\n(.*?)(?=^      - |\Z)",

@@ -62,17 +62,17 @@ pub struct SessionMeta {
     pub title: String,
     pub name: Option<String>,
     pub tags: Vec<String>,
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub pinned: bool,
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub archived: bool,
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub trashed_at_ms: Option<u64>,
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub purge_after_ms: Option<u64>,
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub forked_from_session_id: Option<String>,
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub forked_from_entry_id: Option<String>,
     /// Number of persisted message entries in the active branch.
     pub message_count: usize,
@@ -80,7 +80,7 @@ pub struct SessionMeta {
     /// Canonical workspace path recorded in the store's `.workspace` marker,
     /// when known. Enables cross-workspace browsing without reversing the
     /// workspace-key hash.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub workspace: Option<PathBuf>,
 }
 
@@ -89,7 +89,7 @@ pub struct SessionMeta {
 /// This is intentionally limited to data needed for catalog inventory and
 /// lifetime usage recovery. Opening a session for mutation still performs the
 /// authoritative descriptor-bound `Session` replay.
-#[cfg_attr(not(feature = "serve"), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct SessionCatalogEntry {
     pub meta: Option<SessionMeta>,
@@ -98,7 +98,7 @@ pub(crate) struct SessionCatalogEntry {
 }
 
 /// One compact usage projection retained by the lightweight catalog replay.
-#[cfg_attr(not(feature = "serve"), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct SessionUsageRecord {
     pub endpoint: Option<String>,
@@ -114,7 +114,7 @@ pub(crate) struct SessionUsageRecord {
 }
 
 /// Result of one bounded, graph-validating transcript scan.
-#[cfg_attr(not(feature = "serve"), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct SessionCatalogInspection {
     pub catalog: SessionCatalogEntry,
@@ -145,7 +145,7 @@ pub struct SessionUserMetadata {
     pub forked_from_entry_id: Option<String>,
 }
 
-#[cfg_attr(not(feature = "serve"), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionStorageLifecycle {
     Active,
@@ -153,7 +153,7 @@ pub enum SessionStorageLifecycle {
     Trash,
 }
 
-#[cfg_attr(not(feature = "serve"), allow(dead_code))]
+#[allow(dead_code)]
 pub const SESSION_TRASH_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 #[derive(Debug)]

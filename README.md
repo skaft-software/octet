@@ -80,10 +80,9 @@ installed copy. Continue with [getting started](docs/getting-started.md).
 | Directory | Contents |
 | --- | --- |
 | `crates/` | Model clients, agent runtime, terminal interface, and native host |
-| `extensions/` | Browser, search, MCP, subagents, and graphical Serve packages |
+| `extensions/` | Computer use, search, MCP, subagents, and snap-compact packages |
 | `sdk/` | Integration libraries and protocol types |
 | `examples/` | Extensions, skills, and prompt templates |
-| `apps/web/` | Serve's browser interface |
 | `docs/` | Guides, API reference, and architecture |
 
 ## More

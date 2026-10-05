@@ -188,7 +188,7 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, SDK source packages and six executable
+names or imports. The local host, SDK source packages and five executable
 bundles have distribution version **0.8.2**. That doesn't select an extension
 API or publish SDK registries. Catalog installation needs version-matched
 published assets: see [installation](installation.md) and the [release
@@ -416,11 +416,9 @@ hooks. The session schema version is also unchanged, but the additive
 `usage_uncertainty` record evolves its record contract.
 
 `AgentEvent::ProviderWaitingForNetwork` is live recovery telemetry, not
-assistant content or run completion. Serve keeps its run owner alive during the
-wait without adding a durable status item. The separate unit
+assistant content or run completion. The separate unit
 `AgentEvent::ProviderUsageUncertain` reflects durable session accounting
-uncertainty: Serve keeps it through completion and prefixes completion-review
-summaries with a warning that numeric usage and cost values are known subtotals.
+uncertainty: numeric usage and cost values remain known subtotals.
 Neither event is assistant output. See the [recovery
 boundary](tools.md#recovery-and-security).
 
@@ -540,8 +538,6 @@ reuses. Version-specific payloads and host-availability limits still apply.
 - <a id="installable-extension-bundles"></a>[Bundle installation, update,
   removal, and
   validation](extensions/legacy-authoring.md#installable-extension-bundles)
-- <a id="first-party-application-packages"></a>[Separate Serve application
-  packages](extensions/legacy-authoring.md#first-party-application-packages)
 
 See also the [legacy wire reference](extensions/PROTOCOL-REFERENCE.md) and
 [project tracking](https://github.com/orgs/skaft-software/projects/5).

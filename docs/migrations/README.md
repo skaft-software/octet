@@ -3,9 +3,12 @@
 The seven extension projects and four application projects from
 [PR #480](https://github.com/skaft-software/octet/pull/480) have public source
 snapshots under `skaft-software`. Octet remains the source of truth while the
-integration gates below are open. **This is not a completed migration.** No
-source directories, builtins, examples, SDKs, core crates, existing releases,
-or install/update routes have been removed or replaced.
+integration gates below are open for retained extensions. **This is not a
+completed migration.** #492 removes Serve, the web and Apple clients, and Browse
+from this combined source candidate; it does not switch their release origins to
+external repositories. The pinned destinations below are historical staging
+evidence, not supported install routes. Builtins, examples, SDKs, core crates
+and existing releases remain.
 
 ## Pinned destinations
 
@@ -60,7 +63,7 @@ pinned published revision, not a moving branch tip.
 - No standalone Rust, web, Swift, native-signing, registry-publishing or full
   workspace qualification is claimed by this staging change.
 
-## Required cutover gates
+## Required cutover gates for retained extensions
 
 1. Port each project's CI and deterministic release packaging. Preserve upstream
    license notices and replace old relative documentation links. SDK registry
@@ -74,19 +77,10 @@ pinned published revision, not a moving branch tip.
 4. Preserve exact `requires_octet` checks. Neither extraction nor separate Git
    histories authorizes a compatibility-range change. Publish matching artifacts
    and prove install, update, list and removal before switching download origins.
-5. Move Serve's optional Cargo dependency to a pinned external source without
-   creating two incompatible `octet-agent` type identities. Its adapter into the
-   private coding-agent `App` stays core-owned. Pass default and all-feature builds.
-6. Move the browser-sign-in font to core-owned assets; the CLI currently embeds
-   it from `apps/web`. Replace the web bundle sync's monorepo path with an explicit,
-   bounded destination and validate coordinated client/backend bundles.
-7. Pin the Apple shared package in macOS SwiftPM and iOS XcodeGen definitions.
-   Preserve the existing source-only limitations: macOS is documented as missing
-   shared client types; iOS has no qualified live-host pairing path. Do not claim
-   those pre-existing gaps are fixed by moving files.
-8. Update the documentation inventory and release/Windows/extension/web lanes;
+5. Update the documentation inventory and release/Windows/extension lanes;
    run packaged-docs checks and preserve release provenance. Only then delete
    product sources from this repository, leaving examples and builtins intact.
 
-Keep this migration draft until these gates have evidence. No new repository has
+The removed Serve, web, Apple and Browse products have no pending core cutover.
+Keep the retained-extension migration draft until these gates have evidence. No new repository has
 been declared the authoritative release source yet.

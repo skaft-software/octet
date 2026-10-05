@@ -89,7 +89,7 @@ impl SessionStore {
     /// List sessions across every workspace under the shared root, newest
     /// first. Each row carries its workspace path when the store marker is
     /// readable; otherwise `workspace` is `None`.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn list_all(&self) -> Vec<SessionMeta> {
         let mut all = Vec::new();
         for entry in std::fs::read_dir(&self.root).into_iter().flatten() {
@@ -353,7 +353,7 @@ impl SessionStore {
     }
 
     /// Lists safe regular JSONL filename stems without parsing transcript content.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn session_file_ids(&self) -> Vec<String> {
         self.candidates()
             .into_iter()
@@ -366,7 +366,7 @@ impl SessionStore {
 
     /// Sort named, already-authorized session IDs by transcript mtime without
     /// enumerating or parsing other workspace sessions.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn session_ids_newest_first<'a>(
         &self,
         ids: impl IntoIterator<Item = &'a str>,
@@ -477,7 +477,7 @@ impl SessionStore {
     /// Inspect one named transcript without enumerating or parsing unrelated
     /// sessions. The bounded scan validates its graph and torn tail before
     /// returning catalog and usage projections.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn inspect_by_id(&self, id: &str) -> anyhow::Result<SessionCatalogInspection> {
         self.inspect_candidate(self.candidate_by_id(id)?, true)
     }
@@ -512,7 +512,7 @@ impl SessionStore {
 
     /// Load catalog metadata for one named transcript without scanning the
     /// workspace catalog.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn catalog_by_id(&self, id: &str) -> anyhow::Result<SessionCatalogEntry> {
         self.catalog_by_ids([id])?
             .into_iter()
@@ -527,7 +527,7 @@ impl SessionStore {
     /// The requested IDs are never expanded into a workspace-wide listing. A
     /// missing, invalid, or unreadable ID is omitted just as a failed targeted
     /// [`Self::catalog_by_id`] lookup is omitted by Serve callers.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn catalog_by_ids<'a>(
         &self,
         ids: impl IntoIterator<Item = &'a str>,
@@ -589,7 +589,7 @@ impl SessionStore {
 
     /// Build catalog metadata from the already authorized, fully replayed
     /// session rather than reopening its pathname.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn meta_for_open_session(
         &self,
         id: &str,
@@ -817,7 +817,7 @@ impl SessionStore {
     /// A non-regular entry is an error, not absence. Permanent-deletion
     /// recovery uses this distinction so it never crosses the irreversible
     /// boundary merely because an existing transcript could not be validated.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn session_file_exists(&self, id: &str) -> anyhow::Result<bool> {
         if !session_id_is_valid(id) {
             anyhow::bail!("invalid session id {id:?}");
@@ -984,7 +984,7 @@ impl SessionStore {
         Ok(metadata)
     }
 
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn set_pinned(&self, id: &str, pinned: bool) -> anyhow::Result<SessionUserMetadata> {
         let mut metadata = self.load_metadata(id)?;
         metadata.pinned = pinned;
@@ -992,7 +992,7 @@ impl SessionStore {
         Ok(metadata)
     }
 
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn set_archived(&self, id: &str, archived: bool) -> anyhow::Result<SessionUserMetadata> {
         let mut metadata = self.load_metadata(id)?;
         metadata.archived = archived;
@@ -1002,7 +1002,7 @@ impl SessionStore {
         Ok(metadata)
     }
 
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn set_lifecycle(
         &self,
         id: &str,
@@ -1040,7 +1040,7 @@ impl SessionStore {
         Ok(metadata)
     }
 
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn set_fork_provenance(
         &self,
         id: &str,
@@ -1061,7 +1061,7 @@ impl SessionStore {
         Ok(metadata)
     }
 
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn delete_permanently(&self, id: &str, expected_trashed_at_ms: u64) -> anyhow::Result<()> {
         let metadata = self.load_metadata(id)?;
         if metadata.trashed_at_ms != Some(expected_trashed_at_ms) {
@@ -1116,7 +1116,7 @@ impl SessionStore {
     /// occurs before the irreversible transcript-removal boundary, metadata may
     /// already have been staged. This restores that metadata and removes only
     /// deletion staging files, making pre-commit recovery idempotent.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn rollback_permanent_delete(&self, id: &str) -> anyhow::Result<()> {
         self.path_by_id(id)?;
         let metadata_dir = self.metadata_dir();
@@ -1147,7 +1147,7 @@ impl SessionStore {
     /// This idempotently removes both canonical files and transaction staging
     /// files. Callers must establish the destructive confirmation boundary
     /// before invoking it.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn finish_permanent_delete(&self, id: &str) -> anyhow::Result<()> {
         if !session_id_is_valid(id) {
             anyhow::bail!("invalid session ID");
@@ -1166,7 +1166,7 @@ impl SessionStore {
     /// Removes a just-created session and sidecar during a higher-level
     /// transaction rollback. This is intentionally not a user-facing delete
     /// path and must only be used before the new session is acknowledged.
-    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn discard_unacknowledged(&self, id: &str) -> anyhow::Result<()> {
         let session_path = self.path_by_id(id)?;
         std::fs::remove_file(session_path)?;

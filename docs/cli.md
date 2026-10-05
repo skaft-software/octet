@@ -254,7 +254,7 @@ harness exit.
 [Instructions](instructions.md) and [resource discovery](resources.md) cover
 precedence, file limits, trust and reload.
 
-## Packages and Serve
+## Packages
 
 Reviewed local archives:
 
@@ -264,7 +264,7 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The six executable bundles and the separate Serve app are pinned exactly to the
+The five executable bundles are pinned exactly to the
 running host. This checkout's source manifests require `=0.8.2`, and the
 published 0.8.0 bundles require `=0.8.0`. The [0.8.2
 candidate notes](releases/v0.8.2.md) record planned distribution and remaining
@@ -278,19 +278,12 @@ octet extension update NAME
 octet extension remove NAME
 ```
 
-The executable catalog is `octet-browse`, `octet-codemode`, `octet-computer-use`, `octet-mcp`,
+The executable catalog is `octet-codemode`, `octet-computer-use`, `octet-mcp`,
 `octet-subagents` and `octet-web-search`. Checksummed bundles install atomically
 under `~/.octet/extensions/<id>`, and a local update must match the managed
 package ID. Nothing runs at install: no hook, dependency setup, activation,
 trust or launch. Packaged skills must be loaded explicitly. See
 [Extensions](extensions.md).
-
-Serve is a separate app that must match your octet version. With a compatible
-package installed, `octet serve` starts its loopback web interface.
-`octet serve --no-open --port 0` skips opening a browser and lets the OS pick a
-port. `octet-serve` installs, updates and removes like the packages above, from
-the published catalog, and local archives work too. Removing it keeps your
-sessions and other Serve data. See [Serve](experimental/octet-serve/README.md).
 
 `--experimental-streamable-http-mcp` is a one-shot opt-in, by the process owner,
 to remote MCP that's otherwise blocked. Local stdio MCP doesn't need it. Read
@@ -310,9 +303,9 @@ The dry run only reads. It uses no model tokens, runs no package code and
 changes no files. `--json` gives versioned machine output, and `--npm-root` adds
 an explicit legacy `node_modules` search root. `octet migrate import pi` and
 `octet migrate restore` are separate, explicit steps that never copy credentials
-or modify Pi sources. Pi extension execution, and its former install, plan,
-preflight and publish commands, aren't supported, and inventory classifications
-aren't runtime compatibility claims. The import and restore bounds are in [Pi
+or modify Pi sources. Inventory classifications aren't runtime compatibility
+claims. The optional [Pi extension adapter](pi-compatibility.md) is a separate
+source preview with its own acceptance ledger. The import and restore bounds are in [Pi
 import and restore](pi-migration.md), and [native provider
 support](providers.md) is independent of Pi extensions.
 
@@ -337,8 +330,7 @@ a UI-only notice with the same rich action, instead of repainting historical
 splash rows. Release notes are compiled into the binary, so no network fetch,
 workspace file or model request is used. Plain and print modes reject the
 command with guidance to open the interactive TUI. RPC returns its existing
-error response for prompt, steer or follow-up invocations, and Serve treats it
-as an unsupported boundary without inferring an answer. None of these paths
+error response for prompt, steer or follow-up invocations. None of these paths
 sends release-note requests to a provider or changes an API version.
 
 </details>

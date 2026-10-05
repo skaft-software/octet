@@ -17,7 +17,7 @@ live-provider availability or acceptance.
   model selection. New launches use the endpoint default or its first supported
   enabled choice; absent usable reasoning metadata stays Off without inventing
   wire controls. Explicit choices and resumed-session precedence remain intact.
-  Serve catalog defaults follow the same rule. This is an
+  This is an
   [octet 0.8.0 product fix](providers.md#defaults-unreleased), not a change to
   core `ReasoningConfig::Off` or native-host protocol 1 defaults.
 - Exact sets preserve holes: `low, high` does not imply `medium`. Off is distinct

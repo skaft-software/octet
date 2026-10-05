@@ -142,37 +142,14 @@ async fn run() -> anyhow::Result<()> {
     if let Some(cli::TopLevelCommand::Update { check }) = top_level_command.clone() {
         return update::run(check).await;
     }
-    #[cfg(not(feature = "serve"))]
-    if let Some(cli::TopLevelCommand::Serve {
-        no_open,
-        port,
-        web_root,
-        name,
-    }) = top_level_command.clone()
-    {
-        // The installed extension runtime owns its own launch protocol and this
-        // build cannot apply a startup session name. Fail closed instead of
-        // silently ignoring a requested name.
-        if name.is_some() {
-            anyhow::bail!(
-                "octet serve --name requires an octet build with the embedded Serve runtime ('serve' feature); this build launches the installed octet-serve extension package, which has no startup session-name option to set"
-            );
-        }
-        return extension_package::run_serve(no_open, port, web_root);
-    }
-
     let cwd = match parsed_cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir()?,
     };
-    #[cfg(feature = "serve")]
-    let is_serve = matches!(&top_level_command, Some(cli::TopLevelCommand::Serve { .. }));
-    #[cfg(not(feature = "serve"))]
-    let is_serve = false;
     let is_batch = matches!(&top_level_command, Some(cli::TopLevelCommand::Batch { .. }));
-    if !is_serve && !is_batch {
+    if !is_batch {
         // Preserve the original startup/error boundary for every terminal and
-        // non-Serve invocation.
+        // batch invocation.
         tui::terminal::install_panic_hook();
         tui::terminal::install_signal_restore()?;
     }
@@ -216,17 +193,6 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(cli::TopLevelCommand::Batch { command }) = top_level_command.clone() {
         return batch::run(command, &config).await;
-    }
-    #[cfg(feature = "serve")]
-    if let Some(cli::TopLevelCommand::Serve {
-        no_open,
-        port,
-        web_root,
-        name,
-    }) = top_level_command
-    {
-        return extensions::serve::run_with_session_name(config, port, no_open, web_root, name)
-            .await;
     }
     let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
     let interactive = matches!(config.mode, config::Mode::Interactive) && capabilities.interactive;

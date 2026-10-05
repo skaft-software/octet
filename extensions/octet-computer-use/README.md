@@ -37,9 +37,6 @@ access), and at the end offers the optional Jev setup. **Check status** re-runs
 the driver self-check and permission probe, and the menu's header shows the
 result. Esc cancels a running step.
 
-The web UI has no options menu yet; there the same actions run as the
-`/computer-use` command (`setup`, `status`, `jev`, and `jev-use …`).
-
 Setup installs `cua-driver` 0.30.2 or newer. It publishes builds for macOS 13
 or newer, Linux with glibc 2.31 or newer on x86_64 or aarch64, and 64-bit
 Windows on x64 or ARM64. On other systems setup stops and says so, and an
@@ -479,15 +476,6 @@ confirmation policy, Octet refuses the autonomous runner because upstream cannot
 prompt for each action; a whole-workflow approval cannot bypass that policy.
 Use the existing individual tools in that mode. Source tests and mock process
 fixtures are not evidence of live desktop, provider, or cross-platform success.
-
-## Relationship to octet-browse
-
-`octet-browse` is [deprecated but still installable](../octet-browse/README.md#deprecation).
-It drives an isolated, Octet-owned Chromium with manual authentication, which
-remains the safer surface for authenticated page work. This bundle drives your
-actual desktop, so it can see anything you can see — including a browser you
-already have open. Prefer Browse for anything involving a login or a saved
-session.
 
 ## Tests
 

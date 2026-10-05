@@ -71,7 +71,7 @@ _READ_ONLY_OVERRIDE = frozenset(
     {"check_permissions", "get_screen_size", "get_cursor_position", "list_apps"}
 )
 
-# Bound on text returned to the model, matching octet-browse's result bound.
+# Bound on text returned to the model.
 RESULT_TEXT_LIMIT = 24_000
 
 # How long one macOS permission answer is reused for the effectful-action gate.

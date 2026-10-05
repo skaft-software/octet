@@ -202,7 +202,6 @@ fn embedded_documentation_preserves_current_public_source_text() {
         "CHANGELOG.md",
         "THIRD_PARTY_NOTICES.md",
         "LICENSE",
-        "extensions/octet-browse/REFERENCE.md",
         "extensions/octet-subagents/REFERENCE.md",
         "crates/octet-ai/src/responses_ws.rs",
         "sdk/typescript/src/api_v03.ts",

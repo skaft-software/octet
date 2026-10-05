@@ -4,8 +4,8 @@ This module owns exactly one external dependency: the MIT-licensed
 ``cua-driver`` distribution from ``trycua/cua``. It never downloads a driver
 binary, never runs a piped remote script, and never grants an operating-system
 permission. It installs the published Python wheel into an octet-owned
-virtual environment using the host's own interpreter, mirroring how
-``octet-browse`` provisions a pinned Playwright runtime.
+virtual environment using the host's own interpreter, the way the host provisions
+its own pinned runtimes.
 
 The driver is provisioned from the package index as
 ``cua-driver`` (unpinned by default, so the newest release is used; an exact
@@ -159,7 +159,7 @@ class DriverPaths:
 
 
 def _install_environment() -> Dict[str, str]:
-    """A sanitized environment for pip, mirroring octet-browse's install path."""
+    """A sanitized environment for pip, mirroring the host's install path."""
 
     environment = os.environ.copy()
     # A caller-controlled Python path could make the venv import an ambient

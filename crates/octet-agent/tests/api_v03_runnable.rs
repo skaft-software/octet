@@ -289,7 +289,7 @@ async fn bundled_canonical_extensions_negotiate_with_the_real_host() {
 async fn official_feature_negotiated_bundles_initialize_and_shutdown_with_the_host() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
     for name in [
-        "octet-browse",
+        "octet-computer-use",
         "octet-mcp",
         "octet-subagents",
         "octet-web-search",

@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use std::collections::BTreeMap;
-#[cfg(any(test, feature = "serve"))]
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -38,8 +38,8 @@ use discovery::{
     cards_theme_for, compiled_file_theme_for, discover_themes, read_theme_file_bounded,
     resolved_theme_resource, still_theme_for,
 };
-// Only `available_themes` names it here, and that is test- and serve-only.
-#[cfg(any(test, feature = "serve"))]
+// Only the test-only `available_themes` names it here.
+#[cfg(test)]
 use discovery::theme_file_name;
 #[cfg(test)]
 pub use discovery::{theme_discovery_diagnostics, theme_path};
@@ -697,7 +697,7 @@ impl OctetTheme {
             .unwrap_or_else(|| unicode_glyph(name))
     }
 
-    #[allow(dead_code)] // used only with the `serve` extension feature
+    #[allow(dead_code)]
     pub fn semantic_role_names(&self) -> impl Iterator<Item = &str> {
         self.semantic_styles.keys().map(String::as_str)
     }
@@ -1755,7 +1755,7 @@ pub(crate) fn selectable_file_themes(
 
 /// Return the compiled default and all safe names selected by the shared
 /// resolver. Parsing is deferred to the loader so discovery stays best-effort.
-#[cfg(any(test, feature = "serve"))]
+#[cfg(test)]
 pub fn available_themes(config: &Config) -> Vec<String> {
     let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned()]);
     names.extend(compiled_file_theme_names().map(str::to_owned));

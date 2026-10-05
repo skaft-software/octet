@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- Remove the packaged Serve application, its browser client, and the macOS, iOS,
+  and shared Apple companions: `extensions/octet-serve`, `apps/web`,
+  `apps/macos`, `apps/ios`, and `apps/apple-shared`. The `octet serve` command,
+  the optional `serve` cargo feature and its embedded host, the Serve release
+  workflow and packaging scripts, and the matching CI, dependency, image, and
+  documentation entries go with them. The legacy `octet-serve`
+  application-package install lane is removed with it; previously published
+  release assets stay available in git history. The five remaining first-party
+  executable bundles are unchanged.
+- Remove the deprecated `octet-browse` bundle from the release catalog, its
+  documentation inventory, and the packaging/acceptance scripts that referenced
+  it. The bundled computer-use extension covers desktop and signed-in browser
+  sessions; authenticated page work drives the user's own browser instead of an
+  Octet-owned Chromium profile.
 - Pi extension compatibility fixes. Pi tool images now work on the real host:
   the adapter read the `artifact/publish` acknowledgement as `id`, but the host
   returns `artifact_id`, so every published image (tool results, partial
@@ -221,8 +235,6 @@ receipt.
     macOS host when needed, cursor themes, GNOME helper, permission check,
     optional Jev); also Check status,
     Jev keys, and the jev-use recipe with its jobs.
-  - **Browser**: setup follows the install through Chromium's download; open,
-    close, status, and profile reset.
   - **Web search**: Brave Search or SearXNG, a new SearXNG endpoint change, and
     Brave log-out.
   - **Subagents**: enable or disable orchestration; runtime worker inspection
@@ -238,16 +250,8 @@ receipt.
   a runtime command: bare, list and status open the live roster, including
   mid-run; `/subagents stop <name-or-id|all>` uses the bounded owner-bound stop
   queue. Other worker operations wait for idle. Slash completion follows the
-  first-party extension's live registration. The web UI keeps extension
-  commands for now. Menu actions may run for up to 30 minutes instead of the 30-second
+  first-party extension's live registration. Menu actions may run for up to 30 minutes instead of the 30-second
   request deadline, so long installs finish.
-- Make Files tab search in the web UI usable on large projects (#459). It no
-  longer walks build output, dependencies, VCS state or hidden directories
-  (`node_modules`, `target`, `dist`, `.git` and the like; `.github` stays
-  searchable), the same set the `@` picker's index skips. A search stops after
-  3 seconds and says it was cut short, a newer query aborts the previous
-  request, and non-ASCII text is matched case-insensitively instead of
-  case-sensitively.
 - Report why model discovery was rejected. A provider's HTTP error now names
   its status and the provider's own message, bounded and with
   credential-shaped tokens masked, instead of only "model discovery request

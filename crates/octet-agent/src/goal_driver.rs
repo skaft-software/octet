@@ -1,9 +1,8 @@
 //! Goal-aware continuation state for session actors.
 //!
 //! The driver deliberately depends on a small store trait rather than on a
-//! concrete frontend or persistence crate. The graphical `octet-serve` goal
-//! store can therefore be adapted without making the core agent depend on the
-//! optional extension.
+//! concrete frontend or persistence crate, so an external goal store can be
+//! adapted without making the core agent depend on it.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

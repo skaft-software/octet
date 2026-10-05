@@ -1,9 +1,9 @@
 # Cargo build profiles
 
-octet keeps Cargo's ordinary `dev`, `test` and `release` behavior. Two extra
-profiles make CI test artifacts and profiler builds explicit. The root workspace
-and the separate `extensions/octet-serve` workspace each declare them, because
-Cargo reads profile definitions from the active workspace root.
+octet keeps Cargo's ordinary `dev`, `test`, and `release` behavior unchanged.
+Two additive profiles make CI test artifacts and profiler builds explicit. The
+root workspace declares them, because Cargo resolves profile definitions from the
+active workspace root.
 
 ## `ci-test`
 
@@ -17,7 +17,6 @@ CI's Rust test jobs use it. To reproduce them locally:
 ```sh
 cargo test --workspace --all-targets --all-features --profile ci-test --locked
 cargo test --workspace --doc --profile ci-test --locked
-cargo test --manifest-path extensions/octet-serve/Cargo.toml --profile ci-test --locked
 ```
 
 Leave out `--profile ci-test` for Cargo's normal local test behavior.
@@ -37,12 +36,8 @@ Build a profiler-friendly octet binary:
 cargo build --profile profiling --locked -p octet-coding-agent --bin octet
 ```
 
-The binary is `target/profiling/octet` (or `$CARGO_TARGET_DIR/profiling/octet`
-if that variable is set). Build the separate Serve backend with:
-
-```sh
-cargo build --manifest-path extensions/octet-serve/Cargo.toml --profile profiling --locked
-```
+The binary is written to `target/profiling/octet` (or
+`$CARGO_TARGET_DIR/profiling/octet` when that variable is set).
 
 On platforms that split debug info, keep the companion debug files next to the
 profiling binary when you hand it to a profiler.

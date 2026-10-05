@@ -227,55 +227,6 @@ impl ExecutableExtensions {
         })
     }
 
-    /// Executes an authenticated Serve action with one command-scoped approval.
-    #[cfg(feature = "serve")]
-    pub async fn execute_presentation_action_for_serve(
-        &mut self,
-        extension: &str,
-        expected_extension_instance_id: &str,
-        expected_generation: u64,
-        expected_revision: u64,
-        action_id: &str,
-        confirmed: bool,
-    ) -> anyhow::Result<String> {
-        let action = self
-            .presentation_views()
-            .into_iter()
-            .find(|view| {
-                view.extension == extension
-                    && view.extension_instance_id == expected_extension_instance_id
-                    && view.generation == expected_generation
-                    && view.snapshot.revision == expected_revision
-            })
-            .and_then(|view| {
-                view.snapshot
-                    .actions
-                    .into_iter()
-                    .find(|action| action.id == action_id)
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                "extension presentation action {extension:?}/{action_id:?} is unavailable or stale"
-            )
-            })?;
-        if confirmed && !action.destructive {
-            anyhow::bail!("non-destructive extension action cannot carry approval");
-        }
-        if action.destructive && !confirmed {
-            anyhow::bail!("extension presentation action requires explicit confirmation");
-        }
-        self.execute_command_headless_scoped(
-            Some(extension),
-            &action.command,
-            action.arguments,
-            usize::from(action.destructive && confirmed),
-        )
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!("extension presentation action routed to an unavailable command")
-        })
-    }
-
     /// The options menu `/extensions` shows for one running extension: its
     /// own `menu/collect` answer, or entries generated from its declared
     /// commands when it offers no menu. `None` when it is not running.

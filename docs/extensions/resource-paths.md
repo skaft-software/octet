@@ -68,7 +68,7 @@ withdraw stale contributions before another provider request or resource command
 Nothing is written to config, installation metadata or durable sessions.
 
 Authorized App frontends now wire startup, reload, retirement, and atomic
-publication. Native-host/Serve/preflight construction stays default-off; Mode or
+publication. Native-host/preflight construction stays default-off; Mode or
 factory registration alone never supplies the consumer capability. Retained
 startup outcome records host-attempt completion, not remote execution settlement.
 Actual-process and App tests cover these paths; this does not establish full Pi

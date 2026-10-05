@@ -44,16 +44,13 @@ source builds from planned publication channels.
 
 ## Integrations
 
-- [Extension packages](packages.md)
 - [Subagents](../extensions/octet-subagents/README.md)
 - [Computer use](../extensions/octet-computer-use/README.md)
-- [Browser (deprecated)](../extensions/octet-browse/README.md)
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
 - [Optional Pi extension adapter (source preview)](pi-compatibility.md)
 - [Pi extension compatibility: release status and merge notes](pi-compat-release-status.md)
-- [Serve](experimental/octet-serve/README.md)
 
 ## Development
 

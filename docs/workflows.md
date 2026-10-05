@@ -46,11 +46,11 @@ from an earlier message and `/clone` copies the current state. See
 
 ## Images and audio
 
-Paste or drop a file path into the terminal, or pick the file with `@`
-completion. Wait for the image or audio chip before you send, because a typed
-path isn't an attachment. Native audio is WAV or MP3, only on compatible OpenAI
-Chat routes, and the graphical composer doesn't take audio. Formats, limits and
-privacy are in [Images and audio](media.md).
+Explicitly paste/drop a path through the terminal paste mechanism, or select it
+with `@` completion. Check the image/audio chip before submitting; typed paths
+alone are not attachments. Native audio is WAV/MP3 only on compatible OpenAI Chat
+routes. See the
+[audio/image recipe, formats, limits, and privacy rules](media.md).
 
 ## Subagents
 
@@ -78,15 +78,8 @@ API 0.4, and exact host-version pins still apply.
 
 ## Extend or embed
 
-- Add instructions, prompts and skills: [instructions](instructions.md) and
-  [resource discovery](resources.md).
-- Add tools in any language: [extensions](extensions.md) and the [API 0.4
-  reference](extensions/API-0.4-REFERENCE.md). Start from the current Python
-  process recipe, and keep exact-version examples and conformance tests as they
-  are rather than relabeling them.
-- Use the [browser](../extensions/octet-browse/README.md), [web
-  search](../extensions/octet-web-search/README.md) or
-  [MCP](../extensions/octet-mcp/README.md) packages.
-- Bring over a Pi setup: [Pi import and restore](pi-migration.md).
-- Embed octet with [native host protocol 1](sdk.md), or try the optional
-  [graphical Serve interface](experimental/octet-serve/README.md).
+- Add repository instructions, prompts, and skills through [instructions](instructions.md) and [resource discovery](resources.md).
+- Add tools in any language through [extensions](extensions.md) and the [API 0.4 reference](extensions/API-0.4-REFERENCE.md). Use the current Python process recipe; retain exact-version examples and conformance tests rather than relabeling them.
+- Use [computer use](../extensions/octet-computer-use/README.md), [web search](../extensions/octet-web-search/README.md), or [MCP](../extensions/octet-mcp/README.md) through their package guides.
+- Inventory/import/restore Pi setup with [Pi migration](pi-migration.md).
+- Embed through the independent [native host protocol 1](sdk.md).

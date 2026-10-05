@@ -118,15 +118,13 @@ exactly-once inference after a transport interruption.
 
 `/extensions` is the one place to turn extensions on and set them up. It lists
 installed executable bundles, plus any extension loaded from `--extension-dir`
-or the project (whose activation changes where it came from), but not the
-separate Serve app. Up and Down select. Enter opens the selected extension's
+or the project (whose activation changes where it came from). Up and Down
+select. Enter opens the selected extension's
 options, enabling an installed one first if it's disabled. Each menu shows the
 extension's state and offers only what applies:
 
 - **octet-computer-use:** Set up computer use, Check status, Jev (optional) and
   the jev-use recipe.
-- **octet-browse:** Set up the browser, Open or Close the browser, Check status
-  and Reset the browser profile.
 - **octet-web-search:** Use Brave Search (recommended), Use SearXNG, Change the
   SearXNG endpoint and Log out of Brave Search.
 - **octet-subagents:** Enable or disable orchestration. Use `/subagents` for
@@ -144,10 +142,10 @@ declares, which asks for that command's arguments.
 Other extension commands are no longer typed after the slash in the terminal UI:
 typing one, such as `/computer-use setup`, names the extension to open instead.
 `/subagents` remains a runtime slash command and appears in completion while its
-first-party extension is ready. The web UI keeps extension commands for now.
+first-party extension is ready.
 The menu never writes a trust
-grant. Full access implicitly trusts enabled extensions, while safe mode keeps
-executable extensions stopped.
+grant on enablement. Full access implicitly trusts enabled extensions; safe
+mode starts only enabled extensions with explicit source-bound host authority.
 
 <details>
 <summary>When the menu is read-only or blocked</summary>

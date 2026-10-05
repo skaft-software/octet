@@ -195,7 +195,7 @@ are measured normally.
 - Optional telemetry JSONL writes a bounded `provider_inference` record with
   attempt/logical-turn identity and typed metrics; native-host NDJSON and RPC
   forward a `provider_inference` event without altering assistant messages.
-  Print/plain response stdout and durable Serve item projections stay unchanged.
+  Print/plain response stdout stays unchanged.
 - Provider-request observer spans carry separate `client_*`/`server_*`
   completion attributes. Existing usage attributes remain accounting facts.
 - Legacy `ttft_ms` remains agent-first-nonempty-delta latency. Legacy

@@ -7,9 +7,6 @@
 //! policy-derived trust, startup diagnostics, host-state refresh, slash commands,
 //! context composition, semantic status collection, and reload.
 
-#[cfg(feature = "serve")]
-pub mod serve;
-
 mod mutation_resources;
 pub(crate) mod remote_ui;
 pub(crate) mod resource_paths;
@@ -156,43 +153,6 @@ pub const SUBAGENTS_EXTENSION_NAME: &str = "octet-subagents";
 pub const MCP_EXTENSION_NAME: &str = "octet-mcp";
 const EXPERIMENTAL_STREAMABLE_HTTP_MCP_ARGUMENT: &str = "--experimental-streamable-http-mcp";
 const MAX_CONTEXT_CONTRIBUTION_BYTES: usize = 64 * 1024;
-/// Returns whether configuration is eligible to launch the trusted observer.
-///
-/// The live process/handshake check remains authoritative; this conservative
-/// preflight is used only to avoid advertising Ultra in a frontend before its
-/// worker app has been built.
-#[cfg(feature = "serve")]
-pub fn subagents_extension_activation_configured(config: &Config) -> bool {
-    if !config.start_extension_processes
-        || !config.sandbox.process_execution_allowed()
-        || !config
-            .enabled_extensions
-            .iter()
-            .any(|name| name == SUBAGENTS_EXTENSION_NAME)
-    {
-        return false;
-    }
-    // Full access has implicit authority. Under controlled policies an exact
-    // selected source must have a grant; a bare global name must not authorize
-    // a project shadow when offering Ultra before the process is launched.
-    if config.effect_policy == octet_agent::EffectPolicy::UnsafeHost {
-        return true;
-    }
-    let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
-    let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
-    let mut diagnostics = Vec::new();
-    let (policy, _) = extension_policy(config, &mut diagnostics);
-    snapshot.resources().iter().any(|resource| {
-        resource.name == SUBAGENTS_EXTENSION_NAME
-            && load_extension_descriptor(&resolver, resource, &policy, &mut diagnostics)
-                .is_some_and(|descriptor| {
-                    descriptor
-                        .activation
-                        .start_decision(descriptor.source, config.workspace_trusted)
-                        == ExtensionStartDecision::Allowed
-                })
-    })
-}
 
 const MAX_EXTENSION_CONTEXT_BYTES: usize = 256 * 1024;
 const MAX_CONTEXT_LABEL_BYTES: usize = 1024;

@@ -105,8 +105,8 @@ It is not OpenAI's CUA and is not vendored here.
   into prose or follow-up arguments.
 - Before a purchase, send, publish, delete, or other consequential external
   effect, stop and get explicit user confirmation beyond the automatic prompt.
-- Prefer `octet-browse` for anything involving a login or a saved session; this
-  skill drives the user's real desktop.
+- Anything involving a login or a saved session is driven by the user on their own
+  desktop; never enter credentials on their behalf.
 
 ## Upstream Jev workflows
 

@@ -1416,16 +1416,16 @@ fn persist_extension_activation_changes_only_the_selected_user_entry() {
     let path = dir.path().join("config.toml");
     std::fs::write(
         &path,
-        "# keep this comment\nenabled_extensions = [\"octet-browse\", \"octet-ssh\"]\ntrusted_extensions = [\"octet-browse\", \"octet-ssh\"]\n",
+        "# keep this comment\nenabled_extensions = [\"octet-computer-use\", \"octet-ssh\"]\ntrusted_extensions = [\"octet-computer-use\", \"octet-ssh\"]\n",
     )
     .unwrap();
 
     assert_eq!(
         persist_extension_enabled_to_path("octet-web-search", true, &path).unwrap(),
-        vec!["octet-browse", "octet-ssh", "octet-web-search"]
+        vec!["octet-computer-use", "octet-ssh", "octet-web-search"]
     );
     assert_eq!(
-        persist_extension_enabled_to_path("octet-browse", false, &path).unwrap(),
+        persist_extension_enabled_to_path("octet-computer-use", false, &path).unwrap(),
         vec!["octet-ssh", "octet-web-search"]
     );
 
@@ -1585,7 +1585,7 @@ fn atomic_config_update_preserves_existing_permissions_and_uses_private_new_file
 fn atomic_config_publish_rejects_a_non_locking_external_edit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
-    let original = "enabled_extensions = [\"octet-browse\"]\n";
+    let original = "enabled_extensions = [\"octet-computer-use\"]\n";
     let external = "enabled_extensions = [\"octet-ssh\"]\ntrusted_extensions = [\"octet-ssh\"]\n";
     std::fs::write(&path, original).unwrap();
     let expected = std::fs::read_to_string(&path).unwrap();
@@ -1607,7 +1607,7 @@ fn atomic_config_publish_rejects_a_non_locking_external_edit() {
 fn concurrent_config_update_fails_without_rewriting() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
-    let original = "enabled_extensions = [\"octet-browse\"]\n";
+    let original = "enabled_extensions = [\"octet-computer-use\"]\n";
     std::fs::write(&path, original).unwrap();
     let lock = config_update_lock(&path).unwrap();
 
@@ -1621,7 +1621,7 @@ fn concurrent_config_update_fails_without_rewriting() {
 
     assert_eq!(
         persist_extension_enabled_to_path("octet-ssh", true, &path).unwrap(),
-        ["octet-browse", "octet-ssh"]
+        ["octet-computer-use", "octet-ssh"]
     );
 }
 
@@ -1629,7 +1629,7 @@ fn concurrent_config_update_fails_without_rewriting() {
 fn persist_extension_activation_rejects_a_non_array_without_rewriting() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
-    let invalid = "enabled_extensions = \"octet-browse\"\n";
+    let invalid = "enabled_extensions = \"octet-computer-use\"\n";
     std::fs::write(&path, invalid).unwrap();
 
     assert!(persist_extension_enabled_to_path("octet-ssh", true, &path).is_err());
@@ -1978,7 +1978,7 @@ fn sessions_subcommands_do_not_consume_the_positional_prompt() {
 
 #[test]
 fn extension_package_commands_parse_without_a_prompt() {
-    let cli = Cli::try_parse_from(["octet", "extension", "install", "octet-serve"]).unwrap();
+    let cli = Cli::try_parse_from(["octet", "extension", "install", "octet-subagents"]).unwrap();
     assert!(cli.message.is_none());
     assert!(matches!(
         cli.command,
@@ -1987,11 +1987,11 @@ fn extension_package_commands_parse_without_a_prompt() {
                 name: Some(ref name),
                 path: None,
             }
-        }) if name == "octet-serve"
+        }) if name == "octet-subagents"
     ));
 
-    let cli =
-        Cli::try_parse_from(["octet", "extension", "install", "--path", "./serve.tar.gz"]).unwrap();
+    let cli = Cli::try_parse_from(["octet", "extension", "install", "--path", "./bundle.tar.gz"])
+        .unwrap();
     assert!(matches!(
         cli.command,
         Some(TopLevelCommand::Extension {
@@ -2103,46 +2103,11 @@ fn pi_import_remains_available_without_the_compatibility_bridge() {
 }
 
 #[test]
-fn serve_command_parses_forwarded_loopback_options() {
-    let cli = Cli::try_parse_from([
-        "octet",
-        "serve",
-        "--no-open",
-        "--port",
-        "0",
-        "--web-root",
-        "./web",
-    ])
-    .unwrap();
-    assert!(cli.message.is_none());
-    assert!(matches!(
-        cli.command,
-        Some(TopLevelCommand::Serve {
-            no_open: true,
-            port: 0,
-            web_root: Some(_),
-            name: None,
-        })
-    ));
-}
-
-#[test]
-fn serve_command_accepts_a_startup_session_name() {
-    let cli = Cli::try_parse_from(["octet", "serve", "--name", "  release review  "]).unwrap();
-    match cli.command {
-        Some(TopLevelCommand::Serve {
-            no_open: false,
-            port: 31415,
-            web_root: None,
-            name: Some(name),
-        }) => assert_eq!(name, "  release review  "),
-        other => panic!("unexpected parse result {other:?}"),
-    }
-}
-
-#[test]
-fn serve_command_rejects_a_name_without_a_value() {
-    assert!(Cli::try_parse_from(["octet", "serve", "--name"]).is_err());
+fn serve_is_an_ordinary_prompt_not_a_subcommand() {
+    let cli = Cli::try_parse_from(["octet", "serve"]).unwrap();
+    assert!(cli.command.is_none());
+    assert_eq!(cli.message.as_deref(), Some("serve"));
+    assert!(Cli::try_parse_from(["octet", "serve", "--no-open"]).is_err());
 }
 
 #[test]

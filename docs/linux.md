@@ -37,7 +37,7 @@ needs `set -g set-clipboard on`; see [tmux setup](tmux.md).
 
 ## Opening links
 
-Sign-in flows and `octet serve` open URLs with `xdg-open` from `xdg-utils`,
+Sign-in flows open URLs with `xdg-open` from `xdg-utils`,
 which Omarchy ships. Install it on desktops that lack it.
 
 ## Computer use

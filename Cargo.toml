@@ -8,7 +8,6 @@ members = [
     "crates/octet-migrate-types",
     "crates/octet-tern",
 ]
-exclude = ["extensions/octet-serve"]
 
 [workspace.package]
 version = "0.8.2"
@@ -62,10 +61,3 @@ inherits = "release"
 debug = "full"
 lto = "off"
 strip = "none"
-
-# Keep the audited lopdf 0.42.0 parser. Upstream 0.42.0 declares Rust 1.85 but
-# uses let-chain syntax that only stabilized in 1.88 (the workspace MSRV since
-# octet 0.8.2); this local patch only rewrites that syntax and does not change
-# parser logic.
-[patch.crates-io]
-lopdf = { path = "extensions/octet-serve/vendor/lopdf" }

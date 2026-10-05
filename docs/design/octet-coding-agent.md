@@ -135,8 +135,8 @@ The product treats accepted readiness updates as nonpersistent activity. The TUI
 replaces its mutable `Working` row with a bounded provider-status label until
 model output or settlement; plain and print modes write the diagnostic to stderr
 so print stdout stays response-only. RPC and the native host expose a structured
-`provider_lifecycle` event for clients that choose to render it. Session records,
-serve item projections, and durable telemetry deliberately omit this endpoint
+`provider_lifecycle` event for clients that choose to render it. Session records
+and durable telemetry deliberately omit this endpoint
 telemetry. It is observational only and does not change retry or timeout
 semantics.
 
@@ -250,11 +250,6 @@ through the root's delegation template.
 
 For explicit capability/orchestration boundaries (search vs browser vs computer use, hosted vs in-harness delegation, trust/cwd/approval/sandbox inheritance, and scope non-goals), see [`docs/design/extension-capability-and-orchestration-boundaries.md`](extension-capability-and-orchestration-boundaries.md).
 
-Serve currently has no policy-decision item in its graphical protocol, so its
-projection intentionally ignores `ToolPolicyDecision`; the matching
-`ToolFinished` remains visible. Exposing policy evidence there requires an
-explicit Serve protocol addition rather than silently changing the projection.
-
 The coding host creates an extension-only V2 delegation manager whenever the
 trusted, enabled `octet-subagents` extension successfully negotiates its
 `agent_sessions` service. The manager is available at every reasoning effort so
@@ -306,10 +301,6 @@ The frontends have different command and persistence paths:
   the `SKILL.md` body plus arguments into an ordinary user message; it does not
   append `SkillActivated`. TUI `/skills off` can append `SkillDeactivated` only
   for an activation already present on the branch.
-- Serve's slash-command worker appends `SkillActivated` (descriptor, content
-  hash, and instructions) on load and `SkillDeactivated` on off. The activation
-  event is Serve-only; TUI `off` can only deactivate pre-existing state. Plain,
-  print, and RPC do not gain this activation path.
 - Interactive submission and the plain, print, and RPC prompt paths expand
   explicit `/skill:NAME` text as ordinary prompt content. They do not provide a
   second activation API. Prompt-template `{{skill:name}}` expansion likewise
@@ -325,9 +316,7 @@ registered model tool writes that event; it is not a model-facing resource API.
 Compaction keeps the configured recent-message token window (default 20,000) and
 summarizes older ordinary messages. A TUI inline body is therefore ordinary
 history and may be summarized away; it does not become durable active state.
-Serve activation events are separate session state and their active snapshots
-are carried by compaction, so that Serve-only persistence must not be promised
-for TUI activation.
+Inline skill expansion does not promise durable activation.
 
 ## Prompt templates
 
@@ -398,8 +387,8 @@ current reload generation. A malformed manifest, rejected link, or ID mismatch
 does not prevent healthy skills from loading and no longer disappears into
 startup-only stderr.
 
-The extension menu enumerates managed executable bundles rather than the
-separate `octet-serve` application. It edits only the selected name in the user
+The extension menu enumerates managed executable bundles. It edits only the
+selected name in the user
 config's `enabled_extensions`, preserves independent trust grants and unrelated
 activation, refuses to redirect a shadowed global bundle to project/explicit
 code, and performs a full idle-boundary rebuild so the new process set is live.

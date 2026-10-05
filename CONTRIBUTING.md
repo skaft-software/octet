@@ -6,7 +6,7 @@ changes small and back them with evidence.
 
 ## Development setup
 
-The octet source supports macOS and Linux and needs Rust 1.86 or newer. A native
+The octet source supports macOS and Linux and needs Rust 1.88 or newer. A native
 Windows x64 build (`x86_64-pc-windows-gnu`) is built and tested in CI but not
 released yet: see [Windows](docs/windows.md). Install Rust through
 [rustup](https://rustup.rs/) and install `rg` (ripgrep). Clone the repository if
@@ -80,10 +80,7 @@ cargo test --workspace --all-targets --all-features --profile ci-test --locked
 cargo test --workspace --doc --profile ci-test --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo audit
-cargo audit --file extensions/octet-serve/Cargo.lock
 cargo deny check
-cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
-(cd apps/web && npm ci && npm audit --audit-level=high)
 git diff --check
 ```
 
@@ -96,14 +93,13 @@ cursor, scrollback, style or shutdown behavior. Protocol changes need exact wire
 fixtures and malformed-stream coverage. Session changes should cover restart and
 torn-tail behavior.
 
-The live multimodal test is ignored unless you configure a compatible endpoint.
-Stable Serve releases must pass the disposable configured-provider matrix in
-ordinary CI. Maintainers may also run the separately approved credentialed
-checks in [configured-provider
-acceptance](docs/experimental/octet-serve/provider-acceptance.md) against the
-immutable release SHA. Live checks are optional, and release qualification
-doesn't need live credentials. A check that wasn't selected is recorded as **NOT
-RUN**, never as a pass or a waiver.
+The live multimodal test is intentionally ignored unless an explicitly
+configured compatible endpoint is available. Maintainers may also run
+the separately approved credentialed checks in
+[configured-provider acceptance](docs/experimental/octet-serve/provider-acceptance.md)
+against the immutable release SHA. Live checks are optional; release qualification
+does not require live credentials. An unselected check is recorded as **NOT RUN**,
+not a pass or waiver.
 
 ## Identity and documentation
 

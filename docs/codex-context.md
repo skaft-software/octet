@@ -108,7 +108,7 @@ Catalog construction only *records* notes (`CodexContextNotes`, one per model th
 needs one); the recording is not an emission. Delivery is lazy and belongs to the
 frontend that owns the transcript or an on-demand surface:
 
-* interactive TUI / serve: the opened `App` carries the notes
+* interactive TUI: the opened `App` carries the notes
   (`App::codex_context_notes`). Pull the note with
   `App::take_codex_context_note()` when the user can act on it — the first
   assistant turn after readiness — or read it without consuming via

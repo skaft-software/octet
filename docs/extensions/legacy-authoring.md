@@ -10,7 +10,7 @@ wires or make every low-level service a supported coding-product feature.
 **Identity boundary:** octet 0.8.2 candidate source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
-The source SDK distributions and six official executable bundles are version
+The source SDK distributions and five official executable bundles are version
 `0.8.2`; independent examples keep their own versions. 0.8.2 assets are not
 published; use reviewed source or matching local archives. Native publication
 does not publish SDK registries; see
@@ -79,8 +79,8 @@ Manifest-selected versions are exact:
 No version adds an OS sandbox or implicit access beyond negotiated host
 capabilities. Pi migration is capability-oriented, not Pi's in-process ABI:
 `octet migrate pi --dry-run` inventories resources without executing them.
-The Pi execution bridge is removed; portable import and native providers are
-separate. See [Pi migration](../pi-migration.md).
+Portable import and native providers are separate from the optional
+[Pi extension adapter](../pi-compatibility.md). See [Pi migration](../pi-migration.md).
 
 Discovery is available under every effect policy; executable extensions remain
 disabled until explicitly enabled. In the coding product, startup requires
@@ -215,9 +215,8 @@ workspace trust, and process permissions. `[runtime]` defaults to
 
 Workspace sharing is never inferred from a name or language. It requires a
 canonical workspace, explicit host trust partition, manifest opt-in, matching
-content digest, and directly verified local entrypoint. Ordinary and Serve hosts
-use disjoint trust partitions; Serve further separates project and authority
-profiles. PATH-only commands are permitted for isolated legacy compatibility,
+content digest, and directly verified local entrypoint. PATH-only commands are
+permitted for isolated legacy compatibility,
 not sharing. API `0.1` lacks resource-owner fences and is always isolated.
 Source/catalog changes retire shared runtimes fail-closed. Runtime status and
 `resource_exhausted` expose extension/digest provenance, not workspace paths,
@@ -433,14 +432,6 @@ Owner-bound refresh reconciles authoritative `agent_sessions` state and retains
 focus by stable node ID. Enter revalidates and opens the selected bounded read-only
 transcript; Escape/Left returns to the list.
 
-Serve carries the same complete state through authenticated snapshot/event
-reduction. `extension.invokeAction {extension, extensionInstanceId, generation,
-revision, action, confirmed}` binds action identity; reconnect replaces state
-without replay. Destructive actions need a second host-owned confirmation and an
-instance/generation/revision/action-bound authenticated command. The selected
-manifest's process executes its own command even when another extension uses
-the same name. At most one matching extension confirmation is preapproved during
-that command; other command confirmations fail closed without a trusted surface.
 Plain/print/RPC retain bounded text/structured fallbacks and never implicitly
 choose an action or selection.
 
@@ -483,8 +474,7 @@ effective policy, created/started/completed/deadline timestamps, turn/token/cost
 usage, terminal `timed_out`, and owner/principal provenance, including current
 structured phase/tool, host-observed call count, and disjoint token buckets.
 `session` is an opaque `agent-session:*` reference, never the private JSONL path.
-Serve resolves it only through a host-written parent-session/extension-principal/
-resource-owner binding into a locked read-only inspector. `/extensions inspect`
+`/extensions inspect`
 opens only the current parent's delegation team.
 
 Every child has a fresh independent context; child tokens never enter parent
@@ -691,8 +681,8 @@ and API `0.2` lifecycle APIs at semantic boundaries.
 Legacy lifecycle subscriptions are exact `session/started`, `session/settled`,
 `turn/started`, `turn/settled`, `tool/started`, and `tool/settled` names. Settled
 outcomes cover completion, failure, cancellation, interruption, frontend
-disconnection, shutdown, and limits across interactive/plain/print/RPC/native-host/
-Serve boundaries. Notifications are best effort; host cleanup/persistence remain
+disconnection, shutdown, and limits across interactive/plain/print/RPC/native-host
+boundaries. Notifications are best effort; host cleanup/persistence remain
 authoritative. API `0.1`/`0.2` `after_response` remains success-only; in `0.2`
 it is bounded response-content synchronization, not terminal cleanup.
 
@@ -769,8 +759,8 @@ octet 0.8.2 candidate availability and remaining qualification, consult the
 0.8.2 assets are not published. Use reviewed source or a matching local archive
 until publication is approved and version-matched assets are verified.
 
-Executable bundles use runtime `extension.toml`, not Serve's application launcher
-manifest. An archive has exactly one root named for the extension, all regular
+Executable bundles use runtime `extension.toml`. An archive has exactly one root
+named for the extension, all regular
 runtime files, and optional docs, fixtures, and skills:
 
 ```text
@@ -797,9 +787,9 @@ requires_octet = "=0.8.2"
 
 `requires_octet` is optional for unpackaged local copies but enforced when
 present. Installed bundles require an exact match to the running octet version.
-The first-party catalog is `octet-browse`, `octet-codemode`,
+The first-party catalog is `octet-codemode`,
 `octet-computer-use`, `octet-mcp`, `octet-subagents`, and `octet-web-search`.
-The six working-tree manifests declare API `0.4`; their exact host pins still
+The five working-tree manifests declare API `0.4`; their exact host pins still
 apply. This source metadata is not evidence of a published 0.8.2 bundle.
 
 After matching publication is verified:
@@ -857,34 +847,3 @@ Local packages have no remembered remote update source; only published-catalog
 updates download. There is no automatic earlier-first-party hotfix migration,
 old-root scan, or retired-package cleanup. Existing Ygg installations/external
 data remain separate and untouched.
-
-## First-party application packages
-
-The complete Serve application package is separate from executable bundles. It
-uses `package.toml`, contains target-specific `bin/octet-serve-runtime`, and is
-never loaded by executable-extension discovery. These catalog commands also
-remain gated on matching publication:
-
-```console
-octet extension install octet-serve
-octet extension update octet-serve
-octet extension remove octet-serve
-octet serve
-```
-
-Installation under `~/.octet/extensions/octet-serve/` has its own manifest,
-executable, and `install.json`. The application manifest declares ID/version,
-exact octet version, target triple, launcher arguments, executable SHA-256, and
-loopback/process/workspace capabilities. Official installation uses a matching
-target archive and shared release `SHA256SUMS`; local archives use:
-
-```console
-octet extension install --path ./octet-serve-0.8.2-TARGET.tar.gz
-```
-
-The application archive retains its strict two-file payload and atomic install.
-`octet serve` revalidates compatibility/checksum before replacing the launcher
-process. As a first-party replacement octet process it inherits launcher config
-and provider environment, not the sanitized child environment used for
-model-controlled tools and executable extensions. Removal deletes only package
-files; sessions, project metadata, and other user data remain outside the directory.

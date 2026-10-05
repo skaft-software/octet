@@ -67,22 +67,19 @@ the skill body. Resolve references relative to the skill directory (the parent
 of `SKILL.md`). Supporting text is limited to `references/` or `templates/`, the
 normal sandbox and path policy still applies, and `read` must be enabled.
 
-The TUI and Serve don't activate skills the same way:
+Skill activation is not a durable state in the terminal frontends:
 
-- **TUI.** `/skills load NAME` resolves the skill and fills in `/skill:NAME`.
-  Submitting that draft expands the `SKILL.md` body into an ordinary user
-  message (plus optional arguments). It doesn't append a durable activation
-  event. `/skills off` can only record a deactivation for an activation already
-  on the branch.
-- **Serve.** The slash-command worker appends a durable `SkillActivated` event
-  on load and `SkillDeactivated` on off. The activation event is Serve-only.
-  Plain, print and RPC don't get this path: their prompt preparation only
-  expands an explicit `/skill:NAME` as ordinary prompt text.
+- `/skills load NAME` resolves the skill and prefills `/skill:NAME`.
+  Submitting that draft expands the `SKILL.md` body into an ordinary user message
+  (plus optional arguments); it does not append a durable activation event.
+  `/skills off` can record deactivation only for an activation already present on
+  the branch.
+- Plain, print, and RPC runs expand explicit `/skill:NAME` text as ordinary
+  prompt content; they do not gain an activation path.
 
-So an inlined TUI body is subject to ordinary history and compaction. It may be
-summarized away, and resume doesn't rebuild a separate active-skill state from
-it. Serve's activation state can be rebuilt from its session events and
-compaction snapshots, which isn't a promise of durable TUI activation.
+An inlined body is therefore subject to ordinary history and compaction: it may
+be summarized away, and resume does not reconstruct a separate active-skill state
+from it. This is not a promise of durable skill activation.
 
 Skill reads are bounded. Discovery caps YAML frontmatter at 32 KiB and
 `SKILL.md` at 256 KiB. A supporting text read is capped at 512 KiB and must stay

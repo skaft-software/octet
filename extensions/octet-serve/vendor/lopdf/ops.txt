@@ -1,3 +1,0 @@
-git-chglog -o CHANGELOG.md
-cargo package --list --allow-dirty
-cargo publish --allow-dirty --registry crates-io
