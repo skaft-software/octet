@@ -7,7 +7,7 @@ import { themeColorVectors } from './theme-color-oracle.mjs';
 
 const vectors = JSON.parse(readFileSync(new URL('./fixtures/theme-colors.json', import.meta.url), 'utf8'));
 
-test('perceptual colors match the shared pinned Pi 1.0 golden vectors', () => {
+test('perceptual colors match the shared pinned Pi 1.0.2 golden vectors', () => {
   for (const [input, expected] of vectors.valid) assert.equal(colorToHex(parseColor(input)), expected, input);
   for (const input of vectors.invalid) assert.throws(() => parseColor(input), input);
 });

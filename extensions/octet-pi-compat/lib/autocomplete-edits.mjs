@@ -46,8 +46,8 @@ export function piPosition(lines, cursorLine, cursorCol) {
   return { text, index };
 }
 
-/** Pi 1.0 CombinedAutocompleteProvider.applyCompletion, without filesystem/runtime dependencies.
- * Adapted from 581e7ba78141a4d8b61cc9d11b8b22ae7e59195e, MIT ../LICENSE.pi.
+/** Pi 1.0.2 CombinedAutocompleteProvider.applyCompletion, without filesystem/runtime dependencies.
+ * Adapted from cd32f7725fdbddbaecdff5b1e68491563394e0ca, MIT ../LICENSE.pi.
  */
 export function applyPiCompletion(lines, cursorLine, cursorCol, item, prefix) {
   const currentLine = lines[cursorLine] || '';

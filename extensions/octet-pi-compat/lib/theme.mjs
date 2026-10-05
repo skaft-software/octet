@@ -16,7 +16,7 @@ const palette = {
   syntaxType: 36, syntaxOperator: 39, syntaxPunctuation: 39,
 };
 // Pure Pi palette rendering, not a claim about the host's current theme.
-// Theme methods/fallbacks follow Pi 1.0 581e7ba...; MIT, see ../LICENSE.pi.
+// Theme methods/fallbacks follow Pi 1.0.2 581e7ba...; MIT, see ../LICENSE.pi.
 const styled = (open, close, text) => {
   text = String(text);
   if (!text) return '';

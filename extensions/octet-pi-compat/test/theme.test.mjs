@@ -114,10 +114,10 @@ test('explicit theme file loading is bounded/no-follow and rejects native TOML, 
 });
 
 const repo = process.env.PI_REFERENCE_REPO;
-test('color conversion and palette fallbacks match hash-verified pinned Pi 1.0 source, including built-in dark/light JSON', {
+test('color conversion and palette fallbacks match hash-verified pinned Pi 1.0.2 source, including built-in dark/light JSON', {
   skip: !repo && 'set PI_REFERENCE_REPO to the reviewed offline Pi checkout',
 }, async () => {
-  const ref = '581e7ba78141a4d8b61cc9d11b8b22ae7e59195e';
+  const ref = 'cd32f7725fdbddbaecdff5b1e68491563394e0ca';
   const source = path => execFileSync('git', ['-C', repo, 'show', `${ref}:${path}`], { encoding: 'utf8' });
   const math = source('packages/tui/src/oklab.ts'), colors = source('packages/tui/src/colors.ts');
   assert.equal(createHash('sha256').update(math).digest('hex'), '45b067e6e3605b385f595adecd7c0216f1c6b6686680d5c73f661286de736be6');

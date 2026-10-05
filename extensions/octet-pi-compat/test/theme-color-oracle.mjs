@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 
 export async function themeColorVectors(repo) {
-  const commit = '581e7ba78141a4d8b61cc9d11b8b22ae7e59195e';
+  const commit = 'cd32f7725fdbddbaecdff5b1e68491563394e0ca';
   const hashes = {
     'packages/tui/src/oklab.ts': '45b067e6e3605b385f595adecd7c0216f1c6b6686680d5c73f661286de736be6',
     'packages/tui/src/colors.ts': 'd4fe729c424d2c07bc64cf0c3edfdbf5642865cba395dfb37234c6c88d65f468',

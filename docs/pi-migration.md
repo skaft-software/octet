@@ -120,9 +120,9 @@ effects.
 | `direct` | Pi skills or Markdown prompts have a deterministic octet resource path; the scanner does not copy them. |
 | `replace` | Reserved for an exact package/version/source-hash native replacement recipe. No replacement recipes ship. |
 | `bridge` | Retained scanner classification against its pinned historical profile, not qualification for the optional Pi adapter or permission for unchanged execution. |
-| `native_port` | Uses a known Pi `0.84.4` mutation/registration requiring an explicitly scoped native port or redesign; no future host primitive is promised. |
+| `native_port` | Uses a known Pi `1.0.2` mutation/registration requiring an explicitly scoped native port or redesign; no future host primitive is promised. |
 | `manual` | Arbitrary Pi TUI/editor components, custom providers, or deep session/compaction internals need redesign. Pi JSON themes also need manual conversion to octet's different semantic schema. |
-| `blocked` | Could not resolve/read/parse completely, or uses names outside the pinned Pi `0.84.4` public profile. |
+| `blocked` | Could not resolve/read/parse completely, or uses names outside the pinned Pi `1.0.2` public profile. |
 
 Unsupported calls are never silently classified as no-ops.
 

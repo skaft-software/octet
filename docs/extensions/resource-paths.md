@@ -51,9 +51,9 @@ This consumer accepts native Markdown skills, Markdown/TOML prompts, and TOML or
 Pi JSON themes. JSON themes pass through the same bounded native loader and
 precedence rules. Supported colors are hex, ANSI indices, terminal defaults,
 variable references, and `oklch(...)`/`okhsl(...)` converted natively with the
-pinned Pi 1.0 color implementation. No Node adapter or preprocessing is required;
-see [Pi JSON themes](../themes.md#pi-json-themes) for the source pin and rendering
-limits. Within one directory the existing lexical order makes a same-stem TOML
+pinned Pi 1.0.2 color implementation. No Node adapter or preprocessing is
+required; see [Pi JSON themes](../themes.md#pi-json-themes) for the source pin
+and rendering limits. Within one directory the existing lexical order makes a same-stem TOML
 file win over JSON. An invalid higher-precedence winner must not resurrect a
 lower-precedence theme. Native theme snapshots retain normalized TOML and the
 original inspectable source path.

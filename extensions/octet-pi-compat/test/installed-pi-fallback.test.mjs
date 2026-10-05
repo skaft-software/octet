@@ -1,6 +1,6 @@
 // Opt-in installed-Pi fallback (path B). Fixture installs are generated in a
 // temporary directory (node_modules/ is gitignored) and selected with
-// OCTET_PI_AGENT_DIR; one test exercises the user's real managed Pi 1.0.x.
+// OCTET_PI_AGENT_DIR; one test exercises the user's real managed Pi 1.0.2.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -25,7 +25,7 @@ function run(extensions, { mode, env = {} } = {}) {
 const describe = (metadata, name) => metadata.commands.find(c => c.name === name)?.description;
 
 // Fake managed install: <agent>/install/current-version + releases/<v>/node_modules/@earendil-works/*.
-function fakeInstall(t, { version = '1.0.7', packageVersion = version, omit } = {}) {
+function fakeInstall(t, { version = '1.0.2', packageVersion = version, omit } = {}) {
   const agent = mkdtempSync(join(tmpdir(), 'octet-installed-pi-'));
   t.after(() => rmSync(agent, { recursive: true, force: true }));
   mkdirSync(join(agent, 'install'), { recursive: true });
@@ -38,14 +38,25 @@ export class ProjectTrustStore { constructor() { throw new Error('real ProjectTr
 export const fixtureOnlyHelper = () => 'real unclassified helper ran';`,
     'pi-ai': `export const createProvider = () => { throw new Error('real createProvider must never run'); };`,
     'pi-tui': `export const visibleWidth = () => -1;`,
+    'pi-agent-core': `export class Agent {}`,
   };
+  // Pi 1.0.2 resolves pi-ai's root to its compat entry, plus oauth and the
+  // provider registry through a subpath pattern.
+  const extraExports = { 'pi-ai': { './compat': 'compat.js', './oauth': 'oauth.js', './providers/*': 'providers/*.js' } };
   for (const [name, source] of Object.entries(modules)) {
     if (name === omit) continue;
     const dir = join(agent, 'install', 'releases', version, 'node_modules', '@earendil-works', name);
     mkdirSync(join(dir, 'dist'), { recursive: true });
-    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: `@earendil-works/${name}`, version: packageVersion, type: 'module',
-      exports: { '.': { import: './dist/index.js' } } }));
+    const exports = { '.': { import: './dist/index.js' } };
+    for (const [key, file] of Object.entries(extraExports[name] ?? {})) exports[key] = { import: `./dist/${file}` };
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: `@earendil-works/${name}`, version: packageVersion, type: 'module', exports }));
     writeFileSync(join(dir, 'dist', 'index.js'), source + '\n');
+    if (name === 'pi-ai') {
+      mkdirSync(join(dir, 'dist', 'providers'), { recursive: true });
+      writeFileSync(join(dir, 'dist', 'compat.js'), source + '\n');
+      writeFileSync(join(dir, 'dist', 'oauth.js'), 'export {};\n');
+      writeFileSync(join(dir, 'dist', 'providers', 'all.js'), 'export {};\n');
+    }
   }
   return { OCTET_PI_AGENT_DIR: agent };
 }
@@ -60,7 +71,7 @@ test('path A reports a structured fallback-eligible error for a Pi export the sh
   assert.equal(result.fallback.entrypoint_sha256, createHash('sha256').update(readFileSync(entry)).digest('hex'));
   assert.deepEqual(result.fallback.missing_exports, [{ specifier: '@earendil-works/pi-coding-agent', name: 'parseSkillBlock', file: entry }]);
   assert.match(result.fallback.original_error, /parseSkillBlock\) is not a function/);
-  assert.equal(result.fallback.supported_installed_pi, '1.0.x');
+  assert.equal(result.fallback.supported_installed_pi, '1.0.2');
 });
 
 test('path A classifies a gap in a relative helper module, including legacy package names', () => {
@@ -126,10 +137,12 @@ test('installed mode fails loudly for a missing, unsupported, or inconsistent Pi
   const entry = [fixture('missing-export.ts')];
   const cases = [
     [{ OCTET_PI_AGENT_DIR: join(tmpdir(), 'octet-no-such-pi-agent') }, /could not read managed Pi version from .*current-version \(ENOENT\)/],
-    [fakeInstall(t, { version: '1.1.0' }), /installed Pi 1\.1\.0 is outside the supported range 1\.0\.x/],
-    [fakeInstall(t, { version: '0.99.2' }), /installed Pi 0\.99\.2 is outside the supported range 1\.0\.x/],
-    [fakeInstall(t, { version: '1.0.7', packageVersion: '1.0.6' }), /reports @earendil-works\/pi-coding-agent@1\.0\.6, expected 1\.0\.7/],
-    [fakeInstall(t, { omit: 'pi-tui' }), /@earendil-works\/pi-tui is missing or unreadable in Pi 1\.0\.7/],
+    [fakeInstall(t, { version: '1.1.0' }), /installed Pi 1\.1\.0 is outside the supported range 1\.0\.2/],
+    [fakeInstall(t, { version: '1.0.7' }), /installed Pi 1\.0\.7 is outside the supported range 1\.0\.2/],
+    [fakeInstall(t, { version: '0.99.2' }), /installed Pi 0\.99\.2 is outside the supported range 1\.0\.2/],
+    [fakeInstall(t, { packageVersion: '1.0.1' }), /reports @earendil-works\/pi-coding-agent@1\.0\.1, expected 1\.0\.2/],
+    [fakeInstall(t, { omit: 'pi-tui' }), /@earendil-works\/pi-tui is missing or unreadable in Pi 1\.0\.2/],
+    [fakeInstall(t, { omit: 'pi-agent-core' }), /@earendil-works\/pi-agent-core is missing or unreadable in Pi 1\.0\.2/],
   ];
   for (const [env, message] of cases) {
     const result = run(entry, { mode: 'installed', env });
@@ -161,7 +174,7 @@ test('host initialize receives the fallback data on the JSON-RPC error', async t
 
 const realVersionFile = join(homedir(), '.pi', 'agent', 'install', 'current-version');
 const realVersion = existsSync(realVersionFile) ? readFileSync(realVersionFile, 'utf8').split('\n', 1)[0] : '';
-test('installed mode against the real managed Pi install', { skip: /^1\.0\.\d+$/.test(realVersion) ? false : `no managed Pi 1.0.x at ${realVersionFile}` }, () => {
+test('installed mode against the real managed Pi install', { skip: realVersion === '1.0.2' ? false : `no managed Pi 1.0.2 at ${realVersionFile}` }, () => {
   const env = { OCTET_PI_AGENT_DIR: '' }; // default resolution: ~/.pi/agent
   const result = run([fixture('missing-export.ts')], { mode: 'installed', env });
   assert.equal(result.status, 0, result.stderr);
@@ -172,7 +185,7 @@ test('installed mode against the real managed Pi install', { skip: /^1\.0\.\d+$/
   assert.match(describe(denied.metadata, 'provider'), /^unsupported_feature pi-ai\.createProvider/);
 });
 
-test('approved installed mode uses real Pi built-in tool factories that path A refuses', { skip: /^1\.0\.\d+$/.test(realVersion) ? false : `no managed Pi 1.0.x at ${realVersionFile}` }, () => {
+test('approved installed mode uses real Pi built-in tool factories that path A refuses', { skip: realVersion === '1.0.2' ? false : `no managed Pi 1.0.2 at ${realVersionFile}` }, () => {
   const env = { OCTET_PI_AGENT_DIR: '' };
   const pathA = run([fixture('builtin-tools.ts')], { env });
   assert.notEqual(pathA.status, 0);
@@ -189,13 +202,23 @@ test('path A offers the fallback for a shimmed built-in tool factory it refuses'
   assert.deepEqual(pathA.fallback.missing_exports.map(g => g.name), ['createBashTool']);
 });
 
-test('the pi-ai/compat subpath is fallback-eligible in path A and resolves to installed Pi', { skip: /^1\.0\.\d+$/.test(realVersion) ? false : `no managed Pi 1.0.x at ${realVersionFile}` }, () => {
+test('pi-ai/compat resolves like the pi-ai root, as in Pi 1.0.2, on both paths', { skip: realVersion === '1.0.2' ? false : `no managed Pi 1.0.2 at ${realVersionFile}` }, () => {
   const env = { OCTET_PI_AGENT_DIR: '' };
   const pathA = run([fixture('compat-subpath.ts')], { env });
-  assert.notEqual(pathA.status, 0);
-  assert.equal(pathA.fallback?.fallback_eligible, true, pathA.stderr);
-  assert.deepEqual(pathA.fallback.unsupported_subpaths.map(s => s.specifier), ['@earendil-works/pi-ai/compat']);
+  assert.equal(pathA.status, 0, pathA.stderr);
+  assert.equal(describe(pathA.metadata, 'compat-subpath'), 'stream=function');
   const installed = run([fixture('compat-subpath.ts')], { mode: 'installed', env });
   assert.equal(installed.status, 0, installed.stderr);
   assert.equal(describe(installed.metadata, 'compat-subpath'), 'stream=function');
+});
+
+test('pi-agent-core is fallback-eligible on the emulated path and served by the installed Pi', t => {
+  const env = fakeInstall(t);
+  const pathA = run([fixture('agent-core.ts')], { env });
+  assert.notEqual(pathA.status, 0);
+  assert.equal(pathA.fallback?.fallback_eligible, true, pathA.stderr);
+  assert.deepEqual(pathA.fallback.unsupported_subpaths.map(s => s.specifier), ['@earendil-works/pi-agent-core']);
+  const installed = run([fixture('agent-core.ts')], { mode: 'installed', env });
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.equal(describe(installed.metadata, 'agent-core'), 'agent=function');
 });

@@ -2,7 +2,7 @@ import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { bounded, fields, invalid, plainJSON, rpcError } from './errors.mjs';
 import { colorToHex, parseColor } from './theme-colors.mjs';
 
-// Pi 1.0 theme-json.ts/theme.ts, 581e7ba78141a4d8b61cc9d11b8b22ae7e59195e.
+// Pi 1.0.2 theme-json.ts/theme.ts, cd32f7725fdbddbaecdff5b1e68491563394e0ca.
 // Copyright (c) 2025 Mario Zechner. MIT, see ../LICENSE.pi.
 export const foregroundTokens = Object.freeze([
   'accent', 'border', 'borderAccent', 'borderMuted', 'success', 'error', 'warning', 'muted', 'dim', 'text', 'thinkingText',

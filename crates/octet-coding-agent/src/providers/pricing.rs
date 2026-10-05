@@ -60,9 +60,9 @@ fn openai_pricing(model_id: &str) -> Option<Pricing> {
             (5_000_000, 30_000_000, 500_000, 0),
             Some((10_000_000, 45_000_000, 1_000_000, 0)),
         ),
-        // GPT-5.6 uses OpenAI's published standard costs (Pi 0.84.4
-        // correction); the checked-in models.dev snapshot already agrees
-        // with these rates.
+        // GPT-5.6 Luna matches Pi 1.0.2 and the checked-in models.dev
+        // snapshot. Sol does not: both list 4/20/0.4/5 USD per million
+        // (input/output/cache read/cache write), below the rates held here.
         "gpt-5.6-luna" => (
             (200_000, 1_200_000, 20_000, 250_000),
             Some((400_000, 1_800_000, 40_000, 500_000)),
@@ -286,8 +286,8 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
             0,
             Some((10_000_000, 45_000_000, 1_000_000, 0)),
         ),
-        // GPT-5.6 uses OpenAI's published standard costs, which are well below
-        // the older catalog estimates (Pi 0.84.4 pinned these as authoritative).
+        // GPT-5.6 Luna matches Pi 1.0.2 and the checked-in models.dev
+        // snapshot; Sol is held above both (see the table above).
         "gpt-5.6-luna" => (
             200_000,
             1_200_000,

@@ -286,8 +286,8 @@ The native loader also accepts bounded Pi JSON themes in the same discovery
 roots. It resolves hex colors, ANSI indices, terminal-default empty strings,
 variable references and optional-token fallbacks into native semantic roles.
 Pi `oklch(...)` and `okhsl(...)` colors are converted directly to sRGB using the
-pinned Pi 1.0 implementation (commit
-`581e7ba78141a4d8b61cc9d11b8b22ae7e59195e`), including OKLCH gamut mapping.
+pinned Pi 1.0.2 implementation (commit
+`cd32f7725fdbddbaecdff5b1e68491563394e0ca`), including OKLCH gamut mapping.
 For example, `oklch(62% 0.1 200)` and `okhsl(250 60% 55%)` work directly or
 through variable references, without the Node adapter or a conversion step.
 Malformed colors and out-of-range channels are rejected. Native geometry,

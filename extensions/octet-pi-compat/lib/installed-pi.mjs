@@ -8,7 +8,7 @@
 // unchanged) and fills only names the shims lack from the user's managed Pi
 // install. Real Pi names that would take over Octet-owned side effects are
 // refused, and real names this build has not classified are refused too, so a
-// newer 1.0.x export cannot silently become live. This is a guard against
+// export from another Pi release cannot silently become live. This is a guard against
 // silent takeover, not a sandbox: a trusted factory keeps normal OS authority.
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
@@ -17,15 +17,24 @@ import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { invalid, rpcError } from './errors.mjs';
+import { PI_MODULES, PI_PREFIXES, PI_VERSION, piModule } from './pi-modules.mjs';
 
 export const FALLBACK_ELIGIBLE = -32030;
 export const INSTALLED_PI_UNAVAILABLE = -32031;
-export const SUPPORTED_RANGE = '1.0.x';
-const SUPPORTED = /^1\.0\.(0|[1-9]\d{0,5})$/;
+// octet 0.8.2 is pinned to exactly the Pi release its shims and module table
+// were built from; another installed Pi version is refused, not guessed at.
+export const SUPPORTED_RANGE = PI_VERSION;
+const SUPPORTED = { test: version => version === PI_VERSION };
 const REGISTRY = Symbol.for('octet.pi-compat.installed-pi');
-const PREFIXES = ['@earendil-works', '@mariozechner'];
+const PREFIXES = PI_PREFIXES;
 // shim file key -> real package directory name
 export const PACKAGES = { 'coding-agent': 'pi-coding-agent', ai: 'pi-ai', tui: 'pi-tui' };
+// Pi modules octet does not emulate: the fallback serves the installed files
+// as they are, with the export Pi 1.0.2's loader resolves them to.
+const DIRECT_MODULES = Object.fromEntries(Object.entries(PI_MODULES).filter(([, module]) => !module.shim));
+// The export each emulated package's real namespace is read from (Pi resolves
+// the pi-ai root to its compat entry, a strict superset of the core entry).
+const REAL_EXPORT = { 'coding-agent': '.', ai: './compat', tui: '.' };
 const words = text => text.trim().split(/\s+/);
 
 // Real-only names (absent from the shims) refused in path B, with the seam each
@@ -89,11 +98,9 @@ const REAL_OVERRIDES = {
     createWriteTool createWriteToolDefinition`)),
   ai: new Set(), tui: new Set(),
 };
-// Subpaths loaded wholesale from installed Pi. pi-ai/compat carries the provider
-// building blocks custom providers (registerProvider streamSimple) are built from;
-// those calls are the extension's own provider traffic, which the fallback allows.
-const FALLBACK_SUBPATHS = { ai: ['compat'] };
-const fallbackSubpath = specifier => { const pi = piPackage(specifier); return !!pi?.subpath && (FALLBACK_SUBPATHS[pi.key] ?? []).some(sub => specifier.endsWith(`/${PACKAGES[pi.key]}/${sub}`)); };
+// A Pi specifier the emulated path cannot serve: a module octet does not
+// emulate (agent core, OAuth, provider registry) or an unmapped subpath.
+const fallbackSubpath = specifier => { const pi = piModule(specifier); return !!pi && (pi.unmapped || !pi.shim); };
 const deniedReason = Object.fromEntries(Object.entries(DENIED).map(([pkg, groups]) =>
   [pkg, new Map(groups.flatMap(([names, reason]) => words(names).map(name => [name, reason])))]));
 const allowed = Object.fromEntries(Object.entries(ALLOWED).map(([pkg, names]) => [pkg, new Set(names)]));
@@ -121,31 +128,50 @@ export function locateInstalledPi(env = process.env) {
   if (!SUPPORTED.test(version)) throw unavailable(`installed Pi ${version} is outside the supported range ${SUPPORTED_RANGE}`);
   let releaseDir;
   try { releaseDir = realpathSync(join(agentDir, 'install', 'releases', version)); } catch { throw unavailable(`managed Pi release ${version} is missing under ${join(agentDir, 'install', 'releases')}`); }
-  const packages = {};
-  for (const [key, name] of Object.entries(PACKAGES)) {
+  // Every package the module table names must be the pinned release.
+  const manifests = {};
+  const packageDir = name => {
+    if (manifests[name]) return manifests[name];
     const declared = join(releaseDir, 'node_modules', '@earendil-works', name);
     let dir, pkg;
     try { dir = realpathSync(declared); pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')); }
     catch (error) { throw unavailable(`@earendil-works/${name} is missing or unreadable in Pi ${version} (${error.code || error.message})`); }
     if (!inside(releaseDir, dir)) throw unavailable(`@earendil-works/${name} resolves outside the managed Pi release`);
     if (pkg.name !== `@earendil-works/${name}` || pkg.version !== version) throw unavailable(`@earendil-works/${name} reports ${pkg.name}@${pkg.version}, expected ${version}`);
-    const root = pkg.exports?.['.'] ?? (typeof pkg.exports === 'string' ? pkg.exports : undefined);
-    const relativeEntry = typeof root === 'string' ? root : root?.import ?? root?.default ?? pkg.main ?? 'index.js';
-    const entry = resolve(dir, relativeEntry);
-    try { if (!inside(dir, realpathSync(entry)) || !statSync(entry).isFile()) throw new Error('not a file inside the package'); }
-    catch (error) { throw unavailable(`@earendil-works/${name} entry ${relativeEntry} is invalid (${error.code || error.message})`); }
-    const subpaths = {};
-    for (const sub of FALLBACK_SUBPATHS[key] ?? []) {
-      const target = pkg.exports?.[`./${sub}`];
-      if (target === undefined) continue; // not exported by this install: stays unresolvable
-      const file = resolve(dir, typeof target === 'string' ? target : target?.import ?? target?.default ?? '');
-      try { if (!inside(dir, realpathSync(file)) || !statSync(file).isFile()) throw new Error('not a file inside the package'); }
-      catch (error) { throw unavailable(`@earendil-works/${name}/${sub} is invalid (${error.code || error.message})`); }
-      subpaths[sub] = file;
+    return (manifests[name] = { dir, pkg });
+  };
+  const exportFile = (name, exportKey) => {
+    const { dir, pkg } = packageDir(name);
+    const pickTarget = target => typeof target === 'string' ? target : target?.import ?? target?.default;
+    let relativeEntry;
+    if (exportKey === '.') relativeEntry = pickTarget(pkg.exports?.['.'] ?? (typeof pkg.exports === 'string' ? pkg.exports : undefined)) ?? pkg.main ?? 'index.js';
+    else if (pkg.exports && Object.hasOwn(pkg.exports, exportKey)) relativeEntry = pickTarget(pkg.exports[exportKey]);
+    else {
+      // Subpath patterns, as Node resolves them ("./providers/*").
+      for (const [pattern, target] of Object.entries(pkg.exports ?? {})) {
+        const star = pattern.indexOf('*');
+        if (star < 0) continue;
+        const [head, tail] = [pattern.slice(0, star), pattern.slice(star + 1)];
+        if (!exportKey.startsWith(head) || !exportKey.endsWith(tail) || exportKey.length < pattern.length - 1) continue;
+        const match = exportKey.slice(head.length, exportKey.length - tail.length);
+        relativeEntry = pickTarget(target)?.replaceAll('*', match);
+        break;
+      }
     }
-    packages[key] = { name: `@earendil-works/${name}`, dir, entry, version: pkg.version, subpaths };
+    if (!relativeEntry) throw unavailable(`@earendil-works/${name} does not export ${exportKey} in Pi ${version}`);
+    const file = resolve(dir, relativeEntry);
+    try { if (!inside(dir, realpathSync(file)) || !statSync(file).isFile()) throw new Error('not a file inside the package'); }
+    catch (error) { throw unavailable(`@earendil-works/${name} export ${exportKey} (${relativeEntry}) is invalid (${error.code || error.message})`); }
+    return file;
+  };
+  const packages = {};
+  for (const [key, name] of Object.entries(PACKAGES)) {
+    packages[key] = { name: `@earendil-works/${name}`, dir: packageDir(name).dir, entry: exportFile(name, REAL_EXPORT[key]), version };
   }
-  return { agentDir, version, releaseDir, packages };
+  // Modules without a shim resolve to the installed files directly.
+  const direct = {};
+  for (const [specifier, module] of Object.entries(DIRECT_MODULES)) direct[specifier] = exportFile(module.pkg, module.exportKey);
+  return { agentDir, version, releaseDir, packages, direct };
 }
 
 function refusal(pkg, name, reason) {
@@ -158,9 +184,10 @@ function refusal(pkg, name, reason) {
 export function installedPiAliases(env = process.env) {
   const install = locateInstalledPi(env);
   const aliases = {};
-  for (const prefix of PREFIXES) for (const [key, name] of Object.entries(PACKAGES)) {
-    aliases[`${prefix}/${name}`] = overlayPath(key);
-    for (const [sub, file] of Object.entries(install.packages[key].subpaths)) aliases[`${prefix}/${name}/${sub}`] = file;
+  for (const prefix of PREFIXES) {
+    for (const [specifier, module] of Object.entries(PI_MODULES)) {
+      aliases[`${prefix}/${specifier}`] = module.shim ? overlayPath(module.shim) : install.direct[specifier];
+    }
   }
   return { aliases, install };
 }
@@ -199,13 +226,12 @@ export async function activateInstalledPi(jiti, install) {
 // ---- path A failure classification ---------------------------------------
 const SOURCE_EXTENSIONS = ['.ts', '.mts', '.cts', '.tsx', '.js', '.mjs', '.cjs', '.jsx'];
 const MAX_FILES = 64, MAX_BYTES = 1048576, MAX_REPORTED = 32;
+// An emulated module's named imports are checked against its shim; a module
+// octet does not emulate (or an unmapped subpath) is reported as a whole.
 const piPackage = specifier => {
-  for (const prefix of PREFIXES) for (const [key, name] of Object.entries(PACKAGES)) {
-    const base = `${prefix}/${name}`;
-    if (specifier === base) return { key, subpath: false };
-    if (specifier.startsWith(`${base}/`)) return { key, subpath: true };
-  }
-  return null;
+  const pi = piModule(specifier);
+  if (!pi) return null;
+  return pi.shim && !pi.unmapped ? { key: pi.shim, subpath: false } : { key: null, subpath: true };
 };
 function resolveRelative(from, specifier) {
   const base = resolve(dirname(from), specifier);

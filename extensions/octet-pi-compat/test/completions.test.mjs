@@ -214,7 +214,7 @@ test('completion factories require negotiation and configure retains callback de
 });
 
 const original = process.env.PI_COMMANDS_PATH;
-test('unchanged pinned Pi 1.0 commands example loads and its actual completion callback executes', {
+test('unchanged pinned Pi 1.0.2 commands example loads and its actual completion callback executes', {
   skip: !original && 'set PI_COMMANDS_PATH to the reviewed pinned commands.ts example',
 }, async t => {
   assert.equal(createHash('sha256').update(await readFile(original)).digest('hex'), '36716b53da169936c7e1360a4fde1e2fc0c3356a6505f177235f09c5538c6e4f');
@@ -224,11 +224,11 @@ test('unchanged pinned Pi 1.0 commands example loads and its actual completion c
 });
 
 const repo = process.env.PI_REFERENCE_REPO;
-test('source-extracted Pi 1.0 parser and exact quote/cursor examples match, independent of selected TUI 0.85', {
+test('source-extracted Pi 1.0.2 parser and exact quote/cursor examples match, independent of the pinned TUI', {
   skip: !repo && 'set PI_REFERENCE_REPO to the local reviewed Pi reference checkout',
 }, async () => {
   function source(path, hash) {
-    const value = execFileSync('git', ['-C', repo, 'show', `581e7ba78141a4d8b61cc9d11b8b22ae7e59195e:packages/tui/src/${path}.ts`], { encoding: 'utf8', timeout: 10000 });
+    const value = execFileSync('git', ['-C', repo, 'show', `cd32f7725fdbddbaecdff5b1e68491563394e0ca:packages/tui/src/${path}.ts`], { encoding: 'utf8', timeout: 10000 });
     assert.equal(createHash('sha256').update(value).digest('hex'), hash); return value;
   }
   const autocomplete = source('autocomplete', '7391902f35b60c3467ceb5eccc86e0954a388ea1012455c1a7ea8f7325de773b');

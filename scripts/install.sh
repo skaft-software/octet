@@ -478,7 +478,7 @@ crates/sexy-tui-rs/README.md
 crates/sexy-tui-rs/VENDORED.md
 crates/sexy-tui-rs/docs/octet-integration.md
 crates/sexy-tui-rs/docs/rich-rendering.md
-crates/sexy-tui-rs/upstream/pi-tui-0.84.4.json
+crates/sexy-tui-rs/upstream/pi-tui-1.0.2.json
 evaluation/harbor/README.md
 evaluation/harbor/config.py
 evaluation/harbor/requirements.txt

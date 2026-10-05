@@ -282,10 +282,10 @@ test('resources: configured core factory needs no resource consumer and uncaptur
 });
 
 const repo = process.env.PI_REFERENCE_REPO;
-test('resources: normalization matches source-extracted, hash-verified Pi 1.0 resolvePath with resource trim semantics', {
+test('resources: normalization matches source-extracted, hash-verified Pi 1.0.2 resolvePath with resource trim semantics', {
   skip: !repo && 'set PI_REFERENCE_REPO to the local reviewed Pi reference checkout',
 }, async () => {
-  const source = path => execFileSync('git', ['-C', repo, 'show', `581e7ba78141a4d8b61cc9d11b8b22ae7e59195e:packages/coding-agent/src/${path}`], { encoding: 'utf8', timeout: 10000 });
+  const source = path => execFileSync('git', ['-C', repo, 'show', `cd32f7725fdbddbaecdff5b1e68491563394e0ca:packages/coding-agent/src/${path}`], { encoding: 'utf8', timeout: 10000 });
   const paths = source('utils/paths.ts');
   assert.equal(createHash('sha256').update(paths).digest('hex'), '64c3ebef724fa21ed0042e127908b4323a5d2f1b8aaa91eee550442332fe8502');
   const loader = source('core/resource-loader.ts');

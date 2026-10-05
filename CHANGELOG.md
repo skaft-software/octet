@@ -16,6 +16,16 @@
   it. The bundled computer-use extension covers desktop and signed-in browser
   sessions; authenticated page work drives the user's own browser instead of an
   Octet-owned Chromium profile.
+- Pin Pi compatibility to exactly Pi 1.0.2. The optional adapter ships the
+  dependency versions Pi 1.0.2 ships (jiti 2.7.0, TypeBox 1.3.27, pi-tui
+  1.0.2) and resolves imports through Pi 1.0.2's module table:
+  `@sinclair/typebox` maps onto TypeBox 1.x, `pi-ai/compat` shares the `pi-ai`
+  root, and TypeBox and Pi subpath imports such as `typebox/value` resolve
+  instead of failing. `pi-agent-core`, `pi-ai/oauth` and `pi-ai/providers/all`
+  come from the installed Pi 1.0.2, and the installed-Pi fallback accepts only
+  1.0.2. jiti keeps its transpile cache, as in Pi. `octet migrate pi`, the Pi
+  provider inventory (42 providers, eight newly matched to existing octet
+  routes) and the pi-tui parity tracker now describe Pi 1.0.2.
 - Pi extension compatibility fixes. Pi tool images now work on the real host:
   the adapter read the `artifact/publish` acknowledgement as `id`, but the host
   returns `artifact_id`, so every published image (tool results, partial
@@ -30,7 +40,7 @@
   (63 before); see `docs/pi-extension-api.md` for the failures and deferrals.
 - Experimental, opt-in installed-Pi fallback for `octet-pi-compat`
   (`--pi-runtime installed` or bridge `"pi_runtime": "installed"`). Imports the
-  shims lack resolve to the user's managed Pi 1.0.x install; Pi's built-in tool
+  shims lack resolve to the user's managed Pi 1.0.2 install; Pi's built-in tool
   factories run inside the extension process, outside Octet's per-command tool
   policy. Side-effecting Pi runtimes (sessions, provider calls, credentials,
   config writes, MCP) stay refused. Path A failures that need it report
