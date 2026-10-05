@@ -417,10 +417,26 @@ pub(super) fn dispatch_composition_request(
                 CompositionOperation::Context => {
                     service.context().await.map(CompositionResult::Context)
                 }
-                CompositionOperation::Call { name, arguments, full_outcome, updates: _ } => {
-                    if full_outcome { service.call_outcome_with_updates(name, arguments, cancellation.clone(), wants_updates.then_some(update_tx)).await }
-                    else { service.call(name, arguments, cancellation.clone()).await }
-                }.map(CompositionResult::Call),
+                CompositionOperation::Call {
+                    name,
+                    arguments,
+                    full_outcome,
+                    updates: _,
+                } => {
+                    if full_outcome {
+                        service
+                            .call_outcome_with_updates(
+                                name,
+                                arguments,
+                                cancellation.clone(),
+                                wants_updates.then_some(update_tx),
+                            )
+                            .await
+                    } else {
+                        service.call(name, arguments, cancellation.clone()).await
+                    }
+                }
+                .map(CompositionResult::Call),
                 CompositionOperation::Store { set, delete } => service
                     .store(set, delete)
                     .await
@@ -466,14 +482,28 @@ pub(super) fn dispatch_composition_request(
             }
         };
         while let Ok(update) = update_rx.try_recv() {
-            if !parent.is_live() || cancellation.is_cancelled() || response_state.state.load(Ordering::Acquire) != CHILD_ACTIVE { return; }
+            if !parent.is_live()
+                || cancellation.is_cancelled()
+                || response_state.state.load(Ordering::Acquire) != CHILD_ACTIVE
+            {
+                return;
+            }
             sequence += 1;
-            if let Err(message) = queue_composition_update(&writer, max_message_bytes, &id, sequence, update) {
+            if let Err(message) =
+                queue_composition_update(&writer, max_message_bytes, &id, sequence, update)
+            {
                 // Report the bounded transport refusal on the actual reverse call;
                 // dropping its scope cancels execution, not an invented tool result.
-                let delivery = try_queue_child_response(&children, &id, &writer,
-                    max_message_bytes, composition_error(&id, -32602, message));
-                if delivery.is_err() { settle_child_request(&children, &id); }
+                let delivery = try_queue_child_response(
+                    &children,
+                    &id,
+                    &writer,
+                    max_message_bytes,
+                    composition_error(&id, -32602, message),
+                );
+                if delivery.is_err() {
+                    settle_child_request(&children, &id);
+                }
                 return;
             }
         }
@@ -535,8 +565,13 @@ pub(super) fn dispatch_composition_request(
     Ok(())
 }
 
-fn queue_composition_update(writer: &mpsc::Sender<WriterFrame>, max_message_bytes: usize,
-    id: &ExtensionRequestId, sequence: u64, result: serde_json::Value) -> Result<(), String> {
+fn queue_composition_update(
+    writer: &mpsc::Sender<WriterFrame>,
+    max_message_bytes: usize,
+    id: &ExtensionRequestId,
+    sequence: u64,
+    result: serde_json::Value,
+) -> Result<(), String> {
     let value = serde_json::json!({"jsonrpc":"2.0","method":"composition/update",
         "params":{"request_id":id,"sequence":sequence,"result":result}});
     let line = serde_json::to_vec(&value).map_err(|error| error.to_string())?;

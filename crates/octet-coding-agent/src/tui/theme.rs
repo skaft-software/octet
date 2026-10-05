@@ -1487,7 +1487,8 @@ fn load_theme_path_for(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let source_text = read_theme_file_bounded(path)?;
-    let source_text = crate::extensions::resource_paths::pi_theme::native_source(path, &source_text)?;
+    let source_text =
+        crate::extensions::resource_paths::pi_theme::native_source(path, &source_text)?;
     let fallback_name = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1520,7 +1521,8 @@ fn load_resolved_theme_for(
     capabilities: TerminalCapabilities,
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
-    let source_text = crate::extensions::resource_paths::pi_theme::native_source(path, source_text)?;
+    let source_text =
+        crate::extensions::resource_paths::pi_theme::native_source(path, source_text)?;
     let fallback_name = path
         .file_stem()
         .and_then(|name| name.to_str())

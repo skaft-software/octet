@@ -149,22 +149,37 @@ impl ExtensionRemoteUiChrome {
     fn validate(&self) -> ValidationResult {
         match self {
             Self::Title { title } => {
-                validate_remote_ui_line(title).map_err(|detail| (ExtensionRequestFailure::InvalidRequest, detail))?;
+                validate_remote_ui_line(title)
+                    .map_err(|detail| (ExtensionRequestFailure::InvalidRequest, detail))?;
                 validate_text("terminal title", title, 1024, true)
-            },
+            }
             Self::WorkingMessage { message } | Self::HiddenThinking { label: message } => {
-                if let Some(text) = message { validate_text("chrome text", text, 4096, true)?; }
+                if let Some(text) = message {
+                    validate_text("chrome text", text, 4096, true)?;
+                }
                 Ok(())
             }
-            Self::WorkingIndicator { frames, interval_ms } => {
-                if interval_ms.is_some_and(|value| value > MAX_EXTENSION_REMOTE_UI_REVISION) { return Err(bounds("indicator interval exceeds portable integer")); }
+            Self::WorkingIndicator {
+                frames,
+                interval_ms,
+            } => {
+                if interval_ms.is_some_and(|value| value > MAX_EXTENSION_REMOTE_UI_REVISION) {
+                    return Err(bounds("indicator interval exceeds portable integer"));
+                }
                 if let Some(frames) = frames {
-                    if frames.len() > MAX_EXTENSION_REMOTE_UI_LINES { return Err(bounds("too many indicator frames")); }
+                    if frames.len() > MAX_EXTENSION_REMOTE_UI_LINES {
+                        return Err(bounds("too many indicator frames"));
+                    }
                     let mut bytes = 0;
                     for frame in frames {
                         bytes += frame.len();
-                        if frame.len() > MAX_EXTENSION_REMOTE_UI_LINE_BYTES || bytes > MAX_EXTENSION_REMOTE_UI_FRAME_BYTES { return Err(bounds("indicator frames exceed frame bounds")); }
-                        validate_remote_ui_line(frame).map_err(|detail| (ExtensionRequestFailure::InvalidRequest, detail))?;
+                        if frame.len() > MAX_EXTENSION_REMOTE_UI_LINE_BYTES
+                            || bytes > MAX_EXTENSION_REMOTE_UI_FRAME_BYTES
+                        {
+                            return Err(bounds("indicator frames exceed frame bounds"));
+                        }
+                        validate_remote_ui_line(frame)
+                            .map_err(|detail| (ExtensionRequestFailure::InvalidRequest, detail))?;
                     }
                 }
                 Ok(())
@@ -711,7 +726,7 @@ impl RemoteUiMailbox {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         match &operation {
-            ExtensionRemoteUiOperation::Chrome { .. } => {},
+            ExtensionRemoteUiOperation::Chrome { .. } => {}
             ExtensionRemoteUiOperation::Open {
                 surface_id,
                 mouse_capture,

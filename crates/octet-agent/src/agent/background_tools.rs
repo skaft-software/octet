@@ -197,7 +197,10 @@ impl BackgroundTools {
             .completed
             .expect("joined background result");
         resolve_tool_delivery_after_persistence(&execution.result, sandbox.max_output_bytes);
-        if let Some(usage) = resolved_tool_output(&execution.result).and_then(ToolOutput::usage).copied() {
+        if let Some(usage) = resolved_tool_output(&execution.result)
+            .and_then(ToolOutput::usage)
+            .copied()
+        {
             session.record_tool_composition_usage(call.id.0.clone(), usage)?;
         }
         if let Some(evidence) = evidence {

@@ -14,7 +14,11 @@ pub struct ExtensionInput {
 enum InputEventResult {
     Continue,
     Handled,
-    Transform { text: String, #[serde(default)] images: Option<Vec<octet_ai::Media>> },
+    Transform {
+        text: String,
+        #[serde(default)]
+        images: Option<Vec<octet_ai::Media>>,
+    },
 }
 
 impl ExecutableExtensions {
@@ -27,29 +31,60 @@ impl ExecutableExtensions {
         source: &str,
         streaming_behavior: Option<&str>,
     ) -> anyhow::Result<Option<ExtensionInput>> {
-        anyhow::ensure!(["interactive", "rpc", "extension"].contains(&source), "invalid input source");
-        anyhow::ensure!(streaming_behavior.is_none_or(|value| ["steer", "followUp"].contains(&value)), "invalid input delivery");
-        let mut input = ExtensionInput { text, images, transformed: false };
+        anyhow::ensure!(
+            ["interactive", "rpc", "extension"].contains(&source),
+            "invalid input source"
+        );
+        anyhow::ensure!(
+            streaming_behavior.is_none_or(|value| ["steer", "followUp"].contains(&value)),
+            "invalid input delivery"
+        );
+        let mut input = ExtensionInput {
+            text,
+            images,
+            transformed: false,
+        };
         for process in &self.processes {
             if !process.supports_feature("input_transform_v1")
-                || !process.contributions().hooks.contains(&ExtensionHook::BeforePrompt) {
+                || !process
+                    .contributions()
+                    .hooks
+                    .contains(&ExtensionHook::BeforePrompt)
+            {
                 continue;
             }
-            let output = tokio::time::timeout(PROMPT_RPC_DEADLINE, process.run_hook(
-                ExtensionHook::BeforePrompt,
-                serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
+            let output = tokio::time::timeout(
+                PROMPT_RPC_DEADLINE,
+                process.run_hook(
+                    ExtensionHook::BeforePrompt,
+                    serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
                     "source":source, "streaming_behavior":streaming_behavior}),
-                extension_execution_context(process, self.resource_owner.as_deref()),
-            )).await.map_err(|_| anyhow::anyhow!("extension input hook timed out"))??;
-            anyhow::ensure!(output.disposition == ExtensionHookDisposition::Continue, "extension input hook refused input");
-            let result = output.input_event.map(serde_json::from_value::<InputEventResult>).transpose()?;
+                    extension_execution_context(process, self.resource_owner.as_deref()),
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("extension input hook timed out"))??;
+            anyhow::ensure!(
+                output.disposition == ExtensionHookDisposition::Continue,
+                "extension input hook refused input"
+            );
+            let result = output
+                .input_event
+                .map(serde_json::from_value::<InputEventResult>)
+                .transpose()?;
             match result.unwrap_or(InputEventResult::Continue) {
                 InputEventResult::Continue => {}
                 InputEventResult::Handled => return Ok(None),
                 InputEventResult::Transform { text, images } => {
-                    anyhow::ensure!(text.len() <= 262144 && !text.contains('\0'), "transformed input exceeds bounds");
+                    anyhow::ensure!(
+                        text.len() <= 262144 && !text.contains('\0'),
+                        "transformed input exceeds bounds"
+                    );
                     if let Some(images) = images {
-                        anyhow::ensure!(images.len() <= 256, "transformed input image count exceeds bounds");
+                        anyhow::ensure!(
+                            images.len() <= 256,
+                            "transformed input image count exceeds bounds"
+                        );
                         input.images = Some(images);
                     }
                     input.text = text;
@@ -146,7 +181,10 @@ impl ExecutableExtensions {
     }
 
     pub fn transition_active_session_with_setup(
-        &mut self, session: &Session, model: &Model, reasoning: &ReasoningConfig,
+        &mut self,
+        session: &Session,
+        model: &Model,
+        reasoning: &ReasoningConfig,
         sessions: &SessionStore,
         setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
     ) {
@@ -200,16 +238,29 @@ impl ExecutableExtensions {
             view.resource_owner.is_none() || view.resource_owner.as_deref() == active_owner
         });
         self.refresh_host_state(session, model, reasoning, sessions);
-        if self.pending_session_setup.is_none() { self.start_session_lifecycle(); }
+        if self.pending_session_setup.is_none() {
+            self.start_session_lifecycle();
+        }
         // The session changed in place, so requests admitted against the old
         // snapshot must not run against this replacement.
         self.activate_session_lifecycle_driver();
     }
 
     /// Validate every setup mutation against its original parent and live owner.
-    pub fn session_setup_is_current(&self, parent: u64, owner: &octet_agent::extension_process::ExtensionResourceOwner) -> bool {
-        self.resource_owner.as_deref() == Some(owner.session_id.as_str()) && self.pending_session_setup.as_ref().is_some_and(|(id, admitted)|
-            *id == parent && admitted.extension_instance_id == owner.extension_instance_id && admitted.process_generation == owner.process_generation)
+    pub fn session_setup_is_current(
+        &self,
+        parent: u64,
+        owner: &octet_agent::extension_process::ExtensionResourceOwner,
+    ) -> bool {
+        self.resource_owner.as_deref() == Some(owner.session_id.as_str())
+            && self
+                .pending_session_setup
+                .as_ref()
+                .is_some_and(|(id, admitted)| {
+                    *id == parent
+                        && admitted.extension_instance_id == owner.extension_instance_id
+                        && admitted.process_generation == owner.process_generation
+                })
     }
 
     /// Start only after setup writes are complete; return the exact process
@@ -235,7 +286,8 @@ impl ExecutableExtensions {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let unchanged = initial.model.as_deref() == Some(&model.spec.id.0)
             && initial.model_view == extension_model_view(model)
-            && initial.reasoning == pi_thinking_level(model, reasoning).map(serde_json::Value::String);
+            && initial.reasoning
+                == pi_thinking_level(model, reasoning).map(serde_json::Value::String);
         drop(initial);
         if !unchanged {
             self.refresh_host_state(session, model, reasoning, sessions);

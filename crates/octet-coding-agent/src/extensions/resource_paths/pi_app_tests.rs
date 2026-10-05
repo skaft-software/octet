@@ -207,10 +207,22 @@ fn configured_pi(root: &Path, fail_start: bool) -> ConfiguredPi {
     assert_eq!(
         registrations["registrations"]["hooks"],
         json!([
-            "after_response", "after_tool_call", "before_prompt", "before_tool_call", "model_turn_end",
-            "model_turn_start", "provider_context", "resources_discover", "session_before_compact",
-            "session_before_fork", "session_before_switch", "session_before_tree", "session_compact",
-            "session_end", "session_start", "session_tree"
+            "after_response",
+            "after_tool_call",
+            "before_prompt",
+            "before_tool_call",
+            "model_turn_end",
+            "model_turn_start",
+            "provider_context",
+            "resources_discover",
+            "session_before_compact",
+            "session_before_fork",
+            "session_before_switch",
+            "session_before_tree",
+            "session_compact",
+            "session_end",
+            "session_start",
+            "session_tree"
         ])
     );
     assert_eq!(

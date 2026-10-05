@@ -327,12 +327,10 @@ commands = ["idle-proof"]
                     fork.entry(&original_entry).is_some(),
                     "fork copied the actual durable head"
                 );
-                assert!(
-                    Session::open_read_only(&original_path)
-                        .unwrap()
-                        .entry(&original_entry)
-                        .is_some()
-                );
+                assert!(Session::open_read_only(&original_path)
+                    .unwrap()
+                    .entry(&original_entry)
+                    .is_some());
                 assert_ne!(
                     shell.extension_editor_snapshot().text,
                     "must not reach replacement"
@@ -361,11 +359,10 @@ commands = ["idle-proof"]
         );
         app.executable_extensions
             .commit_prompt_context(composed.pending_context_count);
-        assert!(
-            app.executable_extensions
-                .next_session_lifecycle_request()
-                .is_none()
-        );
+        assert!(app
+            .executable_extensions
+            .next_session_lifecycle_request()
+            .is_none());
     }
     app.executable_extensions.shutdown().await;
 }

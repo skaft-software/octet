@@ -4111,7 +4111,9 @@ impl InteractiveShell {
                 let delivered = messages.len().min(state.steering_queue.len());
                 Arc::make_mut(&mut state.steering_queue).drain(..delivered);
                 for display in steering_displays.expect("steering event projected above") {
-                    if display.is_empty() { continue; }
+                    if display.is_empty() {
+                        continue;
+                    }
                     state.push_block(TranscriptBlock::User {
                         text: display,
                         model_lab,
@@ -4126,7 +4128,9 @@ impl InteractiveShell {
                 let model_lab = state.executing_model_lab();
                 let prompt_color = state.executing_prompt_color();
                 for message in messages {
-                    if message.is_empty() { continue; }
+                    if message.is_empty() {
+                        continue;
+                    }
                     state.push_block(TranscriptBlock::User {
                         text: message.clone(),
                         model_lab,
@@ -4572,7 +4576,9 @@ impl InteractiveShell {
         }
         if composed.parts.is_empty() && !composed.custom_messages.is_empty() {
             for custom in &composed.custom_messages {
-                if custom.display { self.notice(format!("[{}]\n{}", custom.custom_type, custom.text())); }
+                if custom.display {
+                    self.notice(format!("[{}]\n{}", custom.custom_type, custom.text()));
+                }
             }
         } else {
             let prompt_color = self.state.borrow().prompt_color.clone();
@@ -4645,7 +4651,10 @@ impl InteractiveShell {
 
     /// Queue an extension message for the run or idle loop to deliver.
     pub fn queue_extension_message(&mut self, message: PendingExtensionMessage) {
-        self.state.borrow_mut().extension_messages.push_back(message);
+        self.state
+            .borrow_mut()
+            .extension_messages
+            .push_back(message);
     }
 
     pub fn take_extension_messages(&mut self) -> Vec<PendingExtensionMessage> {
@@ -5462,7 +5471,8 @@ impl InteractiveShell {
                 && state.extension_ui.remote.components != projection.components);
         let chrome = projection.chrome.as_ref();
         state.extension_ui.working = chrome.map(|chrome| chrome.working.clone());
-        state.extension_ui.hidden_thinking_label = chrome.and_then(|chrome| chrome.hidden_thinking_label.clone());
+        state.extension_ui.hidden_thinking_label =
+            chrome.and_then(|chrome| chrome.hidden_thinking_label.clone());
         state.extension_ui.remote = projection;
         state.sync_extension_reasoning();
         let fullscreen = state.extension_ui.remote.mount(Placement::Fullscreen);

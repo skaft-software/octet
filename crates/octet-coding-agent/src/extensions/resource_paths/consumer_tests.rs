@@ -188,28 +188,63 @@ async fn actual_app_publishes_pi_json_theme_and_withdraws_after_empty_reply() {
     let original = app.original_resource_config();
     let theme_path = root.join("pi-themes/consumer-proof.json");
     std::fs::create_dir_all(theme_path.parent().unwrap()).unwrap();
-    std::fs::write(&theme_path, pi_theme::fixture("Published Pi", "#2468ac").to_string()).unwrap();
-    std::fs::write(root.join("reply.json"), serde_json::json!({
-        "skill_paths": [root.join("skills")],
-        "prompt_paths": [root.join("prompts")],
-        "theme_paths": [theme_path],
-    }).to_string()).unwrap();
-    let lease = app.executable_extensions.resource_session_starts().unwrap().await.unwrap();
-    let (loaded, lease) = app.prepare_resource_paths(crate::tui::theme::TerminalBackground::Dark, lease).unwrap().await.unwrap();
+    std::fs::write(
+        &theme_path,
+        pi_theme::fixture("Published Pi", "#2468ac").to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("reply.json"),
+        serde_json::json!({
+            "skill_paths": [root.join("skills")],
+            "prompt_paths": [root.join("prompts")],
+            "theme_paths": [theme_path],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let lease = app
+        .executable_extensions
+        .resource_session_starts()
+        .unwrap()
+        .await
+        .unwrap();
+    let (loaded, lease) = app
+        .prepare_resource_paths(crate::tui::theme::TerminalBackground::Dark, lease)
+        .unwrap()
+        .await
+        .unwrap();
     let (theme, diagnostics) = app.apply_extension_resource_paths(loaded, lease).unwrap();
     assert_eq!(theme.source_path(), Some(theme_path.as_path()));
     assert_eq!(theme.metadata().name, "Published Pi");
-    assert_eq!(theme.resolve::<String>("accent").as_deref(), Some("#2468ac"));
-    assert!(!diagnostics.iter().any(|message| message.contains("theme failed")));
+    assert_eq!(
+        theme.resolve::<String>("accent").as_deref(),
+        Some("#2468ac")
+    );
+    assert!(!diagnostics
+        .iter()
+        .any(|message| message.contains("theme failed")));
     assert!(app.prompts.contains("consumer-proof"));
     assert!(app.system.contains("CATALOG-SENTINEL"));
-    assert_eq!(crate::tui::theme::load_theme(&app.config).source_path(), Some(theme_path.as_path()));
+    assert_eq!(
+        crate::tui::theme::load_theme(&app.config).source_path(),
+        Some(theme_path.as_path())
+    );
     let old_prompts = app.prompts.clone();
     let old_skills = app.skills.clone();
     std::fs::write(root.join("reply.json"), "{}").unwrap();
     app.mark_resource_paths_reload();
-    let lease = app.executable_extensions.resource_session_starts().unwrap().await.unwrap();
-    let (loaded, lease) = app.prepare_resource_paths(crate::tui::theme::TerminalBackground::Dark, lease).unwrap().await.unwrap();
+    let lease = app
+        .executable_extensions
+        .resource_session_starts()
+        .unwrap()
+        .await
+        .unwrap();
+    let (loaded, lease) = app
+        .prepare_resource_paths(crate::tui::theme::TerminalBackground::Dark, lease)
+        .unwrap()
+        .await
+        .unwrap();
     let (theme, _) = app.apply_extension_resource_paths(loaded, lease).unwrap();
     assert!(theme.source_path().is_none());
     assert_eq!(app.config.theme_paths, original.theme_paths);
@@ -218,7 +253,9 @@ async fn actual_app_publishes_pi_json_theme_and_withdraws_after_empty_reply() {
     assert!(old_prompts.descriptors().is_empty());
     assert!(old_skills.descriptors().is_empty());
     assert!(!app.system.contains("CATALOG-SENTINEL"));
-    assert!(crate::tui::theme::load_theme(&app.config).source_path().is_none());
+    assert!(crate::tui::theme::load_theme(&app.config)
+        .source_path()
+        .is_none());
     assert!(!app.resource_paths_pending());
     process.shutdown().await;
     // An empty responder is still leased: retirement invalidates the baseline.
@@ -589,11 +626,12 @@ pub(crate) fn configured_app(root: &Path, authorized: bool, start_processes: boo
     std::fs::write(root.join("reply.json"), serde_json::to_vec(&serde_json::json!({
         "skill_paths": [root.join("skills")], "prompt_paths": [root.join("prompts")], "theme_paths": [root.join("themes")],
     })).unwrap()).unwrap();
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(if root.join("reverse-requests").exists() {
-        "src/extensions/resource_paths/fixture.py"
-    } else {
-        "src/extensions/resource_paths/consumer_fixture.py"
-    });
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(if root.join("reverse-requests").exists() {
+            "src/extensions/resource_paths/fixture.py"
+        } else {
+            "src/extensions/resource_paths/consumer_fixture.py"
+        });
     std::fs::write(
         bundle.join("extension.toml"),
         format!(
@@ -693,21 +731,36 @@ async fn mode_does_not_authorize_discovery_and_process_denial_stays_authoritativ
     }
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headless_resource_phase_answers_reverse_requests_with_real_refusals() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     std::fs::write(root.join("reverse-requests"), "headless").unwrap();
     let mut app = configured_app(&root, true, true);
-    tokio::time::timeout(Duration::from_secs(10), app.refresh_resource_paths_headless())
-        .await.unwrap().unwrap();
-    assert!(app.prompts.contains("consumer-proof"), "a refusal must let the peer finish, not timeout and withdraw");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        app.refresh_resource_paths_headless(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        app.prompts.contains("consumer-proof"),
+        "a refusal must let the peer finish, not timeout and withdraw"
+    );
     let replies = std::fs::read_to_string(root.join("reverse-replies.jsonl")).unwrap();
-    let replies = replies.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>();
+    let replies = replies
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(replies.len(), 2);
     assert_eq!(replies[0]["hook"], "session_start");
     assert_eq!(replies[1]["hook"], "resources_discover");
-    assert!(replies.iter().all(|reply| reply["reply"]["error"]["message"].as_str().unwrap().contains("no foreground session")));
+    assert!(replies
+        .iter()
+        .all(|reply| reply["reply"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no foreground session")));
     app.executable_extensions.shutdown().await;
 }

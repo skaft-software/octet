@@ -198,15 +198,16 @@ impl App {
             },
             Err(error) => Err(error),
         };
-        let (_, diagnostics) = match candidate.and_then(|(loaded, lease)| {
-            self.apply_extension_resource_paths(loaded, lease)
-        }) {
+        let (_, diagnostics) = match candidate
+            .and_then(|(loaded, lease)| self.apply_extension_resource_paths(loaded, lease))
+        {
             Ok(published) => published,
             Err(error) => {
                 // One baseline fallback for either phase failure or retirement
                 // between loading and publication. Never retry the fallback.
                 let work = self.prepare_resource_withdrawal(TerminalBackground::Unknown, error)?;
-                let (baseline, lease) = headless_work(&mut self.executable_extensions, work).await??;
+                let (baseline, lease) =
+                    headless_work(&mut self.executable_extensions, work).await??;
                 self.apply_extension_resource_paths(baseline, lease)?
             }
         };

@@ -110,7 +110,12 @@ impl ExtensionProcess {
         result: &Result<ExtensionSessionCompactionResult, String>,
         cancellation: CancellationToken,
     ) -> Result<(), String> {
-        if self.current_context_for_resource_owner(session.resource_owner_key()).resource_owner.as_ref() != Some(owner) {
+        if self
+            .current_context_for_resource_owner(session.resource_owner_key())
+            .resource_owner
+            .as_ref()
+            != Some(owner)
+        {
             return Err("compaction callback owner retired".into());
         }
         let epoch = NEXT_SESSION_OPERATION.fetch_add(1, Ordering::Relaxed);
@@ -122,16 +127,25 @@ impl ExtensionProcess {
         };
         let (consumer, producer, grant) = SessionLeafConsumer::new(session, binding.clone())
             .map_err(|_| "compaction callback consumer refused")?;
-        let lease = self.bind_session_leaf(producer, consumer.revoker(), grant)
+        let lease = self
+            .bind_session_leaf(producer, consumer.revoker(), grant)
             .and_then(|lease| lease.with_session_snapshot(session))
             .map_err(|_| "compaction callback binding refused")?;
         let payload = match result {
-            Ok(result) => serde_json::json!({"kind":"compaction_callback", "parent_request_id":parent_request_id, "result":result}),
-            Err(error) => serde_json::json!({"kind":"compaction_callback", "parent_request_id":parent_request_id, "error":error}),
+            Ok(result) => {
+                serde_json::json!({"kind":"compaction_callback", "parent_request_id":parent_request_id, "result":result})
+            }
+            Err(error) => {
+                serde_json::json!({"kind":"compaction_callback", "parent_request_id":parent_request_id, "error":error})
+            }
         };
         let mut invocation = ProcessSessionOperation {
-            process: self.clone(), consumer, binding, hook: ExtensionHook::SessionCompact,
-            payload, lease: Some(lease),
+            process: self.clone(),
+            consumer,
+            binding,
+            hook: ExtensionHook::SessionCompact,
+            payload,
+            lease: Some(lease),
         };
         let mut future = invocation.take_future();
         loop {

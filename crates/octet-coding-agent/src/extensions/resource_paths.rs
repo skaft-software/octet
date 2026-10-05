@@ -405,7 +405,7 @@ fn admit_path(
 #[cfg(all(test, unix))]
 pub(crate) mod consumer_tests;
 #[cfg(all(test, unix))]
-mod tests;
-#[cfg(all(test, unix))]
 #[path = "resource_paths/pi_app_tests.rs"]
 mod pi_app_tests;
+#[cfg(all(test, unix))]
+mod tests;

@@ -97,9 +97,10 @@ hooks = ["session_before_compact", "session_compact"]
             &mut host,
         );
         assert!(
-            app.executable_extensions.summaries().iter().any(|summary| {
-                summary.name == "compaction-ui-probe" && summary.running
-            }),
+            app.executable_extensions
+                .summaries()
+                .iter()
+                .any(|summary| { summary.name == "compaction-ui-probe" && summary.running }),
             "{}",
             app.executable_extensions.inspect_text()
         );

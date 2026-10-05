@@ -972,16 +972,52 @@ impl DynamicToolReservation {
             .iter()
             .map(|tool| tool.definition().name)
             .collect::<BTreeSet<_>>();
-        let previous = registry.groups.iter().find(|group| group.owner == self.owner);
-        let old_names = previous.map(|group| group.tools.iter().map(|tool| tool.definition().name).collect::<BTreeSet<_>>()).unwrap_or_default();
-        let previously_default = previous.map(|group| group.tools.iter().filter(|tool| tool.default_active()).map(|tool| tool.definition().name).collect::<BTreeSet<_>>()).unwrap_or_default();
+        let previous = registry
+            .groups
+            .iter()
+            .find(|group| group.owner == self.owner);
+        let old_names = previous
+            .map(|group| {
+                group
+                    .tools
+                    .iter()
+                    .map(|tool| tool.definition().name)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let previously_default = previous
+            .map(|group| {
+                group
+                    .tools
+                    .iter()
+                    .filter(|tool| tool.default_active())
+                    .map(|tool| tool.definition().name)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
         let mut active = registry.active_names.clone().unwrap_or_else(|| {
-            registry.static_names.iter().cloned().chain(registry.groups.iter().flat_map(|group| group.tools.iter()).filter(|tool| tool.default_active()).map(|tool| tool.definition().name)).collect()
+            registry
+                .static_names
+                .iter()
+                .cloned()
+                .chain(
+                    registry
+                        .groups
+                        .iter()
+                        .flat_map(|group| group.tools.iter())
+                        .filter(|tool| tool.default_active())
+                        .map(|tool| tool.definition().name),
+                )
+                .collect()
         });
-        for removed in old_names.difference(&published) { active.remove(removed); }
+        for removed in old_names.difference(&published) {
+            active.remove(removed);
+        }
         for tool in &tools {
             let name = tool.definition().name;
-            if tool.default_active() && !previously_default.contains(&name) { active.insert(name); }
+            if tool.default_active() && !previously_default.contains(&name) {
+                active.insert(name);
+            }
         }
         registry.active_names = Some(active);
         let revision = registry.revision.saturating_add(1);

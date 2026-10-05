@@ -22,7 +22,7 @@
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, ensure};
+use anyhow::{ensure, Context};
 use regex::Regex;
 
 static PATTERNS: LazyLock<[Regex; 2]> = LazyLock::new(|| {
@@ -212,7 +212,11 @@ fn max_chroma(a: f64, b: f64, l: f64, [cusp_l, cusp_c]: [f64; 2]) -> f64 {
         let f1 = dot(row, first);
         let f2 = dot(row, second);
         let u = f1 / (f1 * f1 - 0.5 * f * f2);
-        if u >= 0.0 { -f * u } else { f64::MAX }
+        if u >= 0.0 {
+            -f * u
+        } else {
+            f64::MAX
+        }
     });
     t + steps[0].min(steps[1]).min(steps[2])
 }

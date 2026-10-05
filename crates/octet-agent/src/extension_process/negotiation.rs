@@ -135,8 +135,8 @@ pub(super) fn negotiate_api_v03_contributions(
             composition: None,
             constrained_sampling: None,
             default_active: None,
-                nested_execution: false,
-                prepare_arguments: false,
+            nested_execution: false,
+            prepare_arguments: false,
         })
         .collect::<Vec<_>>();
     let protocol = ExtensionNegotiatedProtocol {
@@ -273,7 +273,10 @@ pub(super) fn negotiate_contributions_with_host_services(
                 allowed.insert(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1);
             }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
-                && manifest.contributes.hooks.contains(&ExtensionHook::BeforePrompt)
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::BeforePrompt)
             {
                 allowed.insert("input_transform_v1");
             }

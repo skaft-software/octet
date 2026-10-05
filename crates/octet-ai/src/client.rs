@@ -601,7 +601,10 @@ impl AiClient {
     ) -> Result<crate::steering::SteeringSession, AiError> {
         use crate::steering::{SteeringControl, SteeringSession};
         if self.has_provider_request_hooks() {
-            return Err(crate::ConfigError::Parse("async HTTP provider hooks are unsupported by native steering".into()).into());
+            return Err(crate::ConfigError::Parse(
+                "async HTTP provider hooks are unsupported by native steering".into(),
+            )
+            .into());
         }
         crate::steering::validate_request(&req)?;
         let started_at = Instant::now();
@@ -939,7 +942,9 @@ impl AiClient {
             parts.body = apply_payload_hook(hook, model, parts.body)?;
         }
         let provider_hooks = ProviderRequestAttempt::new(
-            model, &self.provider_request_hooks, &host_options.provider_hooks,
+            model,
+            &self.provider_request_hooks,
+            &host_options.provider_hooks,
         );
         if let Some(hooks) = &provider_hooks {
             parts.body = hooks.payload(parts.body).await?;
@@ -1282,7 +1287,9 @@ impl AiClient {
         .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
         let opened_at = Instant::now();
         if let Some(hooks) = &provider_hooks {
-            hooks.response(response.status(), response.headers()).await?;
+            hooks
+                .response(response.status(), response.headers())
+                .await?;
         }
         Ok(PendingResponsesCompact {
             response,

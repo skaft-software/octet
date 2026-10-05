@@ -50,10 +50,11 @@ impl ComposedInput {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.custom_messages.is_empty() && self.parts.iter().all(|part| match part {
-            InputPart::Text(text) => text.trim().is_empty(),
-            InputPart::Media(_) => false,
-        })
+        self.custom_messages.is_empty()
+            && self.parts.iter().all(|part| match part {
+                InputPart::Text(text) => text.trim().is_empty(),
+                InputPart::Media(_) => false,
+            })
     }
 
     pub fn into_user_input(self) -> UserInput {

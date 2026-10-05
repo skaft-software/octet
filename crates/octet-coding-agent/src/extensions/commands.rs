@@ -477,7 +477,10 @@ impl ExecutableExtensions {
         };
         // Frontends without the App owner retain idle barriers only. The
         // interactive runner opts into yielding mutations to its sole owner.
-        let failure = command.advance(self, confirmations, false, None).await.err();
+        let failure = command
+            .advance(self, confirmations, false, None)
+            .await
+            .err();
         command.finish(self, confirmations, failure).await.map(Some)
     }
 
@@ -923,7 +926,9 @@ impl OwnedExtensionCommand {
             }
             if let Some(progress) = command_progress {
                 if let ToolProgress::Confirmation(request) = &progress {
-                    let approved = confirmations.confirm_effect(extension_name, request).await?;
+                    let approved = confirmations
+                        .confirm_effect(extension_name, request)
+                        .await?;
                     request.respond(approved);
                 } else {
                     confirmations.progress(extension_name, &progress);

@@ -12,37 +12,85 @@ impl Session {
     /// Append one setup entry through the real descriptor-bound journal.
     /// Pi fields are private recovery metadata; only canonical messages enter
     /// provider context. Entry identity, parent, and timestamp remain native.
-    pub fn append_pi_setup_entry(&mut self, namespace: &str, generation: u64, mut entry: serde_json::Value) -> Result<EntryId, SessionError> {
+    pub fn append_pi_setup_entry(
+        &mut self,
+        namespace: &str,
+        generation: u64,
+        mut entry: serde_json::Value,
+    ) -> Result<EntryId, SessionError> {
         let fail = |detail: &str| SessionError::Limit(format!("invalid session setup: {detail}"));
         let object = entry.as_object_mut().ok_or_else(|| fail("entry object"))?;
-        let kind = object.get("type").and_then(serde_json::Value::as_str).ok_or_else(|| fail("entry type"))?.to_owned();
+        let kind = object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| fail("entry type"))?
+            .to_owned();
         let canonical = object.remove("canonical_message");
         let custom = object.remove("custom_message");
-        let text = |key: &str| entry.get(key).and_then(serde_json::Value::as_str).map(str::to_owned).ok_or_else(|| fail(key));
+        let text = |key: &str| {
+            entry
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| fail(key))
+        };
         let value = match kind.as_str() {
-            "message" if custom.is_none() => EntryValue::Message(serde_json::from_value(canonical.ok_or_else(|| fail("canonical message"))?).map_err(|e| SessionError::Serde(e.to_string()))?),
-            "message" | "custom_message" => EntryValue::Config { model: None, reasoning: None, reasoning_mode: None },
-            "custom" if valid_extension_entry_type(&text("customType")?) => EntryValue::Config { model: None, reasoning: None, reasoning_mode: None },
-            "thinking_level_change" => EntryValue::Config { model: None, reasoning: Some(text("thinkingLevel")?), reasoning_mode: None },
-            "model_change" => EntryValue::Config { model: Some(text("modelId")?), reasoning: None, reasoning_mode: None },
-            "session_info" | "label" => EntryValue::Config { model: None, reasoning: None, reasoning_mode: None },
+            "message" if custom.is_none() => EntryValue::Message(
+                serde_json::from_value(canonical.ok_or_else(|| fail("canonical message"))?)
+                    .map_err(|e| SessionError::Serde(e.to_string()))?,
+            ),
+            "message" | "custom_message" => EntryValue::Config {
+                model: None,
+                reasoning: None,
+                reasoning_mode: None,
+            },
+            "custom" if valid_extension_entry_type(&text("customType")?) => EntryValue::Config {
+                model: None,
+                reasoning: None,
+                reasoning_mode: None,
+            },
+            "thinking_level_change" => EntryValue::Config {
+                model: None,
+                reasoning: Some(text("thinkingLevel")?),
+                reasoning_mode: None,
+            },
+            "model_change" => EntryValue::Config {
+                model: Some(text("modelId")?),
+                reasoning: None,
+                reasoning_mode: None,
+            },
+            "session_info" | "label" => EntryValue::Config {
+                model: None,
+                reasoning: None,
+                reasoning_mode: None,
+            },
             _ => return Err(fail("unsupported setup entry type")),
         };
         // Validate before any write. Sanitization must never turn an accepted
         // authored setup entry into a silently dropped recovery record.
-        let own = ExtensionEntryMetadata { public: false,
+        let own = ExtensionEntryMetadata {
+            public: false,
             value: serde_json::json!({"pi_session_entry":entry}),
-            provenance: ExtensionMetadataProvenance { extension: namespace.into(), process_generation: Some(generation) },
-        }.sanitized(namespace).ok_or_else(|| fail("bounded private entry"))?;
+            provenance: ExtensionMetadataProvenance {
+                extension: namespace.into(),
+                process_generation: Some(generation),
+            },
+        }
+        .sanitized(namespace)
+        .ok_or_else(|| fail("bounded private entry"))?;
         let mut metadata = EntryMetadata::default();
         metadata.extension_metadata.insert(namespace.into(), own);
         if let Some(custom) = custom {
-            let custom: CustomMessage = serde_json::from_value(custom).map_err(|e| SessionError::Serde(e.to_string()))?;
+            let custom: CustomMessage =
+                serde_json::from_value(custom).map_err(|e| SessionError::Serde(e.to_string()))?;
             return self.append_custom_message(custom, Some(metadata));
         }
         if kind == "label" {
             let id = EntryId(text("targetId")?);
-            let label = entry.get("label").and_then(serde_json::Value::as_str).unwrap_or("");
+            let label = entry
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             self.set_entry_label(&id, label)?;
         }
         self.append_with_metadata(value, Some(metadata))

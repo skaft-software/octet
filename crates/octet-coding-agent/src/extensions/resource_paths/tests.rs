@@ -213,43 +213,101 @@ async fn discovery_reply_loads_actual_pi_json_and_native_explicit_precedence() {
     let root = temp.path().canonicalize().unwrap();
     let (extensions, mut base) = fixture(&root).await;
     let theme_path = root.join("assets/themes/pi-resource-proof.json");
-    std::fs::write(&theme_path, pi_theme::fixture("Contributed Pi", "#123456").to_string()).unwrap();
+    std::fs::write(
+        &theme_path,
+        pi_theme::fixture("Contributed Pi", "#123456").to_string(),
+    )
+    .unwrap();
     base.theme = Some("pi-resource-proof.json".into());
-    let batch = extensions.prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup).unwrap().await;
-    let loaded = extensions.load_resource_discovery(&base, batch, TerminalBackground::Dark).unwrap();
-    assert_eq!(loaded.selected_theme.source_path(), Some(theme_path.as_path()));
+    let batch = extensions
+        .prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup)
+        .unwrap()
+        .await;
+    let loaded = extensions
+        .load_resource_discovery(&base, batch, TerminalBackground::Dark)
+        .unwrap();
+    assert_eq!(
+        loaded.selected_theme.source_path(),
+        Some(theme_path.as_path())
+    );
     assert_eq!(loaded.selected_theme.metadata().name, "Contributed Pi");
-    assert_eq!(loaded.selected_theme.resolve::<String>("accent").as_deref(), Some("#123456"));
+    assert_eq!(
+        loaded.selected_theme.resolve::<String>("accent").as_deref(),
+        Some("#123456")
+    );
     assert_eq!(loaded.selected_theme.background(), TerminalBackground::Dark);
     assert!(loaded.is_current(&extensions));
-    assert!(!loaded.diagnostics.iter().any(|message| message.contains("theme failed")));
-    let choices = crate::tui::theme::selectable_file_themes(&loaded.config, TerminalBackground::Dark);
-    assert!(choices.iter().any(|(name, theme)| name == "pi-resource-proof" && theme.source_path() == Some(theme_path.as_path())));
+    assert!(!loaded
+        .diagnostics
+        .iter()
+        .any(|message| message.contains("theme failed")));
+    let choices =
+        crate::tui::theme::selectable_file_themes(&loaded.config, TerminalBackground::Dark);
+    assert!(choices
+        .iter()
+        .any(|(name, theme)| name == "pi-resource-proof"
+            && theme.source_path() == Some(theme_path.as_path())));
     // Native snapshot conversion must not reinterpret already-normalized TOML
     // as JSON just because its inspectable source still ends in .json.
-    let light = loaded.selected_theme.for_native_background(TerminalBackground::Light).unwrap();
-    assert_eq!(light.resolve::<String>("accent").as_deref(), Some("#123456"));
+    let light = loaded
+        .selected_theme
+        .for_native_background(TerminalBackground::Light)
+        .unwrap();
+    assert_eq!(
+        light.resolve::<String>("accent").as_deref(),
+        Some("#123456")
+    );
     assert_eq!(light.source_path(), Some(theme_path.as_path()));
-    std::fs::write(&theme_path, pi_theme::fixture("Reloaded Pi", "#654321").to_string()).unwrap();
+    std::fs::write(
+        &theme_path,
+        pi_theme::fixture("Reloaded Pi", "#654321").to_string(),
+    )
+    .unwrap();
     let reloaded = loaded.selected_theme.reload().unwrap();
     assert_eq!(reloaded.metadata().name, "Reloaded Pi");
-    assert_eq!(reloaded.resolve::<String>("accent").as_deref(), Some("#654321"));
+    assert_eq!(
+        reloaded.resolve::<String>("accent").as_deref(),
+        Some("#654321")
+    );
 
     let user_theme = root.join("explicit/pi-resource-proof.toml");
     std::fs::create_dir_all(user_theme.parent().unwrap()).unwrap();
-    std::fs::write(&user_theme, "[metadata]\nname = 'Explicit Native'\n[colors]\naccent = '#abcdef'\n").unwrap();
+    std::fs::write(
+        &user_theme,
+        "[metadata]\nname = 'Explicit Native'\n[colors]\naccent = '#abcdef'\n",
+    )
+    .unwrap();
     base.theme_paths.push(user_theme.clone());
-    let batch = extensions.prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup).unwrap().await;
-    let winner = extensions.load_resource_discovery(&base, batch, TerminalBackground::Dark).unwrap();
-    assert_eq!(winner.selected_theme.source_path(), Some(user_theme.as_path()));
+    let batch = extensions
+        .prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup)
+        .unwrap()
+        .await;
+    let winner = extensions
+        .load_resource_discovery(&base, batch, TerminalBackground::Dark)
+        .unwrap();
+    assert_eq!(
+        winner.selected_theme.source_path(),
+        Some(user_theme.as_path())
+    );
     assert_eq!(winner.selected_theme.metadata().name, "Explicit Native");
-    assert!(winner.diagnostics.iter().any(|message| message.contains("shadowed")));
+    assert!(winner
+        .diagnostics
+        .iter()
+        .any(|message| message.contains("shadowed")));
     // Invalid higher-precedence TOML is not silently replaced by lower JSON.
     std::fs::write(&user_theme, "[colors\naccent = '#abcdef'\n").unwrap();
-    let batch = extensions.prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup).unwrap().await;
-    let invalid = extensions.load_resource_discovery(&base, batch, TerminalBackground::Dark).unwrap();
+    let batch = extensions
+        .prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup)
+        .unwrap()
+        .await;
+    let invalid = extensions
+        .load_resource_discovery(&base, batch, TerminalBackground::Dark)
+        .unwrap();
     assert!(invalid.selected_theme.source_path().is_none());
-    assert!(invalid.diagnostics.iter().any(|message| message.contains("theme failed")));
+    assert!(invalid
+        .diagnostics
+        .iter()
+        .any(|message| message.contains("theme failed")));
     extensions.processes[0].shutdown().await;
 }
 
@@ -262,34 +320,94 @@ fn json_themes_share_native_trust_order_reserved_names_bounds_and_no_follow() {
     let project = workspace.join(".octet/themes");
     let contributed = root.join("contributed");
     let explicit = root.join("explicit");
-    for dir in [global.join("themes"), project.clone(), contributed.clone(), explicit.clone()] {
+    for dir in [
+        global.join("themes"),
+        project.clone(),
+        contributed.clone(),
+        explicit.clone(),
+    ] {
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("precedence.json"), pi_theme::fixture("Pi", "#123456").to_string()).unwrap();
+        std::fs::write(
+            dir.join("precedence.json"),
+            pi_theme::fixture("Pi", "#123456").to_string(),
+        )
+        .unwrap();
     }
     let trusted = ResourceResolver::with_global_octet_dir(workspace.clone(), true, global.clone());
-    assert_eq!(trusted.discover(ResourceKind::Theme, &[]).get("precedence").unwrap().path, project.join("precedence.json"));
-    let untrusted = ResourceResolver::with_global_octet_dir(workspace.clone(), false, global.clone());
-    assert_eq!(untrusted.discover(ResourceKind::Theme, &[]).get("precedence").unwrap().path, global.join("themes/precedence.json"));
-    assert_eq!(trusted.discover(ResourceKind::Theme, &[contributed.clone(), explicit.clone()]).get("precedence").unwrap().path, explicit.join("precedence.json"));
+    assert_eq!(
+        trusted
+            .discover(ResourceKind::Theme, &[])
+            .get("precedence")
+            .unwrap()
+            .path,
+        project.join("precedence.json")
+    );
+    let untrusted =
+        ResourceResolver::with_global_octet_dir(workspace.clone(), false, global.clone());
+    assert_eq!(
+        untrusted
+            .discover(ResourceKind::Theme, &[])
+            .get("precedence")
+            .unwrap()
+            .path,
+        global.join("themes/precedence.json")
+    );
+    assert_eq!(
+        trusted
+            .discover(
+                ResourceKind::Theme,
+                &[contributed.clone(), explicit.clone()]
+            )
+            .get("precedence")
+            .unwrap()
+            .path,
+        explicit.join("precedence.json")
+    );
     // Within one directory the existing lexicographic/native later-wins rule
     // means .toml wins over .json, independently of read_dir enumeration order.
-    std::fs::write(explicit.join("precedence.toml"), "[metadata]\nname = 'Native'\n").unwrap();
-    assert_eq!(trusted.discover(ResourceKind::Theme, &[explicit.clone()]).get("precedence").unwrap().path, explicit.join("precedence.toml"));
+    std::fs::write(
+        explicit.join("precedence.toml"),
+        "[metadata]\nname = 'Native'\n",
+    )
+    .unwrap();
+    assert_eq!(
+        trusted
+            .discover(ResourceKind::Theme, &[explicit.clone()])
+            .get("precedence")
+            .unwrap()
+            .path,
+        explicit.join("precedence.toml")
+    );
 
-    let mut config = super::super::tests::executable_extension_config(&workspace, &root, "pi-paths");
+    let mut config =
+        super::super::tests::executable_extension_config(&workspace, &root, "pi-paths");
     config.theme_paths = vec![explicit.clone()];
     for name in ["default", "auto", "dark", "light", "Cards", "Still"] {
-        std::fs::write(explicit.join(format!("{name}.json")), pi_theme::fixture("Must Not Shadow", "#123456").to_string()).unwrap();
-        let theme = crate::tui::theme::load_named_theme_for_background(&format!("{name}.json"), &config, TerminalBackground::Dark).unwrap();
+        std::fs::write(
+            explicit.join(format!("{name}.json")),
+            pi_theme::fixture("Must Not Shadow", "#123456").to_string(),
+        )
+        .unwrap();
+        let theme = crate::tui::theme::load_named_theme_for_background(
+            &format!("{name}.json"),
+            &config,
+            TerminalBackground::Dark,
+        )
+        .unwrap();
         assert!(theme.source_path().is_none());
     }
     let choices = crate::tui::theme::selectable_file_themes(&config, TerminalBackground::Dark);
-    assert!(!choices.iter().any(|(name, _)| crate::tui::theme::is_reserved_theme_name(name)));
+    assert!(!choices
+        .iter()
+        .any(|(name, _)| crate::tui::theme::is_reserved_theme_name(name)));
     let oversized = explicit.join("oversized.json");
     std::fs::write(&oversized, vec![b' '; 256 * 1024 + 1]).unwrap();
     assert!(crate::tui::theme::load_theme_path(&oversized, &config).is_err());
     let link = explicit.join("linked.json");
     std::os::unix::fs::symlink(explicit.join("precedence.json"), &link).unwrap();
     assert!(crate::tui::theme::load_theme_path(&link, &config).is_err());
-    assert!(trusted.discover(ResourceKind::Theme, &[explicit]).get("linked").is_none());
+    assert!(trusted
+        .discover(ResourceKind::Theme, &[explicit])
+        .get("linked")
+        .is_none());
 }

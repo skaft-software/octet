@@ -200,15 +200,13 @@ fn child_profiles_require_api_04_and_an_authorized_agent_service() {
                 lifecycle_events: Vec::new(),
             }),
         };
-        assert!(
-            negotiate_contributions_with_host_services(
-                &manifest,
-                response(),
-                DEFAULT_PENDING_REQUESTS,
-                OfferedHostServices::default()
-            )
-            .is_err()
-        );
+        assert!(negotiate_contributions_with_host_services(
+            &manifest,
+            response(),
+            DEFAULT_PENDING_REQUESTS,
+            OfferedHostServices::default()
+        )
+        .is_err());
         let offered = OfferedHostServices {
             agent_sessions: true,
             ..OfferedHostServices::default()
@@ -231,18 +229,16 @@ fn child_profiles_require_api_04_and_an_authorized_agent_service() {
                 .unwrap()
                 .features
                 .retain(|f| f != EXTENSION_FEATURE_AGENT_SESSIONS);
-            assert!(
-                negotiate_contributions_with_host_services(
-                    &manifest,
-                    missing_base,
-                    DEFAULT_PENDING_REQUESTS,
-                    OfferedHostServices {
-                        agent_sessions: true,
-                        ..OfferedHostServices::default()
-                    }
-                )
-                .is_err()
-            );
+            assert!(negotiate_contributions_with_host_services(
+                &manifest,
+                missing_base,
+                DEFAULT_PENDING_REQUESTS,
+                OfferedHostServices {
+                    agent_sessions: true,
+                    ..OfferedHostServices::default()
+                }
+            )
+            .is_err());
         }
     }
 }

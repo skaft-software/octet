@@ -132,7 +132,9 @@ async fn native_original_clm_restores_branch_settings_before_first_command() {
         .activate_session_lifecycle_driver();
     let mut shell = InteractiveShell::test_shell();
     let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-    resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input).await.unwrap();
+    resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input)
+        .await
+        .unwrap();
     let dialogs = app.executable_extensions.lifecycle_snapshot();
     let output = {
         let mut frontend = InteractiveExtensionConfirmations {

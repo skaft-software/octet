@@ -711,8 +711,12 @@ pub(super) fn decode_tool_call_output(
         });
     }
     decode_retained_tool_output(
-        &read_std_lock(&connection.protocol).clone(), &connection.artifact_store,
-        connection.generation, definition, artifact_owner, value,
+        &read_std_lock(&connection.protocol).clone(),
+        &connection.artifact_store,
+        connection.generation,
+        definition,
+        artifact_owner,
+        value,
     )
 }
 
@@ -725,10 +729,15 @@ pub(super) fn decode_progress_output(
 ) -> Result<ToolOutput, ExtensionRuntimeError> {
     let definition: ToolDefinition = serde_json::from_value(serde_json::json!({
         "name":"partial_result", "description":"Partial result", "parameters":{}
-    })).expect("internal partial-result definition is valid");
+    }))
+    .expect("internal partial-result definition is valid");
     let output = decode_retained_tool_output(
-        &read_std_lock(&state.protocol).clone(), &state.artifact_store,
-        state.generation, &definition, artifact_owner, value,
+        &read_std_lock(&state.protocol).clone(),
+        &state.artifact_store,
+        state.generation,
+        &definition,
+        artifact_owner,
+        value,
     )?;
     let is_error = output.is_error;
     Ok(output.into_native()?.with_is_error(is_error))

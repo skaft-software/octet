@@ -1,8 +1,8 @@
 //! User image admission: limits, cancellation and message assembly.
 
 use super::*;
-use base64::Engine as _;
 use crate::session::{CustomMessageContent, CustomMessagePart};
+use base64::Engine as _;
 
 /// Fallback when the model has no declared image bounds. This is a host safety
 /// ceiling, not a claim about what any particular provider accepts.
@@ -32,9 +32,14 @@ pub(super) fn image_preparation_limits(
     input: &UserInput,
     model: &Model,
 ) -> Result<ImageInputLimits, AgentError> {
-    for custom in &input.custom_messages { custom.validate()?; }
-    let custom_parts: Vec<InputPart> = input.custom_messages.iter()
-        .flat_map(|custom| custom.content.input_parts()).collect();
+    for custom in &input.custom_messages {
+        custom.validate()?;
+    }
+    let custom_parts: Vec<InputPart> = input
+        .custom_messages
+        .iter()
+        .flat_map(|custom| custom.content.input_parts())
+        .collect();
     let mut count = 0usize;
     let mut bytes = 0usize;
     for part in input.parts.iter().chain(&custom_parts) {
@@ -103,13 +108,20 @@ pub(super) async fn prepare_user_images(
         for custom in &mut input.custom_messages {
             if let CustomMessageContent::Parts(parts) = &mut custom.content {
                 for part in parts {
-                    if cancelled.load(Ordering::Acquire) { return Err(AgentError::Cancelled); }
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(AgentError::Cancelled);
+                    }
                     if let Some(image) = part.image()? {
                         let prepared = octet_ai::prepare_user_image(&image, limits)?;
-                        let ImageSource::Inline(bytes) = prepared.source else { unreachable!("inline preparation"); };
+                        let ImageSource::Inline(bytes) = prepared.source else {
+                            unreachable!("inline preparation");
+                        };
                         *part = CustomMessagePart::Image {
                             data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                            mime_type: prepared.media_type.expect("prepared image MIME").to_string(),
+                            mime_type: prepared
+                                .media_type
+                                .expect("prepared image MIME")
+                                .to_string(),
                         };
                     }
                 }
@@ -144,7 +156,10 @@ pub(super) fn user_message(input: UserInput) -> EntryValue {
 impl Agent {
     /// Commit idle extension input using the same native image admission as a prompt,
     /// without starting inference or creating a checkpoint.
-    pub async fn append_idle_input(&mut self, input: UserInput) -> Result<crate::session::EntryId, AgentError> {
+    pub async fn append_idle_input(
+        &mut self,
+        input: UserInput,
+    ) -> Result<crate::session::EntryId, AgentError> {
         let input = prepare_user_images(input, &self.model, None).await?;
         Ok(input.append_to(&mut self.session, None)?)
     }

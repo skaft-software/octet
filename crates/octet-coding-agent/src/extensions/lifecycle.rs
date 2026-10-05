@@ -211,12 +211,15 @@ impl ExecutableExtensions {
         let remote_ui_wake = if matches!(&config.mode, Mode::Interactive) {
             match remote_ui_consumer {
                 Some(shell) => shell.extension_remote_ui_binding(),
-                None => crate::tui::terminal::TerminalCapabilities::detect(config.color, config.plain)
-                    .interactive.then(|| {
-                        INTERACTIVE_REMOTE_UI_WAKE
-                            .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
-                            .clone()
-                    }),
+                None => {
+                    crate::tui::terminal::TerminalCapabilities::detect(config.color, config.plain)
+                        .interactive
+                        .then(|| {
+                            INTERACTIVE_REMOTE_UI_WAKE
+                                .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
+                                .clone()
+                        })
+                }
             }
         } else {
             None
@@ -229,7 +232,10 @@ impl ExecutableExtensions {
                 let (service, receiver) =
                     ExtensionSessionLifecycleService::channel(SESSION_LIFECYCLE_QUEUE_CAPACITY)
                         .expect("fixed session lifecycle queue capacity is bounded");
-                (Some(service.with_compaction().with_model_control()), Some(receiver))
+                (
+                    Some(service.with_compaction().with_model_control()),
+                    Some(receiver),
+                )
             } else {
                 (None, None)
             };
@@ -953,7 +959,7 @@ impl ExecutableExtensions {
             Result<octet_agent::extension_process::ExtensionReloadReport, String>,
         )>,
     > + Send
-    + 'static {
+           + 'static {
         self.resource_paths_epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.cancel_background_work();

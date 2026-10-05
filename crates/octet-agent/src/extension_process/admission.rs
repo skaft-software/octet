@@ -752,7 +752,11 @@ pub(super) fn dispatch_progress(
             return Ok(());
         }
         request.last_progress_sequence = Some(notification.sequence);
-        (request.progress.clone(), request.resource_owner.clone(), request.method.clone())
+        (
+            request.progress.clone(),
+            request.resource_owner.clone(),
+            request.method.clone(),
+        )
     };
     let Some(sink) = sink else {
         return Ok(());
@@ -763,8 +767,12 @@ pub(super) fn dispatch_progress(
             if method != methods::TOOL_CALL {
                 return Err("partial results require an active tool/call".into());
             }
-            let output = decode_progress_output(state, owner.as_ref().map(|owner| owner.session_id.as_str()), result)
-                .map_err(|error| error.to_string())?;
+            let output = decode_progress_output(
+                state,
+                owner.as_ref().map(|owner| owner.session_id.as_str()),
+                result,
+            )
+            .map_err(|error| error.to_string())?;
             sink.send_one(crate::tool::ToolProgress::PartialResult(Arc::new(output)));
         }
         ExtensionProgressEvent::Status {

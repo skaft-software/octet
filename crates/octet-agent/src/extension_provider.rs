@@ -226,7 +226,13 @@ impl ExtensionProviderRegistry {
         owner: ExtensionProviderOwner,
         request: api_v03::ProviderRegisterParams,
     ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
-        self.replace(owner, request.provider, request.models, false, BTreeMap::new())
+        self.replace(
+            owner,
+            request.provider,
+            request.models,
+            false,
+            BTreeMap::new(),
+        )
     }
 
     /// Atomically replaces the complete model set for an owned provider.
@@ -239,22 +245,40 @@ impl ExtensionProviderRegistry {
         owner: ExtensionProviderOwner,
         request: api_v03::ProviderUpdateParams,
     ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
-        self.replace(owner, request.provider, request.models, true, BTreeMap::new())
+        self.replace(
+            owner,
+            request.provider,
+            request.models,
+            true,
+            BTreeMap::new(),
+        )
     }
 
     /// Atomically publish a Pi declaration and validated sidecar in this same
     /// native record. Generation fencing, revision and bounds are shared with
     /// canonical providers; the API 0.3 model and generator remain untouched.
     pub fn replace_pi_provider(
-        &self, owner: ExtensionProviderOwner, request: api_v03::ProviderRegisterParams,
-        metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>, update: bool,
+        &self,
+        owner: ExtensionProviderOwner,
+        request: api_v03::ProviderRegisterParams,
+        metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>,
+        update: bool,
     ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
-        if request.provider.auth.kind != "none" || metadata.len() != request.models.len()
-            || request.models.iter().any(|model| !metadata.contains_key(&model.id)) {
-            return Err(ExtensionProviderRegistryError::Invalid("invalid Pi provider facts".into()));
+        if request.provider.auth.kind != "none"
+            || metadata.len() != request.models.len()
+            || request
+                .models
+                .iter()
+                .any(|model| !metadata.contains_key(&model.id))
+        {
+            return Err(ExtensionProviderRegistryError::Invalid(
+                "invalid Pi provider facts".into(),
+            ));
         }
         for facts in metadata.values() {
-            facts.validate().map_err(ExtensionProviderRegistryError::Invalid)?;
+            facts
+                .validate()
+                .map_err(ExtensionProviderRegistryError::Invalid)?;
         }
         self.replace(owner, request.provider, request.models, update, metadata)
     }
@@ -943,33 +967,53 @@ mod tests {
     async fn idle_route_waiters_wake_on_every_authoritative_invalidation() {
         for mutation in ["unregister", "replace", "owner", "authorization"] {
             let registry = ExtensionProviderRegistry::new();
-            registry.register(owner(1), register_params("alpha", "alpha-model")).unwrap();
+            registry
+                .register(owner(1), register_params("alpha", "alpha-model"))
+                .unwrap();
             registry.complete_initial_catalog(&owner(1));
             let route = registry.resolve("alpha", "alpha-model").unwrap();
             let invalidated = registry.route_invalidated(&route);
             tokio::pin!(invalidated);
             assert!(futures_util::poll!(invalidated.as_mut()).is_pending());
 
-            registry.register(owner(1), register_params("beta", "beta-model")).unwrap();
-            assert!(futures_util::poll!(invalidated.as_mut()).is_pending(),
-                "an unrelated catalog change cannot cancel the active route");
+            registry
+                .register(owner(1), register_params("beta", "beta-model"))
+                .unwrap();
+            assert!(
+                futures_util::poll!(invalidated.as_mut()).is_pending(),
+                "an unrelated catalog change cannot cancel the active route"
+            );
             match mutation {
-                "unregister" => { registry.unregister(&owner(1), "alpha").unwrap(); }
+                "unregister" => {
+                    registry.unregister(&owner(1), "alpha").unwrap();
+                }
                 "replace" => {
                     let request = register_params("alpha", "alpha-model");
-                    registry.update(owner(1), api_v03::ProviderUpdateParams {
-                        provider: request.provider, models: request.models,
-                    }).unwrap();
+                    registry
+                        .update(
+                            owner(1),
+                            api_v03::ProviderUpdateParams {
+                                provider: request.provider,
+                                models: request.models,
+                            },
+                        )
+                        .unwrap();
                 }
                 "owner" => registry.remove_owner(&owner(1)),
-                "authorization" => registry.set_authorization_status(
-                    &owner(1), "alpha", ExtensionProviderAuthorizationStatus::Revoked,
-                ).unwrap(),
+                "authorization" => registry
+                    .set_authorization_status(
+                        &owner(1),
+                        "alpha",
+                        ExtensionProviderAuthorizationStatus::Revoked,
+                    )
+                    .unwrap(),
                 _ => unreachable!(),
             }
-            tokio::time::timeout(Duration::from_secs(1), invalidated).await
+            tokio::time::timeout(Duration::from_secs(1), invalidated)
+                .await
                 .expect("a withdrawn idle route must wake without another stream event");
-            tokio::time::timeout(Duration::from_secs(1), registry.route_invalidated(&route)).await
+            tokio::time::timeout(Duration::from_secs(1), registry.route_invalidated(&route))
+                .await
                 .expect("a route withdrawn before listener registration must settle immediately");
         }
     }
@@ -1070,22 +1114,47 @@ mod tests {
     #[test]
     fn identical_replacement_and_authorization_aba_cannot_revive_a_route() {
         let registry = ExtensionProviderRegistry::new();
-        registry.register(owner(1), register_params("fixture", "model")).unwrap();
+        registry
+            .register(owner(1), register_params("fixture", "model"))
+            .unwrap();
         registry.complete_initial_catalog(&owner(1));
         let original = registry.resolve("fixture", "model").unwrap();
-        registry.update(owner(1), api_v03::ProviderUpdateParams {
-            provider: provider(), models: vec![model()],
-        }).unwrap();
+        registry
+            .update(
+                owner(1),
+                api_v03::ProviderUpdateParams {
+                    provider: provider(),
+                    models: vec![model()],
+                },
+            )
+            .unwrap();
         let replacement = registry.resolve("fixture", "model").unwrap();
         assert!(!registry.route_is_active(&original));
         assert!(registry.route_is_active(&replacement));
-        assert_ne!(original.registration_revision, replacement.registration_revision);
-        registry.set_authorization_status(&owner(1), "fixture", ExtensionProviderAuthorizationStatus::Revoked).unwrap();
-        registry.set_authorization_status(&owner(1), "fixture", ExtensionProviderAuthorizationStatus::Ready).unwrap();
+        assert_ne!(
+            original.registration_revision,
+            replacement.registration_revision
+        );
+        registry
+            .set_authorization_status(
+                &owner(1),
+                "fixture",
+                ExtensionProviderAuthorizationStatus::Revoked,
+            )
+            .unwrap();
+        registry
+            .set_authorization_status(
+                &owner(1),
+                "fixture",
+                ExtensionProviderAuthorizationStatus::Ready,
+            )
+            .unwrap();
         assert!(!registry.route_is_active(&replacement));
         let authorized = registry.resolve("fixture", "model").unwrap();
         registry.unregister(&owner(1), "fixture").unwrap();
-        registry.register(owner(1), register_params("fixture", "model")).unwrap();
+        registry
+            .register(owner(1), register_params("fixture", "model"))
+            .unwrap();
         assert!(!registry.route_is_active(&authorized));
         assert!(registry.route_is_active(&registry.resolve("fixture", "model").unwrap()));
     }

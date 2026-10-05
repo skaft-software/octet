@@ -362,7 +362,9 @@ pub(super) async fn spawn_connection(
     ));
     artifact_guard.disarm();
     let offered_host_services = OfferedHostServices {
-        provider_proxy: config.provider_registry.is_some() && descriptor.manifest.contributes.providers && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
+        provider_proxy: config.provider_registry.is_some()
+            && descriptor.manifest.contributes.providers
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         remote_ui: config.remote_ui.is_some(),
         provider_pipeline: config.provider_pipeline
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
@@ -432,7 +434,11 @@ pub(super) async fn spawn_connection(
         optional_features.push(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1.to_owned());
     }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
-        && descriptor.manifest.contributes.hooks.contains(&ExtensionHook::BeforePrompt)
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::BeforePrompt)
     {
         optional_features.push("input_transform_v1".to_owned());
     }

@@ -381,7 +381,9 @@ impl SessionLifecycleResponse {
             Self::SessionId(response) => {
                 let _ = response.send(Err(ExtensionSessionLifecycleError::Unavailable));
             }
-            Self::Setup(response) => { let _ = response.send(Err("session setup owner retired".into())); }
+            Self::Setup(response) => {
+                let _ = response.send(Err("session setup owner retired".into()));
+            }
             Self::ModelControl(response) => {
                 let _ = response.send(Err("model selection owner retired".into()));
             }
@@ -463,11 +465,16 @@ impl ExtensionSessionLifecycleService {
         self
     }
 
-    pub(super) fn supports_model_control(&self) -> bool { self.model_control }
+    pub(super) fn supports_model_control(&self) -> bool {
+        self.model_control
+    }
 
     pub(super) fn try_submit_model_control(
-        &self, operation: ExtensionModelControl, authority: SessionCompactionAuthority,
-    ) -> Result<oneshot::Receiver<Result<serde_json::Value, String>>, SessionLifecycleSubmitError> {
+        &self,
+        operation: ExtensionModelControl,
+        authority: SessionCompactionAuthority,
+    ) -> Result<oneshot::Receiver<Result<serde_json::Value, String>>, SessionLifecycleSubmitError>
+    {
         if !self.model_control || !authority.is_current() {
             return Err(SessionLifecycleSubmitError::Unavailable);
         }
@@ -475,7 +482,8 @@ impl ExtensionSessionLifecycleService {
         self.try_submit_request(
             ExtensionSessionLifecycleOperation::ModelControl(operation),
             SessionLifecycleResponse::ModelControl(response),
-            CancellationToken::default(), Some(authority),
+            CancellationToken::default(),
+            Some(authority),
         )?;
         Ok(receiver)
     }
@@ -515,9 +523,18 @@ impl ExtensionSessionLifecycleService {
         Ok(receiver)
     }
 
-    pub(super) fn try_submit_setup(&self, operation: ExtensionSessionLifecycleOperation) -> Result<oneshot::Receiver<Result<serde_json::Value, String>>, SessionLifecycleSubmitError> {
+    pub(super) fn try_submit_setup(
+        &self,
+        operation: ExtensionSessionLifecycleOperation,
+    ) -> Result<oneshot::Receiver<Result<serde_json::Value, String>>, SessionLifecycleSubmitError>
+    {
         let (response, receiver) = oneshot::channel();
-        self.try_submit_request(operation, SessionLifecycleResponse::Setup(response), CancellationToken::default(), None)?;
+        self.try_submit_request(
+            operation,
+            SessionLifecycleResponse::Setup(response),
+            CancellationToken::default(),
+            None,
+        )?;
         Ok(receiver)
     }
 
@@ -651,7 +668,9 @@ impl ExtensionSessionLifecycleRequest {
     /// Original numeric request correlation, never append authority. The callback
     /// receives a fresh host request and a separately issued native leaf grant.
     pub fn compaction_callback_parent(&self) -> Option<u64> {
-        self.authority.as_ref().filter(|authority| authority.callback)
+        self.authority
+            .as_ref()
+            .filter(|authority| authority.callback)
             .map(|authority| authority.parent_request_id)
     }
 
@@ -665,7 +684,9 @@ impl ExtensionSessionLifecycleRequest {
 
     /// Settle a setup operation only after the actual native mutation.
     pub fn respond_setup(self, result: Result<serde_json::Value, String>) {
-        let SessionLifecycleResponse::Setup(response) = self.response else { unreachable!("setup uses its own response type") };
+        let SessionLifecycleResponse::Setup(response) = self.response else {
+            unreachable!("setup uses its own response type")
+        };
         let _ = response.send(result);
     }
 
@@ -674,10 +695,14 @@ impl ExtensionSessionLifecycleRequest {
         if matches!(&self.response, SessionLifecycleResponse::Setup(_)) {
             self.respond_setup(match result {
                 Ok(id) => Ok(serde_json::json!({"session_id":id})),
-                Err(ExtensionSessionLifecycleError::Cancelled) => Ok(serde_json::json!({"cancelled":true})),
+                Err(ExtensionSessionLifecycleError::Cancelled) => {
+                    Ok(serde_json::json!({"cancelled":true}))
+                }
                 Err(error) => Err(format!("session replacement failed: {error:?}")),
             });
-        } else { self.respond(result); }
+        } else {
+            self.respond(result);
+        }
     }
 
     /// Delivers exactly one ordinary lifecycle outcome to the extension process.

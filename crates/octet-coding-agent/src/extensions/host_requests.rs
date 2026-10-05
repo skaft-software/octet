@@ -352,7 +352,11 @@ impl ExecutableExtensions {
                 HostRequestOperation::MessageInjection(injection) => {
                     use octet_agent::extension_process::ExtensionMessageDelivery as Delivery;
                     let message = match injection {
-                        ExtensionMessageInjection::User { text, content, deliver_as } => {
+                        ExtensionMessageInjection::User {
+                            text,
+                            content,
+                            deliver_as,
+                        } => {
                             let mut input = ComposedInput::from_text(text);
                             if let Some(content) = content {
                                 input.parts = content.input_parts();
@@ -366,11 +370,26 @@ impl ExecutableExtensions {
                                 context_only: false,
                             }
                         }
-                        ExtensionMessageInjection::Custom { custom_type, content, display, details, deliver_as, trigger_turn } => {
-                            let custom = octet_agent::session::CustomMessage { custom_type, content, display, details };
+                        ExtensionMessageInjection::Custom {
+                            custom_type,
+                            content,
+                            display,
+                            details,
+                            deliver_as,
+                            trigger_turn,
+                        } => {
+                            let custom = octet_agent::session::CustomMessage {
+                                custom_type,
+                                content,
+                                display,
+                                details,
+                            };
                             let mut input = ComposedInput::from_text(String::new());
                             input.parts.clear();
-                            if custom.display { input.transcript_text = format!("[{}]\n{}", custom.custom_type, custom.text()); }
+                            if custom.display {
+                                input.transcript_text =
+                                    format!("[{}]\n{}", custom.custom_type, custom.text());
+                            }
                             input.custom_messages.push(custom);
                             crate::tui::view::PendingExtensionMessage {
                                 input,
@@ -390,9 +409,15 @@ impl ExecutableExtensions {
                 HostRequestOperation::ActiveTools { names } => match &self.tool_host {
                     Some(host) => match host.set_active_tools(Some(&names.into_iter().collect())) {
                         Ok(()) => ExtensionRequestOutcome::Ok(serde_json::json!({})),
-                        Err(error) => ExtensionRequestOutcome::Failed(ExtensionRequestFailure::InvalidRequest, error),
+                        Err(error) => ExtensionRequestOutcome::Failed(
+                            ExtensionRequestFailure::InvalidRequest,
+                            error,
+                        ),
                     },
-                    None => ExtensionRequestOutcome::Failed(ExtensionRequestFailure::UnsupportedFeature, "live tool registry is not bound".into()),
+                    None => ExtensionRequestOutcome::Failed(
+                        ExtensionRequestFailure::UnsupportedFeature,
+                        "live tool registry is not bound".into(),
+                    ),
                 },
                 HostRequestOperation::Terminal(operation) => self.apply_terminal_host_request(
                     shell,
@@ -459,7 +484,10 @@ impl ExecutableExtensions {
             }
             ExtensionContextOperation::Tools => match &self.tool_host {
                 Some(host) => ExtensionRequestOutcome::Ok(host.pi_tool_snapshot()),
-                None => ExtensionRequestOutcome::Failed(ExtensionRequestFailure::UnsupportedFeature, "live tool registry is not bound".into()),
+                None => ExtensionRequestOutcome::Failed(
+                    ExtensionRequestFailure::UnsupportedFeature,
+                    "live tool registry is not bound".into(),
+                ),
             },
             ExtensionContextOperation::SystemPrompt => ExtensionRequestOutcome::Failed(
                 ExtensionRequestFailure::InvalidRequest,
@@ -692,7 +720,9 @@ impl ExecutableExtensions {
                     ExtensionContextOperation::SystemPrompt => {
                         Self::context_system_prompt_outcome(agent)
                     }
-                    ExtensionContextOperation::Tools => ExtensionRequestOutcome::Ok(agent.extension_tool_snapshot()),
+                    ExtensionContextOperation::Tools => {
+                        ExtensionRequestOutcome::Ok(agent.extension_tool_snapshot())
+                    }
                     // The two session-context reads resolve against the shell
                     // drain, never this agent-owning loop.
                     ExtensionContextOperation::SessionManager

@@ -420,7 +420,12 @@ fn sync_window_title(
         return;
     }
     let title = super::remote_ui::window_title(&shell);
-    if last_title.as_ref().is_some_and(|(_, previous)| previous == &title) { return; }
+    if last_title
+        .as_ref()
+        .is_some_and(|(_, previous)| previous == &title)
+    {
+        return;
+    }
     let name = shell.session_name.clone();
     drop(shell);
     tui.set_window_title(&title);

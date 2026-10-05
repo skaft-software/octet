@@ -47,22 +47,47 @@ impl octet_agent::EventObserver for CaptureToolFacts {
     fn on_event(&self, event: &AgentEvent) {
         // Drive genuine approval UI by cancelling its picker. Never
         // authorize through a test-only broker or respond to the receipt here.
-        if matches!(event, AgentEvent::ToolProgress { progress: ToolProgress::Confirmation(_), .. }) {
-            let _ = self.input.send(Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))));
+        if matches!(
+            event,
+            AgentEvent::ToolProgress {
+                progress: ToolProgress::Confirmation(_),
+                ..
+            }
+        ) {
+            let _ = self.input.send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ))));
         }
         let captured = match event {
-            AgentEvent::ToolProgress { id, progress: ToolProgress::Confirmation(request) } => Some(AgentEvent::ToolProgress {
-                id: id.clone(), progress: ToolProgress::Confirmation(request.clone()),
+            AgentEvent::ToolProgress {
+                id,
+                progress: ToolProgress::Confirmation(request),
+            } => Some(AgentEvent::ToolProgress {
+                id: id.clone(),
+                progress: ToolProgress::Confirmation(request.clone()),
             }),
-            AgentEvent::ToolPolicyDecision { id, name, decision } => Some(AgentEvent::ToolPolicyDecision {
-                id: id.clone(), name: name.clone(), decision: decision.clone(),
-            }),
-            AgentEvent::ToolFinished { id, result, duration } => Some(AgentEvent::ToolFinished {
-                id: id.clone(), result: result.clone(), duration: *duration,
+            AgentEvent::ToolPolicyDecision { id, name, decision } => {
+                Some(AgentEvent::ToolPolicyDecision {
+                    id: id.clone(),
+                    name: name.clone(),
+                    decision: decision.clone(),
+                })
+            }
+            AgentEvent::ToolFinished {
+                id,
+                result,
+                duration,
+            } => Some(AgentEvent::ToolFinished {
+                id: id.clone(),
+                result: result.clone(),
+                duration: *duration,
             }),
             _ => None,
         };
-        if let Some(event) = captured { self.events.lock().unwrap().push(event); }
+        if let Some(event) = captured {
+            self.events.lock().unwrap().push(event);
+        }
     }
 }
 
@@ -158,7 +183,13 @@ async fn exercise_mode(
         "CHANGED_PRIVATE_CONTENT",
     )
     .unwrap();
-    std::fs::write(directory.path().join("fixture.png"), base64::engine::general_purpose::STANDARD.decode(HOOK_PNG).unwrap()).unwrap();
+    std::fs::write(
+        directory.path().join("fixture.png"),
+        base64::engine::general_purpose::STANDARD
+            .decode(HOOK_PNG)
+            .unwrap(),
+    )
+    .unwrap();
     let trace_path = directory.path().join("trace.jsonl");
     app.config.effect_policy = if execution == Execution::Trusted {
         octet_agent::EffectPolicy::UnsafeHost
@@ -180,13 +211,18 @@ async fn exercise_mode(
     // The reviewed adapter reserves resources_discover even without callbacks.
     // Like the interactive prompt path, settle its idle-owned startup barrier
     // before inference; otherwise ResourceProviderGuard rejects every request.
-    app.executable_extensions.activate_session_lifecycle_driver();
+    app.executable_extensions
+        .activate_session_lifecycle_driver();
     let mut startup_shell = InteractiveShell::test_shell();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut startup_input = futures_util::stream::poll_fn(move |cx| input_rx.poll_recv(cx));
-    tokio::time::timeout(Duration::from_secs(20), resource_paths::refresh_resource_paths(
-        &mut app, &mut startup_shell, &mut startup_input,
-    )).await.expect("native tool-hook startup timed out").unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        resource_paths::refresh_resource_paths(&mut app, &mut startup_shell, &mut startup_input),
+    )
+    .await
+    .expect("native tool-hook startup timed out")
+    .unwrap();
     assert!(!app.resource_paths_pending());
     if execution == Execution::Recovery {
         app.agent
@@ -213,38 +249,85 @@ async fn exercise_mode(
             .unwrap();
     }
     let captured_events = Arc::new(Mutex::new(Vec::new()));
-    app.agent.observe(CaptureToolFacts { events: captured_events.clone(), input: input_tx });
+    app.agent.observe(CaptureToolFacts {
+        events: captured_events.clone(),
+        input: input_tx,
+    });
     app.executable_extensions.refresh_host_state(
-        app.agent.session(), &app.model, &app.reasoning, &app.sessions,
+        app.agent.session(),
+        &app.model,
+        &app.reasoning,
+        &app.sessions,
     );
-    let composition = tokio::time::timeout(Duration::from_secs(20), app.executable_extensions.compose_prompt(
-        &app.system, "exercise reviewed tool hooks".into(),
-    )).await.expect("native tool-hook prompt composition timed out").unwrap();
+    let composition = tokio::time::timeout(
+        Duration::from_secs(20),
+        app.executable_extensions
+            .compose_prompt(&app.system, "exercise reviewed tool hooks".into()),
+    )
+    .await
+    .expect("native tool-hook prompt composition timed out")
+    .unwrap();
     app.agent.set_system_prompt(composition.system);
     let mut prompt: octet_agent::UserInput = composition.prompt.into();
     prompt.custom_messages.extend(composition.custom_messages);
     let inspection = ActiveRunInspection::capture(&app);
     let mut run = tokio::time::timeout(Duration::from_secs(20), app.agent.prompt(prompt))
-        .await.expect("native tool-hook prompt admission timed out").unwrap();
-    let turn = tokio::time::timeout(Duration::from_secs(20), app.executable_extensions.begin_turn())
-        .await.expect("native tool-hook lifecycle start timed out");
-    app.executable_extensions.commit_prompt_context(composition.pending_context_count);
+        .await
+        .expect("native tool-hook prompt admission timed out")
+        .unwrap();
+    let turn = tokio::time::timeout(
+        Duration::from_secs(20),
+        app.executable_extensions.begin_turn(),
+    )
+    .await
+    .expect("native tool-hook lifecycle start timed out");
+    app.executable_extensions
+        .commit_prompt_context(composition.pending_context_count);
     let id = startup_shell.begin_run("tool-hooks");
     startup_shell.set_awaiting_provider(id);
     let control = run.control();
     let mut ticker = tokio::time::interval(Duration::from_millis(16));
-    let ended = tokio::time::timeout(Duration::from_secs(20), drive_active_run(
-        &mut run, &control, &mut startup_shell, &mut startup_input, &mut ticker,
-        &mut VecDeque::new(), &mut false, None, None,
-        &mut app.executable_extensions, &mut false, &inspection, &mut None,
-    )).await.expect("native tool-hook run timed out").unwrap();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(20),
+        drive_active_run(
+            &mut run,
+            &control,
+            &mut startup_shell,
+            &mut startup_input,
+            &mut ticker,
+            &mut VecDeque::new(),
+            &mut false,
+            None,
+            None,
+            &mut app.executable_extensions,
+            &mut false,
+            &inspection,
+            &mut None,
+        ),
+    )
+    .await
+    .expect("native tool-hook run timed out")
+    .unwrap();
     drop(run);
-    tokio::time::timeout(Duration::from_secs(20), app.executable_extensions.settle_turn(turn, &ended))
-        .await.expect("native tool-hook lifecycle settlement timed out");
-    assert_eq!(ended, HostRunOutcome::Completed, "{}", startup_shell.debug_snapshot());
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        app.executable_extensions.settle_turn(turn, &ended),
+    )
+    .await
+    .expect("native tool-hook lifecycle settlement timed out");
+    assert_eq!(
+        ended,
+        HostRunOutcome::Completed,
+        "{}",
+        startup_shell.debug_snapshot()
+    );
     let events = std::mem::take(&mut *captured_events.lock().unwrap());
-    tokio::time::timeout(Duration::from_secs(20), app.executable_extensions.shutdown())
-        .await.expect("native tool-hook process shutdown timed out");
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        app.executable_extensions.shutdown(),
+    )
+    .await
+    .expect("native tool-hook process shutdown timed out");
     let count = requests.lock().unwrap().len();
     match execution {
         Execution::Live | Execution::Trusted => assert_eq!(count, 2, "{events:#?}"),
@@ -368,22 +451,49 @@ async fn native_pi_tool_hooks_mutation_is_authorized_not_original_arguments() {
 async fn native_pi_tool_hooks_mutated_workspace_write_requires_real_approval() {
     let acceptance = exercise(
         "export default pi => pi.on('tool_call', e => { e.input.path = 'changed.txt'; });",
-        vec![("write", json!({"path":"original.txt", "content":"MUST_NOT_BE_WRITTEN"}))],
+        vec![(
+            "write",
+            json!({"path":"original.txt", "content":"MUST_NOT_BE_WRITTEN"}),
+        )],
         false,
-    ).await;
+    )
+    .await;
     assert!(!decision(&acceptance).allowed);
-    assert_eq!(decision(&acceptance).effect, Some(octet_agent::ToolEffect::WorkspaceMutation));
-    assert_eq!(decision(&acceptance).denial_code, Some(octet_agent::ToolPolicyDenialCode::ApprovalDenied));
-    let details: Vec<_> = acceptance.events.iter().filter_map(|event| match event {
-        AgentEvent::ToolProgress { progress: ToolProgress::Confirmation(request), .. } => request.detail.as_deref(),
-        _ => None,
-    }).collect();
-    assert_eq!(details.len(), 1, "the real broker must request exactly one approval");
+    assert_eq!(
+        decision(&acceptance).effect,
+        Some(octet_agent::ToolEffect::WorkspaceMutation)
+    );
+    assert_eq!(
+        decision(&acceptance).denial_code,
+        Some(octet_agent::ToolPolicyDenialCode::ApprovalDenied)
+    );
+    let details: Vec<_> = acceptance
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolProgress {
+                progress: ToolProgress::Confirmation(request),
+                ..
+            } => request.detail.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        details.len(),
+        1,
+        "the real broker must request exactly one approval"
+    );
     assert!(details[0].contains("changed.txt"));
     assert!(!details[0].contains("original.txt"));
     assert_eq!(results(&acceptance)[0]["is_error"], true);
-    assert_eq!(std::fs::read_to_string(acceptance._directory.path().join("original.txt")).unwrap(), "ORIGINAL_PRIVATE_CONTENT");
-    assert_eq!(std::fs::read_to_string(acceptance._directory.path().join("changed.txt")).unwrap(), "CHANGED_PRIVATE_CONTENT");
+    assert_eq!(
+        std::fs::read_to_string(acceptance._directory.path().join("original.txt")).unwrap(),
+        "ORIGINAL_PRIVATE_CONTENT"
+    );
+    assert_eq!(
+        std::fs::read_to_string(acceptance._directory.path().join("changed.txt")).unwrap(),
+        "CHANGED_PRIVATE_CONTENT"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -498,12 +608,20 @@ export default pi => {
     assert_ne!(results(&acceptance)[0]["is_error"], true);
 }
 
-const HOOK_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+const HOOK_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
 
-fn finished(acceptance: &Acceptance) -> Vec<&Result<octet_agent::ToolOutput, octet_agent::ToolError>> {
-    acceptance.events.iter().filter_map(|event| match event {
-        AgentEvent::ToolFinished { result, .. } => Some(result), _ => None,
-    }).collect()
+fn finished(
+    acceptance: &Acceptance,
+) -> Vec<&Result<octet_agent::ToolOutput, octet_agent::ToolError>> {
+    acceptance
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolFinished { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -512,13 +630,25 @@ async fn native_pi_tool_hooks_block_termination_is_unanimous_and_persists_siblin
       pi.on('tool_call', e => ({block:true, reason:'TERMINATED_' + e.toolCallId, terminate:true}));
       pi.on('tool_result', () => ({isError:false, details:{stillDenied:true}}));
     };"#;
-    let acceptance = exercise_mode(factory, vec![("read",json!({"path":"original.txt"})), ("read",json!({"path":"changed.txt"}))], false, Execution::Terminate).await;
+    let acceptance = exercise_mode(
+        factory,
+        vec![
+            ("read", json!({"path":"original.txt"})),
+            ("read", json!({"path":"changed.txt"})),
+        ],
+        false,
+        Execution::Terminate,
+    )
+    .await;
     assert_eq!(finished(&acceptance).len(), 2);
     for result in finished(&acceptance) {
         let error = result.as_ref().unwrap_err();
         assert!(error.output().unwrap().terminates_run());
         assert!(error.output().unwrap().is_error());
-        assert_eq!(error.output().unwrap().metadata().unwrap()["pi_details"]["stillDenied"], true);
+        assert_eq!(
+            error.output().unwrap().metadata().unwrap()["pi_details"]["stillDenied"],
+            true
+        );
     }
     assert!(acceptance.durable.contains("TERMINATED_call-0"));
     assert!(acceptance.durable.contains("TERMINATED_call-1"));
@@ -529,7 +659,9 @@ async fn native_pi_tool_hooks_block_termination_is_unanimous_and_persists_siblin
 async fn native_pi_tool_hooks_one_termination_hint_does_not_discard_sibling() {
     let acceptance = exercise("export default pi => pi.on('tool_call', e => e.toolCallId === 'call-0' ? {block:true, terminate:true, reason:'ONE_TERMINATION'} : undefined);", vec![("read",json!({"path":"original.txt"})), ("read",json!({"path":"changed.txt"}))], false).await;
     assert_eq!(results(&acceptance).len(), 2);
-    assert!(results(&acceptance)[1].to_string().contains("CHANGED_PRIVATE_CONTENT"));
+    assert!(results(&acceptance)[1]
+        .to_string()
+        .contains("CHANGED_PRIVATE_CONTENT"));
     assert!(acceptance.durable.contains("ONE_TERMINATION"));
 }
 
@@ -546,7 +678,13 @@ export default pi => {
     let usage = finished(&acceptance)[0].as_ref().unwrap().usage().unwrap();
     assert_eq!(usage.input_tokens, 9);
     assert_eq!(usage.total_tokens, 15);
-    assert!(acceptance.app.agent.session().usage_records().iter().any(|record| record.usage == *usage));
+    assert!(acceptance
+        .app
+        .agent
+        .session()
+        .usage_records()
+        .iter()
+        .any(|record| record.usage == *usage));
     assert!(acceptance.durable.contains("pi_usage"));
     assert!(!acceptance.requests[1].to_string().contains("pi_usage"));
     assert!(!acceptance.requests[1].to_string().contains("totalTokens"));
@@ -570,20 +708,32 @@ export default pi => {
     assert_eq!(acceptance.trace[0]["image"]["data"], HOOK_PNG);
     assert_eq!(acceptance.trace[0]["id"], "call-0");
     let parts = results(&acceptance)[0]["content"].as_array().unwrap();
-    assert_eq!(parts.iter().map(|p|p["type"].as_str().unwrap()).collect::<Vec<_>>(), vec!["text","image","text"]);
+    assert_eq!(
+        parts
+            .iter()
+            .map(|p| p["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["text", "image", "text"]
+    );
     assert_eq!(parts[1]["source"]["data"], HOOK_PNG);
     assert_eq!(parts[0]["text"], "IMAGE_PREFIX");
     assert_eq!(parts[2]["text"], "IMAGE_SUFFIX");
     // Session ImageSource has no local media-reference variant (Url | Inline |
     // ProviderRef), so the replacement image is persisted inline. It must be
     // persisted once: the pre-hook original is not retained as a second copy.
-    assert_eq!(acceptance.durable.matches(HOOK_PNG).count(), 1, "replacement image persisted exactly once");
+    assert_eq!(
+        acceptance.durable.matches(HOOK_PNG).count(),
+        1,
+        "replacement image persisted exactly once"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_tool_hooks_invalid_image_does_not_replace_real_result() {
     let acceptance = exercise("export default pi => pi.on('tool_result', () => ({content:[{type:'image',mimeType:'image/png',data:Buffer.from('not an image').toString('base64')}]}));", vec![("read",json!({"path":"original.txt"}))], false).await;
-    assert!(results(&acceptance)[0].to_string().contains("ORIGINAL_PRIVATE_CONTENT"));
+    assert!(results(&acceptance)[0]
+        .to_string()
+        .contains("ORIGINAL_PRIVATE_CONTENT"));
     assert_eq!(finished(&acceptance)[0].as_ref().unwrap().media().len(), 0);
 }
 

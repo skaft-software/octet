@@ -269,7 +269,9 @@ pub(super) async fn project_agent_event(
                 messages.len(),
             )?;
         }
-        AgentEvent::CustomMessageCommitted { .. } | AgentEvent::RecoveredOutput { .. } | AgentEvent::DelegationUpdated { .. } => {
+        AgentEvent::CustomMessageCommitted { .. }
+        | AgentEvent::RecoveredOutput { .. }
+        | AgentEvent::DelegationUpdated { .. } => {
             // Serve projects owner-fenced subagent state through extension
             // presentation snapshots; native telemetry is TUI-local run chrome.
         }

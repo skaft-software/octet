@@ -1789,7 +1789,10 @@ async fn session_lifecycle_service_is_bounded_and_epoch_fenced() {
 
     service.activate();
     let stale = service
-        .try_submit(ExtensionSessionLifecycleOperation::Fork { entry_id: None, at: false })
+        .try_submit(ExtensionSessionLifecycleOperation::Fork {
+            entry_id: None,
+            at: false,
+        })
         .unwrap();
     assert!(matches!(
         service.try_submit(ExtensionSessionLifecycleOperation::Reload),
@@ -1861,7 +1864,10 @@ async fn api_v03_session_lifecycle_dispatch_validates_and_settles_canonically() 
             "fork-request",
             methods::SESSION_FORK,
             serde_json::json!({}),
-            ExtensionSessionLifecycleOperation::Fork { entry_id: None, at: false },
+            ExtensionSessionLifecycleOperation::Fork {
+                entry_id: None,
+                at: false,
+            },
             "forked-session",
         ),
         (
@@ -2893,8 +2899,8 @@ fn non_tool_input_fails_closed_without_an_event_consumer() {
 fn prospective_tool_catalog_has_one_input_and_output_schema_byte_budget() {
     let tool = |name: &str, bytes: usize| ToolDefinition {
         default_active: None,
-                nested_execution: false,
-                prepare_arguments: false,
+        nested_execution: false,
+        prepare_arguments: false,
         prompt_snippet: None,
         prompt_guidelines: Vec::new(),
         operation: None,
@@ -3836,8 +3842,8 @@ fn handshake_must_exactly_match_manifest_contribution_names() {
         api_version: manifest.api_version.clone(),
         tools: vec![ToolDefinition {
             default_active: None,
-                nested_execution: false,
-                prepare_arguments: false,
+            nested_execution: false,
+            prepare_arguments: false,
             prompt_snippet: None,
             prompt_guidelines: Vec::new(),
             operation: None,
@@ -3926,8 +3932,8 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
         api_version: EXTENSION_API_VERSION_0_4.into(),
         tools: vec![ToolDefinition {
             default_active: None,
-                nested_execution: false,
-                prepare_arguments: false,
+            nested_execution: false,
+            prepare_arguments: false,
             prompt_snippet: None,
             prompt_guidelines: Vec::new(),
             operation: None,

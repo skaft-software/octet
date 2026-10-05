@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 fn definition() -> ToolDefinition {
     ToolDefinition {
         default_active: None,
-                nested_execution: false,
-                prepare_arguments: false,
+        nested_execution: false,
+        prepare_arguments: false,
         prompt_snippet: None,
         prompt_guidelines: Vec::new(),
         operation: None,

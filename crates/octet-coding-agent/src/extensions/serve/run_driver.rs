@@ -153,7 +153,9 @@ pub(super) async fn start_and_drive_run_inner(
         .item_turns
         .insert(user_item_id.clone(), turn_id.clone());
     let mut composed_input = model_prompt;
-    composed_input.parts.extend(media.into_iter().map(InputPart::Media));
+    composed_input
+        .parts
+        .extend(media.into_iter().map(InputPart::Media));
     let title_before_prompt =
         session_meta_for_open_session(&plan.sessions, &plan.session_id, app.agent.session())
             .map(|metadata| metadata.title);

@@ -836,7 +836,14 @@ fn block_node(
                     .text(
                         "head",
                         vec![Span::styled(
-                            if let Some(label) = shell.extension_ui.hidden_thinking_label.as_ref().filter(|_| !shell.verbose_tools) { label.clone() } else if block.finished {
+                            if let Some(label) = shell
+                                .extension_ui
+                                .hidden_thinking_label
+                                .as_ref()
+                                .filter(|_| !shell.verbose_tools)
+                            {
+                                label.clone()
+                            } else if block.finished {
                                 block.reasoning_elapsed.map_or_else(
                                     || "Thoughts".into(),
                                     |elapsed| {
@@ -957,7 +964,14 @@ fn text_node(identity: u64, text: &str, token: &str) -> Node {
 
 fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
     let run = shell.run.current().filter(|run| run.is_active())?;
-    if shell.extension_ui.working.as_ref().is_some_and(|working| working.visible == Some(false)) { return None; }
+    if shell
+        .extension_ui
+        .working
+        .as_ref()
+        .is_some_and(|working| working.visible == Some(false))
+    {
+        return None;
+    }
     let label = match run.phase() {
         crate::presentation::RunPhase::Preparing { summary } => summary.as_str(),
         crate::presentation::RunPhase::AwaitingProvider { .. } => "Waiting for provider",
@@ -969,7 +983,12 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
         crate::presentation::RunPhase::AwaitingApproval { prompt } => prompt.as_str(),
         crate::presentation::RunPhase::Finished(_) => return None,
     };
-    let label = shell.extension_ui.working.as_ref().and_then(|working| working.message.as_deref()).unwrap_or(label);
+    let label = shell
+        .extension_ui
+        .working
+        .as_ref()
+        .and_then(|working| working.message.as_deref())
+        .unwrap_or(label);
     let age = run.elapsed_at(Instant::now()).as_millis() as u64;
     let mut node = octet_tern::scene::working_row("work", &sanitize_for_terminal(label), age, None);
     node.p = Some(node.p.unwrap_or_default().role("omp.working"));
@@ -991,8 +1010,13 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
     if let Some(working) = &shell.extension_ui.working {
         if let Some(frames) = &working.frames {
             let interval = working.interval_ms.filter(|value| *value > 0).unwrap_or(80);
-            let frame = if frames.is_empty() { "" } else { &frames[((age / interval) % frames.len() as u64) as usize] };
-            node.c.as_mut().expect("working row")[0] = octet_tern::scene::ansi_block("work.spin", frame);
+            let frame = if frames.is_empty() {
+                ""
+            } else {
+                &frames[((age / interval) % frames.len() as u64) as usize]
+            };
+            node.c.as_mut().expect("working row")[0] =
+                octet_tern::scene::ansi_block("work.spin", frame);
         }
     }
     Some(node)

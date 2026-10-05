@@ -1309,7 +1309,10 @@ impl DelegationManager {
         };
         let control = run.control();
         if extension_policy.is_some() {
-            self.record_child_event(&identity.id, json!({"kind": "run_started", "message": persisted_task}));
+            self.record_child_event(
+                &identity.id,
+                json!({"kind": "run_started", "message": persisted_task}),
+            );
         }
 
         let output_limit = extension_policy

@@ -634,19 +634,15 @@ mod session_snapshot_tests {
         assert!(values.contains_key("owner.one"));
         assert!(values.contains_key("owner.public"));
         assert!(!values.contains_key("owner.two"));
-        assert!(
-            original
-                .metadata
-                .as_ref()
-                .unwrap()
-                .extension_metadata
-                .contains_key("owner.two")
-        );
-        assert!(
-            !serde_json::to_string(&projected)
-                .unwrap()
-                .contains("private:owner.two")
-        );
+        assert!(original
+            .metadata
+            .as_ref()
+            .unwrap()
+            .extension_metadata
+            .contains_key("owner.two"));
+        assert!(!serde_json::to_string(&projected)
+            .unwrap()
+            .contains("private:owner.two"));
     }
 
     #[test]

@@ -187,7 +187,11 @@ impl NativeState {
             let text = text_input(&pending.payload.input).expect("native text admission");
             let mut metadata = metadata.clone();
             metadata.native_steering = Some((self.operation.clone(), pending.id));
-            pending.payload.input.clone().append_to(session, Some(metadata))?;
+            pending
+                .payload
+                .input
+                .clone()
+                .append_to(session, Some(metadata))?;
             self.materialized.push((
                 pending.id,
                 pending.applied.clone().expect("applied successor"),
@@ -257,7 +261,9 @@ impl NativeState {
 fn text_input(input: &UserInput) -> Option<String> {
     let mut text = String::new();
     for part in input.clone().into_user_parts() {
-        let UserPart::Text(part) = part else { return None; };
+        let UserPart::Text(part) = part else {
+            return None;
+        };
         text.push_str(&part);
     }
     (!text.is_empty() && text.len() <= 65536).then_some(text)

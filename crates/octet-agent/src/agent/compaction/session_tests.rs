@@ -190,9 +190,7 @@ async fn replacement_commits_once_and_observes_real_checkpoint_then_reopens() {
     drop(agent);
     let reopened = Session::open(dir.path().join("session.jsonl")).unwrap();
     assert_eq!(reopened.head(), Some(checkpoint));
-    assert!(
-        serialize_conversation(&reopened.context().unwrap()).contains("real extension handoff")
-    );
+    assert!(serialize_conversation(&reopened.context().unwrap()).contains("real extension handoff"));
 }
 
 #[tokio::test]
@@ -240,13 +238,11 @@ async fn threshold_veto_allows_in_budget_request_without_reentering_hook() {
             && serde_json::to_value(agent.session.entry(&assistant_entry.id).unwrap()).unwrap()
                 == serde_json::to_value(assistant_entry).unwrap()
     ));
-    assert!(
-        !agent
-            .session
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
-    );
+    assert!(!agent
+        .session
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
 }
 
 #[tokio::test]
@@ -268,25 +264,21 @@ async fn overflow_veto_cannot_bypass_capacity_or_dispatch_provider() {
             },
         ]
     ));
-    assert!(
-        !agent
-            .session
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
-    );
+    assert!(!agent
+        .session
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
 }
 
 #[tokio::test]
 async fn tree_veto_preserves_head_and_no_after_event() {
     let (mut agent, seen, calls, _dir) = agent(Action::Cancel);
     let revision = SessionSourceRevision::capture(&agent.session).unwrap();
-    assert!(
-        agent
-            .navigate_session_tree(None, CancellationToken::default())
-            .await
-            .is_err()
-    );
+    assert!(agent
+        .navigate_session_tree(None, CancellationToken::default())
+        .await
+        .is_err());
     revision.validate(&agent.session).unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert_eq!(seen.lock().unwrap().len(), 1);

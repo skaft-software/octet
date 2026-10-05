@@ -131,7 +131,8 @@ pub(super) async fn prepare_parallel_read_call(
 ) -> ParallelReadPreparation {
     let start = std::time::Instant::now();
     let (progress_tx, progress_rx) = mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
-    let progress_sink = ToolProgressSink::live(progress_tx).with_invocation(invocation)
+    let progress_sink = ToolProgressSink::live(progress_tx)
+        .with_invocation(invocation)
         .with_tool_call_identity(request_id.0.clone(), None);
     let tool_ctx = ToolContext {
         workspace: &sandbox.workspace,
@@ -145,23 +146,31 @@ pub(super) async fn prepare_parallel_read_call(
     };
 
     let arguments =
-        match transform_tool_arguments(hooks, tool.as_ref(), name, arguments.clone(), &tool_ctx).await {
+        match transform_tool_arguments(hooks, tool.as_ref(), name, arguments.clone(), &tool_ctx)
+            .await
+        {
             Ok(arguments) => arguments,
             Err(error) => {
                 let cancellation_won = cancellation.is_cancelled();
                 let (result, decision) = if cancellation_won {
                     (Err(cancelled_tool_error()), None)
                 } else {
-                    (Err(error), Some(secondary_hook_denial(sandbox, broker, None).1))
+                    (
+                        Err(error),
+                        Some(secondary_hook_denial(sandbox, broker, None).1),
+                    )
                 };
-                return ParallelReadPreparation::Completed(completed_parallel_read_execution(
-                    result,
-                    decision,
-                    progress_rx,
-                    progress_sink,
-                    start,
-                    cancellation_won,
-                ).with_after(name, &arguments));
+                return ParallelReadPreparation::Completed(
+                    completed_parallel_read_execution(
+                        result,
+                        decision,
+                        progress_rx,
+                        progress_sink,
+                        start,
+                        cancellation_won,
+                    )
+                    .with_after(name, &arguments),
+                );
             }
         };
     let admission = reserve_tool_effect(
@@ -190,14 +199,17 @@ pub(super) async fn prepare_parallel_read_call(
             } else {
                 Err(error)
             };
-            return ParallelReadPreparation::Completed(completed_parallel_read_execution(
-                result,
-                Some(decision),
-                progress_rx,
-                progress_sink,
-                start,
-                cancellation_won,
-            ).with_after(name, &arguments));
+            return ParallelReadPreparation::Completed(
+                completed_parallel_read_execution(
+                    result,
+                    Some(decision),
+                    progress_rx,
+                    progress_sink,
+                    start,
+                    cancellation_won,
+                )
+                .with_after(name, &arguments),
+            );
         }
     };
 
@@ -236,14 +248,17 @@ pub(super) async fn prepare_parallel_read_call(
     }
     if hook_denial.is_some() {
         let (error, decision) = secondary_hook_denial(sandbox, broker, Some(effect));
-        return ParallelReadPreparation::Completed(completed_parallel_read_execution(
-            Err(error),
-            Some(decision),
-            progress_rx,
-            progress_sink,
-            start,
-            false,
-        ).with_after(name, &arguments));
+        return ParallelReadPreparation::Completed(
+            completed_parallel_read_execution(
+                Err(error),
+                Some(decision),
+                progress_rx,
+                progress_sink,
+                start,
+                false,
+            )
+            .with_after(name, &arguments),
+        );
     }
     if cancellation.is_cancelled() {
         return ParallelReadPreparation::Completed(completed_parallel_read_execution(
@@ -264,14 +279,17 @@ pub(super) async fn prepare_parallel_read_call(
         Err(error) => {
             let (error, decision) =
                 effect_reservation_commit_denial(sandbox, broker, effect, &error);
-            return ParallelReadPreparation::Completed(completed_parallel_read_execution(
-                Err(error),
-                Some(decision),
-                progress_rx,
-                progress_sink,
-                start,
-                false,
-            ).with_after(name, &arguments));
+            return ParallelReadPreparation::Completed(
+                completed_parallel_read_execution(
+                    Err(error),
+                    Some(decision),
+                    progress_rx,
+                    progress_sink,
+                    start,
+                    false,
+                )
+                .with_after(name, &arguments),
+            );
         }
     };
     let policy_decision = policy_decision(

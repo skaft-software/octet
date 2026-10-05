@@ -419,7 +419,10 @@ impl Tool for ProcessTool {
             _ = cancellation.cancelled() => return Err(ToolError::new("tool argument preparation cancelled")),
             result = request => result.map_err(|error|ToolError::new(error.to_string()))?,
         };
-        result.get("arguments").cloned().ok_or_else(||ToolError::new("argument preparation returned no arguments"))
+        result
+            .get("arguments")
+            .cloned()
+            .ok_or_else(|| ToolError::new("argument preparation returned no arguments"))
     }
 
     fn replay_safety(&self) -> ReplaySafety {

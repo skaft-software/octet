@@ -44,14 +44,20 @@ impl From<&str> for UserInput {
 
 impl From<Vec<InputPart>> for UserInput {
     fn from(parts: Vec<InputPart>) -> Self {
-        Self { parts, custom_messages: Vec::new() }
+        Self {
+            parts,
+            custom_messages: Vec::new(),
+        }
     }
 }
 
 impl UserInput {
     /// A custom-only prompt, without a substitute user message.
     pub fn from_custom(message: crate::session::CustomMessage) -> Self {
-        Self { parts: Vec::new(), custom_messages: vec![message] }
+        Self {
+            parts: Vec::new(),
+            custom_messages: vec![message],
+        }
     }
 
     /// Persist the prompt and each custom message independently, in Pi order.
@@ -61,17 +67,24 @@ impl UserInput {
         session: &mut crate::session::Session,
         metadata: Option<crate::session::EntryMetadata>,
     ) -> Result<crate::session::EntryId, crate::session::SessionError> {
-        for message in &self.custom_messages { message.validate()?; }
+        for message in &self.custom_messages {
+            message.validate()?;
+        }
         let mut first = None;
         if !self.parts.is_empty() || self.custom_messages.is_empty() {
             let message = octet_ai::Message::User(octet_ai::UserMessage {
                 content: UserInput::from(self.parts).into_user_parts(),
             });
-            first = Some(session.append_with_metadata(crate::session::EntryValue::Message(message), metadata.clone())?);
+            first = Some(session.append_with_metadata(
+                crate::session::EntryValue::Message(message),
+                metadata.clone(),
+            )?);
         }
         for message in self.custom_messages {
             let id = session.append_custom_message(message, metadata.clone())?;
-            if first.is_none() { first = Some(id); }
+            if first.is_none() {
+                first = Some(id);
+            }
         }
         Ok(first.expect("input always appends at least one entry"))
     }
@@ -95,9 +108,15 @@ impl UserInput {
     pub fn display_summary(&self) -> String {
         let ordinary = UserInput::from(self.parts.clone()).text_summary();
         let mut pieces = Vec::new();
-        if !ordinary.is_empty() { pieces.push(ordinary); }
-        pieces.extend(self.custom_messages.iter().filter(|message| message.display)
-            .map(|message| format!("[{}]\n{}", message.custom_type, message.text())));
+        if !ordinary.is_empty() {
+            pieces.push(ordinary);
+        }
+        pieces.extend(
+            self.custom_messages
+                .iter()
+                .filter(|message| message.display)
+                .map(|message| format!("[{}]\n{}", message.custom_type, message.text())),
+        );
         pieces.join("\n")
     }
 
@@ -110,7 +129,11 @@ impl UserInput {
                 InputPart::Text(text) => UserPart::Text(text),
                 InputPart::Media(media) => UserPart::Media(media),
             })
-            .chain(self.custom_messages.iter().flat_map(|message| message.user_parts()))
+            .chain(
+                self.custom_messages
+                    .iter()
+                    .flat_map(|message| message.user_parts()),
+            )
             .collect()
     }
 }

@@ -218,7 +218,10 @@ async fn active_driver_settles_every_negotiated_session_operation() {
         (
             "session/fork",
             json!({}),
-            ExtensionSessionLifecycleOperation::Fork { entry_id: None, at: false },
+            ExtensionSessionLifecycleOperation::Fork {
+                entry_id: None,
+                at: false,
+            },
             "forked-session",
         ),
         (

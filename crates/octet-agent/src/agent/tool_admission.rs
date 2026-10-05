@@ -295,7 +295,10 @@ pub(super) async fn reserve_tool_effect(
 
 /// Canonical rich content, including an error's replacement envelope.
 pub(super) fn resolved_tool_output(result: &Result<ToolOutput, ToolError>) -> Option<&ToolOutput> {
-    match result { Ok(output) => Some(output), Err(error) => error.output() }
+    match result {
+        Ok(output) => Some(output),
+        Err(error) => error.output(),
+    }
 }
 
 pub(super) fn tool_result_terminates_run(result: &Result<ToolOutput, ToolError>) -> bool {

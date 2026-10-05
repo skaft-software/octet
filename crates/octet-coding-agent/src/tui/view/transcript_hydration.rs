@@ -91,7 +91,9 @@ pub(super) fn append_hydrated_items(
                     persisted: true,
                 });
             }
-            TranscriptItem::CustomMessage { custom_type, text, .. } => {
+            TranscriptItem::CustomMessage {
+                custom_type, text, ..
+            } => {
                 state.seal_activity_group();
                 state.push_block(TranscriptBlock::Notice(format!("[{custom_type}]\n{text}")));
             }

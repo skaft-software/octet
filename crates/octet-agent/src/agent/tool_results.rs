@@ -357,8 +357,12 @@ pub(super) fn lower_tool_result(
         if let Some(output) = error.output() {
             rich_result = Ok(output.clone().with_is_error(true));
             &rich_result
-        } else { result }
-    } else { result };
+        } else {
+            result
+        }
+    } else {
+        result
+    };
     let (raw_text, is_error) = match result {
         Ok(output) => (output.text.as_str(), output.is_error()),
         Err(error) => (error.message.as_str(), true),

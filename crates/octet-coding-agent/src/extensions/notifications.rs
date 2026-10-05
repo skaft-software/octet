@@ -84,11 +84,14 @@ impl ExecutableExtensions {
 
     /// Fan out a real custom-message commit through the negotiated lifecycle channel.
     pub fn notify_custom_message_committed_all(
-        &mut self, entry_id: &octet_agent::session::EntryId,
-        message: &octet_agent::session::CustomMessage, timestamp_unix_ms: u64,
+        &mut self,
+        entry_id: &octet_agent::session::EntryId,
+        message: &octet_agent::session::CustomMessage,
+        timestamp_unix_ms: u64,
     ) {
         self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
-            process.notify_custom_message_committed(entry_id, message, timestamp_unix_ms)
+            process
+                .notify_custom_message_committed(entry_id, message, timestamp_unix_ms)
                 .map_err(|error| error.to_string())
         });
     }

@@ -580,7 +580,10 @@ impl ImageGenerationOptions {
     pub fn validate(&self) -> Result<(), AiError> {
         self.runtime.validate()?;
         if !self.runtime.provider_hooks.is_empty() {
-            return Err(ConfigError::Parse("async provider hooks are not supported for image requests".into()).into());
+            return Err(ConfigError::Parse(
+                "async provider hooks are not supported for image requests".into(),
+            )
+            .into());
         }
         if self.runtime.fetch.is_some() {
             return Err(ConfigError::Parse(

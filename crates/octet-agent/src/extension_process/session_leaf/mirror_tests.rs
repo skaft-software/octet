@@ -5,7 +5,7 @@ use crate::session::{
     EntryMetadata, EntryValue, ExtensionEntryMetadata, ExtensionMetadataProvenance,
 };
 use pretty_assertions::assert_eq;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 const SCRIPT: &str = r#"#!/usr/bin/env python3
@@ -248,13 +248,11 @@ async fn initial_session_mirror_is_native_complete_namespace_filtered_and_branch
             .collect::<Vec<_>>(),
         vec![json!(root), json!(own), json!(foreign), json!(public)]
     );
-    assert!(
-        host["session_entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["id"] == json!(abandoned))
-    );
+    assert!(host["session_entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == json!(abandoned)));
     assert_eq!(host["session_leaf_id"], json!(session.head()));
     assert_eq!(host["session_file"], json!(path));
     assert!(!host.to_string().contains("never disclose"));
@@ -350,16 +348,14 @@ async fn empty_is_real_unavailable_is_not_empty_and_foreign_owner_cannot_read_mi
         seen["start"]["context"]["host"]["session_leaf_id"],
         Value::Null
     );
-    assert!(
-        process
-            .execute_command(
-                "inspect",
-                vec![],
-                process.current_context_for_resource_owner("foreign-owner")
-            )
-            .await
-            .is_err()
-    );
+    assert!(process
+        .execute_command(
+            "inspect",
+            vec![],
+            process.current_context_for_resource_owner("foreign-owner")
+        )
+        .await
+        .is_err());
     open(&process, &session, &mut events).await;
     // Durable per-entry limits remain intact; the complete mirror exceeds its
     // aggregate bound without any individual invalid entry.
@@ -373,33 +369,27 @@ async fn empty_is_real_unavailable_is_not_empty_and_foreign_owner_cannot_read_mi
             )
             .unwrap();
     }
-    assert!(
-        process
-            .set_host_state_with_session(state.clone(), &session)
-            .is_err()
-    );
-    assert!(
-        process
-            .execute_command(
-                "inspect",
-                vec![],
-                process.current_context_for_resource_owner(session.resource_owner_key())
-            )
-            .await
-            .is_err()
-    );
+    assert!(process
+        .set_host_state_with_session(state.clone(), &session)
+        .is_err());
+    assert!(process
+        .execute_command(
+            "inspect",
+            vec![],
+            process.current_context_for_resource_owner(session.resource_owner_key())
+        )
+        .await
+        .is_err());
     // A plain metadata refresh cannot resurrect a failed mirror.
     process.set_host_state(state);
-    assert!(
-        process
-            .execute_command(
-                "inspect",
-                vec![],
-                process.current_context_for_resource_owner(session.resource_owner_key())
-            )
-            .await
-            .is_err()
-    );
+    assert!(process
+        .execute_command(
+            "inspect",
+            vec![],
+            process.current_context_for_resource_owner(session.resource_owner_key())
+        )
+        .await
+        .is_err());
     process.shutdown().await;
     let seen = observations(&temp);
     let invalidation = seen
@@ -442,16 +432,14 @@ async fn distinct_native_owners_with_same_display_id_retire_old_mirror_and_ui() 
     assert!(!process.remote_ui_surface_is_current(&old_owner, "mirror"));
     let connection = read_std_lock(&process.inner.connection).clone();
     assert!(!lock_std_mutex(&connection.issued_resource_owners).contains(&old_owner));
-    assert!(
-        process
-            .execute_command(
-                "inspect",
-                vec![],
-                process.current_context_for_resource_owner(first.resource_owner_key())
-            )
-            .await
-            .is_err()
-    );
+    assert!(process
+        .execute_command(
+            "inspect",
+            vec![],
+            process.current_context_for_resource_owner(first.resource_owner_key())
+        )
+        .await
+        .is_err());
     process
         .start_session_hook_binding(second.resource_owner_key())
         .await
@@ -484,15 +472,11 @@ async fn unnegotiated_session_entries_does_not_disclose_history() {
         .await
         .unwrap();
     let seen = inspect(&process, &session).await;
-    assert!(
-        seen["start"]["context"]["host"]
-            .get("session_entries")
-            .is_none()
-    );
-    assert!(
-        seen["command"]["context"]["host"]
-            .get("session_entries")
-            .is_none()
-    );
+    assert!(seen["start"]["context"]["host"]
+        .get("session_entries")
+        .is_none());
+    assert!(seen["command"]["context"]["host"]
+        .get("session_entries")
+        .is_none());
     assert!(process.shutdown().await);
 }

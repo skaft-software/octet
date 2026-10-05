@@ -62,11 +62,19 @@ pub trait ExtensionConfirmationHandler {
     fn finish_progress(&mut self, _extension: &str) {}
 
     /// Native exact-effect confirmations must never consume action-level preapproval.
-    fn confirm_effect<'a>(&'a mut self, extension: &'a str, request: &'a octet_agent::tool::ToolConfirmation)
-        -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
+    fn confirm_effect<'a>(
+        &'a mut self,
+        extension: &'a str,
+        request: &'a octet_agent::tool::ToolConfirmation,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
         Box::pin(async move {
-            let prompt = ConfirmationRequest { parent_request_id: None, prompt: request.prompt.clone(),
-                detail: request.detail.clone(), destructive: request.destructive, default: request.default };
+            let prompt = ConfirmationRequest {
+                parent_request_id: None,
+                prompt: request.prompt.clone(),
+                detail: request.detail.clone(),
+                destructive: request.destructive,
+                default: request.default,
+            };
             self.confirm(extension, &prompt).await
         })
     }
@@ -120,8 +128,11 @@ where
         self.inner.should_yield_to_fullscreen()
     }
 
-    fn confirm_effect<'a>(&'a mut self, extension: &'a str, request: &'a octet_agent::tool::ToolConfirmation)
-        -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
+    fn confirm_effect<'a>(
+        &'a mut self,
+        extension: &'a str,
+        request: &'a octet_agent::tool::ToolConfirmation,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
         self.inner.confirm_effect(extension, request)
     }
 

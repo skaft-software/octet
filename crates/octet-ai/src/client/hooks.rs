@@ -75,7 +75,9 @@ pub(crate) fn validate_hook_headers(
 
 fn decode_hook_body(body: &[u8]) -> Result<serde_json::Value, AiError> {
     if body.len() > MAX_HOOKED_BODY_BYTES {
-        return Err(crate::ConfigError::Parse("provider hook input exceeds byte limit".into()).into());
+        return Err(
+            crate::ConfigError::Parse("provider hook input exceeds byte limit".into()).into(),
+        );
     }
     serde_json::from_slice(body)
         .map_err(|_| AiError::Decode(DecodeError::Json("invalid provider hook JSON body".into())))
@@ -83,12 +85,18 @@ fn decode_hook_body(body: &[u8]) -> Result<serde_json::Value, AiError> {
 
 fn encode_hook_body(payload: &serde_json::Value) -> Result<bytes::Bytes, AiError> {
     if !payload.is_object() && !payload.is_array() {
-        return Err(crate::ConfigError::Parse("provider hook body must be an object or array".into()).into());
+        return Err(crate::ConfigError::Parse(
+            "provider hook body must be an object or array".into(),
+        )
+        .into());
     }
-    let encoded = serde_json::to_vec(payload)
-        .map_err(|_| AiError::Decode(DecodeError::Json("invalid provider hook JSON body".into())))?;
+    let encoded = serde_json::to_vec(payload).map_err(|_| {
+        AiError::Decode(DecodeError::Json("invalid provider hook JSON body".into()))
+    })?;
     if encoded.len() > MAX_HOOKED_BODY_BYTES {
-        return Err(crate::ConfigError::Parse("provider hook output exceeds byte limit".into()).into());
+        return Err(
+            crate::ConfigError::Parse("provider hook output exceeds byte limit".into()).into(),
+        );
     }
     Ok(bytes::Bytes::from(encoded))
 }
@@ -118,19 +126,27 @@ impl ProviderRequestAttempt {
                 model: HookModelContext::from_model(model),
             },
             hooks: client_hooks.iter().chain(request_hooks).cloned().collect(),
-            timeout: model.endpoint.timeout.min(std::time::Duration::from_secs(5)),
+            timeout: model
+                .endpoint
+                .timeout
+                .min(std::time::Duration::from_secs(5)),
         })
     }
 
     pub(super) async fn payload(&self, mut body: bytes::Bytes) -> Result<bytes::Bytes, AiError> {
         tokio::time::timeout(self.timeout, async {
             for hook in &self.hooks {
-                if let Some(payload) = hook.before_request(&self.context, decode_hook_body(&body)?).await? {
+                if let Some(payload) = hook
+                    .before_request(&self.context, decode_hook_body(&body)?)
+                    .await?
+                {
                     body = encode_hook_body(&payload)?;
                 }
             }
             Ok(body)
-        }).await.map_err(|_| hook_deadline())?
+        })
+        .await
+        .map_err(|_| hook_deadline())?
     }
 
     pub(super) async fn headers(&self, headers: &mut http::HeaderMap) -> Result<(), AiError> {
@@ -141,7 +157,9 @@ impl ProviderRequestAttempt {
                 validate_hook_headers(&before, headers)?;
             }
             Ok(())
-        }).await.map_err(|_| hook_deadline())?
+        })
+        .await
+        .map_err(|_| hook_deadline())?
     }
 
     pub(super) async fn response(
@@ -154,7 +172,9 @@ impl ProviderRequestAttempt {
                 hook.after_response(&self.context, status, headers).await?;
             }
             Ok(())
-        }).await.map_err(|_| hook_deadline())?
+        })
+        .await
+        .map_err(|_| hook_deadline())?
     }
 }
 

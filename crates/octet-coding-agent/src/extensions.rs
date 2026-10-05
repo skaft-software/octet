@@ -99,20 +99,20 @@ use crate::tui::view::{
 
 mod admission;
 mod commands;
-mod exec;
-mod mcp;
-#[cfg(all(test, unix))]
-mod mcp_native_tests;
 mod composition;
 mod confirmation;
 mod event_drain;
+mod exec;
 mod headless;
 mod host_requests;
 mod lifecycle;
+mod mcp;
+#[cfg(all(test, unix))]
+mod mcp_native_tests;
+pub(crate) mod model_control;
 mod notifications;
 mod post_mutation;
 mod provider_runtime;
-pub(crate) mod model_control;
 mod runtime_state;
 mod status;
 mod summaries;

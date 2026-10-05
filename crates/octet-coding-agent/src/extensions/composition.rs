@@ -480,7 +480,8 @@ pub(super) fn extension_model_view(
         .clone()
         .or_else(|| octet_ai::model_metadata::model_display_name(&spec.id.0))
         .unwrap_or_else(|| spec.api_name.clone());
-    if !model_field_fits(&spec.api_name) || !model_field_fits(&provider) || !model_field_fits(&name) {
+    if !model_field_fits(&spec.api_name) || !model_field_fits(&provider) || !model_field_fits(&name)
+    {
         return None;
     }
     let mut input = vec!["text".to_owned()];

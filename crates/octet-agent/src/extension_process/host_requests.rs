@@ -390,7 +390,11 @@ pub struct SessionSendMessageRequest {
     #[serde(default)]
     pub display: bool,
     /// Extension-defined data that the model never sees.
-    #[serde(default, deserialize_with = "crate::session::deserialize_custom_message_details", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::session::deserialize_custom_message_details",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub details: Option<serde_json::Value>,
     /// Pi `deliverAs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

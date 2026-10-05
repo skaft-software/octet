@@ -1,11 +1,12 @@
 //! Public Pi helper imports exercised inside the real Node/Rust command path.
 #![cfg(unix)]
-use super::*;
 use super::pi_contract_support::{command, pi_app};
+use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_public_helpers_load_and_persist_through_the_real_host() {
-    let (_directory, mut app) = pi_app(r#"
+    let (_directory, mut app) = pi_app(
+        r#"
       import { uuidv7, calculateCost, collapseSystemMessages, createAssistantMessageEventStream,
         getCurrentSystemPrompt, getCurrentTools } from '@earendil-works/pi-ai';
       import { VERSION, CONFIG_DIR_NAME, getAgentDir, isToolCallEventType, isReadToolResult, parseFrontmatter, truncateHead, convertToLlm,
@@ -69,14 +70,17 @@ async fn pi_public_helpers_load_and_persist_through_the_real_host() {
           version: VERSION, config: CONFIG_DIR_NAME, agentDir: typeof getAgentDir() === 'string', uuid: uuidv7(123).slice(0, 13),
         });
       } });
-    "#);
+    "#,
+    );
     let path = app.agent.session().path().to_owned();
     let mut shell = InteractiveShell::test_shell();
     let result = command(&mut app, &mut shell, "probe").await;
     app.executable_extensions.shutdown().await;
     result.unwrap();
     let reopened = Session::open_read_only(&path).unwrap();
-    let entries = serde_json::to_value(reopened.entries()).unwrap().to_string();
+    let entries = serde_json::to_value(reopened.entries())
+        .unwrap()
+        .to_string();
     assert!(entries.contains("helper-proof"), "{entries}");
     assert!(entries.contains("\"version\":\"1.0.2\""), "{entries}");
     assert!(entries.contains("\"config\":\".pi\""), "{entries}");
@@ -87,21 +91,33 @@ async fn pi_public_helpers_load_and_persist_through_the_real_host() {
     assert!(entries.contains("\"head\":\"first\""), "{entries}");
     assert!(entries.contains("[User]: helper-text"), "{entries}");
     assert!(entries.contains("\"privateLeaked\":false"), "{entries}");
-    let proofs: Vec<_> = reopened.entries().iter().filter_map(|entry| {
-        reopened.extension_entry(&entry.id, "octet-pi-compat")
-            .filter(|private| private.entry_type == "helper-proof")
-    }).collect();
-    assert_eq!(proofs.len(), 1, "exactly one durable helper command receipt");
+    let proofs: Vec<_> = reopened
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            reopened
+                .extension_entry(&entry.id, "octet-pi-compat")
+                .filter(|private| private.entry_type == "helper-proof")
+        })
+        .collect();
+    assert_eq!(
+        proofs.len(),
+        1,
+        "exactly one durable helper command receipt"
+    );
     // Assert the computed values in the reopened native session, not merely
     // import/export presence or a JS-only/synthetic-host observation.
-    assert_eq!(proofs[0].data["ai"], serde_json::json!({
-        "cost": { "input": 1, "output": 4, "cacheRead": 0.3, "cacheWrite": 7.25, "total": 12.55 },
-        "costIdentity": true, "totalTokens": 1000000,
-        "prompt": "base\nα\n\nlater\n\nnew\n\nformat", "toolNames": ["b", "a"], "toolIdentity": true,
-        "collapsed": { "roles": ["system", "user"], "timestamp": 0, "content": "base\nα\n\nlater",
-            "sections": { "tone": "new", "format": "format" }, "userIdentity": true, "envelopeKeys": ["messages"] },
-        "replayStable": true, "unchanged": true,
-        "stream": { "types": ["text_delta", "done"], "eventIdentity": true, "resultIdentity": true,
-            "stablePromise": true, "errorIdentity": true, "endIdentity": true, "ended": true },
-    }));
+    assert_eq!(
+        proofs[0].data["ai"],
+        serde_json::json!({
+            "cost": { "input": 1, "output": 4, "cacheRead": 0.3, "cacheWrite": 7.25, "total": 12.55 },
+            "costIdentity": true, "totalTokens": 1000000,
+            "prompt": "base\nα\n\nlater\n\nnew\n\nformat", "toolNames": ["b", "a"], "toolIdentity": true,
+            "collapsed": { "roles": ["system", "user"], "timestamp": 0, "content": "base\nα\n\nlater",
+                "sections": { "tone": "new", "format": "format" }, "userIdentity": true, "envelopeKeys": ["messages"] },
+            "replayStable": true, "unchanged": true,
+            "stream": { "types": ["text_delta", "done"], "eventIdentity": true, "resultIdentity": true,
+                "stablePromise": true, "errorIdentity": true, "endIdentity": true, "ended": true },
+        })
+    );
 }

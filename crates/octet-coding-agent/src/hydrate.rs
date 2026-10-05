@@ -817,7 +817,11 @@ fn hydrate_entries_with_image_budget(
     let mut items = Vec::new();
     let mut image_budget = ToolImageBudget::default();
     for entry in entries {
-        if let Some(custom) = entry.metadata.as_ref().and_then(|metadata| metadata.custom_message.as_ref()) {
+        if let Some(custom) = entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.custom_message.as_ref())
+        {
             if custom.display {
                 items.push(TranscriptItem::CustomMessage {
                     custom_type: custom.custom_type.clone(),

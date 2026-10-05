@@ -64,29 +64,19 @@ where
     }
 
     let starts = match app.executable_extensions.resource_session_starts() {
-        Ok(work) => {
-            pump(shell, input, app, async move {
-                Ok(work.await)
-            })
-            .await?
-        }
+        Ok(work) => pump(shell, input, app, async move { Ok(work.await) }).await?,
         Err(error) => Err(error),
     };
     let candidate = match starts {
         Ok(lease) => match app.prepare_resource_paths(shell.theme().background(), lease) {
-            Ok(work) => {
-                pump(shell, input, app, async move {
-                    Ok(work.await)
-                })
-                .await?
-            }
+            Ok(work) => pump(shell, input, app, async move { Ok(work.await) }).await?,
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
     };
-    let (theme, diagnostics) = match candidate.and_then(|(loaded, lease)| {
-        app.apply_extension_resource_paths(loaded, lease)
-    }) {
+    let (theme, diagnostics) = match candidate
+        .and_then(|(loaded, lease)| app.apply_extension_resource_paths(loaded, lease))
+    {
         Ok(published) => published,
         Err(error) => {
             let baseline = app.prepare_resource_withdrawal(shell.theme().background(), error)?;
@@ -112,10 +102,7 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let work = app.executable_extensions.prepare_resource_process_reload();
-    let results = pump(shell, input, app, async move {
-        Ok(work.await)
-    })
-    .await?;
+    let results = pump(shell, input, app, async move { Ok(work.await) }).await?;
     let report = app
         .executable_extensions
         .finish_resource_process_reload(results)
@@ -196,28 +183,55 @@ mod tests {
         let mut app = configured_app(&root, true, true);
         let mut shell = InteractiveShell::test_shell();
         let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-        tokio::time::timeout(Duration::from_secs(10), refresh_resource_paths(&mut app, &mut shell, &mut input))
-            .await.unwrap().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            refresh_resource_paths(&mut app, &mut shell, &mut input),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(app.prompts.contains("consumer-proof"));
         assert_eq!(shell.theme().glyph("prompt"), ":");
         let old_prompts = app.prompts.clone();
         // A replacement generation must answer the same real reverse requests
         // before its empty authoritative reply withdraws all old resources.
         std::fs::write(root.join("reply.json"), "{}").unwrap();
-        let report = tokio::time::timeout(Duration::from_secs(10), reload_resource_processes(&mut app, &mut shell, &mut input))
-            .await.unwrap().unwrap();
+        let report = tokio::time::timeout(
+            Duration::from_secs(10),
+            reload_resource_processes(&mut app, &mut shell, &mut input),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(report.processes.iter().all(|(_, result)| result.is_ok()));
         assert!(!app.resource_paths_pending());
         assert!(!old_prompts.contains("consumer-proof"));
         assert!(!app.prompts.contains("consumer-proof"));
         assert!(shell.theme().source_path().is_none());
         let replies = std::fs::read_to_string(root.join("reverse-replies.jsonl")).unwrap();
-        let replies = replies.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+        let replies = replies
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(replies.len(), 4);
-        for (reply, hook) in replies.iter().zip(["session_start", "resources_discover", "session_start", "resources_discover"]) {
+        for (reply, hook) in replies.iter().zip([
+            "session_start",
+            "resources_discover",
+            "session_start",
+            "resources_discover",
+        ]) {
             assert_eq!(reply["hook"], hook);
-            let id = octet_agent::EntryId(reply["reply"]["result"]["entry_id"].as_str().unwrap().into());
-            let entry = app.agent.session().extension_entry(&id, "consumer-peer").unwrap();
+            let id = octet_agent::EntryId(
+                reply["reply"]["result"]["entry_id"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+            );
+            let entry = app
+                .agent
+                .session()
+                .extension_entry(&id, "consumer-peer")
+                .unwrap();
             assert_eq!(entry.entry_type, "resource-phase-proof");
             assert_eq!(entry.data["hook"], hook);
         }

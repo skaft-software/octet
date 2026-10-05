@@ -17,16 +17,31 @@ pub struct ExtensionLifecycleSnapshot {
 
 impl ExecutableExtensions {
     /// Resolve the live issuing process for a requested compaction callback.
-    pub fn compaction_callback_process(&self, owner: &octet_agent::extension_process::ExtensionResourceOwner) -> Option<ExtensionProcess> {
-        self.processes.iter().find(|process|
-            process.extension_instance_id() == owner.extension_instance_id
-                && process.health_snapshot().generation == owner.process_generation
-        ).cloned()
+    pub fn compaction_callback_process(
+        &self,
+        owner: &octet_agent::extension_process::ExtensionResourceOwner,
+    ) -> Option<ExtensionProcess> {
+        self.processes
+            .iter()
+            .find(|process| {
+                process.extension_instance_id() == owner.extension_instance_id
+                    && process.health_snapshot().generation == owner.process_generation
+            })
+            .cloned()
     }
 
     /// Real foreground mirror of the admitted setup process.
-    pub fn session_setup_context(&self, owner: &octet_agent::extension_process::ExtensionResourceOwner) -> anyhow::Result<serde_json::Value> {
-        let process = self.processes.iter().find(|process| process.extension_instance_id() == owner.extension_instance_id && process.health_snapshot().generation == owner.process_generation)
+    pub fn session_setup_context(
+        &self,
+        owner: &octet_agent::extension_process::ExtensionResourceOwner,
+    ) -> anyhow::Result<serde_json::Value> {
+        let process = self
+            .processes
+            .iter()
+            .find(|process| {
+                process.extension_instance_id() == owner.extension_instance_id
+                    && process.health_snapshot().generation == owner.process_generation
+            })
             .ok_or_else(|| anyhow::anyhow!("session setup process retired"))?;
         Ok(process.replacement_context(owner)?)
     }
@@ -41,11 +56,26 @@ impl ExecutableExtensions {
 
 impl ExtensionLifecycleSnapshot {
     /// Await Pi's cancellable replacement boundary on captured process handles.
-    pub async fn before_session_change(&self, owner: &str, hook: ExtensionHook, payload: serde_json::Value) -> anyhow::Result<bool> {
+    pub async fn before_session_change(
+        &self,
+        owner: &str,
+        hook: ExtensionHook,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<bool> {
         for process in &self.processes {
-            if !process.contributions().hooks.contains(&hook) { continue; }
-            let output = process.run_hook(hook, payload.clone(), process.current_context_for_resource_owner(owner)).await?;
-            if matches!(output.disposition, ExtensionHookDisposition::Deny { .. }) { return Ok(true); }
+            if !process.contributions().hooks.contains(&hook) {
+                continue;
+            }
+            let output = process
+                .run_hook(
+                    hook,
+                    payload.clone(),
+                    process.current_context_for_resource_owner(owner),
+                )
+                .await?;
+            if matches!(output.disposition, ExtensionHookDisposition::Deny { .. }) {
+                return Ok(true);
+            }
         }
         Ok(false)
     }

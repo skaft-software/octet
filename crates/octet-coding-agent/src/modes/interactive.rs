@@ -14,36 +14,36 @@ use octet_agent::extension_api_v03::MAX_JSON_RPC_ID_BYTES;
 #[cfg(windows)]
 use octet_agent::extension_process::WindowsProcessLaunch;
 #[cfg(unix)]
-use octet_agent::extension_process::{BashProcessLaunch, wait_for_bash_process};
+use octet_agent::extension_process::{wait_for_bash_process, BashProcessLaunch};
 use octet_agent::extension_process::{
     ExtensionInputRequest, ExtensionSessionLifecycleError, ExtensionSessionLifecycleOperation,
     ExtensionSessionLifecycleRequest, MAX_EXTENSION_TERMINAL_INPUT_BYTES,
 };
 use octet_agent::{
-    AgentCompactionMode, AgentError, AgentEvent, EffectBroker, EffectIntent, EntryId, GoalDecision,
-    GoalStatus, GoalTurnSource, OutputChannel, Run, RunControl, Session, ToolEffect, ToolProgress,
-    ToolProgressSink, analyze_session_cache_stats,
+    analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EffectBroker,
+    EffectIntent, EntryId, GoalDecision, GoalStatus, GoalTurnSource, OutputChannel, Run,
+    RunControl, Session, ToolEffect, ToolProgress, ToolProgressSink,
 };
 use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::app::bootstrap::{
-    Bootstrap, SessionSelection, build_app_with_resource_consumer as build_app,
-    effective_compaction_threshold_fraction, estimate_text_tokens, open_launch_session,
-    rebuild_app, resolve_launch_interactive, terminal_goal_session_id,
+    build_app_with_resource_consumer as build_app, effective_compaction_threshold_fraction,
+    estimate_text_tokens, open_launch_session, rebuild_app, resolve_launch_interactive,
+    terminal_goal_session_id, Bootstrap, SessionSelection,
 };
 use crate::app::{
-    App, Reconfig, apply_reconfig, level_from_reasoning, reasoning_label,
-    requested_thinking_to_reasoning, supported_levels_with_subagents,
+    apply_reconfig, level_from_reasoning, reasoning_label, requested_thinking_to_reasoning,
+    supported_levels_with_subagents, App, Reconfig,
 };
 use crate::commands::{self, Command};
 #[cfg(test)]
 use crate::compaction::attempt_compaction;
-use crate::compaction::{CompactionOutcome, context_window, estimate_next_request_tokens};
+use crate::compaction::{context_window, estimate_next_request_tokens, CompactionOutcome};
 use crate::config::{CompactionMode, Config, ResumeSelector, SandboxPolicy, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
-use crate::prompts::{RenderedPrompt, render_and_record};
+use crate::prompts::{render_and_record, RenderedPrompt};
 use crate::provider_setup::{
     CompletedSetup, ProviderSetupError, ProviderSetupService, ProviderSetupState,
     SetupAuthentication, SetupAuthority, SetupDraft,
@@ -52,16 +52,17 @@ use crate::resources::{compose_instructions, expand_skill_command};
 use crate::tui::composer::ComposedInput;
 use crate::tui::keymap::{self, InputAction};
 use crate::tui::pickers::{
-    self, SubagentPickerSnapshot, confirmation_picker, extension_confirmation_picker,
-    extension_input_picker, extension_picker, message_picker, optional_model_picker,
-    pick_list_with_preview, provider_setup_picker, read_only_document,
-    read_only_document_live_styled, session_picker, subagent_picker, thinking_picker,
+    self, confirmation_picker, extension_confirmation_picker, extension_input_picker,
+    extension_picker, message_picker, optional_model_picker, pick_list_with_preview,
+    provider_setup_picker, read_only_document, read_only_document_live_styled, session_picker,
+    subagent_picker, thinking_picker, SubagentPickerSnapshot,
 };
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
-    TerminalBackground, TerminalThemeChoice, background_from_terminal_rgb, is_reserved_theme_name,
-    load_named_theme_for_background, load_theme, load_theme_for_background, selectable_file_themes,
+    background_from_terminal_rgb, is_reserved_theme_name, load_named_theme_for_background,
+    load_theme, load_theme_for_background, selectable_file_themes, TerminalBackground,
+    TerminalThemeChoice,
 };
 use crate::tui::view::{
     InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult, Panel, PanelAction, PanelResult,
@@ -72,8 +73,8 @@ mod extension_menu;
 mod onboarding;
 
 use extension_menu::{
-    ExtensionMenuOutcome, authority_label, extension_options_menu, set_extension_enabled,
-    set_extension_host_authority,
+    authority_label, extension_options_menu, set_extension_enabled, set_extension_host_authority,
+    ExtensionMenuOutcome,
 };
 
 /// Ordered controls sent to the frozen Agent during an active run.
@@ -305,7 +306,10 @@ async fn run_interactive_extension_command<H: InteractiveCommandFrontend>(
     approval_budget: usize,
 ) -> anyhow::Result<Option<String>> {
     app.executable_extensions.refresh_host_state(
-        app.agent.session(), &app.model, &app.reasoning, &app.sessions,
+        app.agent.session(),
+        &app.model,
+        &app.reasoning,
+        &app.sessions,
     );
     let Some(mut command) = app.executable_extensions.prepare_owned_command(
         extension,
@@ -4100,7 +4104,11 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
 /// Pi's idle delivery: a message that triggers a turn runs now, through the
 /// queued follow-up path (never the local shell-escape path); any other waits
 /// for the next prompt. Returns whether the idle session should wake.
-async fn wake_for_extension_messages(shell: &mut InteractiveShell, mut agent: Option<&mut octet_agent::Agent>, extensions: &mut crate::extensions::ExecutableExtensions) -> anyhow::Result<bool> {
+async fn wake_for_extension_messages(
+    shell: &mut InteractiveShell,
+    mut agent: Option<&mut octet_agent::Agent>,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+) -> anyhow::Result<bool> {
     use octet_agent::extension_process::ExtensionMessageDelivery as Delivery;
     let mut wake = false;
     for message in shell.take_extension_messages() {
@@ -4111,12 +4119,25 @@ async fn wake_for_extension_messages(shell: &mut InteractiveShell, mut agent: Op
             wake = true;
         } else if let Some(agent) = agent.as_deref_mut() {
             let cursor = agent.session().entries().len();
-            agent.append_idle_input(message.input.into_user_input()).await?;
+            agent
+                .append_idle_input(message.input.into_user_input())
+                .await?;
             for entry in &agent.session().entries()[cursor..] {
-                if let Some(custom) = entry.metadata.as_ref().and_then(|metadata| metadata.custom_message.as_ref()) {
-                    if custom.display { shell.notice(format!("[{}]\n{}", custom.custom_type, custom.text())); }
-                    extensions.notify_custom_message_committed_all(&entry.id, custom,
-                        entry.timestamp_unix_ms.expect("fresh durable entry timestamp"));
+                if let Some(custom) = entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.custom_message.as_ref())
+                {
+                    if custom.display {
+                        shell.notice(format!("[{}]\n{}", custom.custom_type, custom.text()));
+                    }
+                    extensions.notify_custom_message_committed_all(
+                        &entry.id,
+                        custom,
+                        entry
+                            .timestamp_unix_ms
+                            .expect("fresh durable entry timestamp"),
+                    );
                 }
             }
         } else {
@@ -4124,7 +4145,9 @@ async fn wake_for_extension_messages(shell: &mut InteractiveShell, mut agent: Op
             shell.queue_extension_message(message);
         }
     }
-    if wake { shell.settle_queued_follow_ups(true); }
+    if wake {
+        shell.settle_queued_follow_ups(true);
+    }
     Ok(wake)
 }
 
@@ -4142,14 +4165,17 @@ fn deliver_extension_messages_to_run(
                 if let Err(error) = control.try_append_custom(custom) {
                     // A terminal race is appended by the idle session owner, never run.
                     shell.queue_extension_message(message);
-                    if !matches!(error, octet_agent::AgentError::RunEnded) { shell.error(error.to_string()); }
+                    if !matches!(error, octet_agent::AgentError::RunEnded) {
+                        shell.error(error.to_string());
+                    }
                     break;
                 }
             }
             continue;
         }
         match message.delivery {
-            Delivery::Steer => match control.prepare_steer(message.input.clone().into_user_input()) {
+            Delivery::Steer => match control.prepare_steer(message.input.clone().into_user_input())
+            {
                 Ok((prepared, receipt)) => {
                     let ComposedInput {
                         display_text,
@@ -4169,10 +4195,13 @@ fn deliver_extension_messages_to_run(
                 Err(_) => shell.queue_follow_up(message.input),
             },
             Delivery::FollowUp => {
-                if control.try_follow_up(message.input.clone().into_user_input()).is_err() {
+                if control
+                    .try_follow_up(message.input.clone().into_user_input())
+                    .is_err()
+                {
                     shell.queue_follow_up(message.input);
                 }
-            },
+            }
             Delivery::NextTurn => shell.queue_next_turn(message.input),
         }
     }
@@ -6042,16 +6071,35 @@ where
     transition(app, shell, input, reconfig).await
 }
 
-async fn transition<S>(mut app: App, shell: &mut InteractiveShell, input: &mut S, reconfig: Reconfig) -> anyhow::Result<App>
-where S: Stream<Item = std::io::Result<Event>> + Unpin {
+async fn transition<S>(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    reconfig: Reconfig,
+) -> anyhow::Result<App>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     use octet_agent::extension_process::ExtensionHook;
     let before = match &reconfig {
         Reconfig::NewSession => Some(serde_json::json!({"reason":"new"})),
-        Reconfig::Resume(path) => Some(serde_json::json!({"reason":"resume","targetSessionFile":path})),
+        Reconfig::Resume(path) => {
+            Some(serde_json::json!({"reason":"resume","targetSessionFile":path}))
+        }
         _ => None,
     };
     if let Some(payload) = before {
-        if cancel_session_change(&mut app, shell, input, ExtensionHook::SessionBeforeSwitch, payload).await? { return Ok(app); }
+        if cancel_session_change(
+            &mut app,
+            shell,
+            input,
+            ExtensionHook::SessionBeforeSwitch,
+            payload,
+        )
+        .await?
+        {
+            return Ok(app);
+        }
     }
     transition_after_before(app, shell, input, reconfig).await
 }
@@ -6226,11 +6274,9 @@ where
         None => app.agent.session().head(),
         Some(entry_id) => {
             let entry_id = EntryId(entry_id);
-            let entry = app
-                .agent
-                .session()
-                .entry(&entry_id)
-                .ok_or_else(|| anyhow::anyhow!("fork entry `{}` is not in this session", entry_id.0))?;
+            let entry = app.agent.session().entry(&entry_id).ok_or_else(|| {
+                anyhow::anyhow!("fork entry `{}` is not in this session", entry_id.0)
+            })?;
             if at {
                 Some(entry_id)
             } else {
@@ -6265,28 +6311,38 @@ fn replace_extension_active_session(app: &mut App, session: Session) -> anyhow::
     replace_extension_active_session_with_setup(app, session, None)
 }
 
-fn replace_extension_active_session_with_setup(app: &mut App, session: Session, setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>) -> anyhow::Result<String> {
+fn replace_extension_active_session_with_setup(
+    app: &mut App,
+    session: Session,
+    setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
+) -> anyhow::Result<String> {
     let session_id = bounded_extension_session_id(terminal_goal_session_id(&session)?)?;
     app.agent.replace_session_at_idle(session)?;
     app.goal_session_id = session_id.clone();
     let goal_store: Arc<dyn octet_agent::GoalStore> = app.goal_store.clone();
     app.goal_driver = octet_agent::GoalDriver::new(goal_store, session_id.clone());
-    app.executable_extensions.transition_active_session_with_setup(
-        app.agent.session(),
-        &app.model,
-        &app.reasoning,
-        &app.sessions,
-        setup,
-    );
+    app.executable_extensions
+        .transition_active_session_with_setup(
+            app.agent.session(),
+            &app.model,
+            &app.reasoning,
+            &app.sessions,
+            setup,
+        );
     Ok(session_id)
 }
 
 async fn create_extension_session_with_options<S>(
-    app: &mut App, shell: &mut InteractiveShell, input: &mut S,
-    request: &ExtensionSessionLifecycleRequest, parent_session: Option<String>,
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    request: &ExtensionSessionLifecycleRequest,
+    parent_session: Option<String>,
     setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
 ) -> anyhow::Result<Option<String>>
-where S: Stream<Item = std::io::Result<Event>> + Unpin {
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let path = app.sessions.new_path(&crate::modes::timestamp());
     let cwd = app.config.workspace.clone();
     let session = run_blocking_lifecycle(shell, input, "creating session…", move || {
@@ -6294,41 +6350,110 @@ where S: Stream<Item = std::io::Result<Event>> + Unpin {
         let mut session = open_launch_session(&mut prepared, SessionSelection::CreateNew(path))?;
         session.initialize_header(&cwd, parent_session)?;
         Ok(session)
-    }).await?;
-    if request.is_cancelled() { return Ok(None); }
-    app.executable_extensions.revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
+    })
+    .await?;
+    if request.is_cancelled() {
+        return Ok(None);
+    }
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
     replace_extension_active_session_with_setup(app, session, setup).map(Some)
 }
 
-async fn mutate_extension_session_setup<S>(app: &mut App, shell: &mut InteractiveShell, input: &mut S,
-    parent: u64, owner: octet_agent::extension_process::ExtensionResourceOwner, namespace: String, mutation: serde_json::Value,
+async fn mutate_extension_session_setup<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    parent: u64,
+    owner: octet_agent::extension_process::ExtensionResourceOwner,
+    namespace: String,
+    mutation: serde_json::Value,
 ) -> Result<serde_json::Value, String>
-where S: Stream<Item = std::io::Result<Event>> + Unpin {
-    if !app.executable_extensions.session_setup_is_current(parent, &owner) { return Err("session setup parent/foreground owner retired".into()); }
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    if !app
+        .executable_extensions
+        .session_setup_is_current(parent, &owner)
+    {
+        return Err("session setup parent/foreground owner retired".into());
+    }
     match mutation.get("kind").and_then(serde_json::Value::as_str) {
         Some("append") => {
-            let entry = mutation.get("entry").cloned().ok_or("session setup entry missing")?;
-            let name = (entry["type"] == "session_info").then(|| entry["name"].as_str().map(str::to_owned)).flatten();
-            let id = app.agent.session_mut().append_pi_setup_entry(&namespace, owner.process_generation, entry).map_err(|e| e.to_string())?;
-            if let Some(name) = name { app.sessions.rename(&app.goal_session_id, &name).map_err(|e| e.to_string())?; }
-            app.executable_extensions.refresh_host_state(app.agent.session(), &app.model, &app.reasoning, &app.sessions);
-            shell.hydrate(app.agent.session()).map_err(|e| e.to_string())?;
-            Ok(serde_json::json!({"entry_id":id.0, "context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}))
+            let entry = mutation
+                .get("entry")
+                .cloned()
+                .ok_or("session setup entry missing")?;
+            let name = (entry["type"] == "session_info")
+                .then(|| entry["name"].as_str().map(str::to_owned))
+                .flatten();
+            let id = app
+                .agent
+                .session_mut()
+                .append_pi_setup_entry(&namespace, owner.process_generation, entry)
+                .map_err(|e| e.to_string())?;
+            if let Some(name) = name {
+                app.sessions
+                    .rename(&app.goal_session_id, &name)
+                    .map_err(|e| e.to_string())?;
+            }
+            app.executable_extensions.refresh_host_state(
+                app.agent.session(),
+                &app.model,
+                &app.reasoning,
+                &app.sessions,
+            );
+            shell
+                .hydrate(app.agent.session())
+                .map_err(|e| e.to_string())?;
+            Ok(
+                serde_json::json!({"entry_id":id.0, "context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}),
+            )
         }
         Some("branch") => {
-            if let Some(id) = mutation["entry_id"].as_str() { app.agent.session_mut().checkout(octet_agent::EntryId(id.into())) } else { app.agent.session_mut().checkout_root() }.map_err(|e| e.to_string())?;
-            app.executable_extensions.refresh_host_state(app.agent.session(), &app.model, &app.reasoning, &app.sessions);
-            shell.hydrate(app.agent.session()).map_err(|e| e.to_string())?;
-            Ok(serde_json::json!({"context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}))
+            if let Some(id) = mutation["entry_id"].as_str() {
+                app.agent
+                    .session_mut()
+                    .checkout(octet_agent::EntryId(id.into()))
+            } else {
+                app.agent.session_mut().checkout_root()
+            }
+            .map_err(|e| e.to_string())?;
+            app.executable_extensions.refresh_host_state(
+                app.agent.session(),
+                &app.model,
+                &app.reasoning,
+                &app.sessions,
+            );
+            shell
+                .hydrate(app.agent.session())
+                .map_err(|e| e.to_string())?;
+            Ok(
+                serde_json::json!({"context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}),
+            )
         }
         Some("complete") => {
             let starts = app.executable_extensions.complete_session_setup();
             let mut future = Box::pin(async move {
-                for (process, session) in starts { process.start_session_hook_binding(session).await.map_err(|e| e.to_string())?; }
+                for (process, session) in starts {
+                    process
+                        .start_session_hook_binding(session)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
                 Ok::<_, String>(())
             });
-            await_with_ctrl_c_and_extensions(future.as_mut(), shell, input, Some(&mut app.executable_extensions)).await.ok_or("session setup completion interrupted")??;
-            Ok(serde_json::json!({"context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}))
+            await_with_ctrl_c_and_extensions(
+                future.as_mut(),
+                shell,
+                input,
+                Some(&mut app.executable_extensions),
+            )
+            .await
+            .ok_or("session setup completion interrupted")??;
+            Ok(
+                serde_json::json!({"context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}),
+            )
         }
         _ => Err("invalid session setup mutation".into()),
     }
@@ -6457,13 +6582,27 @@ where
     result
 }
 
-async fn cancel_session_change<S>(app: &mut App, shell: &mut InteractiveShell, input: &mut S, hook: octet_agent::extension_process::ExtensionHook, payload: serde_json::Value) -> anyhow::Result<bool>
-where S: Stream<Item = std::io::Result<Event>> + Unpin {
+async fn cancel_session_change<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    hook: octet_agent::extension_process::ExtensionHook,
+    payload: serde_json::Value,
+) -> anyhow::Result<bool>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let snapshot = app.executable_extensions.lifecycle_snapshot();
     let owner = app.agent.session().resource_owner_key();
     let mut future = Box::pin(snapshot.before_session_change(&owner, hook, payload));
-    await_with_ctrl_c_and_extensions(future.as_mut(), shell, input, Some(&mut app.executable_extensions)).await
-        .ok_or_else(|| anyhow::anyhow!("session replacement interrupted"))?
+    await_with_ctrl_c_and_extensions(
+        future.as_mut(),
+        shell,
+        input,
+        Some(&mut app.executable_extensions),
+    )
+    .await
+    .ok_or_else(|| anyhow::anyhow!("session replacement interrupted"))?
 }
 
 async fn execute_extension_session_lifecycle<S>(
@@ -6481,28 +6620,77 @@ where
     let operation = request.operation().clone();
     use octet_agent::extension_process::ExtensionHook;
     let before = match &operation {
-        ExtensionSessionLifecycleOperation::Create | ExtensionSessionLifecycleOperation::CreateWithOptions { .. } => Some((ExtensionHook::SessionBeforeSwitch, serde_json::json!({"reason":"new"}))),
-        ExtensionSessionLifecycleOperation::Switch { session_id } => match app.sessions.path_by_id(session_id) {
-            Ok(path) => Some((ExtensionHook::SessionBeforeSwitch, serde_json::json!({"reason":"resume","targetSessionFile":path}))),
-            Err(error) => { request.respond_replacement(Err(ExtensionSessionLifecycleError::Failed)); shell.error(error.to_string()); return false; }
-        },
-        ExtensionSessionLifecycleOperation::Fork { entry_id, at } => Some((ExtensionHook::SessionBeforeFork, serde_json::json!({"entryId":entry_id.clone().or_else(|| app.agent.session().head().map(|id| id.0)),"position":if *at { "at" } else { "before" }}))),
+        ExtensionSessionLifecycleOperation::Create
+        | ExtensionSessionLifecycleOperation::CreateWithOptions { .. } => Some((
+            ExtensionHook::SessionBeforeSwitch,
+            serde_json::json!({"reason":"new"}),
+        )),
+        ExtensionSessionLifecycleOperation::Switch { session_id } => {
+            match app.sessions.path_by_id(session_id) {
+                Ok(path) => Some((
+                    ExtensionHook::SessionBeforeSwitch,
+                    serde_json::json!({"reason":"resume","targetSessionFile":path}),
+                )),
+                Err(error) => {
+                    request.respond_replacement(Err(ExtensionSessionLifecycleError::Failed));
+                    shell.error(error.to_string());
+                    return false;
+                }
+            }
+        }
+        ExtensionSessionLifecycleOperation::Fork { entry_id, at } => Some((
+            ExtensionHook::SessionBeforeFork,
+            serde_json::json!({"entryId":entry_id.clone().or_else(|| app.agent.session().head().map(|id| id.0)),"position":if *at { "at" } else { "before" }}),
+        )),
         _ => None,
     };
     if let Some((hook, payload)) = before {
         match cancel_session_change(app, shell, input, hook, payload).await {
-            Ok(true) => { request.respond_replacement(Err(ExtensionSessionLifecycleError::Cancelled)); return false; }
+            Ok(true) => {
+                request.respond_replacement(Err(ExtensionSessionLifecycleError::Cancelled));
+                return false;
+            }
             Ok(false) => {}
-            Err(error) => { request.respond_replacement(Err(ExtensionSessionLifecycleError::Failed)); shell.error(error.to_string()); return false; }
+            Err(error) => {
+                request.respond_replacement(Err(ExtensionSessionLifecycleError::Failed));
+                shell.error(error.to_string());
+                return false;
+            }
         }
     }
     let mut result = match operation.clone() {
-        ExtensionSessionLifecycleOperation::Setup { parent_request_id, owner, namespace, mutation } => {
-            let result = mutate_extension_session_setup(app, shell, input, parent_request_id, owner, namespace, mutation).await;
-            request.respond_setup(result); return false;
+        ExtensionSessionLifecycleOperation::Setup {
+            parent_request_id,
+            owner,
+            namespace,
+            mutation,
+        } => {
+            let result = mutate_extension_session_setup(
+                app,
+                shell,
+                input,
+                parent_request_id,
+                owner,
+                namespace,
+                mutation,
+            )
+            .await;
+            request.respond_setup(result);
+            return false;
         }
-        ExtensionSessionLifecycleOperation::CreateWithOptions { parent_session, setup_parent: Some(parent) } => {
-            let result = create_extension_session_with_options(app, shell, input, &request, parent_session, Some(parent.clone())).await;
+        ExtensionSessionLifecycleOperation::CreateWithOptions {
+            parent_session,
+            setup_parent: Some(parent),
+        } => {
+            let result = create_extension_session_with_options(
+                app,
+                shell,
+                input,
+                &request,
+                parent_session,
+                Some(parent.clone()),
+            )
+            .await;
             let replaced = result.as_ref().is_ok_and(|id| id.is_some());
             let result = result.and_then(|id| {
                 let id = id.ok_or_else(|| anyhow::anyhow!("session creation interrupted"))?;
@@ -6510,15 +6698,27 @@ where
                 let owner = octet_agent::extension_process::ExtensionResourceOwner { session_id: app.agent.session().resource_owner_key(), ..parent.1 };
                 Ok(serde_json::json!({"session_id":id,"context":app.executable_extensions.session_setup_context(&owner)?}))
             }).map_err(|e| e.to_string());
-            request.respond_setup(result); request_extension_ui(shell, app); update_status(shell, app); return replaced;
+            request.respond_setup(result);
+            request_extension_ui(shell, app);
+            update_status(shell, app);
+            return replaced;
         }
-        ExtensionSessionLifecycleOperation::CreateWithOptions { parent_session, setup_parent: None } => {
-            create_extension_session_with_options(app, shell, input, &request, parent_session, None).await
+        ExtensionSessionLifecycleOperation::CreateWithOptions {
+            parent_session,
+            setup_parent: None,
+        } => {
+            create_extension_session_with_options(app, shell, input, &request, parent_session, None)
+                .await
         }
         ExtensionSessionLifecycleOperation::ModelControl(selection) => {
-            let result = if request.resource_owner().is_some_and(|owner| owner.session_id == app.agent.session().resource_owner_key()) {
+            let result = if request
+                .resource_owner()
+                .is_some_and(|owner| owner.session_id == app.agent.session().resource_owner_key())
+            {
                 crate::extensions::model_control::apply_idle_model_control(app, &selection)
-            } else { Err("model selection owner is not the foreground session".into()) };
+            } else {
+                Err("model selection owner is not the foreground session".into())
+            };
             // Publish the native snapshot before waking the synchronous caller.
             request_extension_ui(shell, app);
             update_status(shell, app);
@@ -6541,16 +6741,30 @@ where
             } else {
                 Err("session compaction owner is not the current foreground session".into())
             };
-            if let (Some(parent), Some(owner)) = (request.compaction_callback_parent(), request.resource_owner()) {
+            if let (Some(parent), Some(owner)) = (
+                request.compaction_callback_parent(),
+                request.resource_owner(),
+            ) {
                 if !request.is_cancelled() {
-                    if let Some(process) = app.executable_extensions.compaction_callback_process(owner) {
+                    if let Some(process) =
+                        app.executable_extensions.compaction_callback_process(owner)
+                    {
                         let callback = process.run_compaction_callback(
-                            app.agent.session_mut(), owner, parent, &result, request.cancellation_token(),
+                            app.agent.session_mut(),
+                            owner,
+                            parent,
+                            &result,
+                            request.cancellation_token(),
                         );
                         match await_with_ctrl_c_and_extensions(
-                            callback, shell, input, Some(&mut app.executable_extensions),
-                        ).await {
-                            Some(Ok(())) => {},
+                            callback,
+                            shell,
+                            input,
+                            Some(&mut app.executable_extensions),
+                        )
+                        .await
+                        {
+                            Some(Ok(())) => {}
                             Some(Err(error)) => shell.error(error),
                             None => shell.error("compaction callback interrupted".into()),
                         }
@@ -6597,7 +6811,8 @@ where
     };
     let active_session_operation = matches!(
         &operation,
-        ExtensionSessionLifecycleOperation::Create | ExtensionSessionLifecycleOperation::CreateWithOptions { .. }
+        ExtensionSessionLifecycleOperation::Create
+            | ExtensionSessionLifecycleOperation::CreateWithOptions { .. }
             | ExtensionSessionLifecycleOperation::Fork { .. }
             | ExtensionSessionLifecycleOperation::Switch { .. }
     );
@@ -6616,7 +6831,8 @@ where
     let method = match operation {
         ExtensionSessionLifecycleOperation::ModelControl(_) => "model_control",
         ExtensionSessionLifecycleOperation::WaitForIdle => "wait_for_idle",
-        ExtensionSessionLifecycleOperation::Create | ExtensionSessionLifecycleOperation::CreateWithOptions { .. } => "create",
+        ExtensionSessionLifecycleOperation::Create
+        | ExtensionSessionLifecycleOperation::CreateWithOptions { .. } => "create",
         ExtensionSessionLifecycleOperation::Setup { .. } => "setup",
         ExtensionSessionLifecycleOperation::Fork { .. } => "fork",
         ExtensionSessionLifecycleOperation::Switch { .. } => "switch",
@@ -6766,7 +6982,17 @@ async fn fork_session(
     let Some((entry_id, text)) = message_picker(shell, input, messages).await? else {
         return Ok(app);
     };
-    if cancel_session_change(&mut app, shell, input, octet_agent::extension_process::ExtensionHook::SessionBeforeFork, serde_json::json!({"entryId":entry_id,"position":"before"})).await? { return Ok(app); }
+    if cancel_session_change(
+        &mut app,
+        shell,
+        input,
+        octet_agent::extension_process::ExtensionHook::SessionBeforeFork,
+        serde_json::json!({"entryId":entry_id,"position":"before"}),
+    )
+    .await?
+    {
+        return Ok(app);
+    }
     let session_id = fork_extension_session(&app, shell, input, Some(entry_id), false).await?;
     let destination = app.sessions.path_by_id(&session_id)?;
     app = transition_after_before(app, shell, input, Reconfig::Resume(destination)).await?;
@@ -6784,7 +7010,17 @@ async fn clone_session(
         shell.notice("Nothing to clone yet");
         return Ok(app);
     };
-    if cancel_session_change(&mut app, shell, input, octet_agent::extension_process::ExtensionHook::SessionBeforeFork, serde_json::json!({"entryId":head.0,"position":"at"})).await? { return Ok(app); }
+    if cancel_session_change(
+        &mut app,
+        shell,
+        input,
+        octet_agent::extension_process::ExtensionHook::SessionBeforeFork,
+        serde_json::json!({"entryId":head.0,"position":"at"}),
+    )
+    .await?
+    {
+        return Ok(app);
+    }
     let destination = fork_active_session_lifecycle(&app, head, shell, input).await?;
     app = transition_after_before(app, shell, input, Reconfig::Resume(destination)).await?;
     shell.clear_editor();
@@ -10561,33 +10797,57 @@ async fn run_interactive_once(
                     shell.render();
                     continue;
                 }
-                let input_images = composed.parts.iter().filter_map(|part| match part {
-                    octet_agent::InputPart::Media(media) => Some(media.clone()),
-                    _ => None,
-                }).collect::<Vec<_>>();
+                let input_images = composed
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        octet_agent::InputPart::Media(media) => Some(media.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
                 let transformed = await_with_ctrl_c(
                     app.executable_extensions.process_input(
                         composed.transcript_text.clone(),
                         (!input_images.is_empty()).then_some(input_images),
-                        if queued_submission { "extension" } else { "interactive" },
+                        if queued_submission {
+                            "extension"
+                        } else {
+                            "interactive"
+                        },
                         None,
                     ),
-                    &mut shell, &mut input,
-                ).await;
+                    &mut shell,
+                    &mut input,
+                )
+                .await;
                 let transformed = match transformed {
                     Some(Ok(Some(transformed))) => transformed,
-                    Some(Ok(None)) => { shell.render(); continue; }
+                    Some(Ok(None)) => {
+                        shell.render();
+                        continue;
+                    }
                     Some(Err(error)) => {
                         shell.restore_composed(composed);
                         shell.error(format!("extension input processing failed: {error}"));
-                        shell.render(); continue;
+                        shell.render();
+                        continue;
                     }
-                    None => { shell.restore_composed(composed); shell.render(); continue; }
+                    None => {
+                        shell.restore_composed(composed);
+                        shell.render();
+                        continue;
+                    }
                 };
                 if transformed.transformed {
                     composed.transcript_text = transformed.text.clone();
                     composed.parts = vec![octet_agent::InputPart::Text(transformed.text)];
-                    composed.parts.extend(transformed.images.unwrap_or_default().into_iter().map(octet_agent::InputPart::Media));
+                    composed.parts.extend(
+                        transformed
+                            .images
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(octet_agent::InputPart::Media),
+                    );
                 }
                 let model_prompt = match expand_skill_command(
                     app.skills.as_ref(),
@@ -10647,7 +10907,9 @@ async fn run_interactive_once(
                 app.agent.set_system_prompt(composition.system);
                 let answer_only = composed.answer_only;
                 let retry_composed = composed.clone();
-                if !composed.parts.is_empty() { composed.replace_model_text(composition.prompt); }
+                if !composed.parts.is_empty() {
+                    composed.replace_model_text(composition.prompt);
+                }
                 composed.custom_messages.extend(composition.custom_messages);
                 // Keep extension context in the replayable model message, but
                 // persist the exact user-facing draft separately for title and

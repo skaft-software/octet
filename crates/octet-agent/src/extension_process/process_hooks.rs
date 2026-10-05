@@ -484,7 +484,9 @@ impl ExtensionProcess {
             );
             return Err(if output.terminate == Some(true) {
                 error.with_output(ToolOutput::new(reason).requesting_termination())
-            } else { error });
+            } else {
+                error
+            });
         }
         Ok(output.arguments)
     }
@@ -503,26 +505,39 @@ impl ExtensionProcess {
         let mut payload = serde_json::json!({ "name": name, "arguments": arguments,
             "tool_call_id": context.progress.tool_call_identity().0,
             "parent_tool_call_id": context.progress.tool_call_identity().1 });
-        let output = match result { Ok(output) => Some(output), Err(error) => error.output() };
+        let output = match result {
+            Ok(output) => Some(output),
+            Err(error) => error.output(),
+        };
         payload["output"] = match result {
-            Ok(output) => output.text.clone(), Err(error) => error.message.clone(),
-        }.into();
+            Ok(output) => output.text.clone(),
+            Err(error) => error.message.clone(),
+        }
+        .into();
         payload["is_error"] = (result.is_err() || output.is_some_and(ToolOutput::is_error)).into();
         if let Some(output) = output {
             let mut content = Vec::new();
             for part in output.content_parts() {
                 match part {
-                    ToolOutputContentPart::Text(text) => content.push(serde_json::json!({"type":"text", "text":text})),
+                    ToolOutputContentPart::Text(text) => {
+                        content.push(serde_json::json!({"type":"text", "text":text}))
+                    }
                     ToolOutputContentPart::Media(Media::Image(image)) => {
                         // Pi ImageContent is inline bytes, never a URL or a local path.
-                        let (octet_ai::ImageSource::Inline(data), Some(mime)) = (&image.source, &image.media_type) else {
+                        let (octet_ai::ImageSource::Inline(data), Some(mime)) =
+                            (&image.source, &image.media_type)
+                        else {
                             let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
-                                message: "tool_result cannot map a non-inline image to Pi ImageContent".into(),
+                                message:
+                                    "tool_result cannot map a non-inline image to Pi ImageContent"
+                                        .into(),
                             });
                             return None;
                         };
-                        content.push(serde_json::json!({"type":"image", "mimeType":mime.to_string(),
-                            "data":base64::engine::general_purpose::STANDARD.encode(data)}));
+                        content.push(
+                            serde_json::json!({"type":"image", "mimeType":mime.to_string(),
+                            "data":base64::engine::general_purpose::STANDARD.encode(data)}),
+                        );
                     }
                     ToolOutputContentPart::Media(Media::Audio(_)) => {
                         let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
@@ -533,9 +548,15 @@ impl ExtensionProcess {
                 }
             }
             payload["pi_content"] = content.into();
-            if let Some(value) = output.structured_content() { payload["structured_content"] = value.clone(); }
-            if let Some(value) = output.metadata() { payload["metadata"] = value.clone(); }
-            if let Some(value) = output.usage() { payload["usage"] = serde_json::to_value(value).expect("Usage serializes"); }
+            if let Some(value) = output.structured_content() {
+                payload["structured_content"] = value.clone();
+            }
+            if let Some(value) = output.metadata() {
+                payload["metadata"] = value.clone();
+            }
+            if let Some(value) = output.usage() {
+                payload["usage"] = serde_json::to_value(value).expect("Usage serializes");
+            }
         }
         let context = self.tool_execution_context(context, {
             let connection = read_std_lock(&self.inner.connection);
@@ -567,15 +588,25 @@ fn replace_tool_result(
     content: Option<Vec<ToolOutputContentPart>>,
 ) -> Result<
     Result<ToolOutput, ToolError>,
-    (Result<ToolOutput, ToolError>, crate::ToolOutputValidationError),
+    (
+        Result<ToolOutput, ToolError>,
+        crate::ToolOutputValidationError,
+    ),
 > {
     let original = result.clone();
     let ExtensionToolResultReplacement {
-        content: _, structured_content, metadata, is_error, usage,
+        content: _,
+        structured_content,
+        metadata,
+        is_error,
+        usage,
     } = replacement;
     let (output, denial) = match result {
         Err(error) => {
-            let output = error.output().cloned().unwrap_or_else(|| ToolOutput::new(error.message.clone()).with_is_error(true));
+            let output = error
+                .output()
+                .cloned()
+                .unwrap_or_else(|| ToolOutput::new(error.message.clone()).with_is_error(true));
             let denial = error.policy_denial_code().is_some().then_some(error);
             (output, denial)
         }
@@ -593,13 +624,22 @@ fn replace_tool_result(
         return Err((original, error));
     }
     let mut output = match content {
-        Some(parts) => output.with_content_parts(parts), None => output,
+        Some(parts) => output.with_content_parts(parts),
+        None => output,
     };
-    if let Some(value) = is_error { output = output.with_is_error(value); }
-    if let Some(value) = usage { output = output.with_usage(value); }
-    let output = output.try_with_details(structured_content, metadata)
+    if let Some(value) = is_error {
+        output = output.with_is_error(value);
+    }
+    if let Some(value) = usage {
+        output = output.with_usage(value);
+    }
+    let output = output
+        .try_with_details(structured_content, metadata)
         .expect("replacement details were validated above");
-    Ok(match denial { Some(error) => Err(error.with_output(output)), None => Ok(output) })
+    Ok(match denial {
+        Some(error) => Err(error.with_output(output)),
+        None => Ok(output),
+    })
 }
 
 #[async_trait::async_trait]
@@ -646,28 +686,50 @@ impl ToolCallHook for ExtensionProcess {
             // output schema: a result hook is not a new tool execution.
             let definition: ToolDefinition = serde_json::from_value(serde_json::json!({
                 "name":name, "description":"", "parameters":{"type":"object"}
-            })).expect("hook codec descriptor is valid");
-            let parts: Vec<_> = parts.iter().map(|part| match part {
-                serde_json::Value::String(text) => serde_json::json!({"type":"text", "text":text}),
-                other => other.clone(),
-            }).collect();
+            }))
+            .expect("hook codec descriptor is valid");
+            let parts: Vec<_> = parts
+                .iter()
+                .map(|part| match part {
+                    serde_json::Value::String(text) => {
+                        serde_json::json!({"type":"text", "text":text})
+                    }
+                    other => other.clone(),
+                })
+                .collect();
             let connection = read_std_lock(&self.inner.connection).clone();
-            match decode_tool_call_output(&connection, &definition, Some(context.resource_owner),
-                serde_json::json!({"content":parts, "is_error":false, "metadata":{}})) {
-                Ok(output) => Some(output.native_output.expect("decoder provides native content").content_parts().to_vec()),
+            match decode_tool_call_output(
+                &connection,
+                &definition,
+                Some(context.resource_owner),
+                serde_json::json!({"content":parts, "is_error":false, "metadata":{}}),
+            ) {
+                Ok(output) => Some(
+                    output
+                        .native_output
+                        .expect("decoder provides native content")
+                        .content_parts()
+                        .to_vec(),
+                ),
                 Err(error) => {
                     let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
-                        message: format!("after_tool_call content for `{name}` was invalid: {error}"),
+                        message: format!(
+                            "after_tool_call content for `{name}` was invalid: {error}"
+                        ),
                     });
                     return result;
                 }
             }
-        } else { None };
+        } else {
+            None
+        };
         match replace_tool_result(result, replacement, content) {
             Ok(result) => result,
             Err((result, error)) => {
                 let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
-                    message: format!("after_tool_call replacement for `{name}` was invalid: {error}"),
+                    message: format!(
+                        "after_tool_call replacement for `{name}` was invalid: {error}"
+                    ),
                 });
                 result
             }

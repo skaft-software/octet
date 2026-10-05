@@ -58,14 +58,25 @@ pub trait ToolCompositionService: Send + Sync {
         cancellation: CancellationToken,
     ) -> Result<Value, ToolError>;
     /// Runs through the same broker, returning the complete canonical outcome.
-    async fn call_outcome(&self, _name: String, _arguments: Value,
-        _cancellation: CancellationToken) -> Result<Value, ToolError> {
+    async fn call_outcome(
+        &self,
+        _name: String,
+        _arguments: Value,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
         Err(ToolError::new("complete nested outcomes are unavailable"))
     }
     /// Complete outcomes with a bounded, request-local stream of partial results.
-    async fn call_outcome_with_updates(&self, name: String, arguments: Value,
-        cancellation: CancellationToken, updates: Option<tokio::sync::mpsc::Sender<Value>>) -> Result<Value, ToolError> {
-        if updates.is_some() { return Err(ToolError::new("nested result updates are unavailable")); }
+    async fn call_outcome_with_updates(
+        &self,
+        name: String,
+        arguments: Value,
+        cancellation: CancellationToken,
+        updates: Option<tokio::sync::mpsc::Sender<Value>>,
+    ) -> Result<Value, ToolError> {
+        if updates.is_some() {
+            return Err(ToolError::new("nested result updates are unavailable"));
+        }
         self.call_outcome(name, arguments, cancellation).await
     }
     /// Commits successful script writes to private, branch-scoped session state.
@@ -79,9 +90,16 @@ pub(crate) fn native_result_value(output: &crate::tool::ToolOutput) -> Result<Va
         "content": serde_json::to_value(output.content_parts()).map_err(|error| ToolError::new(error.to_string()))?,
         "is_error": output.is_error(),
     });
-    if let Some(metadata) = output.metadata() { value["metadata"] = metadata.clone(); }
-    if let Some(structured) = output.structured_content() { value["structured_content"] = structured.clone(); }
-    if let Some(usage) = output.usage() { value["usage"] = serde_json::to_value(usage).map_err(|error| ToolError::new(error.to_string()))?; }
+    if let Some(metadata) = output.metadata() {
+        value["metadata"] = metadata.clone();
+    }
+    if let Some(structured) = output.structured_content() {
+        value["structured_content"] = structured.clone();
+    }
+    if let Some(usage) = output.usage() {
+        value["usage"] =
+            serde_json::to_value(usage).map_err(|error| ToolError::new(error.to_string()))?;
+    }
     Ok(value)
 }
 

@@ -558,8 +558,16 @@ pub(super) fn render_block_planned_with_rainbow(
         collapsed_reasoning,
     );
     let marker = match block {
-        TranscriptBlock::Reasoning(reasoning) if collapsed_reasoning && !reasoning.finished
-            && reasoning.extension_working.as_ref().is_some_and(|working| working.frames.is_some()) => super::remote_ui::working_frame(reasoning),
+        TranscriptBlock::Reasoning(reasoning)
+            if collapsed_reasoning
+                && !reasoning.finished
+                && reasoning
+                    .extension_working
+                    .as_ref()
+                    .is_some_and(|working| working.frames.is_some()) =>
+        {
+            super::remote_ui::working_frame(reasoning)
+        }
         _ => marker,
     };
     let lines = decorate_surface_with_frame(

@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::{Context, ensure};
+use anyhow::{ensure, Context};
 use serde_json::{Map, Value};
 
 mod colors;

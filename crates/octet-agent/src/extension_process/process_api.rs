@@ -1509,19 +1509,36 @@ impl ExtensionProcess {
     /// current. This is the resource-owner fence for the request surface.
     /// Return the real parent frontend progress sink and negotiated frame bound.
     /// No extension-supplied confirmation channel is ever accepted.
-    pub fn exec_request_frontend_context(&self, id: &ExtensionRequestId, generation: u64) -> (Option<ToolProgressSink>, usize) {
+    pub fn exec_request_frontend_context(
+        &self,
+        id: &ExtensionRequestId,
+        generation: u64,
+    ) -> (Option<ToolProgressSink>, usize) {
         let connection = read_std_lock(&self.inner.connection);
         let capacity = connection.max_message_bytes();
-        if generation != connection.generation || !connection_is_usable(&connection) || connection.draining.load(Ordering::Acquire) {
+        if generation != connection.generation
+            || !connection_is_usable(&connection)
+            || connection.draining.load(Ordering::Acquire)
+        {
             return (None, capacity);
         }
         let parent = {
             let children = lock_std_mutex(&connection.child_requests);
-            children.get(id).filter(|child| child.response_state.state.load(Ordering::Acquire) == CHILD_ACTIVE)
+            children
+                .get(id)
+                .filter(|child| child.response_state.state.load(Ordering::Acquire) == CHILD_ACTIVE)
                 .map(|child| child.parent_request_id)
         };
-        let progress = parent.and_then(|parent| lock_std_mutex(&connection.pending).get(&parent)
-            .and_then(|pending| pending.progress.clone().or_else(|| pending.child_interaction_progress.clone())));
+        let progress = parent.and_then(|parent| {
+            lock_std_mutex(&connection.pending)
+                .get(&parent)
+                .and_then(|pending| {
+                    pending
+                        .progress
+                        .clone()
+                        .or_else(|| pending.child_interaction_progress.clone())
+                })
+        });
         (progress, capacity)
     }
 
@@ -1540,9 +1557,17 @@ impl ExtensionProcess {
     /// Whether an admitted exec was cancelled, settled, or replaced.
     pub fn exec_request_is_cancelled(&self, id: &ExtensionRequestId, generation: u64) -> bool {
         let connection = read_std_lock(&self.inner.connection);
-        if connection.generation != generation || !connection_is_usable(&connection) || connection.draining.load(Ordering::Acquire) { return true; }
+        if connection.generation != generation
+            || !connection_is_usable(&connection)
+            || connection.draining.load(Ordering::Acquire)
+        {
+            return true;
+        }
         let children = lock_std_mutex(&connection.child_requests);
-        children.get(id).is_none_or(|child| child.exec_cancelled || child.response_state.state.load(Ordering::Acquire) != CHILD_ACTIVE)
+        children.get(id).is_none_or(|child| {
+            child.exec_cancelled
+                || child.response_state.state.load(Ordering::Acquire) != CHILD_ACTIVE
+        })
     }
 
     /// Answer a generation-fenced host request.
@@ -1616,17 +1641,25 @@ impl ExtensionProcess {
 
     /// Emit an actual committed custom message without changing the assistant coalescer.
     pub fn notify_custom_message_committed(
-        &self, entry_id: &crate::session::EntryId, message: &crate::session::CustomMessage,
+        &self,
+        entry_id: &crate::session::EntryId,
+        message: &crate::session::CustomMessage,
         timestamp_unix_ms: u64,
     ) -> Result<(), ExtensionRuntimeError> {
         let payload = ExtensionMessageLifecycle {
             message_id: Some(entry_id.0.clone()),
             message: Some(message.lifecycle_value(timestamp_unix_ms)),
         };
-        self.queue_lifecycle_notification(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
-            methods::MESSAGE_STARTED, &payload)?;
-        self.queue_lifecycle_notification(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
-            methods::MESSAGE_SETTLED, &payload)
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MESSAGE_STARTED,
+            &payload,
+        )?;
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MESSAGE_SETTLED,
+            &payload,
+        )
     }
 
     /// Opens one observable assistant message boundary.

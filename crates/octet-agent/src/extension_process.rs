@@ -74,10 +74,10 @@ use crate::extension_provider::{
     ExtensionProviderOwner, ExtensionProviderRegistry, ExtensionProviderRegistryError,
 };
 use crate::extension_remote_ui::{
-    ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed, ExtensionRemoteUiFrame,
-    ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey, ExtensionRemoteUiMouse,
-    ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation, ExtensionRemoteUiResize,
-    RemoteUiChildRequest, RemoteUiMailbox, EXTENSION_FEATURE_REMOTE_UI,
+    ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed,
+    ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey,
+    ExtensionRemoteUiMouse, ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation,
+    ExtensionRemoteUiResize, RemoteUiChildRequest, RemoteUiMailbox, EXTENSION_FEATURE_REMOTE_UI,
 };
 use crate::extension_secret::{ExtensionSecretBroker, ExtensionSecretRequest};
 use crate::tool::{
@@ -95,13 +95,14 @@ mod bulk;
 mod composition;
 mod connection;
 mod contributions;
-mod host_requests;
 mod exec;
+mod host_requests;
 pub use self::exec::ExtensionExecRequest;
 mod mcp;
 pub use self::mcp::ExtensionMcpRequest;
 mod lifecycle_events;
 mod manifest;
+mod model_control;
 mod negotiation;
 mod presentation;
 mod process_api;
@@ -115,9 +116,8 @@ mod provider_stream;
 mod reader;
 mod resource_paths;
 mod session_control;
-mod model_control;
-pub use self::model_control::{ExtensionModelControl, PiProviderModelMetadata};
 use self::model_control::dispatch_model_control;
+pub use self::model_control::{ExtensionModelControl, PiProviderModelMetadata};
 pub use resource_paths::{
     ExtensionResourceDiscoveryReason, ExtensionResourcePaths, EXTENSION_FEATURE_RESOURCE_PATHS,
 };
@@ -162,7 +162,6 @@ pub use self::contributions::ExtensionEditorRequest;
 pub use self::contributions::ExtensionEditorResponse;
 pub use self::contributions::ExtensionHookDisposition;
 pub use self::contributions::ExtensionHookOutput;
-pub use self::contributions::ExtensionToolResultReplacement;
 pub use self::contributions::ExtensionMessageDelivery;
 pub use self::contributions::ExtensionMessageInjection;
 pub use self::contributions::ExtensionMessageLifecycle;
@@ -182,6 +181,7 @@ pub use self::contributions::ExtensionStatusContribution;
 pub use self::contributions::ExtensionTerminalInput;
 pub use self::contributions::ExtensionTerminalOperation;
 pub use self::contributions::ExtensionTerminalResize;
+pub use self::contributions::ExtensionToolResultReplacement;
 pub use self::contributions::ExtensionUiContribution;
 pub use self::contributions::ExtensionUserBash;
 pub use self::contributions::ExtensionWidgetPlacement;
@@ -299,15 +299,14 @@ pub use self::process_group::EXTENSION_API_VERSION_0_3;
 pub use self::process_group::EXTENSION_API_VERSION_0_4;
 pub use self::process_group::EXTENSION_FEATURE_ACTIVE_TOOLS;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1;
+pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1;
-pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
 pub use self::process_group::EXTENSION_FEATURE_APPROVALS;
 pub use self::process_group::EXTENSION_FEATURE_ARTIFACTS;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1;
 pub use self::process_group::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1;
-pub use self::process_group::EXTENSION_FEATURE_PIPELINE_HOOKS_V1;
 pub use self::process_group::EXTENSION_FEATURE_CACHE_WARMING_DECISION;
 pub use self::process_group::EXTENSION_FEATURE_COMPACTION_STRATEGY;
 pub use self::process_group::EXTENSION_FEATURE_COMPOSER;
@@ -320,6 +319,7 @@ pub use self::process_group::EXTENSION_FEATURE_LIFECYCLE_EVENTS;
 pub use self::process_group::EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2;
 pub use self::process_group::EXTENSION_FEATURE_MESSAGE_INJECTION;
 pub use self::process_group::EXTENSION_FEATURE_MODEL_CATALOG;
+pub use self::process_group::EXTENSION_FEATURE_PIPELINE_HOOKS_V1;
 pub use self::process_group::EXTENSION_FEATURE_POLICY_INTENTS;
 pub use self::process_group::EXTENSION_FEATURE_PROGRESS_DECORATION;
 pub use self::process_group::EXTENSION_FEATURE_REQUEST_CANCELLATION;

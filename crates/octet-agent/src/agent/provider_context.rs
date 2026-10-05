@@ -29,7 +29,8 @@ pub(super) fn provider_request_client(
     if factories.is_empty() {
         return Ok(client.clone());
     }
-    let hooks = factories.iter()
+    let hooks = factories
+        .iter()
         .map(|factory| factory.bind_provider_request_hook(resource_owner))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(client.with_provider_request_hooks(hooks))
@@ -241,9 +242,21 @@ pub(super) async fn project_provider_context(
             if let Some(tools) = projection.tools {
                 let mut seen = HashSet::new();
                 for tool in &tools {
-                    let Some(original) = canonical.tools.iter().find(|original| original.name == tool.name) else { return Err(refused("loadout introduced an unregistered tool")); };
-                    let mut unchanged = tool.clone(); unchanged.description = original.description.clone();
-                    if !seen.insert(tool.name.clone()) || serde_json::to_value(&unchanged).expect("canonical tool serializes") != serde_json::to_value(original).expect("canonical tool serializes") { return Err(refused("loadout changed tool authority")); }
+                    let Some(original) = canonical
+                        .tools
+                        .iter()
+                        .find(|original| original.name == tool.name)
+                    else {
+                        return Err(refused("loadout introduced an unregistered tool"));
+                    };
+                    let mut unchanged = tool.clone();
+                    unchanged.description = original.description.clone();
+                    if !seen.insert(tool.name.clone())
+                        || serde_json::to_value(&unchanged).expect("canonical tool serializes")
+                            != serde_json::to_value(original).expect("canonical tool serializes")
+                    {
+                        return Err(refused("loadout changed tool authority"));
+                    }
                 }
                 request.tools = tools;
             }

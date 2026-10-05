@@ -75,14 +75,24 @@ pub trait Tool: Send + Sync {
 
     /// Whether this tool receives a request-scoped nested dispatch capability.
     /// This does not change its declaration or authorize any nested effects.
-    fn nested_execution(&self) -> bool { self.composition_config().is_some() }
+    fn nested_execution(&self) -> bool {
+        self.composition_config().is_some()
+    }
 
     /// Whether raw provider arguments need preparation before schema validation.
-    fn prepares_arguments(&self) -> bool { false }
+    fn prepares_arguments(&self) -> bool {
+        false
+    }
 
     /// Prepare raw arguments without effect authority. Validation follows this call.
-    async fn prepare_arguments(&self, arguments: serde_json::Value, _owner: &str,
-        _cancellation: CancellationToken) -> Result<serde_json::Value, ToolError> { Ok(arguments) }
+    async fn prepare_arguments(
+        &self,
+        arguments: serde_json::Value,
+        _owner: &str,
+        _cancellation: CancellationToken,
+    ) -> Result<serde_json::Value, ToolError> {
+        Ok(arguments)
+    }
 
     /// Machine-readable schema of the programmatic result, when available.
     /// Without a schema, a nested call resolves to the tool's text output.
@@ -621,7 +631,10 @@ impl ToolProgressSink {
     }
 
     pub(crate) fn tool_call_identity(&self) -> (Option<&str>, Option<&str>) {
-        (self.tool_call_id.as_deref(), self.parent_tool_call_id.as_deref())
+        (
+            self.tool_call_id.as_deref(),
+            self.parent_tool_call_id.as_deref(),
+        )
     }
 
     pub(crate) fn with_invocation(

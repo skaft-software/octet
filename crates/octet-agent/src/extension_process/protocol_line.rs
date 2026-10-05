@@ -179,7 +179,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
-            "model/select" if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 => {
+            "model/select"
+                if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 =>
+            {
                 dispatch_model_control(state, object, params)?;
             }
             methods::SESSION_COMPACT => {
@@ -361,8 +363,19 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 });
             }
             "ui/chrome" => {
-                let Some((request, admitted)) = admit_remote_ui_request::<ExtensionRemoteUiChromeRequest>(state, object, method, params)? else { return Ok(()); };
-                dispatch_remote_ui_request(state, &admitted, ExtensionRemoteUiOperation::Chrome { chrome: request.chrome })?;
+                let Some((request, admitted)) = admit_remote_ui_request::<
+                    ExtensionRemoteUiChromeRequest,
+                >(state, object, method, params)?
+                else {
+                    return Ok(());
+                };
+                dispatch_remote_ui_request(
+                    state,
+                    &admitted,
+                    ExtensionRemoteUiOperation::Chrome {
+                        chrome: request.chrome,
+                    },
+                )?;
             }
             methods::UI_OPEN => {
                 let Some((request, admitted)) = admit_remote_ui_request::<
@@ -564,36 +577,38 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 require_declared(state.declared.providers, "provider catalogs")?;
                 let id = parse_child_request_id(object, methods::PROVIDERS_REGISTER)?;
                 insert_child_request(state, id.clone(), None, None)?;
-                let result = (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
-                    model_control::register_provider_proxy(state, params, false)
-                } else {
-                    api_v03::parse_provider_register_params(params)
-                        .map_err(|_| ProviderHostResponseError::Invalid)
-                        .and_then(|request| {
-                            provider_registry_for_request(state)?
-                                .register(state.provider_owner.clone(), request)
-                                .map_err(provider_registry_response_error)
-                        })
-                })
-                .and_then(provider_catalog_response_value);
+                let result =
+                    (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
+                        model_control::register_provider_proxy(state, params, false)
+                    } else {
+                        api_v03::parse_provider_register_params(params)
+                            .map_err(|_| ProviderHostResponseError::Invalid)
+                            .and_then(|request| {
+                                provider_registry_for_request(state)?
+                                    .register(state.provider_owner.clone(), request)
+                                    .map_err(provider_registry_response_error)
+                            })
+                    })
+                    .and_then(provider_catalog_response_value);
                 queue_provider_host_response(state, &id, result)?;
             }
             methods::PROVIDERS_UPDATE => {
                 require_declared(state.declared.providers, "provider catalogs")?;
                 let id = parse_child_request_id(object, methods::PROVIDERS_UPDATE)?;
                 insert_child_request(state, id.clone(), None, None)?;
-                let result = (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
-                    model_control::register_provider_proxy(state, params, true)
-                } else {
-                    api_v03::parse_provider_update_params(params)
-                        .map_err(|_| ProviderHostResponseError::Invalid)
-                        .and_then(|request| {
-                            provider_registry_for_request(state)?
-                                .update(state.provider_owner.clone(), request)
-                                .map_err(provider_registry_response_error)
-                        })
-                })
-                .and_then(provider_catalog_response_value);
+                let result =
+                    (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
+                        model_control::register_provider_proxy(state, params, true)
+                    } else {
+                        api_v03::parse_provider_update_params(params)
+                            .map_err(|_| ProviderHostResponseError::Invalid)
+                            .and_then(|request| {
+                                provider_registry_for_request(state)?
+                                    .update(state.provider_owner.clone(), request)
+                                    .map_err(provider_registry_response_error)
+                            })
+                    })
+                    .and_then(provider_catalog_response_value);
                 queue_provider_host_response(state, &id, result)?;
             }
             methods::PROVIDERS_UNREGISTER => {
@@ -645,21 +660,44 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             "mcp/replace" => mcp::dispatch_mcp_registration(state, object, params)?,
             "process/exec" => {
                 let Some((request, admitted)) = admit_host_request::<ExtensionExecRequest>(
-                    state, object, method, "process_exec_v1", params)? else { return Ok(()); };
+                    state,
+                    object,
+                    method,
+                    "process_exec_v1",
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
                 if let Err(detail) = request.validate() {
-                    reject_typed_child_request(state, admitted.request_id, ExtensionRequestFailure::InvalidRequest, detail)?;
+                    reject_typed_child_request(
+                        state,
+                        admitted.request_id,
+                        ExtensionRequestFailure::InvalidRequest,
+                        detail,
+                    )?;
                     return Ok(());
                 }
-                dispatch_host_request_event(state, &admitted, |admitted| ExtensionEvent::ExecRequested {
-                    request_id: admitted.request_id.clone(), generation: admitted.generation, owner: admitted.owner.clone(), request,
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ExecRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: admitted.owner.clone(),
+                        request,
+                    }
                 })?;
             }
             "process/exec/cancel" => {
-                if object.contains_key("id") { return Err("exec cancellation must be a notification".into()); }
+                if object.contains_key("id") {
+                    return Err("exec cancellation must be a notification".into());
+                }
                 require_feature(state, "process_exec_v1")?;
-                let id: ExtensionRequestId = serde_json::from_value(params.get("id").cloned().unwrap_or_default())
-                    .map_err(|error| format!("invalid exec cancellation: {error}"))?;
-                if let Some(child) = lock_std_mutex(&state.child_requests).get_mut(&id) { child.exec_cancelled = true; }
+                let id: ExtensionRequestId =
+                    serde_json::from_value(params.get("id").cloned().unwrap_or_default())
+                        .map_err(|error| format!("invalid exec cancellation: {error}"))?;
+                if let Some(child) = lock_std_mutex(&state.child_requests).get_mut(&id) {
+                    child.exec_cancelled = true;
+                }
             }
             methods::SESSION_CREATE => {
                 let id = parse_child_request_id(object, methods::SESSION_CREATE)?;
@@ -1286,10 +1324,31 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     deliver_as: request.deliver_as,
                     trigger_turn: request.trigger_turn,
                 };
-                let ExtensionMessageInjection::Custom { custom_type, content, display, details, .. } = &injection else { unreachable!() };
-                let custom = crate::session::CustomMessage { custom_type: custom_type.clone(), content: content.clone(), display: *display, details: details.clone() };
+                let ExtensionMessageInjection::Custom {
+                    custom_type,
+                    content,
+                    display,
+                    details,
+                    ..
+                } = &injection
+                else {
+                    unreachable!()
+                };
+                let custom = crate::session::CustomMessage {
+                    custom_type: custom_type.clone(),
+                    content: content.clone(),
+                    display: *display,
+                    details: details.clone(),
+                };
                 if let Err(failure) = bounded_plain_text_failure("custom type", custom_type, 128)
-                    .and_then(|()| bounded_plain_text_failure("injected message", &custom.text(), MAX_EXTENSION_INJECTED_MESSAGE_BYTES)) {
+                    .and_then(|()| {
+                        bounded_plain_text_failure(
+                            "injected message",
+                            &custom.text(),
+                            MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
+                        )
+                    })
+                {
                     return refuse_admitted_request(state, &admitted, failure);
                 }
                 dispatch_host_request_event(state, &admitted, move |admitted| {
@@ -1342,11 +1401,22 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             }
             "tools/snapshot" => {
                 let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
-                    state, object, method, EXTENSION_FEATURE_ACTIVE_TOOLS, params,
-                )? else { return Ok(()); };
-                dispatch_host_request_event(state, &admitted, |admitted| ExtensionEvent::ContextSnapshotRequested {
-                    request_id: admitted.request_id.clone(), generation: admitted.generation,
-                    owner: Some(admitted.owner.clone()), operation: ExtensionContextOperation::Tools,
+                    state,
+                    object,
+                    method,
+                    EXTENSION_FEATURE_ACTIVE_TOOLS,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ContextSnapshotRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionContextOperation::Tools,
+                    }
                 })?;
             }
             methods::TOOLS_SET_ACTIVE => {
@@ -1731,40 +1801,62 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     || require_feature(state, feature).is_err()
                 {
                     return reject_typed_child_request(
-                        state, id, ExtensionRequestFailure::UnsupportedFeature,
+                        state,
+                        id,
+                        ExtensionRequestFailure::UnsupportedFeature,
                         format!("{method} requires API 0.4 agent_sessions and {feature}"),
                     );
                 }
                 let (parent, owner, method, operation) = if method == methods::AGENT_EVENTS {
                     let request: AgentSessionEventsRequest = match serde_json::from_value(params) {
                         Ok(request) => request,
-                        Err(error) => return reject_typed_child_request(
-                            state, id, ExtensionRequestFailure::InvalidRequest,
-                            format!("invalid agent events request: {error}"),
-                        ),
+                        Err(error) => {
+                            return reject_typed_child_request(
+                                state,
+                                id,
+                                ExtensionRequestFailure::InvalidRequest,
+                                format!("invalid agent events request: {error}"),
+                            )
+                        }
                     };
                     if request.timeout_ms > 25_000 {
                         return reject_typed_child_request(
-                            state, id, ExtensionRequestFailure::InvalidRequest,
+                            state,
+                            id,
+                            ExtensionRequestFailure::InvalidRequest,
                             "child event wait must not exceed 25000 milliseconds",
                         );
                     }
-                    (request.parent_request_id, request.resource_owner, methods::AGENT_EVENTS,
+                    (
+                        request.parent_request_id,
+                        request.resource_owner,
+                        methods::AGENT_EVENTS,
                         AgentSessionOperation::Events {
                             target: request.target,
                             after_sequence: request.after_sequence,
                             timeout: Duration::from_millis(request.timeout_ms),
-                        })
+                        },
+                    )
                 } else {
                     let request: AgentSessionTargetRequest = match serde_json::from_value(params) {
                         Ok(request) => request,
-                        Err(error) => return reject_typed_child_request(
-                            state, id, ExtensionRequestFailure::InvalidRequest,
-                            format!("invalid agent stop request: {error}"),
-                        ),
+                        Err(error) => {
+                            return reject_typed_child_request(
+                                state,
+                                id,
+                                ExtensionRequestFailure::InvalidRequest,
+                                format!("invalid agent stop request: {error}"),
+                            )
+                        }
                     };
-                    (request.parent_request_id, request.resource_owner, methods::AGENT_STOP,
-                        AgentSessionOperation::Stop { target: request.target })
+                    (
+                        request.parent_request_id,
+                        request.resource_owner,
+                        methods::AGENT_STOP,
+                        AgentSessionOperation::Stop {
+                            target: request.target,
+                        },
+                    )
                 };
                 queue_agent_session_operation(state, id, parent, method, operation, owner)?;
             }

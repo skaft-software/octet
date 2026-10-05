@@ -14,12 +14,20 @@ fn pipeline_header_patch_preserves_repeated_values_and_explicit_deletions() {
     headers.insert("x-stays", reqwest::header::HeaderValue::from_static("kept"));
     let reply: ProviderPipelineReply = serde_json::from_value(serde_json::json!({
         "provider_headers":{"x-remove":null,"x-multi":["first","second"],"x-new":"inserted"}
-    })).unwrap();
+    }))
+    .unwrap();
     apply_pipeline_headers(&mut headers, reply.provider_headers.unwrap()).unwrap();
     assert!(!headers.contains_key("x-remove"));
     assert_eq!(headers["x-stays"], "kept");
     assert_eq!(headers["x-new"], "inserted");
-    assert_eq!(headers.get_all("x-multi").iter().map(|value| value.to_str().unwrap()).collect::<Vec<_>>(), ["first", "second"]);
+    assert_eq!(
+        headers
+            .get_all("x-multi")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
     assert!(headers["x-new"].is_sensitive());
     let projected = serde_json::to_value(pipeline_header_projection(&headers).unwrap()).unwrap();
     assert_eq!(projected["x-new"], "inserted");
@@ -41,9 +49,15 @@ fn pipeline_rejects_ambiguous_or_unrepresentable_header_patches_privately() {
         assert!(!error.to_string().contains("private-value"));
     }
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("x-binary", reqwest::header::HeaderValue::from_bytes(&[0x80]).unwrap());
+    headers.insert(
+        "x-binary",
+        reqwest::header::HeaderValue::from_bytes(&[0x80]).unwrap(),
+    );
     assert!(pipeline_header_projection(&headers).is_err());
-    assert!(serde_json::from_value::<ProviderPipelineReply>(serde_json::json!({"provider_context":{}})).is_err());
+    assert!(serde_json::from_value::<ProviderPipelineReply>(
+        serde_json::json!({"provider_context":{}})
+    )
+    .is_err());
 }
 
 fn manifest() -> ExtensionManifest {

@@ -129,18 +129,31 @@ impl RemoteUi {
             ExtensionRemoteUiOperation::Chrome { chrome } => {
                 use octet_agent::extension_remote_ui::ExtensionRemoteUiChrome as Chrome;
                 match chrome {
-                    Chrome::Get => {},
+                    Chrome::Get => {}
                     Chrome::ToolsExpanded { expanded } => shell.set_verbose_tools(expanded),
                     change => {
-                        if self.chrome.as_ref().is_none_or(|lease| lease.owner != owner) {
-                            self.chrome = Some(ChromeLease { process, owner, state: ChromeState::default() });
+                        if self
+                            .chrome
+                            .as_ref()
+                            .is_none_or(|lease| lease.owner != owner)
+                        {
+                            self.chrome = Some(ChromeLease {
+                                process,
+                                owner,
+                                state: ChromeState::default(),
+                            });
                         }
                         let state = &mut self.chrome.as_mut().expect("chrome lease").state;
                         match change {
                             Chrome::Title { title } => state.title = Some(title),
                             Chrome::WorkingMessage { message } => state.working.message = message,
-                            Chrome::WorkingVisible { visible } => state.working.visible = Some(visible),
-                            Chrome::WorkingIndicator { frames, interval_ms } => {
+                            Chrome::WorkingVisible { visible } => {
+                                state.working.visible = Some(visible)
+                            }
+                            Chrome::WorkingIndicator {
+                                frames,
+                                interval_ms,
+                            } => {
                                 state.working.frames = frames;
                                 state.working.interval_ms = interval_ms;
                             }
@@ -336,10 +349,12 @@ impl RemoteUi {
     }
 
     pub(super) fn reconcile(&mut self, foreground: Option<&str>, size: (u16, u16)) -> Vec<String> {
-        if self.chrome.as_ref().is_some_and(|lease| foreground != Some(lease.owner.session_id.as_str())
-            || !lease.process.is_running()
-            || lease.process.extension_instance_id() != lease.owner.extension_instance_id
-            || lease.process.health_snapshot().generation != lease.owner.process_generation) {
+        if self.chrome.as_ref().is_some_and(|lease| {
+            foreground != Some(lease.owner.session_id.as_str())
+                || !lease.process.is_running()
+                || lease.process.extension_instance_id() != lease.owner.extension_instance_id
+                || lease.process.health_snapshot().generation != lease.owner.process_generation
+        }) {
             self.chrome = None;
         }
         let mut errors = Vec::new();

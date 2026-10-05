@@ -285,7 +285,10 @@ pub(super) fn extension_provider_response_stream(
     model: HostStreamModel,
     request: octet_ai::Request,
     diagnostics: Vec<Diagnostic>,
-    route: (Arc<ExtensionProviderRegistry>, crate::extension_provider::ExtensionProviderRoute),
+    route: (
+        Arc<ExtensionProviderRegistry>,
+        crate::extension_provider::ExtensionProviderRoute,
+    ),
 ) -> ResponseStream {
     // Own cancellation before the first poll: dropping a successfully opened
     // but never-polled stream must still release the accepted provider job.
@@ -472,7 +475,8 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
 
         // Protect the acceptance wait too. Cancellation at an ambiguous
         // acceptance boundary never leaves an ingress/job without an owner.
-        let mut opening_cancellation = ProviderStreamCancellation::new(&connection, stream_id.clone());
+        let mut opening_cancellation =
+            ProviderStreamCancellation::new(&connection, stream_id.clone());
         let accepted = match connection
             .request(
                 methods::PROVIDER_STREAM,

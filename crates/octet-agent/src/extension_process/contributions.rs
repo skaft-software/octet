@@ -560,7 +560,11 @@ pub enum ExtensionMessageInjection {
         #[serde(default)]
         display: bool,
         /// Extension-defined data that the model never sees.
-        #[serde(default, deserialize_with = "crate::session::deserialize_custom_message_details", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "crate::session::deserialize_custom_message_details",
+            skip_serializing_if = "Option::is_none"
+        )]
         details: Option<serde_json::Value>,
         /// Delivery while a run is active, or `next_turn`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -590,14 +594,28 @@ impl ExtensionMessageInjection {
         let text = match self {
             Self::User { text, content, .. } => {
                 if let Some(content) = content {
-                    if !text.is_empty() { return Err("ambiguous user message content".into()); }
+                    if !text.is_empty() {
+                        return Err("ambiguous user message content".into());
+                    }
                     content.validate().map_err(|error| error.to_string())?;
                 }
                 text
-            },
-            Self::Custom { custom_type, content, display, details, .. } => {
-                return crate::session::CustomMessage { custom_type: custom_type.clone(), content: content.clone(), display: *display, details: details.clone() }
-                    .validate().map_err(|error| error.to_string());
+            }
+            Self::Custom {
+                custom_type,
+                content,
+                display,
+                details,
+                ..
+            } => {
+                return crate::session::CustomMessage {
+                    custom_type: custom_type.clone(),
+                    content: content.clone(),
+                    display: *display,
+                    details: details.clone(),
+                }
+                .validate()
+                .map_err(|error| error.to_string());
             }
         };
         validate_bounded_bytes(
