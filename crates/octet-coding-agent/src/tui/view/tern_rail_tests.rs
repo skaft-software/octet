@@ -277,6 +277,7 @@ fn remote(
         .unwrap();
     shell.set_remote_ui(Projection {
         components: Arc::new(components),
+        chrome: None,
         mounts: vec![MountView {
             id: "fixture.remote".into(),
             title: "Fixture remote owner".into(),

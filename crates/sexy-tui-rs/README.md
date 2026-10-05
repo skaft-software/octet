@@ -28,6 +28,19 @@ updates stable, and degrades to deterministic escape-free text.
 - A crate-level `#![forbid(unsafe_code)]` contract for the complete renderer and
   terminal abstraction.
 
+## Main-screen rendering boundaries
+
+The Pi-style main-screen renderer treats only a nonempty `TERMUX_VERSION` as
+a Termux session. An empty retained document uses the initial paint path when
+the viewport size is unchanged, without clearing saved terminal history.
+Kitty and iTerm2 image rows bypass text normalization and text resets; legacy
+inline image classification remains Kitty-specific.
+
+Each main-screen frame write is at most 1 MiB and ends on a UTF-8 boundary.
+Splitting preserves the byte stream and its synchronized-output transaction.
+The renderer still assembles the complete frame in memory; this is not a total
+memory limit. Focused regressions live in `src/tui/release_parity_tests.rs`.
+
 ## Workspace dependency
 
 octet consumes this directory directly and pins its package version exactly:

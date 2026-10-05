@@ -33,6 +33,12 @@ use super::TUI;
 /// Reset emitted after every normalized row so a styled or hyperlink-carrying
 /// row cannot bleed its attributes into the next one.
 const PI_LINE_RESET: &str = "\x1b[0m\x1b]8;;\x07";
+const PI_MAX_WRITE_BYTES: usize = 1024 * 1024;
+
+/// Main-screen image rows bypass text normalization; legacy paths remain Kitty-only.
+fn is_pi_image_line(line: &str) -> bool {
+    is_image_line(line) || line.contains("\x1b]1337;File=")
+}
 
 impl<'a> TUI<'a> {
     /// Paint one fixed-viewport alternate-screen frame.
@@ -68,7 +74,7 @@ impl<'a> TUI<'a> {
                     .filter(|cursor| cursor.row < stable_prefix)
             });
         for line in &mut replacement {
-            if !is_image_line(line) {
+            if !is_pi_image_line(line) {
                 *line = format!(
                     "{}{}",
                     crate::utils::normalize_terminal_output(line),
@@ -185,7 +191,7 @@ impl<'a> TUI<'a> {
                 let replacement = replacement
                     .into_iter()
                     .map(|line| {
-                        if is_image_line(&line) {
+                        if is_pi_image_line(&line) {
                             line
                         } else {
                             format!(
@@ -210,7 +216,7 @@ impl<'a> TUI<'a> {
                 let logical_cursor_position =
                     extract_logical_cursor_position_from(&mut rendered, 0);
                 for line in &mut rendered {
-                    if !is_image_line(line) {
+                    if !is_pi_image_line(line) {
                         *line = format!(
                             "{}{}",
                             crate::utils::normalize_terminal_output(line),
@@ -224,7 +230,7 @@ impl<'a> TUI<'a> {
             let mut rendered = self.root_render(width_u16);
             let logical_cursor_position = extract_logical_cursor_position_from(&mut rendered, 0);
             for line in &mut rendered {
-                if !is_image_line(line) {
+                if !is_pi_image_line(line) {
                     *line = format!(
                         "{}{}",
                         crate::utils::normalize_terminal_output(line),
@@ -236,9 +242,9 @@ impl<'a> TUI<'a> {
         };
         self.logical_cursor_position = logical_cursor_position;
         let cursor_position = pi_cursor_position(logical_cursor_position, new_lines.len(), height);
-        // Pi's first render writes the complete frame without touching saved
-        // lines. Structural fallbacks replay it unless preservation is enabled.
-        if self.first_render && !width_changed && !height_changed {
+        // An empty retained document uses Pi's initial paint path, even after
+        // a no-op Termux resize. Do not clear terminal-owned saved lines.
+        if previous_len == 0 && !width_changed && !height_changed {
             self.pi_full_render(
                 new_lines,
                 width_u16,
@@ -439,7 +445,7 @@ impl<'a> TUI<'a> {
                 self.hardware_cursor_row = target_row;
                 self.pi_append_hardware_cursor(&mut buffer, cursor_position, new_lines.len());
                 buffer.push_str("\x1b[?2026l");
-                self.terminal.write(&buffer);
+                self.pi_write_frame(&buffer);
             }
             self.pi_record_kitty_state(&new_lines, lazy_stable_prefix.is_some());
             self.previous_frame = new_lines;
@@ -524,7 +530,7 @@ impl<'a> TUI<'a> {
                 buffer.push_str("\r\n");
             }
             let line = &new_lines[index];
-            let image = is_image_line(line);
+            let image = is_pi_image_line(line);
             let image_reserved_rows = if image {
                 self.pi_kitty_image_reserved_rows(&new_lines, index, render_end)
             } else {
@@ -588,11 +594,24 @@ impl<'a> TUI<'a> {
             previous_viewport_top.max(final_cursor_row.saturating_sub(height.saturating_sub(1)));
         self.pi_append_hardware_cursor(&mut buffer, cursor_position, new_lines.len());
         buffer.push_str("\x1b[?2026l");
-        self.terminal.write(&buffer);
+        self.pi_write_frame(&buffer);
         self.pi_record_kitty_state(&new_lines, lazy_stable_prefix.is_some());
         self.previous_frame = new_lines;
         self.previous_size = Some((width_u16, height_u16));
         self.first_render = false;
+    }
+
+    /// Bound each write without changing the frame stream or its sync transaction.
+    /// The frame is still assembled in memory; this is not a total memory bound.
+    fn pi_write_frame(&mut self, mut buffer: &str) {
+        while !buffer.is_empty() {
+            let mut end = buffer.len().min(PI_MAX_WRITE_BYTES);
+            while !buffer.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.terminal.write(&buffer[..end]);
+            buffer = &buffer[end..];
+        }
     }
 
     pub(super) fn pi_full_render(
@@ -652,7 +671,7 @@ impl<'a> TUI<'a> {
         self.previous_viewport_top = buffer_length.saturating_sub(height_rows);
         self.pi_append_hardware_cursor(&mut buffer, cursor_position, new_lines.len());
         buffer.push_str("\x1b[?2026l");
-        self.terminal.write(&buffer);
+        self.pi_write_frame(&buffer);
         self.pi_record_kitty_state(&new_lines, false);
         self.previous_frame = new_lines;
         self.previous_size = Some((width, height));
@@ -682,7 +701,7 @@ impl<'a> TUI<'a> {
             buffer.push_str(&format!("\x1b[{};1H\x1b[2K", row + 1));
         }
         for (row, line) in new_lines[top..].iter().enumerate() {
-            if !is_image_line(line) && visible_width(line) > usize::from(width) {
+            if !is_pi_image_line(line) && visible_width(line) > usize::from(width) {
                 self.stop();
                 panic!("rendered line exceeds terminal width; components must wrap or truncate");
             }
@@ -698,7 +717,7 @@ impl<'a> TUI<'a> {
         self.previous_viewport_top = top;
         self.pi_append_hardware_cursor(&mut buffer, cursor_position, new_lines.len());
         buffer.push_str("\x1b[?2026l");
-        self.terminal.write(&buffer);
+        self.pi_write_frame(&buffer);
         self.pi_record_kitty_state(&new_lines, known_image_free);
         self.previous_frame = new_lines;
         self.previous_size = Some((width, height));
@@ -712,7 +731,7 @@ impl<'a> TUI<'a> {
     ) {
         let mut buffer = String::new();
         self.pi_append_hardware_cursor(&mut buffer, cursor_position, total_lines);
-        self.terminal.write(&buffer);
+        self.pi_write_frame(&buffer);
     }
 
     /// Finish cursor geometry and visibility in the caller's frame transaction.

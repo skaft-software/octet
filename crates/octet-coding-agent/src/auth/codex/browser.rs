@@ -25,11 +25,11 @@ const MARK: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs/assets/octet/marks/mark-black.svg"
 ));
-/// Local Grotesk Regular (Local 0.53, as vendored for the web UI), inlined so
+/// Local Grotesk Regular (Local 0.53), inlined so
 /// the pages load nothing from the network. See `THIRD_PARTY_NOTICES.md`.
 const FONT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../apps/web/src/assets/fonts/LocalGrotesk-Regular.woff2"
+    "/../../docs/assets/fonts/LocalGrotesk-Regular.woff2"
 ));
 
 /// The loopback address for one registered callback port.

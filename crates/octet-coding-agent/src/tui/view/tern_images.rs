@@ -53,12 +53,7 @@ impl NativeImages {
                 let TranscriptBlock::Tool(panel) = block else {
                     continue;
                 };
-                // Command output is private until Ctrl+O disclosure. Gate
-                // payload preparation too, not just the native image node:
-                // upload runs before the projected tree is sent to Tern.
-                if !panel.image_rendering.enabled
-                    || (matches!(panel.name.as_str(), "bash" | "exec") && !shell.verbose_tools)
-                {
+                if !panel.image_rendering.enabled {
                     continue;
                 }
                 for (image_index, image) in panel.images.iter().enumerate() {

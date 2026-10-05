@@ -51,6 +51,10 @@ mod kitty;
 mod pi_render;
 mod repaint;
 
+#[cfg(test)]
+#[path = "tui/release_parity_tests.rs"]
+mod release_parity_tests;
+
 use self::cursor::{push_vertical_move, signed_difference, LogicalCursorPosition};
 pub(crate) use self::kitty::delete_all_kitty_images;
 

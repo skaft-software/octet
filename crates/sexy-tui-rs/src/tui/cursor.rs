@@ -26,7 +26,7 @@ pub(super) struct LogicalCursorPosition {
 }
 
 pub(super) fn is_termux_session() -> bool {
-    std::env::var_os("TERMUX_VERSION").is_some()
+    std::env::var_os("TERMUX_VERSION").is_some_and(|value| !value.is_empty())
 }
 
 pub(super) fn extract_logical_cursor_position_from(

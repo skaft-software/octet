@@ -10,6 +10,9 @@ text LICENSE
 text README.md
 text SECURITY.md
 text THIRD_PARTY_NOTICES.md
+text docs/assets/fonts/GUST-FONT-LICENSE.txt
+text docs/assets/fonts/LOCAL-NOTICE.md
+asset docs/assets/fonts/LocalGrotesk-Regular.woff2
 text crates/octet-ai/docs/responses-controls.md
 text crates/octet-ai/models/SOURCES.md
 text crates/octet-ai/src/protocol/openai_responses.rs
