@@ -105,6 +105,10 @@ passed.
   `octet-subagents`), so Pi `createAgentSession` spawns native Octet agents.
 - Host features above: provider OAuth for extension providers,
   `provider_stream_event`, `project_trust`, virtual models.
+- Seven pre-existing `octet-agent` failures in `extension_operations` and
+  `resources_tests::composition` (operation-catalog tool counts, nested
+  revocation counts, D11 refused `resource_paths_v1`); they fail identically at
+  `d7be74f4`.
 - The three `pi_ui_contract_tests` failures, the resident MCP catalog test and
   the order-dependent model-setter flake above.
 - Native transcript renderer consumer (ledger row 25), remaining UI/editor
