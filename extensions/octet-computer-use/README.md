@@ -236,9 +236,15 @@ Set `OCTET_CUA_CONFIRM=1` to approve each effectful computer-use action.
 Replacing an installed extension (`extension update` or `install --replace`)
 is unsupported on Windows: atomic directory exchange is unavailable, and the
 previous installation stays active. Test a reviewed candidate with the explicit
-`--extension-dir` above instead of removing the existing installation. The
-observed driver 0.33.0 direct runtime reports no agent-cursor overlay; installed
-themes are not proof of a visible cursor. See the
+`--extension-dir` above instead of removing the existing installation.
+
+**Cursor feedback.** The direct runtime configures the model-colored agent
+cursor on Windows and verifies enablement, theme, and motion by live read-back.
+**Check status** reports the cursor state separately from desktop readiness.
+Overlay failures are reported but do not disable otherwise working input;
+installed themes alone do not establish cursor readiness. Driver 0.33.0 excludes
+its overlay from screenshots, so screenshot evidence does not visually qualify
+it. See the
 [PR 480 Windows qualification record](../../docs/qualification/pr480-windows-computer-use.md)
 for the tested setup path and remaining gaps.
 
@@ -323,10 +329,10 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   classification and do not prompt; actual permission or capture errors remain
   visible to the caller.
 - **Targeted cursor feedback.** On the macOS host, cursor enablement and motion
-  are verified before any tool call is reported ready. On Linux the direct
-  runtime draws the same themed cursor through Cua's X11 or Wayland overlay; it
-  is best-effort there, so a cursor that cannot be shown is reported in status
-  and never blocks an action. On native Wayland, Cua 0.30 cannot read cursor
+  are verified before any tool call is reported ready. On Linux and Windows,
+  the direct runtime configures the same themed cursor; it is best-effort, so a
+  cursor that cannot be shown is reported in status and never blocks an action.
+  Windows requires live read-back. On native Wayland, Cua 0.30 cannot read cursor
   state back, so the setters' acknowledgements confirm it instead. GNOME draws
   the cursor in its Shell helper, which the bundle pins to the model color. The cursor uses a short,
   straight 80 ms glide without curved turns and hides after 5 seconds of

@@ -371,8 +371,8 @@ class ComputerUse:
         self._lock = threading.Lock()
         self._permission_cache: Optional[Tuple[float, bool]] = None
         self._app_daemon = False
-        # Linux's direct runtime draws its own X11/Wayland overlay. Unlike the
-        # macOS host it was never the gate for computer use, so its cursor is
+        # Linux and Windows direct runtimes draw their own overlay. Unlike the
+        # macOS host it is not the gate for computer use, so their cursor is
         # best-effort: a failure is reported, and actions still proceed.
         self._direct_cursor = False
         self._cursor_failure: Optional[str] = None
@@ -445,10 +445,10 @@ class ComputerUse:
             self._client = client
             self._binary = Path(binary)
             self._app_daemon = app_daemon
-            self._direct_cursor = not app_daemon and driver_module.host_platform() == "linux"
+            self._direct_cursor = not app_daemon and driver_module.host_platform() in {"linux", "windows"}
             self._cursor_failure = None
             if self._direct_cursor:
-                self._theme_ids = self._linux_theme_ids(Path(binary))
+                self._theme_ids = self._direct_theme_ids(Path(binary))
                 self._ensure_cursor(client, self._cursor_session or cursor_session())
             if app_daemon:
                 try:
@@ -491,11 +491,11 @@ class ComputerUse:
         self._configure_cursor(client, session)
 
     @staticmethod
-    def _linux_theme_ids(binary: Path) -> set:
+    def _direct_theme_ids(binary: Path) -> set:
         """Installed theme IDs, installing the bundled ones first if missing.
 
-        The Linux wheel has no theme compiler, so the bundled artifacts go
-        straight into the driver's own store. Doing it here, not only in
+        The Linux and Windows wheels have no theme compiler, so bundled artifacts
+        go straight into the driver's own store. Doing it here, not only in
         computer-use setup, is what makes model colors work as soon as the
         driver is provisioned by any route. Only reviewed bundled files are
         written, and an up-to-date store is left untouched.
@@ -532,7 +532,7 @@ class ComputerUse:
             if not self._direct_cursor or selected == "cua.default":
                 raise McpError(f"agent cursor theme selection failed: {error}") from error
             # A driver newer than the bundled artifacts may reject them; keep
-            # the Linux cursor on Cua's default rather than losing it.
+            # the direct runtime's cursor on Cua's default rather than losing it.
             selected = "cua.default"
             try:
                 theme_ack = self._payload(self._checked_call(client, "set_agent_cursor_theme", {
@@ -566,9 +566,10 @@ class ComputerUse:
             # overlay's state, so on native Wayland it reads back defaults even
             # though the layer-shell overlay renders the configured cursor. On
             # Linux, accept the setters' own acknowledgements of exactly what
-            # was requested; macOS keeps requiring the read-back.
+            # was requested; macOS and Windows keep requiring the read-back.
             acknowledged = (
                 self._direct_cursor
+                and driver_module.host_platform() == "linux"
                 and enabled_ack.get("enabled") is True
                 and isinstance(motion_ack.get("motion"), Mapping)
                 and all(motion_ack["motion"].get(key) == value for key, value in CURSOR_MOTION.items())
@@ -1582,6 +1583,8 @@ def _render_status(status: Mapping[str, Any]) -> str:
         return "\n".join(lines)
     else:
         lines.append("runtime: direct (inherits your terminal's permissions)")
+        if windows:
+            _render_agent_cursor(status, lines)
     permissions = status.get("permissions")
     if permissions == "granted":
         if windows:
@@ -1633,12 +1636,7 @@ def _render_linux_session(status: Mapping[str, Any], lines: List[str]) -> None:
             "For element trees, install at-spi2-core (Arch/Omarchy: "
             "`sudo pacman -S at-spi2-core`) and log in again; pixel actions work without it."
         )
-    if status.get("cursor_available"):
-        if status.get("cursor_enabled"):
-            lines.append(f"agent cursor: on (theme {status.get('cursor_theme', 'cua.default')})")
-        else:
-            lines.append("agent cursor: not shown%s" % (
-                f" ({status['cursor_detail']})" if status.get("cursor_detail") else ""))
+    _render_agent_cursor(status, lines)
     helper = status.get("gnome_helper")
     if helper and helper != "active":
         lines.append("GNOME Shell helper: %s" % (
@@ -1647,6 +1645,17 @@ def _render_linux_session(status: Mapping[str, Any], lines: List[str]) -> None:
                 "upstream": "an older copy is loaded; set up computer use from /extensions, then log out and back in",
                 "restart-required": "installed; log out and back in once to load it",
             }.get(helper, helper)))
+
+
+def _render_agent_cursor(status: Mapping[str, Any], lines: List[str]) -> None:
+    """Report direct-runtime cursor verification and any actionable failure."""
+
+    if status.get("cursor_available"):
+        if status.get("cursor_enabled"):
+            lines.append(f"agent cursor: on (theme {status.get('cursor_theme', 'cua.default')})")
+        else:
+            lines.append("agent cursor: not shown%s" % (
+                f" ({status['cursor_detail']})" if status.get("cursor_detail") else ""))
 
 
 def main() -> None:
