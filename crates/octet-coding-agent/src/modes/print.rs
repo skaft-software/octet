@@ -67,6 +67,10 @@ pub(crate) async fn run_invocation(
     let launch = resolve_launch_print(&boot, &timestamp())?;
     let system = compose_instructions(&boot.config)?;
     let mut app = build_app(boot, launch, system)?;
+    // Stdout carries only the answer or the JSON event stream.
+    for notice in app.executable_extensions.startup_failure_notices() {
+        crate::output::stderr!("warning: {notice}");
+    }
     if json {
         JsonEventStream::header(&app)?;
     }

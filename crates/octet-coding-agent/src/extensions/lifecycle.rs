@@ -364,6 +364,7 @@ impl ExecutableExtensions {
                         runtime_binding = Some(binding);
                         for activation in activations {
                             let name = activation.extension;
+                            let detail = activation.detail;
                             match (activation.outcome, activation.process) {
                                 (ExtensionRuntimeActivationOutcome::Ready, Some(process)) => {
                                     starts.push((name, Ok(process)));
@@ -381,7 +382,9 @@ impl ExecutableExtensions {
                                             error.to_string()
                                         }
                                         ExtensionRuntimeActivationOutcome::Failed(failure) => {
-                                            format!("runtime startup {failure:?}")
+                                            detail.unwrap_or_else(|| {
+                                                startup_failure_reason(failure).to_owned()
+                                            })
                                         }
                                         ExtensionRuntimeActivationOutcome::Ready => {
                                             "runtime activation returned no process".to_owned()
@@ -527,6 +530,7 @@ impl ExecutableExtensions {
         extensions.shortcuts = shortcuts;
         extensions.summaries = summaries;
         extensions.diagnostics.extend(diagnostics);
+        extensions.start_failures = start_failures;
         extensions.event_bus = Some(event_bus);
         extensions.remote_ui_wake = remote_ui_wake;
         extensions.session_lifecycle_service = session_lifecycle_service;
@@ -1084,5 +1088,20 @@ impl ExecutableExtensions {
         self.provider_runtime
             .await_initial_registrations_async(&processes)
             .await;
+    }
+}
+
+/// Plain wording for a classified startup failure without host detail.
+fn startup_failure_reason(
+    failure: octet_agent::extension_runtime::ExtensionRuntimeFailure,
+) -> &'static str {
+    use octet_agent::extension_runtime::ExtensionRuntimeFailure as Failure;
+    match failure {
+        Failure::NotEligible => "it is not enabled and trusted",
+        Failure::StaleSource => "its source changed while starting",
+        Failure::Launch => "its process exited during startup",
+        Failure::Protocol => "it failed the startup handshake",
+        Failure::StartupTimeout => "it did not finish starting in time",
+        Failure::ManagerClosed => "octet was shutting down",
     }
 }

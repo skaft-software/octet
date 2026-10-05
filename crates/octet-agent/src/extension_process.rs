@@ -139,6 +139,7 @@ pub use resources::{
 mod runtime_config;
 pub mod session_leaf;
 mod spawn;
+pub(crate) use spawn::entrypoint_outside_extension;
 mod tools;
 mod validation;
 

@@ -10701,6 +10701,9 @@ async fn run_interactive_once(
     if let Some(notice) = commands::resumed_cache_warming_notice(&app) {
         shell.notice(notice);
     }
+    for notice in app.executable_extensions.startup_failure_notices() {
+        shell.notice(notice);
+    }
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);

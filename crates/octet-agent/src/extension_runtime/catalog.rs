@@ -21,7 +21,8 @@ use sha2::{Digest as _, Sha256};
 
 use super::{sha256_hex, ExtensionRuntimeDomainError};
 use crate::extension_process::{
-    DiscoveredExtension, ExtensionLifecycleProfile, ExtensionRuntimeSharing, ExtensionTrust,
+    entrypoint_outside_extension, DiscoveredExtension, ExtensionLifecycleProfile,
+    ExtensionRuntimeSharing, ExtensionTrust,
 };
 use crate::secure_fs::read_regular_file_bounded;
 const MAX_CATALOG_SOURCE_BYTES: usize = 64 * 1024 * 1024;
@@ -213,6 +214,48 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Digest for an installed interpreter (`node`, `bun`, `python3`) launched in
+/// place from outside the extension. The runtime's own bytes are not extension
+/// source, so only its path enters the hash, followed by every script argument
+/// that the extension ships. Like a PATH launch it is never eligible for
+/// content-digested sharing.
+fn interpreter_digest(
+    mut hasher: Sha256,
+    descriptor: &DiscoveredExtension,
+    directory: &Path,
+    work: &mut ExtensionDigestWork,
+) -> (ExtensionContentDigest, bool) {
+    hasher.update(b"\0interpreter\0");
+    hasher.update(descriptor.manifest.entrypoint.command.as_bytes());
+    let mut total = 0usize;
+    for argument in &descriptor.manifest.entrypoint.args {
+        let path = Path::new(argument);
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            directory.join(path)
+        };
+        if entrypoint_outside_extension(directory, &path) || !path.is_file() {
+            continue;
+        }
+        let remaining = MAX_CATALOG_PACKAGE_BYTES.saturating_sub(total);
+        let Ok(content) = read_regular_file_bounded(&path, remaining) else {
+            continue;
+        };
+        total += content.len();
+        work.files += 1;
+        work.bytes += content.len();
+        hasher.update(b"\0script\0");
+        hasher.update(argument.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(content);
+    }
+    (
+        ExtensionContentDigest(format!("{:x}", hasher.finalize())),
+        false,
+    )
+}
+
 // Conservatively bind Python's local import surface, including vendored and
 // namespace packages. Scan every local .py below the entrypoint rather than
 // guessing which conditional/dynamic imports will execute at runtime.
@@ -282,6 +325,11 @@ fn catalog_content_digest(
     hasher.update(entrypoint);
 
     let configured = PathBuf::from(&descriptor.manifest.entrypoint.command);
+    if let Some(directory) = descriptor.manifest_path.parent() {
+        if entrypoint_outside_extension(directory, &configured) {
+            return Ok(interpreter_digest(hasher, descriptor, directory, work));
+        }
+    }
     let local = if configured.is_absolute() {
         Some(configured)
     } else {

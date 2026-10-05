@@ -1518,9 +1518,9 @@ impl ProcessConnection {
         let mut children = lock_std_mutex(&self.child_requests);
         let child = children.get(id).ok_or_else(stale)?;
         if child.parent_request_id != 0
-            && !pending
+            && pending
                 .get(&child.parent_request_id)
-                .is_some_and(|parent| parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE)
+                .is_none_or(|parent| parent.terminal.load(Ordering::Acquire) != REQUEST_ACTIVE)
         {
             return Err(stale());
         }

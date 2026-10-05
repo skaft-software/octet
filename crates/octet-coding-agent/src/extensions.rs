@@ -381,6 +381,10 @@ pub struct ExecutableExtensions {
     /// the product drain paths reuse the exact configuration the fleet was
     /// built from instead of guessing roots at drain time.
     rescan_config: Option<Config>,
+    /// Enabled extensions that failed to start, with a bounded host reason.
+    /// Frontends report these once at startup: an enabled extension must never
+    /// disappear silently.
+    start_failures: BTreeMap<String, String>,
     #[cfg(test)]
     lifecycle_delivery_test_control: Option<std::sync::Arc<LifecycleDeliveryTestControl>>,
 }
@@ -448,13 +452,25 @@ impl Default for ExecutableExtensions {
             mutation_family_generations: BTreeMap::new(),
             rescan_global_config: None,
             rescan_config: None,
+            start_failures: BTreeMap::new(),
             #[cfg(test)]
             lifecycle_delivery_test_control: None,
         }
     }
 }
 
-impl ExecutableExtensions {}
+impl ExecutableExtensions {
+    /// One line per enabled extension that failed to start, for the frontend
+    /// to show at startup. `/extensions` keeps the full status.
+    pub(crate) fn startup_failure_notices(&self) -> Vec<String> {
+        self.start_failures
+            .iter()
+            .map(|(name, reason)| {
+                format!("extension {name} did not start: {reason} (see /extensions)")
+            })
+            .collect()
+    }
+}
 
 fn shutdown_telemetry_observer(observer: octet_agent::TelemetryObserver) {
     if let Err(error) = observer.shutdown(Duration::from_secs(2)) {
