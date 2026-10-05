@@ -60,11 +60,10 @@ const OSC11_QUERY: &[u8] = b"\x1b]11;?";
 /// scenarios cannot isolate it: a configured provider makes startup open the
 /// model picker instead of first-run setup.
 fn profile_has_configured_provider() -> bool {
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+    let Some(home) = dirs::home_dir() else {
         return false;
     };
-    std::path::Path::new(&home)
-        .join(".octet")
+    home.join(".octet")
         .join("credentials")
         .join("custom.json")
         .is_file()
@@ -635,6 +634,39 @@ fn interactive_round_trip(environment: &[(&str, &str)], rule: char) {
         );
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn profile_guard_ignores_environment_home_overrides() {
+    let _serial = serial();
+    let home = dirs::home_dir().expect("native Windows profile");
+    let expected = home.join(".octet/credentials/custom.json").is_file();
+    let fake_home = tempfile::tempdir().expect("disposable environment profile");
+    // Make the environment profile give the opposite answer on both fresh
+    // accounts and developer accounts, without changing native credentials.
+    if !expected {
+        let credentials = fake_home.path().join(".octet/credentials");
+        std::fs::create_dir_all(&credentials).expect("fixture credentials directory");
+        std::fs::write(credentials.join("custom.json"), b"{}").expect("fixture registry");
+    }
+    let saved: Vec<_> = ["USERPROFILE", "HOME"]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+    for (key, _) in &saved {
+        std::env::set_var(key, fake_home.path());
+    }
+    let actual = profile_has_configured_provider();
+    for (key, value) in saved {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "guard must use the frontend's native profile"
+    );
 }
 
 #[test]

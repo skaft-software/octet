@@ -1488,6 +1488,85 @@ class LinuxCursorTests(unittest.TestCase):
         self.assertIn("log out and back in", text)
 
 
+class WindowsCursorTests(unittest.TestCase):
+    """Windows direct sessions verify the themed overlay by reading it back."""
+
+    def setUp(self):
+        patcher = mock.patch.object(entrypoint.driver_module.platform, "system", return_value="Windows")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        confirm = mock.patch.dict(os.environ, {"OCTET_CUA_CONFIRM": "0"})
+        confirm.start()
+        self.addCleanup(confirm.stop)
+
+    def _start(self, client):
+        computer = ComputerUse(RecordingExtension())
+        computer.select_model({"host": {"model": "claude-sonnet-4"}})
+        client.start = lambda **_: None
+        themes = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        with mock.patch.object(entrypoint.driver_module, "desktop_app_binary", return_value=None), \
+                mock.patch.object(entrypoint.driver_module, "installed_binary", return_value=Path("cua-driver.exe")), \
+                mock.patch.object(entrypoint, "DriverClient", return_value=client), \
+                mock.patch.object(entrypoint.cursor_theme, "installed_theme_ids", return_value=themes):
+            computer.client()
+        return computer
+
+    def test_direct_runtime_verifies_the_colored_cursor_and_binds_actions(self):
+        client = CursorSessionTests._CursorClient()
+        computer = self._start(client)
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+        session = computer._cursor_session
+        computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertEqual(client.calls[-1][1]["session"], session)
+        computer.shutdown()
+        self.assertIn(("end_session", {"session": session}), client.calls)
+        self.assertFalse(client.started)
+
+    def test_setter_acknowledgements_do_not_replace_windows_readback(self):
+        client = CursorSessionTests._CursorClient()
+        original = client.call
+
+        def call(tool, arguments=None, **kwargs):
+            result = original(tool, arguments, **kwargs)
+            if tool == "set_agent_cursor_motion":
+                return {"structuredContent": {"motion": entrypoint.CURSOR_MOTION}}
+            if tool == "set_agent_cursor_theme":
+                return {"structuredContent": {"theme": {"id": arguments["theme_id"]}}}
+            if tool == "set_agent_cursor_enabled":
+                return {"structuredContent": {"enabled": True}}
+            if tool == "get_agent_cursor_state":
+                return {"structuredContent": {"enabled": False, "motion": {}, "theme": {}}}
+            return result
+
+        client.call = call
+        computer = self._start(client)
+        self.assertFalse(computer._cursor_ready)
+        self.assertIsNotNone(computer._cursor_failure)
+        computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertEqual(client.calls[-1][0], "click", "overlay failure must not disable desktop input")
+
+    def test_status_reports_windows_cursor_verification_and_failure(self):
+        status = {"installed": True, "runtime": "direct", "platform": "windows",
+                  "permissions": "granted", "cursor_available": True,
+                  "cursor_enabled": True, "cursor_theme": "com.octet.computeruse.openai"}
+        self.assertIn("agent cursor: on (theme com.octet.computeruse.openai)", _render_status(status))
+        status.update(cursor_enabled=False, cursor_detail="read-back did not match")
+        self.assertIn("agent cursor: not shown (read-back did not match)", _render_status(status))
+
+    def test_session_and_model_switch_reconfigure_the_same_windows_cursor(self):
+        client = CursorSessionTests._CursorClient()
+        computer = self._start(client)
+        previous = computer._cursor_session
+        computer.call("start_session", {"session": "windows-review"})
+        self.assertIn(("end_session", {"session": previous}), client.calls)
+        computer.select_model({"host": {"model": "gpt-5.6"}})
+        computer.call("press_key", {"pid": 17, "window_id": 5, "key": "ENTER"})
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.openai")
+        self.assertEqual(client.calls[-1][1]["session"], "windows-review")
+
+
 class GnomeHelperTests(unittest.TestCase):
     def test_gnome_wayland_detection_covers_derivatives(self):
         from unittest import mock
