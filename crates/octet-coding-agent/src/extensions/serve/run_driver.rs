@@ -108,7 +108,7 @@ pub(super) async fn start_and_drive_run_inner(
     let (pending_context_count, model_prompt, project_instruction_tokens) = if replay_exact {
         let project_instruction_tokens = project_instruction_token_hint(&app.system);
         app.agent.set_system_prompt(app.system.clone());
-        (0, prompt, project_instruction_tokens)
+        (0, UserInput::from(prompt), project_instruction_tokens)
     } else {
         let composition = match app
             .executable_extensions
@@ -124,7 +124,8 @@ pub(super) async fn start_and_drive_run_inner(
             }
         };
         let pending_context_count = composition.pending_context_count;
-        let model_prompt = composition.prompt;
+        let mut model_prompt = UserInput::from(composition.prompt);
+        model_prompt.custom_messages = composition.custom_messages;
         let project_instruction_tokens = project_instruction_token_hint(&composition.system);
         app.agent.set_system_prompt(composition.system);
         (
@@ -151,18 +152,17 @@ pub(super) async fn start_and_drive_run_inner(
     projection
         .item_turns
         .insert(user_item_id.clone(), turn_id.clone());
-    let mut input_parts = Vec::with_capacity(1 + media.len());
-    if !model_prompt.is_empty() {
-        input_parts.push(InputPart::Text(model_prompt));
-    }
-    input_parts.extend(media.into_iter().map(InputPart::Media));
+    let mut composed_input = model_prompt;
+    composed_input
+        .parts
+        .extend(media.into_iter().map(InputPart::Media));
     let title_before_prompt =
         session_meta_for_open_session(&plan.sessions, &plan.session_id, app.agent.session())
             .map(|metadata| metadata.title);
     projection.usage_uncertain |= app.agent.session().has_uncertain_usage();
     let run_model = app.model.clone();
     let prior_cache_misses = crate::commands::cache_miss_count(app);
-    let mut run = match app.agent.prompt(UserInput::from(input_parts)).await {
+    let mut run = match app.agent.prompt(composed_input).await {
         Ok(run) => run,
         Err(_) => {
             return Ok(RunDriveOutcome::Rejected {

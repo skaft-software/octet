@@ -44,7 +44,7 @@ try {
     if (!name || !/^[a-z][a-z0-9-]{0,63}$/.test(name) || !version ||
         !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) || !output ||
         basename(dirname(resolve(output))) !== name || !['none', 'workspace', 'unrestricted'].includes(filesystem)) throw new Error(usage);
-    const {tools, commands} = extension.contributions();
+    const {tools, commands, hooks} = extension.contributions();
     // JSON strings/arrays are valid TOML basic strings/arrays here; reject control input.
     const quote = value => {
       if (/[\u0000-\u001f\u007f]/.test(value)) throw new Error('Manifest strings must not contain controls');
@@ -58,7 +58,7 @@ try {
     const launch = `#!/bin/sh\n# Invoke the installed interpreter in place: the host stages this script, not Node.\nexec ${[process.execPath, fileURLToPath(import.meta.url), 'run', authorPath].map(shellQuote).join(' ')}\n`;
     // Fail closed on existing local files; don't overwrite a reviewed launcher.
     writeFileSync(launcher, launch, {flag: 'wx', mode: 0o700});
-    const text = `# Generated local manifest. Regenerate after moving this package or Node.\nname = ${quote(name)}\nversion = ${quote(version)}\napi_version = "0.4"\n\n[entrypoint]\ncommand = ${quote(launcher)}\nargs = []\n\n[capabilities]\nfilesystem = ${quote(filesystem)}\nprocess = ${!!options['--process']}\nnetwork = ${!!options['--network']}\n\n[contributes]\ntools = ${array(tools)}\ncommands = ${array(commands)}\n`;
+    const text = `# Generated local manifest. Regenerate after moving this package or Node.\nname = ${quote(name)}\nversion = ${quote(version)}\napi_version = "0.4"\n\n[entrypoint]\ncommand = ${quote(launcher)}\nargs = []\n\n[capabilities]\nfilesystem = ${quote(filesystem)}\nprocess = ${!!options['--process']}\nnetwork = ${!!options['--network']}\n\n[contributes]\ntools = ${array(tools)}\ncommands = ${array(commands)}\nhooks = ${array(hooks)}\n`;
     writeFileSync(resolve(output), text, {flag: 'wx', mode: 0o600});
     console.error(`Generated ${resolve(output)} (local source; not a distributable bundle)`);
   }

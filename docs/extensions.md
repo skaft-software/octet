@@ -1,10 +1,11 @@
 # Executable extensions
 
-Extensions add tools and bounded, host-shaped integrations to octet's fast,
-small coding host. They aren't a promise to run unchanged Pi extensions or to
-replace every host subsystem. Browse, MCP, web search and host-owned subagents
-stay supported integrations with their package-specific limits, and Serve stays
-a separate application.
+Extensions run as subprocesses over JSON-RPC. The optional Pi adapter replicates
+**Pi 1.0.2's public extension API** under this protocol; Pi defines its semantics.
+The [27-row ledger](pi-extension-api.md) records implementation and real Rust-host
+acceptance separately. Third-party package internals, the Pi CLI and child SDK
+are not compatibility targets. Rust owns agent execution, sessions, policy,
+persistence and the terminal; domain integrations remain optional.
 
 Write new process extensions against **API `0.4`**, the current working-tree
 version. It uses the feature-negotiated JSON-RPC wire retained from API `0.2`.
@@ -251,6 +252,81 @@ Dynamic tools used by MCP, `agent_sessions` used by subagents, and command,
 status and presentation surfaces stay available subject to their existing host
 gates. A documented approval or secret broker isn't automatically offered by a
 host.
+
+### Typed values, native resources and immutable bulk (API `0.4`)
+
+The [Python](../sdk/python/README.md) and [Rust](../sdk/rust/README.md) SDKs
+support generated typed JSON inputs/outputs, explicit model-facing text and
+validated diagnostics. Native objects opt into `resource_refs_v1` plus
+`operation_descriptors_v1`: the extension keeps the object while the host
+mediates opaque ResourceRefs, exact nominal types, exclusive admission and
+explicit cleanup. Ordinary tools, including Pi tools, need no annotations.
+
+Hosts may opt into bounded applicable-operation discovery and lazy model-schema
+projection without changing their full registered/active catalogs. Configured
+`bulk_objects_v1` storage transports numerical bytes through immutable verified
+`local-file.v1` snapshots; model results contain only BlobRefs and summaries.
+ResourceRefs do not survive owner/generation/host retirement. Durable blobs
+require explicit host retention/recovery; transport tickets and locators are
+never durable domain data.
+
+See the [wire methods](extensions/PROTOCOL-REFERENCE.md#226-native-resource-lifecycle-api-04),
+[approved contract](design/extension-values-v1.md) and
+[required conformance cases](design/extension-values-v1-conformance.md).
+Implementation is not a full conformance or Pi compatibility claim; actual
+SPICE execution additionally requires `ngspice`. These services do not sandbox
+a trusted subprocess's operating-system access.
+
+### Tool prompt metadata (API `0.4`)
+
+The optional `tool_prompt_metadata_v1` feature carries presentation metadata in
+initialized and dynamically registered tool definitions:
+
+```json
+{"name":"inspect","description":"Inspect a project","parameters":{"type":"object"},"prompt_snippet":"Inspect project structure","prompt_guidelines":["Report only verified findings"]}
+```
+
+`prompt_snippet` is optional; `prompt_guidelines` defaults to an empty array.
+Each string is limited to 1,024 UTF-8 bytes, with at most 16 guidelines per tool.
+Newline and tab are allowed; other C0/C1 controls are rejected. Metadata also
+counts toward the existing aggregate catalog byte budget. A snippet or nonempty
+guidelines array requires this negotiated feature on API `0.4`; older wires are
+unchanged.
+
+The Agent includes explicit metadata only from its model-visible, policy-filtered
+active tool snapshot. Guidelines work without a snippet. Empty/whitespace-only
+contributions add nothing. The section retains the Agent's existing byte/count
+bounds and is frozen for that run, just like the system prefix; changes take
+effect on the next run. Tool-free runs omit it. Ordinary tools without metadata
+retain their existing behavior, including the default-disabled legacy built-in
+prompt section. Embedders assembling their own prompts can read the owned
+`Tool::prompt_metadata()` contribution. Metadata never changes effects,
+authorization, schemas, handlers, or active-tool selection.
+
+The Pi adapter maps `promptSnippet`/`promptGuidelines` to these fields. This is
+one binding, not a full Pi compatibility claim.
+
+### Autocomplete edits (API `0.4`)
+
+The optional `autocomplete_edit_v1` profile requires negotiated `autocomplete`
+and uses the existing `ui/autocomplete/complete` RPC, not a new editor service.
+Choices may include `replace_after_bytes` (additional original bytes after the
+cursor to replace, absent = zero, at most 262,144) and `cursor_offset_bytes`
+(cursor within the inserted value, absent = its UTF-8 byte length). Both are
+optional `u32` fields; explicit null or any unnegotiated presence, including
+zero, is invalid. Prefix/value may contain LF, TAB and CR under this profile;
+labels/descriptions remain control-free. Each string stays within 1,024 UTF-8
+bytes and each response within 32 items.
+
+The host validates the exact snapshot, UTF-8 edit range and resulting editor
+budget at response, display and explicit acceptance. Live provider instance,
+generation, session/resource owner and text/cursor/revision/focus fences prevent
+stale edits or fallback into a new draft. The native editor also requires
+representable grapheme boundaries: it refuses an incompatible edit/cursor
+rather than silently moving the requested cursor. See the [wire profile and
+example](extensions/PROTOCOL-REFERENCE.md#autocomplete-edit-v1). This documents
+the native contract, not Pi adapter support, full parity or completed feature
+qualification.
 
 ### Retained canonical API `0.3` wire
 

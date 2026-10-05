@@ -435,6 +435,7 @@ impl DelegationManager {
                     tool_call_count: 0,
                     active_tools: BTreeMap::new(),
                     recent_tools: VecDeque::new(),
+                    child_events: ChildEventLog::default(),
                     usage: Usage::default(),
                     streamed_output_bytes: 0,
                     usage_uncertain: false,
@@ -1307,6 +1308,12 @@ impl DelegationManager {
             }
         };
         let control = run.control();
+        if extension_policy.is_some() {
+            self.record_child_event(
+                &identity.id,
+                json!({"kind": "run_started", "message": persisted_task}),
+            );
+        }
 
         let output_limit = extension_policy
             .map(|policy| policy.max_output_bytes)
@@ -1365,6 +1372,11 @@ impl DelegationManager {
                 },
                 command = commands.recv(), if commands_open => Next::Command(command),
             };
+            if extension_policy.is_some() {
+                if let Some(event) = next_event.as_ref() {
+                    self.observe_child_event(&identity.id, event);
+                }
+            }
             match next {
                 Next::Changed => {}
                 Next::Deadline => {
@@ -1449,6 +1461,11 @@ impl DelegationManager {
                                 );
                                 break;
                             };
+                            if extension_policy.is_some() {
+                                self.record_child_event(&identity.id, json!({
+                                    "kind": "user_message", "message": format_direct_message(&message),
+                                }));
+                            }
                             self.release_message_reservation(&identity.id, &message);
                         }
                     }
@@ -1461,6 +1478,11 @@ impl DelegationManager {
                                 );
                                 break;
                             };
+                            if extension_policy.is_some() {
+                                self.record_child_event(&identity.id, json!({
+                                    "kind": "user_message", "message": format_follow_up(&follow_up, &[]),
+                                }));
+                            }
                             self.acknowledge_follow_up_delivery(&identity.id, &follow_up);
                             acknowledged_follow_ups.add_usage(follow_up.usage());
                         }

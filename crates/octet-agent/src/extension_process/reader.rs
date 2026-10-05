@@ -4,6 +4,8 @@ use super::*;
 
 pub(super) struct ProtocolReadState {
     pub(super) pending: PendingRequests,
+    pub(super) resources: Resources,
+    pub(super) resource_cleanup_changed: Arc<Notify>,
     pub(super) issued_resource_owners: IssuedResourceOwners,
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
@@ -77,6 +79,14 @@ pub(super) enum AgentSessionOperation {
     Interrupt {
         target: String,
     },
+    Events {
+        target: String,
+        after_sequence: u64,
+        timeout: Duration,
+    },
+    Stop {
+        target: String,
+    },
 }
 
 pub(super) async fn execute_agent_session_operation(
@@ -122,6 +132,22 @@ pub(super) async fn execute_agent_session_operation(
         AgentSessionOperation::Interrupt { target } => {
             service.interrupt(&resource_owner, &target).await
         }
+        AgentSessionOperation::Events {
+            target,
+            after_sequence,
+            timeout,
+        } => {
+            service
+                .events(
+                    &resource_owner,
+                    &target,
+                    after_sequence,
+                    timeout,
+                    &cancellation,
+                )
+                .await
+        }
+        AgentSessionOperation::Stop { target } => service.stop(&resource_owner, &target),
     }
 }
 
@@ -131,14 +157,24 @@ pub(super) fn queue_agent_session_operation(
     parent_request_id: u64,
     method: &'static str,
     operation: AgentSessionOperation,
+    explicit_owner: Option<ExtensionResourceOwner>,
 ) -> Result<(), String> {
-    let Some(registered) =
-        register_child_request(state, request_id.clone(), Some(parent_request_id), method)?
+    let Some(registered) = register_agent_session_request(
+        state,
+        request_id.clone(),
+        parent_request_id,
+        method,
+        explicit_owner,
+    )?
     else {
         return Ok(());
     };
     let response_state = registered.response_state;
-    let resource_owner = registered.resource_owner.map(|owner| owner.session_id);
+    let resource_owner = registered.resource_owner;
+    let issued_resource_owners = Arc::clone(&state.issued_resource_owners);
+    let closed = Arc::clone(&state.closed);
+    let draining = Arc::clone(&state.draining);
+    let owner_changed = Arc::clone(&state.pending_changed);
     let service = read_std_lock(&state.delegation_service).clone();
     let worker = match state.child_work_slots.clone().try_acquire_owned() {
         Ok(worker) => worker,
@@ -171,17 +207,43 @@ pub(super) fn queue_agent_session_operation(
     tokio::spawn(async move {
         let cancellation = CancellationToken::default();
         let result = if let (Some(service), Some(resource_owner)) = (service, resource_owner) {
-            tokio::select! {
-                result = execute_agent_session_operation(
-                    service,
-                    resource_owner,
-                    operation,
-                    cancellation.clone(),
-                ) => result,
-                _ = child_response_settled(Arc::clone(&response_state)) => {
-                    cancellation.cancel();
-                    drop(worker);
-                    return;
+            if closed.load(Ordering::Acquire)
+                || draining.load(Ordering::Acquire)
+                || !lock_std_mutex(&issued_resource_owners).contains(&resource_owner)
+            {
+                Err("child session owner retired before dispatch".to_owned())
+            } else {
+                let retired = async {
+                    loop {
+                        let changed = owner_changed.notified();
+                        tokio::pin!(changed);
+                        changed.as_mut().enable();
+                        if closed.load(Ordering::Acquire)
+                            || draining.load(Ordering::Acquire)
+                            || !lock_std_mutex(&issued_resource_owners).contains(&resource_owner)
+                        {
+                            return;
+                        }
+                        changed.await;
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    _ = retired => {
+                        cancellation.cancel();
+                        Err("child session owner retired during dispatch".to_owned())
+                    }
+                    _ = child_response_settled(Arc::clone(&response_state)) => {
+                        cancellation.cancel();
+                        drop(worker);
+                        return;
+                    }
+                    result = execute_agent_session_operation(
+                        service,
+                        resource_owner.session_id.clone(),
+                        operation,
+                        cancellation.clone(),
+                    ) => result,
                 }
             }
         } else {
@@ -214,6 +276,170 @@ pub(super) fn queue_agent_session_operation(
             );
             let _ = events.send(ExtensionEvent::Diagnostic { message });
             settle_child_request(&child_requests, &request_id);
+        }
+        drop(worker);
+    });
+    Ok(())
+}
+
+/// Use the existing lifecycle queue and child-worker slot, retaining both native
+/// cancellation and accounting settlement even after the reverse caller leaves.
+pub(super) fn queue_session_compaction_operation(
+    state: &ProtocolReadState,
+    request_id: ExtensionRequestId,
+    instructions: Option<String>,
+    owner: ExtensionResourceOwner,
+    parent_request_id: u64,
+    callback: bool,
+    response_state: Arc<ChildResponseState>,
+) -> Result<(), String> {
+    let worker = match state.child_work_slots.clone().try_acquire_owned() {
+        Ok(worker) => worker,
+        Err(_) => {
+            return reject_typed_child_request(
+                state,
+                request_id,
+                ExtensionRequestFailure::BoundsExceeded,
+                "session compaction worker limit exceeded",
+            )
+        }
+    };
+    let authority = SessionCompactionAuthority {
+        parent_request_id,
+        callback,
+        owner,
+        issued: Arc::clone(&state.issued_resource_owners),
+        closed: Arc::clone(&state.closed),
+        draining: Arc::clone(&state.draining),
+        response: Arc::clone(&response_state),
+    };
+    let service = state
+        .session_lifecycle
+        .as_ref()
+        .expect("compaction admission checked its consumer");
+    let cancellation = CancellationToken::default();
+    let driver = Arc::clone(&service.state);
+    let epoch = driver.epoch.load(Ordering::Acquire);
+    let mut receiver = match service.try_submit_compaction(
+        instructions,
+        cancellation.clone(),
+        authority.clone(),
+    ) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            return reject_typed_child_request(
+                state,
+                request_id,
+                match error {
+                    SessionLifecycleSubmitError::Full => ExtensionRequestFailure::BoundsExceeded,
+                    SessionLifecycleSubmitError::Unavailable => {
+                        ExtensionRequestFailure::NotForegroundOwner
+                    }
+                },
+                match error {
+                    SessionLifecycleSubmitError::Full => "session lifecycle queue is full",
+                    SessionLifecycleSubmitError::Unavailable => {
+                        "session compaction idle consumer is unavailable"
+                    }
+                },
+            )
+        }
+    };
+    let owner_changed = Arc::clone(&state.pending_changed);
+    let writer = state.writer.clone();
+    let child_requests = Arc::clone(&state.child_requests);
+    let max_message_bytes = state.max_message_bytes();
+    let health = Arc::clone(&state.health);
+    let events = state.events.clone();
+    tokio::spawn(async move {
+        let retired = async {
+            // Some legacy generation teardown paths clear child maps without a
+            // waiter notification. Keep revocation bounded on this same worker.
+            let mut tick = tokio::time::interval(Duration::from_millis(25));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let owner_change = owner_changed.notified();
+                let driver_change = driver.changed.notified();
+                tokio::pin!(owner_change, driver_change);
+                owner_change.as_mut().enable();
+                driver_change.as_mut().enable();
+                if !authority.is_current()
+                    || !driver.active.load(Ordering::Acquire)
+                    || driver.epoch.load(Ordering::Acquire) != epoch
+                {
+                    return;
+                }
+                tokio::select! {
+                    _ = owner_change => {},
+                    _ = driver_change => {},
+                    _ = tick.tick() => {},
+                }
+            }
+        };
+        let result = tokio::select! {
+            biased;
+            _ = child_response_settled(response_state) => {
+                cancellation.cancel();
+                // Never abandon a borrowed Agent summary before it accounts for
+                // completed/uncertain provider work. The same permit stays held.
+                let _ = receiver.await;
+                return;
+            }
+            _ = retired => {
+                cancellation.cancel();
+                receiver.await
+            }
+            result = &mut receiver => result,
+        };
+        let result = result.unwrap_or_else(|_| {
+            Err("session compaction consumer was lost; do not replay ambiguous work".into())
+        });
+        let result = match result {
+            Ok(committed) if !authority.is_current()
+                || !driver.active.load(Ordering::Acquire)
+                || driver.epoch.load(Ordering::Acquire) != epoch => Err(format!("session compaction committed entry {} but its owner retired; retained, do not retry", committed.entry_id)),
+            other => other,
+        };
+        let committed_id = result.as_ref().ok().map(|result| result.entry_id.clone());
+        let response = match result {
+            Ok(result) => serde_json::json!({"jsonrpc":"2.0","id":request_id,"result":result}),
+            Err(mut message) => {
+                // Error details are bounded too; do not invent a successful result.
+                truncate_utf8(&mut message, MAX_LIFECYCLE_REASON_BYTES);
+                serde_json::json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32603,"message":message}})
+            }
+        };
+        let delivery = try_queue_child_response(
+            &child_requests,
+            &request_id,
+            &writer,
+            max_message_bytes,
+            response,
+        );
+        if let Err(message) = delivery {
+            // A real summary can exceed a small negotiated frame. Refuse, naming
+            // the retained checkpoint, rather than truncating the summary or ACKing.
+            let response = serde_json::json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32603,"message":match committed_id {
+                Some(id) => format!("session compaction committed entry {id} but response delivery failed; retained, do not retry"),
+                None => "session compaction response delivery failed; do not replay ambiguous work".into(),
+            }}});
+            if try_queue_child_response(
+                &child_requests,
+                &request_id,
+                &writer,
+                max_message_bytes,
+                response,
+            )
+            .is_err()
+            {
+                settle_child_request(&child_requests, &request_id);
+            }
+            update_health(
+                &health,
+                ExtensionHealthState::Degraded,
+                Some(message.clone()),
+            );
+            let _ = events.send(ExtensionEvent::Diagnostic { message });
         }
         drop(worker);
     });
@@ -402,7 +628,20 @@ pub(super) fn queue_api_v03_session_lifecycle_operation(
     operation: ExtensionSessionLifecycleOperation,
 ) -> Result<(), String> {
     let registered = register_unparented_api_v03_child_request(state, request_id.clone())?;
-    let response_state = registered.response_state;
+    queue_registered_session_lifecycle_operation(
+        state,
+        request_id,
+        operation,
+        registered.response_state,
+    )
+}
+
+pub(super) fn queue_registered_session_lifecycle_operation(
+    state: &ProtocolReadState,
+    request_id: ExtensionRequestId,
+    operation: ExtensionSessionLifecycleOperation,
+    response_state: Arc<ChildResponseState>,
+) -> Result<(), String> {
     let writer = state.writer.clone();
     let frame_limit = Arc::clone(&state.frame_limit);
     let child_requests = Arc::clone(&state.child_requests);
@@ -443,6 +682,9 @@ pub(super) fn queue_api_v03_session_lifecycle_operation(
                 };
                 match result {
                     Ok(session_id) => api_v03_session_lifecycle_success(&request_id, session_id),
+                    Err(ExtensionSessionLifecycleError::Cancelled) => Ok(serde_json::json!({
+                        "jsonrpc":"2.0", "id":request_id, "result":{"cancelled":true}
+                    })),
                     Err(ExtensionSessionLifecycleError::Unavailable) => {
                         api_v03_session_lifecycle_error(
                             &request_id,
@@ -662,6 +904,8 @@ pub(super) fn queue_secret_lookup(
 pub(super) async fn read_protocol_stdout<R>(
     mut stdout: R,
     pending: PendingRequests,
+    resources: Resources,
+    resource_cleanup_changed: Arc<Notify>,
     issued_resource_owners: IssuedResourceOwners,
     session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     remote_ui: Arc<RemoteUiMailbox>,
@@ -703,6 +947,8 @@ pub(super) async fn read_protocol_stdout<R>(
 {
     let state = ProtocolReadState {
         pending,
+        resources,
+        resource_cleanup_changed,
         issued_resource_owners,
         session_leaf,
         remote_ui,
@@ -809,6 +1055,8 @@ pub(super) async fn read_protocol_stdout<R>(
     };
 
     state.closed.store(true, Ordering::Release);
+    lock_std_mutex(&state.resources).retire_generation();
+    state.resource_cleanup_changed.notify_one();
     state.session_leaf.clear();
     state.remote_ui.clear();
     lock_std_mutex(&state.issued_resource_owners).clear();
@@ -847,6 +1095,7 @@ pub(super) async fn read_protocol_stdout<R>(
     if health_state == ExtensionHealthState::Crashed {
         if let (Some(child), Some(termination)) = (state.child, state.termination) {
             reap_failed_extension(child, termination).await;
+            lock_std_mutex(&state.resources).terminate_generation();
         }
     }
 }

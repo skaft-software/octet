@@ -103,10 +103,10 @@ impl BackgroundTools {
                 ),
             };
             if let Some(after) = completed.after.take() {
-                run_parallel_after_tool_hooks(
+                completed.execution.result = run_parallel_after_tool_hooks(
                     after,
                     &hooks,
-                    &completed.execution.result,
+                    completed.execution.result,
                     &sandbox,
                     &tool_scope,
                     &resource_owner,
@@ -197,6 +197,12 @@ impl BackgroundTools {
             .completed
             .expect("joined background result");
         resolve_tool_delivery_after_persistence(&execution.result, sandbox.max_output_bytes);
+        if let Some(usage) = resolved_tool_output(&execution.result)
+            .and_then(ToolOutput::usage)
+            .copied()
+        {
+            session.record_tool_composition_usage(call.id.0.clone(), usage)?;
+        }
         if let Some(evidence) = evidence {
             evidence.record_action(&call.name, &call.arguments_json, is_error, &text);
         }
@@ -221,7 +227,7 @@ impl BackgroundTools {
             });
         }
         context.tool_finished();
-        if let Ok(output) = &execution.result {
+        if let Some(output) = resolved_tool_output(&execution.result) {
             if let Some(tool_usage) = output.usage() {
                 add_usage(usage, tool_usage);
             }

@@ -178,10 +178,19 @@ pub(super) async fn spawn_connection(
     let closed = Arc::new(AtomicBool::new(false));
     let draining = Arc::new(AtomicBool::new(false));
     let tombstones = Arc::new(StdMutex::new(RequestTombstones::default()));
+    let resources = Arc::new(StdMutex::new(ResourceRegistry::with_bulk(
+        (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4)
+            .then(|| config.bulk_store.clone())
+            .flatten(),
+        Arc::clone(&issued_resource_owners),
+    )));
+    let resource_cleanup_changed = Arc::new(Notify::new());
     let api_v03_contract = Arc::new(StdRwLock::new(None));
-    // Keep active-host lifecycle authority out of every legacy process even
-    // when a generic caller supplied a runtime service configuration.
-    let session_lifecycle = if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_3 {
+    // Binding-specific lifecycle authority is available only to modern peers.
+    let session_lifecycle = if matches!(
+        descriptor.manifest.api_version.as_str(),
+        EXTENSION_API_VERSION_0_3 | EXTENSION_API_VERSION_0_4
+    ) {
         config.session_lifecycle.clone()
     } else {
         None
@@ -242,6 +251,8 @@ pub(super) async fn spawn_connection(
     tokio::spawn(read_protocol_stdout(
         stdout,
         Arc::clone(&pending),
+        Arc::clone(&resources),
+        Arc::clone(&resource_cleanup_changed),
         Arc::clone(&issued_resource_owners),
         Arc::clone(&session_leaf),
         Arc::clone(&remote_ui),
@@ -302,6 +313,8 @@ pub(super) async fn spawn_connection(
         writer,
         child,
         pending,
+        resources,
+        resource_cleanup_changed: Arc::clone(&resource_cleanup_changed),
         issued_resource_owners,
         session_leaf,
         remote_ui,
@@ -343,13 +356,29 @@ pub(super) async fn spawn_connection(
         message_deltas: StdMutex::new(MessageDeltaCoalescer::default()),
         process_group,
     });
+    tokio::spawn(run_resource_cleanup(
+        Arc::downgrade(&connection),
+        resource_cleanup_changed,
+    ));
     artifact_guard.disarm();
     let offered_host_services = OfferedHostServices {
+        provider_proxy: config.provider_registry.is_some()
+            && descriptor.manifest.contributes.providers
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         remote_ui: config.remote_ui.is_some(),
+        provider_pipeline: config.provider_pipeline
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
+        resource_paths: config.resource_paths
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
+        bulk_objects: config.bulk_store.is_some()
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         agent_sessions: config.agent_sessions,
         tool_composition: config.tool_composition
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         session_lifecycle: session_lifecycle.is_some(),
+        session_compaction: session_lifecycle
+            .as_ref()
+            .is_some_and(|service| service.supports_compaction()),
         approvals: config.approvals,
         secrets: config.secret_broker.is_some()
             && !descriptor.manifest.capabilities.secrets.is_empty(),
@@ -367,6 +396,9 @@ pub(super) async fn spawn_connection(
         .iter()
         .map(|feature| (*feature).to_owned())
         .collect::<Vec<_>>();
+    if offered_host_services.provider_proxy {
+        optional_features.push("provider_proxy_v1".to_owned());
+    }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
         && descriptor
             .manifest
@@ -385,6 +417,65 @@ pub(super) async fn spawn_connection(
     {
         optional_features.push(EXTENSION_FEATURE_CACHE_WARMING_DECISION.to_owned());
     }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+        optional_features.push(EXTENSION_FEATURE_RESOURCE_REFS_V1.to_owned());
+        optional_features.push(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1.to_owned());
+        optional_features.push(EXTENSION_FEATURE_TOOL_PROMPT_METADATA.to_owned());
+        optional_features.push(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1.to_owned());
+    }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor.manifest.capabilities.system_prompt
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::BeforePrompt)
+    {
+        optional_features.push(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1.to_owned());
+    }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::BeforePrompt)
+    {
+        optional_features.push("input_transform_v1".to_owned());
+    }
+    if offered_host_services.provider_pipeline
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .iter()
+            .any(|hook| hook.is_provider_pipeline())
+    {
+        optional_features.push(EXTENSION_FEATURE_PIPELINE_HOOKS_V1.to_owned());
+    }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && offered_host_services.session_lifecycle
+    {
+        optional_features.push(EXTENSION_FEATURE_SESSION_CONTROL_V1.to_owned());
+        if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+            optional_features.push("process_exec_v1".to_owned());
+            optional_features.push("mcp_registration_v1".to_owned());
+        }
+        if offered_host_services.session_compaction {
+            optional_features.push(EXTENSION_FEATURE_SESSION_COMPACTION_V1.to_owned());
+        }
+    }
+    if offered_host_services.resource_paths
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::ResourcesDiscover)
+    {
+        optional_features.push(EXTENSION_FEATURE_RESOURCE_PATHS.to_owned());
+    }
+    if offered_host_services.bulk_objects {
+        optional_features.push(EXTENSION_FEATURE_BULK_OBJECTS_V1.to_owned());
+    }
     if offered_host_services.tool_composition {
         optional_features.push(EXTENSION_FEATURE_TOOL_COMPOSITION.to_owned());
     }
@@ -396,6 +487,10 @@ pub(super) async fn spawn_connection(
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
         optional_features.push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.to_owned());
+        if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+            optional_features.push(EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1.to_owned());
+            optional_features.push(EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1.to_owned());
+        }
     }
     if offered_host_services.approvals {
         optional_features.push(EXTENSION_FEATURE_APPROVALS.to_owned());
@@ -473,8 +568,17 @@ pub(super) async fn spawn_connection(
                     version: descriptor.manifest.api_version.clone(),
                     required_features,
                     optional_features,
+                    bulk_objects_v1: if offered_host_services.bulk_objects {
+                        config.bulk_store.as_ref().map(|storage| {
+                            let store = storage.lock();
+                            serde_json::json!({"profile":"local-file.v1", "transfer_directory": store.transfer_directory(), "limits":store.limits()})
+                        })
+                    } else { None },
                     limits: ExtensionProtocolLimits {
                         max_concurrent_requests: config.max_pending_requests,
+                        resource_refs_v1: (descriptor.manifest.api_version
+                            == EXTENSION_API_VERSION_0_4)
+                            .then(ResourceProtocolLimits::default),
                     },
                 }
             }),

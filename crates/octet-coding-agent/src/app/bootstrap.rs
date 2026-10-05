@@ -185,6 +185,7 @@ impl Bootstrap {
             &self.sessions,
             None,
             self.provider_runtime.clone(),
+            super::resource_paths::ResourceConsumerCapability::Disabled,
         )?;
         // Populate a throwaway copy now so callers can validate/select the
         // projected models. `build_app` repeats this against its owned catalog.
@@ -7732,9 +7733,11 @@ fn configured_extensions(
         sessions,
         None,
         ExtensionProviderRuntime::default(),
+        super::resource_paths::ResourceConsumerCapability::Disabled,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn configured_extensions_with_runtime_manager(
     config: &Config,
     session: &Session,
@@ -7743,6 +7746,7 @@ fn configured_extensions_with_runtime_manager(
     sessions: &SessionStore,
     runtime_manager: Option<ExtensionRuntimeManager>,
     provider_runtime: ExtensionProviderRuntime,
+    resource_consumer: super::resource_paths::ResourceConsumerCapability,
 ) -> anyhow::Result<(ExtensionHost, ExecutableExtensions)> {
     let (mut extensions, telemetry) = configured_extension_host(config, model)?;
     let mut executable_extensions = ExecutableExtensions::discover_and_start_with_provider_runtime(
@@ -7754,6 +7758,8 @@ fn configured_extensions_with_runtime_manager(
         &mut extensions,
         runtime_manager,
         provider_runtime,
+        resource_consumer,
+        None,
     );
     executable_extensions.set_telemetry(telemetry);
     startup_phase("extensions.activate");
@@ -7897,6 +7903,37 @@ pub(crate) fn build_app_with_runtime_manager(
     system: String,
     runtime_manager: Option<ExtensionRuntimeManager>,
 ) -> anyhow::Result<App> {
+    build_app_with_consumer(
+        boot,
+        launch,
+        system,
+        runtime_manager,
+        super::resource_paths::ResourceConsumerCapability::Disabled,
+    )
+}
+
+/// Only frontends owning the startup/reload/retirement phase may call this.
+pub(crate) fn build_app_with_resource_consumer(
+    boot: Bootstrap,
+    launch: LaunchSelection,
+    system: String,
+) -> anyhow::Result<App> {
+    build_app_with_consumer(
+        boot,
+        launch,
+        system,
+        None,
+        super::resource_paths::ResourceConsumerCapability::AppFrontend,
+    )
+}
+
+fn build_app_with_consumer(
+    boot: Bootstrap,
+    launch: LaunchSelection,
+    system: String,
+    runtime_manager: Option<ExtensionRuntimeManager>,
+    resource_consumer: super::resource_paths::ResourceConsumerCapability,
+) -> anyhow::Result<App> {
     let Bootstrap {
         mut config,
         mut catalog,
@@ -7957,6 +7994,7 @@ pub(crate) fn build_app_with_runtime_manager(
         &sessions,
         runtime_manager,
         provider_runtime,
+        resource_consumer,
     )?;
     complete_delegation_catalog(
         executable_extensions.has_agent_session_service(),
@@ -7981,6 +8019,15 @@ pub(crate) fn build_app_with_runtime_manager(
         &normalized_reasoning,
         &sessions,
     );
+    let resource_paths = super::resource_paths::ResourcePathConsumer::new(
+        &config,
+        &skills,
+        &prompts,
+        &executable_extensions,
+        &mut extensions,
+        resource_consumer,
+    );
+    executable_extensions.bind_tool_host(&extensions);
     let definitions = extensions.tool_definitions();
     let compact_model = config
         .compaction
@@ -8092,6 +8139,7 @@ pub(crate) fn build_app_with_runtime_manager(
         skills,
         prompts,
         executable_extensions,
+        resource_paths,
         goal_store,
         goal_driver,
         goal_session_id,
@@ -8183,7 +8231,8 @@ pub fn rebuild_app(
     selection: Option<SessionSelection>,
 ) -> anyhow::Result<App> {
     app.synchronize_extension_provider_catalog();
-    let mut config = app.config.clone();
+    let resource_consumer = app.resource_paths.capability;
+    let mut config = app.original_resource_config();
     let mut catalog = app.catalog.clone();
     let model_scope = app.model_scope.clone();
     let sessions = app.sessions.clone();
@@ -8192,7 +8241,6 @@ pub fn rebuild_app(
     let reasoning = app.reasoning.clone();
     let reasoning_mode = app.reasoning_mode;
     let system = app.system.clone();
-    let old_skills = Arc::clone(&app.skills);
     let goal_store = Arc::clone(&app.goal_store);
     // Idle rebuilds of the same session preserve delivery. A new or resumed
     // different session owns a fresh latch; the previous session's notice must
@@ -8228,7 +8276,7 @@ pub fn rebuild_app(
         SessionSelection::OpenExisting(path) => path == &current_path,
     });
     let service_tier = same_session.then(|| app.agent.service_tier()).flatten();
-    let old_skill_metadata = format_skills_for_prompt(&old_skills.descriptors());
+    let old_skill_metadata = app.resource_paths.catalog_suffix.clone();
     let mut system = system;
     if !old_skill_metadata.is_empty() && system.ends_with(&old_skill_metadata) {
         system.truncate(system.len() - old_skill_metadata.len());
@@ -8363,7 +8411,7 @@ pub fn rebuild_app(
         &config.prompt_paths,
         config.workspace_trusted,
     ));
-    let (extensions, mut executable_extensions) = configured_extensions_with_runtime_manager(
+    let (mut extensions, mut executable_extensions) = configured_extensions_with_runtime_manager(
         &config,
         &session,
         &model,
@@ -8371,6 +8419,7 @@ pub fn rebuild_app(
         &sessions,
         runtime_manager,
         provider_runtime,
+        resource_consumer,
     )?;
     complete_delegation_catalog(
         executable_extensions.has_agent_session_service(),
@@ -8380,6 +8429,14 @@ pub fn rebuild_app(
         &mut codex_context_notes,
     )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
+    let resource_paths = super::resource_paths::ResourcePathConsumer::new(
+        &config,
+        &skills,
+        &prompts,
+        &executable_extensions,
+        &mut extensions,
+        resource_consumer,
+    );
     let definitions = extensions.tool_definitions();
     let service_available = executable_extensions.has_agent_session_service();
     let subagents_available = service_available
@@ -8477,6 +8534,7 @@ pub fn rebuild_app(
         skills,
         prompts,
         executable_extensions,
+        resource_paths,
         goal_store,
         goal_driver,
         goal_session_id,

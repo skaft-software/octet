@@ -664,7 +664,9 @@ fn coalesced_drafts_keep_frontend_completion_revisions_and_pointer_selection() {
             .map(|value| super::super::ShellAutocompleteItem {
                 value: value.into(),
                 label: value.into(),
-                description: None
+                description: None,
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
             })
             .collect()
     ));

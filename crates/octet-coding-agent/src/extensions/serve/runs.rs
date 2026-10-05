@@ -44,6 +44,31 @@ pub(super) struct WorkerPlan {
     pub(super) checkout_hooks: CheckoutTestHooks,
 }
 
+/// A failed after-hook must not roll a synced checkout back or reuse an Agent
+/// whose model still belongs to the old branch. Retire that owner so reopening
+/// recovers the committed branch and its model through the ordinary seed path.
+pub(super) async fn navigate_checkout(
+    agent: &mut octet_agent::Agent,
+    target: EntryId,
+) -> Result<(), ServiceError> {
+    let previous_head = agent.session().head();
+    let previous_entries = agent.session().entries().len();
+    agent
+        .navigate_session_tree(Some(target), octet_agent::CancellationToken::default())
+        .await
+        .map_err(|_| {
+            if agent.session().head() != previous_head
+                || agent.session().entries().len() != previous_entries
+            {
+                // This also retains metadata a before-hook committed before
+                // refusing. It is not safe to infer rollback from a hook error.
+                ServiceError::OwnerLost
+            } else {
+                ServiceError::InvalidBoundary
+            }
+        })
+}
+
 pub(super) async fn run_worker(
     mut plan: WorkerPlan,
     mut commands: mpsc::Receiver<WorkerMessage>,
@@ -502,14 +527,19 @@ pub(super) async fn run_worker(
                     let _ = message.response.send(Err(ServiceError::InvalidBoundary));
                     continue;
                 };
-                if owned_app
-                    .agent
-                    .session_mut()
-                    .checkout(EntryId(entry_id.as_str().to_owned()))
-                    .is_err()
+                if let Err(error) =
+                    navigate_checkout(&mut owned_app.agent, EntryId(entry_id.as_str().to_owned()))
+                        .await
                 {
+                    if error == ServiceError::OwnerLost {
+                        // Preserve committed hook/navigation work; no guarded
+                        // replacement exists yet that could authorize rollback.
+                        app = Some(owned_app);
+                        let _ = message.response.send(Err(error));
+                        break;
+                    }
                     app = Some(owned_app);
-                    let _ = message.response.send(Err(ServiceError::InvalidBoundary));
+                    let _ = message.response.send(Err(error));
                     continue;
                 }
 

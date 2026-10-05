@@ -29,6 +29,7 @@ from .editor import (
     describe,
 )
 from .manager import BridgeManager
+from .pi_registration import PiMcpRegistrations
 from .menu import GATE_NOTE, build_menu
 from .streamable_http import StaticEnvironmentCredentialProvider
 
@@ -148,13 +149,15 @@ def build_runtime(
         experimental_streamable_http_mcp=experimental_streamable_http_mcp,
     )
 
+    pi_registrations = PiMcpRegistrations(manager)
+
     def apply(config: BridgeConfig, context: Mapping[str, Any]) -> None:
         if any(server.transport == "streamable-http" for server in config.servers):
             # Owner binding is an admission check, not a best-effort hint. Never
             # persist an edit that this host owner cannot apply.
             if not manager.bind_owner(context):
                 raise ValueError("Remote MCP owner mismatch; configuration was not changed.")
-        manager.apply_config(config, credential_provider=static_credential_provider(config))
+        pi_registrations.apply_config(config, credential_provider=static_credential_provider(config))
 
     def edit(arguments: list[str], context: Mapping[str, Any]) -> str:
         manager.assert_lifecycle_mutation_allowed()
@@ -220,6 +223,8 @@ def build_runtime(
         usage=USAGE,
     )
     def mcp_command(arguments: list[str], context: Mapping[str, Any]) -> dict[str, Any]:
+        if arguments and arguments[0] in {"__pi_replace", "__pi_release"}:
+            return pi_registrations.command(arguments, context)
         if arguments and arguments[0] in EDIT_ACTIONS:
             try:
                 text = edit(arguments, context)

@@ -13,9 +13,9 @@ export function inspect(extensions) {
 }
 export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], options = {}) {
   const metadata = inspect(extensions);
-  const child = spawn(process.execPath, [join(root, 'runner.mjs'), ...(options.config ? ['--config', options.config] : extensions)], { cwd: options.cwd || root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...options.env } });
+  const child = spawn(process.execPath, [options.runner || join(root, 'runner.mjs'), ...(options.config ? ['--config', options.config] : extensions)], { cwd: options.cwd || root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...options.env } });
   let stderr = '', next = 1;
-  const queue = [], waiters = [], seen = [];
+  const queue = [], waiters = [], seen = [], editors = new Map();
   child.stderr.on('data', b => { stderr = (stderr + b).slice(-65536); });
   child.stdin.on('error', () => {});
   createInterface({ input: child.stdout }).on('line', line => {
@@ -24,10 +24,21 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
     seen.push(frame); if (seen.length > 128) seen.shift();
     if (options.auto !== false && frame.id !== undefined && frame.method && !options.hold?.includes(frame.method)) {
       let result;
-      if (frame.method === 'ui/open') result = { columns: options.columns || 80, rows: options.rows || 24 };
-      else if (frame.method === 'composer/get') result = { text: options.composer || 'existing draft' };
+      if (frame.method === 'ui/open') {
+        result = { columns: options.columns || 80, rows: options.rows || 24 };
+        if (frame.params.placement === 'editor' && options.editorFence !== false) {
+          result.editor_mount_id = `host-editor-${frame.params.surface_id}`;
+          editors.set(frame.params.surface_id, { mount_id: result.editor_mount_id, input_revision: 0 });
+        }
+      }
+      else if (frame.method === 'ui/autocomplete/register') result = { accepted: options.completionAccepted ?? true };
+      else if (frame.method === 'composer/get') result = { text: options.composer ?? 'existing draft' };
       else if (frame.method === 'session/append_entry') result = { entry_id: 'host-entry' };
-      else if (['ui/close', 'composer/set', 'composer/insert', 'session/set_name', 'shortcut/register', 'session/set_label', 'session/send_user_message', 'tools/set_active'].includes(frame.method)) result = {};
+      else if (frame.method === 'composer/set' && frame.params.editor_checkpoint) {
+        const { input_revision, checkpoint_revision } = frame.params.editor_checkpoint;
+        result = { input_revision, checkpoint_revision };
+      }
+      else if (['ui/close', 'composer/set', 'composer/insert', 'session/set_name', 'shortcut/register', 'session/set_label', 'session/send_user_message', 'session/send_message', 'tools/set_active'].includes(frame.method)) result = {};
       if (result !== undefined) send({ jsonrpc: '2.0', id: frame.id, result });
     }
     const at = waiters.findIndex(w => w.match(frame));
@@ -48,9 +59,9 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
   function request(method, params) { const id = next++; send({ jsonrpc: '2.0', id, method, params }); return { id, response: wait(f => f.id === id && !f.method) }; }
   function context(extra = {}) { return { workspace: options.cwd || root, resource_owner: owner, host: { ...host, ...extra } }; }
   return { child, send, wait, request, context, seen, metadata, stderr: () => stderr,
-    async init(features = ['remote_ui', 'request_progress', 'composer', 'editor_handoff', 'session_entries', 'lifecycle_events', 'lifecycle_events_v2', 'shortcuts', 'message_injection', 'active_tools']) {
+    async init(features = ['remote_ui', 'request_progress', 'composer', 'editor_handoff', 'session_entries', 'lifecycle_events', 'lifecycle_events_v2', 'shortcuts', 'message_injection', 'active_tools', 'input_transform_v1']) {
       const result = await request('initialize', { api_version: '0.4', workspace: options.cwd || root, host,
-        contributes: { tools: metadata.tools.map(t => t.name), commands: metadata.commands.map(c => c.name), hooks: metadata.hooks, tool_renderers: metadata.tool_renderers },
+        contributes: { tools: metadata.tools.map(t => t.name), commands: metadata.commands.map(c => c.name), hooks: metadata.hooks, tool_renderers: metadata.tool_renderers, shortcuts: metadata.shortcuts },
         flag_values: [{ name: 'test-option', value: 'host-value' }],
         protocol: { version: '0.4', required_features: ['request_cancellation', 'content_parts'], optional_features: features, limits: { max_concurrent_requests: 8 } },
       }).response;
@@ -59,6 +70,11 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
     async start(extra = {}) { const result = await request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: context(extra) }).response; assert.ok(result.result, JSON.stringify(result)); return result; },
     command(name, args = [], extra = {}) { return request('command/execute', { name, arguments: args, context: context(extra) }); },
     call(mode, extra = {}) { return request('tool/call', { name: 'core', arguments: { mode }, context: context(extra) }); },
+    editorKey(surface_id, key, kind = 'press', modifiers = []) {
+      const editor = editors.get(surface_id); assert.ok(editor, 'synthetic editor mount is open');
+      send({ jsonrpc: '2.0', method: 'ui/key', params: { surface_id, key, kind, modifiers,
+        editor_input: { mount_id: editor.mount_id, input_revision: ++editor.input_revision } } });
+    },
     notify(method, params) { send({ jsonrpc: '2.0', method, params }); },
     async close() { const exited = once(child, 'exit'); assert.deepEqual((await request('shutdown', {}).response).result, {}); assert.equal((await exited)[0], 0); },
   };

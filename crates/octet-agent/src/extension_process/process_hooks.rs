@@ -231,6 +231,20 @@ impl Extension for ExtensionProcess {
                 .inner
                 .contributions
                 .hooks
+                .iter()
+                .any(|hook| hook.is_session_operation())
+        {
+            host.session_operation_hook(self.clone());
+        }
+        if self.has_provider_pipeline_hooks() {
+            host.provider_request_hook(self.clone());
+        }
+        if self.api_version() == EXTENSION_API_VERSION_0_4
+            && self.supports_feature(EXTENSION_FEATURE_SESSION_ENTRIES)
+            && self
+                .inner
+                .contributions
+                .hooks
                 .contains(&ExtensionHook::ProviderContext)
         {
             host.provider_context_hook(self.clone());
@@ -326,6 +340,15 @@ impl ExtensionProcess {
                 .store(0, Ordering::Release);
         }) {
             Ok(registration) => {
+                if read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_RESOURCE_REFS_V1)
+                {
+                    registration.resource_source(self.clone());
+                    if read_std_lock(&connection.protocol)
+                        .supports(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1)
+                    {
+                        host.enable_operation_discovery();
+                    }
+                }
                 *lock_std_mutex(&self.inner.dynamic_tool_registration) = Some(registration);
                 self.inner.dynamic_tool_registration_ready.notify_waiters();
             }
@@ -433,26 +456,19 @@ impl EventObserver for ExtensionProcess {
     }
 }
 
-#[async_trait::async_trait]
-impl ToolCallHook for ExtensionProcess {
-    async fn before_tool_call(
+impl ExtensionProcess {
+    async fn run_before_tool_call(
         &self,
         name: &str,
         arguments: &serde_json::Value,
         context: &ToolContext<'_>,
-    ) -> Result<(), ToolError> {
-        if !self
-            .inner
-            .contributions
-            .hooks
-            .contains(&ExtensionHook::BeforeToolCall)
-        {
-            return Ok(());
-        }
+    ) -> Result<Option<serde_json::Value>, ToolError> {
         let output = self
             .run_hook(
                 ExtensionHook::BeforeToolCall,
-                serde_json::json!({ "name": name, "arguments": arguments }),
+                serde_json::json!({ "name": name, "arguments": arguments,
+                    "tool_call_id": context.progress.tool_call_identity().0,
+                    "parent_tool_call_id": context.progress.tool_call_identity().1 }),
                 self.tool_execution_context(context, {
                     let connection = read_std_lock(&self.inner.connection);
                     connection.generation
@@ -461,54 +477,284 @@ impl ToolCallHook for ExtensionProcess {
             .await
             .map_err(|error| ToolError::new(error.to_string()))?;
         self.publish_hook_output(&output);
-        match output.disposition {
-            ExtensionHookDisposition::Continue => Ok(()),
-            ExtensionHookDisposition::Deny { reason } => Err(ToolError::new(format!(
-                "extension `{}` denied tool `{name}`: {reason}",
-                self.inner.descriptor.manifest.name
-            ))),
+        if let ExtensionHookDisposition::Deny { reason } = output.disposition {
+            let error = ToolError::policy_denied(
+                crate::effect::ToolPolicyDenialCode::SecondaryHookDenied,
+                reason.clone(),
+            );
+            return Err(if output.terminate == Some(true) {
+                error.with_output(ToolOutput::new(reason).requesting_termination())
+            } else {
+                error
+            });
         }
+        Ok(output.arguments)
     }
 
-    async fn after_tool_call(
+    fn has_hook(&self, hook: ExtensionHook) -> bool {
+        self.inner.contributions.hooks.contains(&hook)
+    }
+
+    async fn run_after_tool_call(
         &self,
         name: &str,
         arguments: &serde_json::Value,
-        output: &str,
-        is_error: bool,
+        result: &Result<ToolOutput, ToolError>,
         context: &ToolContext<'_>,
-    ) {
-        if !self
-            .inner
-            .contributions
-            .hooks
-            .contains(&ExtensionHook::AfterToolCall)
-        {
-            return;
+    ) -> Option<ExtensionHookOutput> {
+        let mut payload = serde_json::json!({ "name": name, "arguments": arguments,
+            "tool_call_id": context.progress.tool_call_identity().0,
+            "parent_tool_call_id": context.progress.tool_call_identity().1 });
+        let output = match result {
+            Ok(output) => Some(output),
+            Err(error) => error.output(),
+        };
+        payload["output"] = match result {
+            Ok(output) => output.text.clone(),
+            Err(error) => error.message.clone(),
         }
+        .into();
+        payload["is_error"] = (result.is_err() || output.is_some_and(ToolOutput::is_error)).into();
+        if let Some(output) = output {
+            let mut content = Vec::new();
+            for part in output.content_parts() {
+                match part {
+                    ToolOutputContentPart::Text(text) => {
+                        content.push(serde_json::json!({"type":"text", "text":text}))
+                    }
+                    ToolOutputContentPart::Media(Media::Image(image)) => {
+                        // Pi ImageContent is inline bytes, never a URL or a local path.
+                        let (octet_ai::ImageSource::Inline(data), Some(mime)) =
+                            (&image.source, &image.media_type)
+                        else {
+                            let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                                message:
+                                    "tool_result cannot map a non-inline image to Pi ImageContent"
+                                        .into(),
+                            });
+                            return None;
+                        };
+                        content.push(
+                            serde_json::json!({"type":"image", "mimeType":mime.to_string(),
+                            "data":base64::engine::general_purpose::STANDARD.encode(data)}),
+                        );
+                    }
+                    ToolOutputContentPart::Media(Media::Audio(_)) => {
+                        let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                            message: "Pi tool_result does not support audio content".into(),
+                        });
+                        return None;
+                    }
+                }
+            }
+            payload["pi_content"] = content.into();
+            if let Some(value) = output.structured_content() {
+                payload["structured_content"] = value.clone();
+            }
+            if let Some(value) = output.metadata() {
+                payload["metadata"] = value.clone();
+            }
+            if let Some(value) = output.usage() {
+                payload["usage"] = serde_json::to_value(value).expect("Usage serializes");
+            }
+        }
+        let context = self.tool_execution_context(context, {
+            let connection = read_std_lock(&self.inner.connection);
+            connection.generation
+        });
         match self
-            .run_hook(
-                ExtensionHook::AfterToolCall,
-                serde_json::json!({
-                    "name": name,
-                    "arguments": arguments,
-                    "output": output,
-                    "is_error": is_error,
-                }),
-                self.tool_execution_context(context, {
-                    let connection = read_std_lock(&self.inner.connection);
-                    connection.generation
-                }),
-            )
+            .run_hook(ExtensionHook::AfterToolCall, payload, context)
             .await
         {
-            Ok(output) => self.publish_hook_output(&output),
+            Ok(output) => {
+                self.publish_hook_output(&output);
+                Some(output)
+            }
             Err(error) => {
                 let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
                     message: format!("after_tool_call hook failed: {error}"),
                 });
+                None
             }
         }
+    }
+}
+
+/// A policy denial retains its typed fact and rich error envelope.
+#[allow(clippy::result_large_err)]
+fn replace_tool_result(
+    result: Result<ToolOutput, ToolError>,
+    replacement: ExtensionToolResultReplacement,
+    content: Option<Vec<ToolOutputContentPart>>,
+) -> Result<
+    Result<ToolOutput, ToolError>,
+    (
+        Result<ToolOutput, ToolError>,
+        crate::ToolOutputValidationError,
+    ),
+> {
+    let original = result.clone();
+    let ExtensionToolResultReplacement {
+        content: _,
+        structured_content,
+        metadata,
+        is_error,
+        usage,
+    } = replacement;
+    let (output, denial) = match result {
+        Err(error) => {
+            let output = error
+                .output()
+                .cloned()
+                .unwrap_or_else(|| ToolOutput::new(error.message.clone()).with_is_error(true));
+            let denial = error.policy_denial_code().is_some().then_some(error);
+            (output, denial)
+        }
+        Ok(output) => (output, None),
+    };
+    let structured_content = match (structured_content, &content) {
+        (Some(value), _) => Some(value),
+        (None, Some(_)) => None,
+        (None, None) => output.structured_content().cloned(),
+    };
+    let metadata = metadata.or_else(|| output.metadata().cloned());
+    if let Err(error) = ToolOutput::new(String::new())
+        .try_with_details(structured_content.clone(), metadata.clone())
+    {
+        return Err((original, error));
+    }
+    let mut output = match content {
+        Some(parts) => output.with_content_parts(parts),
+        None => output,
+    };
+    if let Some(value) = is_error {
+        output = output.with_is_error(value);
+    }
+    if let Some(value) = usage {
+        output = output.with_usage(value);
+    }
+    let output = output
+        .try_with_details(structured_content, metadata)
+        .expect("replacement details were validated above");
+    Ok(match denial {
+        Some(error) => Err(error.with_output(output)),
+        None => Ok(output),
+    })
+}
+
+#[async_trait::async_trait]
+impl ToolCallHook for ExtensionProcess {
+    async fn transform_tool_call(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+        context: &ToolContext<'_>,
+    ) -> Result<Option<serde_json::Value>, ToolError> {
+        if !self.has_hook(ExtensionHook::BeforeToolCall) {
+            return Ok(None);
+        }
+        let replacement = self.run_before_tool_call(name, arguments, context).await?;
+        if replacement.as_ref().is_some_and(|value| !value.is_object()) {
+            return Err(ToolError::new(format!(
+                "extension `{}` replaced the arguments of `{name}` with a non-object",
+                self.inner.descriptor.manifest.name
+            )));
+        }
+        Ok(replacement)
+    }
+
+    async fn transform_tool_result(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+        result: Result<ToolOutput, ToolError>,
+        context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        if !self.has_hook(ExtensionHook::AfterToolCall) {
+            return result;
+        }
+        let Some(replacement) = self
+            .run_after_tool_call(name, arguments, &result, context)
+            .await
+            .and_then(|output| output.tool_result)
+        else {
+            return result;
+        };
+        let content = if let Some(parts) = &replacement.content {
+            // Reuse the negotiated native result decoder and its owner/generation,
+            // image sniffing, MIME, byte and part limits. This descriptor has no
+            // output schema: a result hook is not a new tool execution.
+            let definition: ToolDefinition = serde_json::from_value(serde_json::json!({
+                "name":name, "description":"", "parameters":{"type":"object"}
+            }))
+            .expect("hook codec descriptor is valid");
+            let parts: Vec<_> = parts
+                .iter()
+                .map(|part| match part {
+                    serde_json::Value::String(text) => {
+                        serde_json::json!({"type":"text", "text":text})
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            let connection = read_std_lock(&self.inner.connection).clone();
+            match decode_tool_call_output(
+                &connection,
+                &definition,
+                Some(context.resource_owner),
+                serde_json::json!({"content":parts, "is_error":false, "metadata":{}}),
+            ) {
+                Ok(output) => Some(
+                    output
+                        .native_output
+                        .expect("decoder provides native content")
+                        .content_parts()
+                        .to_vec(),
+                ),
+                Err(error) => {
+                    let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                        message: format!(
+                            "after_tool_call content for `{name}` was invalid: {error}"
+                        ),
+                    });
+                    return result;
+                }
+            }
+        } else {
+            None
+        };
+        match replace_tool_result(result, replacement, content) {
+            Ok(result) => result,
+            Err((result, error)) => {
+                let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                    message: format!(
+                        "after_tool_call replacement for `{name}` was invalid: {error}"
+                    ),
+                });
+                result
+            }
+        }
+    }
+
+    // `transform_tool_call` and `transform_tool_result` run this process's
+    // tool hooks with Pi's semantics; there is no separate observer pass.
+    async fn before_tool_call(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        _context: &ToolContext<'_>,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    async fn after_tool_call(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        _output: &str,
+        _is_error: bool,
+        _context: &ToolContext<'_>,
+    ) {
     }
 }
 

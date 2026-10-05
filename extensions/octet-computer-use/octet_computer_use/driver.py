@@ -192,12 +192,6 @@ def _run(
         options = dict(
             cwd=str(cwd) if cwd is not None else None,
             env=dict(env) if env is not None else None,
-            # Never inherit stdin. Inside octet it is the extension's JSON-RPC
-            # pipe, which the protocol reader is blocked reading. On Windows a
-            # child that inherits that synchronous pipe can stall in C runtime
-            # startup until the host happens to send another message, so the
-            # status probe and the options menu hung only when hosted.
-            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -209,8 +203,13 @@ def _run(
             encoding="utf-8",
             errors="replace",
         )
+        # Never inherit the extension's JSON-RPC stdin. On Windows an inherited
+        # synchronous pipe can stall child startup while the protocol reader waits.
+        # Keep the choice explicit at each spawn so the repository guard sees it.
         if cancellation is None:
-            return subprocess.run(list(argv), **options, timeout=timeout, check=False)
+            return subprocess.run(
+                list(argv), stdin=subprocess.DEVNULL, **options, timeout=timeout, check=False,
+            )
         return _run_cancellable(list(argv), cancellation, timeout=timeout, **options)
     except subprocess.TimeoutExpired as error:
         raise ProvisionError(
@@ -230,7 +229,7 @@ def _run_cancellable(
     from octet_computer_use.jev_use import _kill_tree, _windows_job, RuntimeFailure
 
     options.update({"creationflags": 4} if os.name == "nt" else {"start_new_session": True})
-    with subprocess.Popen(argv, **options) as process:
+    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, **options) as process:
         job = None
         try:
             if os.name == "nt":

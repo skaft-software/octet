@@ -103,6 +103,16 @@ pub enum ExtensionPostMutationDisposition {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionHookOutput {
+    /// Custom messages returned by before_agent_start, appended after the prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_messages: Vec<crate::session::CustomMessage>,
+    /// Raw-input decision applied before prompt expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_event: Option<serde_json::Value>,
+    /// Per-run composed system replacement, accepted only by a negotiated
+    /// before_prompt_state_v1 frontend. Empty text is an explicit replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     /// Canonical messages/system proposal accepted only by the API 0.4
     /// provider_context preparation driver, never a provider payload override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,6 +143,39 @@ pub struct ExtensionHookOutput {
     /// response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_mutation: Option<ExtensionPostMutationDisposition>,
+    /// Replacement tool arguments from a `before_tool_call` response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+    /// Replacement tool result from an `after_tool_call` response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<ExtensionToolResultReplacement>,
+    /// Blocked-call hint; honored only by unanimous native batch termination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminate: Option<bool>,
+}
+
+/// Replacement for a resolved tool result. Absent fields keep the current
+/// value. Replacing `content` without `structured_content` drops the old
+/// structured content, which may no longer match the new content.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionToolResultReplacement {
+    /// Text strings or negotiated typed text/image content parts. Images are
+    /// admitted by the native result decoder with artifact owner/generation checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Vec<serde_json::Value>>,
+    /// Machine-readable result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<serde_json::Value>,
+    /// Non-model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    /// Whether the result is a tool failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+    /// Billed per-result usage, never model-context usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<octet_ai::Usage>,
 }
 
 /// A semantic status/header/footer contribution.
@@ -345,6 +388,15 @@ pub enum ExtensionComposerOperation {
         /// Text to insert at the cursor.
         text: String,
     },
+    /// Commit a recovery checkpoint for a currently owned API 0.4 editor mount.
+    Checkpoint {
+        /// Complete replacement text.
+        text: String,
+        /// Authoritative owner resolved by the host at request admission.
+        owner: ExtensionResourceOwner,
+        /// Exact mount and input/checkpoint revisions to arbitrate at commit.
+        checkpoint: ExtensionEditorCheckpoint,
+    },
 }
 
 impl ExtensionComposerOperation {
@@ -353,6 +405,12 @@ impl ExtensionComposerOperation {
     pub fn validate(&self) -> Result<(), String> {
         let text = match self {
             Self::Set { text } | Self::Insert { text } => Some(text),
+            Self::Checkpoint {
+                text, checkpoint, ..
+            } => {
+                checkpoint.validate().map_err(|(_, detail)| detail)?;
+                Some(text)
+            }
             Self::Get => None,
         };
         if let Some(text) = text {
@@ -391,6 +449,8 @@ pub enum ExtensionContextOperation {
     PendingMessages,
     /// Return the host-owned composed system prompt text.
     SystemPrompt,
+    /// Return authoritative active names and the registered tool catalog.
+    Tools,
 }
 
 /// One read-only model operation requested by an API `0.2` extension.
@@ -478,21 +538,53 @@ impl ExtensionSessionEntryOperation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionMessageInjection {
-    /// Assistant-role injected text.
-    Assistant {
-        /// Bounded injected text.
-        text: String,
-    },
-    /// System-role injected text.
-    System {
-        /// Bounded injected text.
-        text: String,
-    },
-    /// User-role injected text.
+    /// Pi `sendUserMessage`: a user prompt. An idle session runs it; an
+    /// active run steers it in or queues it as a follow-up.
     User {
-        /// Bounded injected text.
+        /// Bounded message text.
         text: String,
+        /// Optional ordered text/image input, not custom-message metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<crate::session::CustomMessageContent>,
+        /// Delivery while a run is active.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deliver_as: Option<ExtensionMessageDelivery>,
     },
+    /// Pi `sendMessage`: a custom message the model sees as user content.
+    Custom {
+        /// Extension-defined message type.
+        custom_type: String,
+        /// Original string or ordered text blocks.
+        content: crate::session::CustomMessageContent,
+        /// Whether the transcript shows the message.
+        #[serde(default)]
+        display: bool,
+        /// Extension-defined data that the model never sees.
+        #[serde(
+            default,
+            deserialize_with = "crate::session::deserialize_custom_message_details",
+            skip_serializing_if = "Option::is_none"
+        )]
+        details: Option<serde_json::Value>,
+        /// Delivery while a run is active, or `next_turn`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deliver_as: Option<ExtensionMessageDelivery>,
+        /// Pi `triggerTurn`: `true` runs an idle session, `false` never runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_turn: Option<bool>,
+    },
+}
+
+/// Pi `deliverAs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionMessageDelivery {
+    /// Inject into the active run at its next model-turn boundary.
+    Steer,
+    /// Run after the active run finishes.
+    FollowUp,
+    /// Send with the next user prompt.
+    NextTurn,
 }
 
 impl ExtensionMessageInjection {
@@ -500,7 +592,31 @@ impl ExtensionMessageInjection {
     /// [`validate_extension_editor_text`]'s plain-text posture.
     pub fn validate(&self) -> Result<(), String> {
         let text = match self {
-            Self::Assistant { text } | Self::System { text } | Self::User { text } => text,
+            Self::User { text, content, .. } => {
+                if let Some(content) = content {
+                    if !text.is_empty() {
+                        return Err("ambiguous user message content".into());
+                    }
+                    content.validate().map_err(|error| error.to_string())?;
+                }
+                text
+            }
+            Self::Custom {
+                custom_type,
+                content,
+                display,
+                details,
+                ..
+            } => {
+                return crate::session::CustomMessage {
+                    custom_type: custom_type.clone(),
+                    content: content.clone(),
+                    display: *display,
+                    details: details.clone(),
+                }
+                .validate()
+                .map_err(|error| error.to_string());
+            }
         };
         validate_bounded_bytes(
             "injected message",
@@ -617,6 +733,9 @@ impl ExtensionRequestOutcome {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionMessageLifecycle {
+    /// Full committed custom message; omitted on the existing assistant delta profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<serde_json::Value>,
     /// Host message identity within the active turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
@@ -783,11 +902,37 @@ pub struct ExtensionAutocompleteItem {
     /// Optional plain secondary label.
     #[serde(default)]
     pub description: Option<String>,
+    /// Additional original bytes after the cursor to replace. Absence means zero.
+    /// Presence requires negotiated API `0.4` `autocomplete_edit_v1`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "autocomplete_edit_offset"
+    )]
+    pub replace_after_bytes: Option<u32>,
+    /// UTF-8 byte cursor within `value`. Absence means its byte length.
+    /// Presence requires negotiated API `0.4` `autocomplete_edit_v1`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "autocomplete_edit_offset"
+    )]
+    pub cursor_offset_bytes: Option<u32>,
+}
+
+// Missing fields use serde(default); explicit null is present and invalid.
+fn autocomplete_edit_offset<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    u32::deserialize(deserializer).map(Some)
 }
 
 impl ExtensionAutocompleteItem {
-    pub(super) fn validate(&self) -> Result<(), String> {
-        validate_extension_autocomplete_text("autocomplete value", &self.value)?;
+    fn validate(&self, edit_v1: bool) -> Result<(), String> {
+        if !edit_v1 && (self.replace_after_bytes.is_some() || self.cursor_offset_bytes.is_some()) {
+            return Err("autocomplete edit fields require negotiated autocomplete_edit_v1".into());
+        }
+        validate_extension_autocomplete_edit_text("autocomplete value", &self.value, edit_v1)?;
         validate_extension_autocomplete_text("autocomplete label", &self.label)?;
         if let Some(description) = &self.description {
             validate_extension_autocomplete_text("autocomplete description", description)?;
@@ -808,8 +953,13 @@ pub struct ExtensionAutocompleteResponse {
 }
 
 impl ExtensionAutocompleteResponse {
+    #[cfg(test)]
     pub(super) fn validate(&self) -> Result<(), String> {
-        validate_extension_autocomplete_text("autocomplete prefix", &self.prefix)?;
+        self.validate_fields(false)
+    }
+
+    fn validate_fields(&self, edit_v1: bool) -> Result<(), String> {
+        validate_extension_autocomplete_edit_text("autocomplete prefix", &self.prefix, edit_v1)?;
         if self.items.len() > MAX_EXTENSION_AUTOCOMPLETE_ITEMS {
             return Err(format!(
                 "autocomplete response has {} items; limit is {MAX_EXTENSION_AUTOCOMPLETE_ITEMS}",
@@ -818,7 +968,47 @@ impl ExtensionAutocompleteResponse {
         }
         self.items
             .iter()
-            .try_for_each(ExtensionAutocompleteItem::validate)
+            .try_for_each(|item| item.validate(edit_v1))
+    }
+
+    /// Validate the entire response against the exact original editor snapshot.
+    /// `edit_v1` must reflect host-negotiated capability, never extension data.
+    /// Frontends repeat this check before displaying or accepting a choice.
+    pub fn validate_for_request(
+        &self,
+        request: &ExtensionAutocompleteRequest,
+        edit_v1: bool,
+    ) -> Result<(), String> {
+        request.validate()?;
+        self.validate_fields(edit_v1)?;
+        if !request.text[..request.cursor].ends_with(&self.prefix) {
+            return Err("autocomplete prefix is not the exact suffix before the cursor".into());
+        }
+        for item in &self.items {
+            let after = item.replace_after_bytes.unwrap_or(0) as usize;
+            if after > MAX_EXTENSION_EDITOR_TEXT_BYTES {
+                return Err("autocomplete suffix exceeds editor byte budget".into());
+            }
+            let end = request
+                .cursor
+                .checked_add(after)
+                .filter(|end| *end <= request.text.len() && request.text.is_char_boundary(*end))
+                .ok_or("autocomplete replacement end is outside a UTF-8 character boundary")?;
+            let offset = item
+                .cursor_offset_bytes
+                .map_or(item.value.len(), |value| value as usize);
+            if offset > item.value.len() || !item.value.is_char_boundary(offset) {
+                return Err(
+                    "autocomplete inserted cursor is outside a UTF-8 character boundary".into(),
+                );
+            }
+            let start = request.cursor - self.prefix.len();
+            let bytes = request.text.len() - (end - start) + item.value.len();
+            if bytes > MAX_EXTENSION_EDITOR_TEXT_BYTES {
+                return Err("autocomplete result exceeds editor byte budget".into());
+            }
+        }
+        Ok(())
     }
 }
 

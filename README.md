@@ -12,11 +12,12 @@ octet reads code, edits files, and runs commands from your terminal. It has a
 native Rust core, supports cloud and local models, saves resumable sessions,
 and lets you add tools through subprocess extensions in any language.
 
-Extensions add bounded, host-shaped integrations—not an everything-as-extension
-platform or a promise to run unchanged Pi extensions. Browse, MCP, web search,
-and host-owned subagents remain optional integrations; Serve is a separate
-graphical application. The host keeps authority over sessions, lifecycle, and
-resource limits.
+Extensions use subprocess JSON-RPC. The optional Pi adapter targets the pinned
+**Pi 1.0.2 public extension API**, not arbitrary third-party packages, private Pi
+internals, or the Pi CLI/SDK. Implementation and real-host qualification are
+tracked separately in the [27-row ledger](docs/pi-extension-api.md). Browse, MCP,
+web search and subagents remain optional integrations; Serve is a separate app.
+The Rust host owns sessions, policy, persistence, terminal UI and resource limits.
 
 **By default octet has full access and no sandbox.** Commands, file edits, and
 enabled extensions run with your operating-system permissions, and nothing asks

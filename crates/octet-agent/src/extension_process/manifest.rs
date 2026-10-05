@@ -260,6 +260,28 @@ impl ExtensionManifest {
                     .into(),
             ));
         }
+        if self.api_version != EXTENSION_API_VERSION_0_4
+            && self
+                .contributes
+                .hooks
+                .iter()
+                .any(|hook| hook.is_session_operation())
+        {
+            return Err(ExtensionRuntimeError::InvalidManifest(
+                "session operation hooks require extension API 0.4".into(),
+            ));
+        }
+        if self.api_version != EXTENSION_API_VERSION_0_4
+            && self
+                .contributes
+                .hooks
+                .iter()
+                .any(|hook| hook.is_provider_pipeline())
+        {
+            return Err(ExtensionRuntimeError::InvalidManifest(
+                "provider pipeline hooks require extension API 0.4".into(),
+            ));
+        }
         if self
             .contributes
             .hooks
@@ -288,6 +310,16 @@ impl ExtensionManifest {
         {
             return Err(ExtensionRuntimeError::InvalidManifest(
                 "provider_context requires extension API 0.4".into(),
+            ));
+        }
+        if self
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::ResourcesDiscover)
+            && self.api_version != EXTENSION_API_VERSION_0_4
+        {
+            return Err(ExtensionRuntimeError::InvalidManifest(
+                "resources_discover requires extension API 0.4".into(),
             ));
         }
         if self.api_version == EXTENSION_API_VERSION_0_1 && self.contributes.providers {
@@ -503,9 +535,34 @@ pub struct ManifestContributions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionHook {
+    /// Cancellable Pi new/resume boundary.
+    SessionBeforeSwitch,
+    /// Cancellable Pi fork boundary.
+    SessionBeforeFork,
+    /// Supplies temporary filesystem resource roots to a real host loader.
+    /// Requires API 0.4 and the resource_paths_v1 consumer.
+    ResourcesDiscover,
     /// Prepares canonical model-visible context with a run-owned private append
     /// consumer; requires API 0.4 and negotiated session_entries.
     ProviderContext,
+    /// Mutate the real codec-produced HTTP body before dispatch (API 0.4).
+    BeforeProviderRequest,
+    /// Patch non-reserved headers before authoritative authentication (API 0.4).
+    BeforeProviderHeaders,
+    /// Observe actual HTTP status and headers before body consumption (API 0.4).
+    AfterProviderResponse,
+    /// Observe the start of one actual model iteration with an awaited leaf consumer.
+    ModelTurnStart,
+    /// Observe the durable assistant and settled tool results for one model iteration.
+    ModelTurnEnd,
+    /// Await a cancellable decision before a prepared local compaction.
+    SessionBeforeCompact,
+    /// Observe the actual durable compaction record.
+    SessionCompact,
+    /// Await a cancellable decision before a durable tree checkout.
+    SessionBeforeTree,
+    /// Observe an actual durable tree checkout.
+    SessionTree,
     /// Runs immediately before prompt composition.
     BeforePrompt,
     /// Runs after a complete assistant response.
@@ -535,6 +592,25 @@ pub enum ExtensionHook {
 }
 
 impl ExtensionHook {
+    pub(super) fn is_session_operation(self) -> bool {
+        matches!(
+            self,
+            Self::ModelTurnStart
+                | Self::ModelTurnEnd
+                | Self::SessionBeforeCompact
+                | Self::SessionCompact
+                | Self::SessionBeforeTree
+                | Self::SessionTree
+        )
+    }
+
+    pub(super) fn is_provider_pipeline(self) -> bool {
+        matches!(
+            self,
+            Self::BeforeProviderRequest | Self::BeforeProviderHeaders | Self::AfterProviderResponse
+        )
+    }
+
     pub(super) fn is_session_hook(self) -> bool {
         matches!(self, Self::SessionStart | Self::SessionEnd)
     }

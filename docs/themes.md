@@ -20,7 +20,8 @@ replacing other settings. Dismissing onboarding uses Auto. Existing configured
 installs don't reopen onboarding, and print, plain and RPC sessions, redirected
 output and `TERM=dumb` never open it.
 
-Use `/theme` later to browse the built-in choices **and** valid `.toml` files
+Use `/theme` later to browse the built-in choices **and** valid `.toml` or Pi
+`.json` files
 from normal resource discovery: global `~/.octet/themes`, a trusted project's
 `.octet/themes`, and directories or files passed with `--theme-dir`. The list
 shows each file stem and its optional metadata name and description, and typing
@@ -251,7 +252,7 @@ Three optional top-level tokens shape the startup splash:
   uses the model accent. It claims the whole splash, so `splash` is not used.
   `Cards` uses it.
 
-A theme file is a bounded TOML document (256 KiB) with these typed sections:
+A native theme file is a bounded TOML document (256 KiB) with these typed sections:
 
 - `[metadata]`: `name`, `description`, `author`, `version`, `terminal`
   (`light-dark`, `dark`, `light` or `any`), and optional `adaptive` to rebalance
@@ -278,6 +279,25 @@ Theme files reject terminal control bytes, unknown sections and fields, invalid
 role names, non-ASCII ASCII-fallbacks, wide or empty structural glyphs and
 oversized values. Unknown or partial files fall back to the compiled default
 rather than starting with a broken shell.
+
+## Pi JSON themes
+
+The native loader also accepts bounded Pi JSON themes in the same discovery
+roots. It resolves hex colors, ANSI indices, terminal-default empty strings,
+variable references and optional-token fallbacks into native semantic roles.
+Pi `oklch(...)` and `okhsl(...)` colors are converted directly to sRGB using the
+pinned Pi 1.0 implementation (commit
+`581e7ba78141a4d8b61cc9d11b8b22ae7e59195e`), including OKLCH gamut mapping.
+For example, `oklch(62% 0.1 200)` and `okhsl(250 60% 55%)` work directly or
+through variable references, without the Node adapter or a conversion step.
+Malformed colors and out-of-range channels are rejected. Native geometry,
+model accents and rendering remain native; HTML export colors are validated
+but not rendered. This is not full Pi theme fidelity.
+
+JSON and TOML share trust, no-follow, size, reserved-name and later-root-wins
+rules. Directory entries are ordered lexically, so a same-stem TOML file wins
+inside a directory. A malformed winning file does not expose an older shadowed
+file. Reload uses the original source path; snapshots use normalized native TOML.
 
 ## Semantic role vocabulary
 
@@ -319,8 +339,9 @@ Two channels are open to extensions:
   directory passed with `--theme-dir`. Discovered files use the same bounded,
   no-follow reader as the compiled default and never run extension code.
 
-A manifest-level `contributes.themes` channel that would register an extension's
-own directory as a theme root is **not implemented**. It needs a change in the
-extension manifest schema and discovery, outside the theme module. Until then,
-publishing a theme file into a discovery root is the supported way to contribute
-one.
+A manifest-level `contributes.themes` channel is **not implemented**. An admitted
+API 0.4 process may instead contribute temporary roots through
+[`resource_paths_v1`](extensions/resource-paths.md), when an active App consumer
+negotiates it. Startup/reload publication and owner retirement govern these
+roots; registration metadata alone grants no access. Copying a file into a
+normal discovery root remains supported.

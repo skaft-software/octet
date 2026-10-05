@@ -46,8 +46,8 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
 use crate::app::bootstrap::{
-    build_app, effective_compaction_threshold_fraction, rebuild_app, resolve_launch_print,
-    Bootstrap,
+    build_app_with_resource_consumer as build_app, effective_compaction_threshold_fraction,
+    rebuild_app, resolve_launch_print, Bootstrap,
 };
 use crate::app::{
     apply_reconfig, reasoning_label, supported_levels_with_subagents,
@@ -644,7 +644,8 @@ async fn prepare_prompt(
     }
     app.agent.set_system_prompt(composition.system);
     app.agent.set_prompt_display_text(Some(original.clone()));
-    let input = input_from_command(command, composition.prompt)?;
+    let mut input = input_from_command(command, composition.prompt)?;
+    input.custom_messages = composition.custom_messages;
     let mut display_input = input.clone();
     if let Some(InputPart::Text(text)) = display_input.parts.first_mut() {
         *text = original;
@@ -1096,7 +1097,10 @@ fn command_error(
 async fn reload_resources(mut app: App) -> anyhow::Result<App> {
     app.system = compose_instructions(&app.config)?;
     app.system_tokens = estimate_text_tokens(&app.system);
-    rebuild_app(app, None, None, None, None)
+    let mut app = rebuild_app(app, None, None, None, None)?;
+    app.mark_resource_paths_reload();
+    app.refresh_resource_paths_headless().await?;
+    Ok(app)
 }
 
 fn available_models(app: &App) -> Vec<Value> {
@@ -1577,6 +1581,7 @@ async fn run_rpc_loop(
     let bash_tool = Arc::new(BashTool);
 
     while !eof {
+        app.refresh_resource_paths_headless().await?;
         let inbound = if let Some(command) = deferred.pop_front() {
             RpcInput::Value(command)
         } else {
@@ -1606,6 +1611,7 @@ async fn run_rpc_loop(
             RpcInput::Eof => break,
             RpcInput::Value(command) => command,
         };
+        app.refresh_resource_paths_headless().await?;
         let Some(kind) = command_type(&command).map(str::to_owned) else {
             output.error(
                 command_id(&command),

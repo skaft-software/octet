@@ -74,10 +74,10 @@ use crate::extension_provider::{
     ExtensionProviderOwner, ExtensionProviderRegistry, ExtensionProviderRegistryError,
 };
 use crate::extension_remote_ui::{
-    ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed, ExtensionRemoteUiFrame,
-    ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey, ExtensionRemoteUiMouse,
-    ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation, ExtensionRemoteUiResize,
-    RemoteUiChildRequest, RemoteUiMailbox, EXTENSION_FEATURE_REMOTE_UI,
+    ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed,
+    ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey,
+    ExtensionRemoteUiMouse, ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation,
+    ExtensionRemoteUiResize, RemoteUiChildRequest, RemoteUiMailbox, EXTENSION_FEATURE_REMOTE_UI,
 };
 use crate::extension_secret::{ExtensionSecretBroker, ExtensionSecretRequest};
 use crate::tool::{
@@ -90,12 +90,19 @@ mod event_bus;
 pub use event_bus::ExtensionEventBus;
 
 mod admission;
+mod agent_sessions;
+mod bulk;
 mod composition;
 mod connection;
 mod contributions;
+mod exec;
 mod host_requests;
+pub use self::exec::ExtensionExecRequest;
+mod mcp;
+pub use self::mcp::ExtensionMcpRequest;
 mod lifecycle_events;
 mod manifest;
+mod model_control;
 mod negotiation;
 mod presentation;
 mod process_api;
@@ -107,6 +114,28 @@ mod protocol_line;
 mod provider_context;
 mod provider_stream;
 mod reader;
+mod resource_paths;
+mod session_control;
+use self::model_control::dispatch_model_control;
+pub use self::model_control::{ExtensionModelControl, PiProviderModelMetadata};
+pub use resource_paths::{
+    ExtensionResourceDiscoveryReason, ExtensionResourcePaths, EXTENSION_FEATURE_RESOURCE_PATHS,
+};
+use session_control::{dispatch_session_compaction, dispatch_session_control};
+pub use session_control::{
+    EXTENSION_FEATURE_SESSION_COMPACTION_V1, EXTENSION_FEATURE_SESSION_CONTROL_V1,
+};
+mod resource_validation;
+use bulk::*;
+mod resources;
+use resource_validation::*;
+use resources::*;
+pub use resources::{
+    OperationDescriptor, ResourceAccess, ResourceCleanupStatus, ResourceInput, ResourceOutput,
+    ResourceRef, ResourceReleaseStatus, EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1,
+    EXTENSION_FEATURE_RESOURCE_REFS_V1, MAX_RESOURCE_RECORDS,
+    MAX_RESOURCE_REGISTRATIONS_PER_PARENT,
+};
 mod runtime_config;
 pub mod session_leaf;
 mod spawn;
@@ -115,6 +144,7 @@ mod validation;
 
 pub use self::admission::validate_extension_flag_value;
 use self::admission::*;
+use self::agent_sessions::register_agent_session_request;
 use self::composition::*;
 use self::connection::*;
 pub use self::contributions::CommandOutput;
@@ -132,6 +162,7 @@ pub use self::contributions::ExtensionEditorRequest;
 pub use self::contributions::ExtensionEditorResponse;
 pub use self::contributions::ExtensionHookDisposition;
 pub use self::contributions::ExtensionHookOutput;
+pub use self::contributions::ExtensionMessageDelivery;
 pub use self::contributions::ExtensionMessageInjection;
 pub use self::contributions::ExtensionMessageLifecycle;
 pub use self::contributions::ExtensionMessageUpdated;
@@ -150,10 +181,12 @@ pub use self::contributions::ExtensionStatusContribution;
 pub use self::contributions::ExtensionTerminalInput;
 pub use self::contributions::ExtensionTerminalOperation;
 pub use self::contributions::ExtensionTerminalResize;
+pub use self::contributions::ExtensionToolResultReplacement;
 pub use self::contributions::ExtensionUiContribution;
 pub use self::contributions::ExtensionUserBash;
 pub use self::contributions::ExtensionWidgetPlacement;
 pub use self::contributions::TerminalGrantLost;
+pub use self::host_requests::AgentSessionEventsRequest;
 pub use self::host_requests::AgentSessionListRequest;
 pub use self::host_requests::AgentSessionMessageRequest;
 pub use self::host_requests::AgentSessionModelsRequest;
@@ -173,6 +206,7 @@ pub use self::host_requests::ContextSnapshotRequest;
 pub use self::host_requests::ContextSystemPromptResult;
 pub use self::host_requests::ExtensionActiveSkill;
 pub use self::host_requests::ExtensionContributions;
+pub use self::host_requests::ExtensionEditorCheckpoint;
 pub use self::host_requests::ExtensionExecutionContext;
 pub use self::host_requests::ExtensionHostState;
 pub use self::host_requests::ExtensionModelCost;
@@ -203,6 +237,7 @@ pub use self::host_requests::MAX_EXTENSION_MODEL_INPUTS;
 use self::host_requests::*;
 pub use self::lifecycle_events::ExtensionEvent;
 pub use self::lifecycle_events::ExtensionOperationToken;
+pub use self::lifecycle_events::ExtensionSessionCompactionResult;
 pub use self::lifecycle_events::ExtensionSessionLifecycleError;
 pub use self::lifecycle_events::ExtensionSessionLifecycleOperation;
 pub use self::lifecycle_events::ExtensionSessionLifecycleReceiver;
@@ -265,9 +300,13 @@ pub use self::process_group::EXTENSION_API_VERSION_0_4;
 pub use self::process_group::EXTENSION_FEATURE_ACTIVE_TOOLS;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
+pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1;
+pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1;
 pub use self::process_group::EXTENSION_FEATURE_APPROVALS;
 pub use self::process_group::EXTENSION_FEATURE_ARTIFACTS;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE;
+pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1;
+pub use self::process_group::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1;
 pub use self::process_group::EXTENSION_FEATURE_CACHE_WARMING_DECISION;
 pub use self::process_group::EXTENSION_FEATURE_COMPACTION_STRATEGY;
 pub use self::process_group::EXTENSION_FEATURE_COMPOSER;
@@ -280,6 +319,7 @@ pub use self::process_group::EXTENSION_FEATURE_LIFECYCLE_EVENTS;
 pub use self::process_group::EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2;
 pub use self::process_group::EXTENSION_FEATURE_MESSAGE_INJECTION;
 pub use self::process_group::EXTENSION_FEATURE_MODEL_CATALOG;
+pub use self::process_group::EXTENSION_FEATURE_PIPELINE_HOOKS_V1;
 pub use self::process_group::EXTENSION_FEATURE_POLICY_INTENTS;
 pub use self::process_group::EXTENSION_FEATURE_PROGRESS_DECORATION;
 pub use self::process_group::EXTENSION_FEATURE_REQUEST_CANCELLATION;
@@ -367,7 +407,9 @@ pub use self::protocol::ExtensionProtocolRequest;
 pub use self::protocol::ExtensionProtocolResponse;
 pub use self::protocol::ExtensionRequestId;
 pub use self::protocol::RenderedToolCall;
+pub use self::protocol::ResourceProtocolLimits;
 pub use self::protocol::ToolRenderSegment;
+pub use self::protocol::EXTENSION_FEATURE_TOOL_PROMPT_METADATA;
 use self::protocol::*;
 use self::protocol_line::*;
 use self::provider_stream::*;
@@ -413,6 +455,8 @@ pub mod methods {
     pub const CANCEL_REQUEST: &str = "$/cancelRequest";
     /// Request-scoped ephemeral progress.
     pub const PROGRESS: &str = "$/progress";
+    /// Extension request to compact the idle active-host session (API 0.4).
+    pub const SESSION_COMPACT: &str = "session/compact";
     /// Extension request to create a durable active-host session.
     pub const SESSION_CREATE: &str = "session/create";
     /// Extension request to fork the active host session.
@@ -509,6 +553,10 @@ pub mod methods {
     pub const AGENT_WAIT: &str = "agent/wait";
     /// Extension request to interrupt an owned child-session tree.
     pub const AGENT_INTERRUPT: &str = "agent/interrupt";
+    /// API 0.4 loss-detecting observation of an owned child session.
+    pub const AGENT_EVENTS: &str = "agent/events";
+    /// API 0.4 shutdown of one owned child-session tree (not settlement).
+    pub const AGENT_STOP: &str = "agent/stop";
     /// Observational session start.
     pub const SESSION_STARTED: &str = "session/started";
     /// Observational session terminal boundary.
@@ -611,11 +659,18 @@ impl_owner_scoped_host_request!(ToolsSetActiveRequest);
 impl_owner_scoped_host_request!(TerminalAcquireRequest);
 impl_owner_scoped_host_request!(TerminalReleaseRequest);
 impl_owner_scoped_host_request!(ContextSnapshotRequest);
+impl_owner_scoped_host_request!(ExtensionExecRequest);
+impl_owner_scoped_host_request!(ExtensionMcpRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiOpenRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiCloseRequest);
+impl_owner_scoped_host_request!(ExtensionRemoteUiChromeRequest);
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ui_transport_tests;
 
 #[cfg(all(test, unix))]
 mod remote_ui_tests;
+#[cfg(all(test, unix))]
+mod resources_tests;

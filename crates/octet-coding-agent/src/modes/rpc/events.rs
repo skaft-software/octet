@@ -537,6 +537,36 @@ impl EventTranslator {
                                 "\n[dropped {bytes} bytes and {events} events]"
                             ));
                         }
+                        ToolProgress::PartialResult(result) => {
+                            let content = result
+                                .content_parts()
+                                .iter()
+                                .map(|part| match part {
+                                    octet_agent::ToolOutputContentPart::Text(text) => {
+                                        json!({"type":"text","text":text})
+                                    }
+                                    octet_agent::ToolOutputContentPart::Media(media) => {
+                                        super::projection::media_content(media)
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            let mut partial =
+                                json!({"content":content,"isError":result.is_error()});
+                            if let Some(details) = result
+                                .metadata()
+                                .and_then(|metadata| metadata.get("pi_details"))
+                            {
+                                partial["details"] = details.clone();
+                            }
+                            if let Some(structured) = result.structured_content() {
+                                partial["structuredContent"] = structured.clone();
+                            }
+                            output.send(json!({
+                                "type":"tool_execution_update", "toolCallId":id.0,
+                                "toolName":name, "args":args, "partialResult":partial,
+                            }))?;
+                            return Ok(None);
+                        }
                         ToolProgress::Confirmation(_)
                         | ToolProgress::Input(_)
                         | ToolProgress::SessionEvent(_, _)
@@ -656,7 +686,7 @@ impl EventTranslator {
                     self.finish_pending_turn(output)?;
                 }
             }
-            AgentEvent::DelegationUpdated { .. } => {}
+            AgentEvent::CustomMessageCommitted { .. } | AgentEvent::DelegationUpdated { .. } => {}
             // Attempt boundaries are not part of the RPC protocol surface.
             AgentEvent::TurnStarted => {}
             AgentEvent::RunFinished { reason, .. } => {

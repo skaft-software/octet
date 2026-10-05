@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::catalog::Model;
 use crate::error::{AiError, DecodeError};
-use crate::runtime::HookModelContext;
+use crate::runtime::{HookModelContext, ProviderRequestContext, ProviderRequestHook};
 use crate::types::Request;
 pub(super) fn merge_preset_headers(
     headers: &mut http::HeaderMap,
@@ -49,21 +49,137 @@ pub(super) fn apply_payload_hook(
     if body.is_empty() {
         return Ok(body);
     }
-    let payload: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+    let payload = decode_hook_body(&body)?;
     let host_model = HookModelContext::from_model(model);
     let Some(replacement) = hook.on_payload(payload, &host_model)? else {
         return Ok(body);
     };
-    let encoded = serde_json::to_vec(&replacement)
-        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-    if encoded.len() > MAX_HOOKED_BODY_BYTES {
-        return Err(crate::ConfigError::Parse(format!(
-            "payload hook produced a body larger than the {MAX_HOOKED_BODY_BYTES}-byte limit"
-        ))
+    encode_hook_body(&replacement)
+}
+
+/// The reserved check includes removals and every repeated value, not just the
+/// first value of names which remain present after a transform.
+pub(crate) fn validate_hook_headers(
+    before: &http::HeaderMap,
+    after: &http::HeaderMap,
+) -> Result<(), AiError> {
+    for name in before.keys().chain(after.keys()) {
+        if crate::runtime::is_reserved_header(name)
+            && !before.get_all(name).iter().eq(after.get_all(name).iter())
+        {
+            return Err(crate::ConfigError::ReservedHeader(name.clone()).into());
+        }
+    }
+    Ok(())
+}
+
+fn decode_hook_body(body: &[u8]) -> Result<serde_json::Value, AiError> {
+    if body.len() > MAX_HOOKED_BODY_BYTES {
+        return Err(
+            crate::ConfigError::Parse("provider hook input exceeds byte limit".into()).into(),
+        );
+    }
+    serde_json::from_slice(body)
+        .map_err(|_| AiError::Decode(DecodeError::Json("invalid provider hook JSON body".into())))
+}
+
+fn encode_hook_body(payload: &serde_json::Value) -> Result<bytes::Bytes, AiError> {
+    if !payload.is_object() && !payload.is_array() {
+        return Err(crate::ConfigError::Parse(
+            "provider hook body must be an object or array".into(),
+        )
         .into());
     }
+    let encoded = serde_json::to_vec(payload).map_err(|_| {
+        AiError::Decode(DecodeError::Json("invalid provider hook JSON body".into()))
+    })?;
+    if encoded.len() > MAX_HOOKED_BODY_BYTES {
+        return Err(
+            crate::ConfigError::Parse("provider hook output exceeds byte limit".into()).into(),
+        );
+    }
     Ok(bytes::Bytes::from(encoded))
+}
+
+/// Exists only when an async subscriber is installed. One identity and ordered
+/// chain survive all three phases; no wire hooks run on opaque host transports.
+pub(super) struct ProviderRequestAttempt {
+    context: ProviderRequestContext,
+    hooks: Vec<Arc<dyn ProviderRequestHook>>,
+    timeout: std::time::Duration,
+}
+
+impl ProviderRequestAttempt {
+    pub(super) fn new(
+        model: &Model,
+        client_hooks: &[Arc<dyn ProviderRequestHook>],
+        request_hooks: &[Arc<dyn ProviderRequestHook>],
+    ) -> Option<Self> {
+        if client_hooks.is_empty() && request_hooks.is_empty() {
+            return None;
+        }
+        static NEXT_OPERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let operation = NEXT_OPERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(Self {
+            context: ProviderRequestContext {
+                operation_id: format!("provider-http:{operation}"),
+                model: HookModelContext::from_model(model),
+            },
+            hooks: client_hooks.iter().chain(request_hooks).cloned().collect(),
+            timeout: model
+                .endpoint
+                .timeout
+                .min(std::time::Duration::from_secs(5)),
+        })
+    }
+
+    pub(super) async fn payload(&self, mut body: bytes::Bytes) -> Result<bytes::Bytes, AiError> {
+        tokio::time::timeout(self.timeout, async {
+            for hook in &self.hooks {
+                if let Some(payload) = hook
+                    .before_request(&self.context, decode_hook_body(&body)?)
+                    .await?
+                {
+                    body = encode_hook_body(&payload)?;
+                }
+            }
+            Ok(body)
+        })
+        .await
+        .map_err(|_| hook_deadline())?
+    }
+
+    pub(super) async fn headers(&self, headers: &mut http::HeaderMap) -> Result<(), AiError> {
+        tokio::time::timeout(self.timeout, async {
+            for hook in &self.hooks {
+                let before = headers.clone();
+                hook.before_headers(&self.context, headers).await?;
+                validate_hook_headers(&before, headers)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| hook_deadline())?
+    }
+
+    pub(super) async fn response(
+        &self,
+        status: http::StatusCode,
+        headers: &http::HeaderMap,
+    ) -> Result<(), AiError> {
+        tokio::time::timeout(self.timeout, async {
+            for hook in &self.hooks {
+                hook.after_response(&self.context, status, headers).await?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| hook_deadline())?
+    }
+}
+
+fn hook_deadline() -> AiError {
+    crate::ConfigError::Parse("provider hook deadline exceeded".into()).into()
 }
 
 /// Canonical preparation shared by every host-mediated attempt.

@@ -92,8 +92,8 @@ flow, not a claim that live-model acceptance was run.
 ```sh
 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=2 \
   cargo test --manifest-path sdk/rust/Cargo.toml --offline --locked --lib
-CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=2 CARGO_TARGET_DIR="$PWD/sdk/rust/target-host" \
-  cargo test --manifest-path sdk/rust/host-check/Cargo.toml --offline --locked --lib -- --nocapture
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=2 CARGO_TARGET_DIR="$PWD/sdk/rust/target" \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --manifest-path sdk/rust/host-check/Cargo.toml --offline --locked --lib -- --nocapture
 python3 scripts/generate-extension-api-v03.py --check
 ```
 
@@ -124,11 +124,69 @@ OCTET_NATIVE_BIN_DIR="$PWD/examples/extensions/native-hello/build-sanitized" \
 Only C/C++ author/probe code is ASan/UBSan-instrumented; the stable Rust static
 library is not, so this isn't whole-runtime sanitizer coverage.
 
+## Rust typed, native-resource and binary-data recipes
+
+[`rust/typed.rs`](rust/typed.rs) declares each input/output once: bounded finite
+samples become a typed summary, with optional units, cancellation, negotiated
+progress and an empty-input diagnostic. No resource or bulk setup is needed.
+[`rust/resources.rs`](rust/resources.rs) declares a counter's nominal type once,
+then registers a constructor, ordinary-argument update and explicit release-last
+lifecycle operation. Release returns typed retirement and independent cleanup status.
+[`rust/blobs.rs`](rust/blobs.rs) writes and reads immutable data with callback-scoped
+streams; no author-written schema, slot list, private locator or byte-bearing RPC.
+These additions do not change the three basic hello examples or C/C++ ABI1.
+
+```sh
+CARGO_BUILD_JOBS=1 bash examples/extensions/native-hello/build.sh
+python3 sdk/rust/tests/test_resource_process.py
+python3 sdk/rust/tests/test_bulk_process.py
+```
+
+Checked-in manifests are [typed/extension.toml](typed/extension.toml),
+[resources/extension.toml](resources/extension.toml) and
+[blobs/extension.toml](blobs/extension.toml). The build stages each Cargo example
+into its bundle's ignored `build/` directory, without parent traversal or global
+installation. Use a reviewed
+API 0.4 host with session-owned context. The blob example additionally requires
+host-configured bulk storage and negotiated `local-file.v1` (Unix helper profile);
+it explicitly refuses an unconfigured host rather than placing bytes in JSON.
+The production-host companion includes actual SDK resource/bulk processes. See
+[SDK resource and bulk contracts](../../../sdk/rust/README.md#native-resources-and-operations)
+for provisional output admission, explicit cleanup/failure semantics, finite limits
+and callback lifetime constraints. These library-level checks are not a claim of
+live-model, frontend, cross-platform or complete Pi SDK acceptance.
+
+After staging, the ordinary tool flows are:
+
+- `summarize({"label":"voltage","samples":[1,3],"unit":"V"})` → typed
+  `{label:"voltage",count:2,mean:2,unit:"V"}` plus `Sample summary ready`.
+  Empty samples return a domain error with `samples.empty`, not fake output.
+- `counter_create({"initial":7})` → retain its returned `counter`; pass that exact
+  identity to `counter_add({"counter":...,"amount":5})` → `{value:12}`.
+  `counter_release_last({})` retires the last-created counter; reuse is refused.
+  Older counters remain host-owned until explicit host release/session teardown.
+  Do not add a Resource argument to this release tool: admission would pin it.
+- `blob_save({})` → retain the returned `data`; pass it to
+  `blob_size({"data":...})`. Every read verifies bytes and closes/releases its lease.
+  Blob result retention belongs to the host/session, not an extension-side destructor.
+
+To author a deliberately quiet extension, call `extension.request_progress(false)`
+before `run`. Reusable handlers can use `call.supports_progress()`; a declined
+progress helper returns an explicit error rather than emitting a notification.
+The ordinary default remains opt-in when offered by the host.
+
+The companion `author_examples` tests execute these staged manifests, including
+release/reuse refusal and repeated fresh blob reads. Test sources are not claims
+of successful execution; the parent integration run supplies that evidence.
+
 ## Deliberate limits
 
-One active domain handler; static tools only; one text result/error, no structured
-content or media. No hooks/UI/commands/flags, dynamic catalogs, reverse host
-requests, secrets/approvals, composition, sessions or subagents. Unsupported
+One active domain handler; static tools only. These hello examples and C ABI 1
+return one text result/error. Rust additionally supports generated typed
+input/output contracts, structured results, diagnostics and negotiated status
+progress, native resources and local-file bulk helpers; see [Rust typed authoring](../../../sdk/rust/README.md#typed-inputoutput-diagnostics-and-progress).
+Media rendering is not exposed by this SDK. No hooks/UI/commands/flags, dynamic catalogs, general reverse host
+requests beyond resource/bulk helpers, secrets/approvals, composition, sessions or subagents. Unsupported
 required features and manifest contributions fail explicitly. C/C++ expose flat
 string/integer/boolean inputs only; Rust adds typed nonrecursive generated schemas.
 Do not retain callback handles, bypass stdout framing, free live callback data,

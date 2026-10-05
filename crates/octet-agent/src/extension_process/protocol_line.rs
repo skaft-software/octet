@@ -179,6 +179,30 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
+            "model/select"
+                if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 =>
+            {
+                dispatch_model_control(state, object, params)?;
+            }
+            methods::SESSION_COMPACT => {
+                dispatch_session_compaction(state, object, params)?;
+            }
+            "session/setup"
+            | "session/wait_for_idle"
+            | "session/create"
+            | "session/fork"
+            | "session/reload"
+            | "session/switch"
+                if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 =>
+            {
+                dispatch_session_control(state, object, method, params)?;
+            }
+            "bulk/write" | "bulk/commit" | "bulk/read" | "bulk/release" => {
+                dispatch_bulk_request(state, object, method, params)?;
+            }
+            "resource/register" | "resource/release" => {
+                dispatch_resource_request(state, object, method, params)?;
+            }
             methods::COMPOSITION_CONTEXT
             | methods::COMPOSITION_CALL
             | methods::COMPOSITION_STORE => {
@@ -337,6 +361,21 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     generation: state.generation,
                     contribution,
                 });
+            }
+            "ui/chrome" => {
+                let Some((request, admitted)) = admit_remote_ui_request::<
+                    ExtensionRemoteUiChromeRequest,
+                >(state, object, method, params)?
+                else {
+                    return Ok(());
+                };
+                dispatch_remote_ui_request(
+                    state,
+                    &admitted,
+                    ExtensionRemoteUiOperation::Chrome {
+                        chrome: request.chrome,
+                    },
+                )?;
             }
             methods::UI_OPEN => {
                 let Some((request, admitted)) = admit_remote_ui_request::<
@@ -538,12 +577,17 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 require_declared(state.declared.providers, "provider catalogs")?;
                 let id = parse_child_request_id(object, methods::PROVIDERS_REGISTER)?;
                 insert_child_request(state, id.clone(), None, None)?;
-                let result = api_v03::parse_provider_register_params(params)
-                    .map_err(|_| ProviderHostResponseError::Invalid)
-                    .and_then(|request| {
-                        provider_registry_for_request(state)?
-                            .register(state.provider_owner.clone(), request)
-                            .map_err(provider_registry_response_error)
+                let result =
+                    (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
+                        model_control::register_provider_proxy(state, params, false)
+                    } else {
+                        api_v03::parse_provider_register_params(params)
+                            .map_err(|_| ProviderHostResponseError::Invalid)
+                            .and_then(|request| {
+                                provider_registry_for_request(state)?
+                                    .register(state.provider_owner.clone(), request)
+                                    .map_err(provider_registry_response_error)
+                            })
                     })
                     .and_then(provider_catalog_response_value);
                 queue_provider_host_response(state, &id, result)?;
@@ -552,12 +596,17 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 require_declared(state.declared.providers, "provider catalogs")?;
                 let id = parse_child_request_id(object, methods::PROVIDERS_UPDATE)?;
                 insert_child_request(state, id.clone(), None, None)?;
-                let result = api_v03::parse_provider_update_params(params)
-                    .map_err(|_| ProviderHostResponseError::Invalid)
-                    .and_then(|request| {
-                        provider_registry_for_request(state)?
-                            .update(state.provider_owner.clone(), request)
-                            .map_err(provider_registry_response_error)
+                let result =
+                    (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
+                        model_control::register_provider_proxy(state, params, true)
+                    } else {
+                        api_v03::parse_provider_update_params(params)
+                            .map_err(|_| ProviderHostResponseError::Invalid)
+                            .and_then(|request| {
+                                provider_registry_for_request(state)?
+                                    .update(state.provider_owner.clone(), request)
+                                    .map_err(provider_registry_response_error)
+                            })
                     })
                     .and_then(provider_catalog_response_value);
                 queue_provider_host_response(state, &id, result)?;
@@ -608,6 +657,48 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     .map_err(|_| "invalid API 0.3 provider stream event".to_owned())?;
                 dispatch_provider_stream_event(state, event)?;
             }
+            "mcp/replace" => mcp::dispatch_mcp_registration(state, object, params)?,
+            "process/exec" => {
+                let Some((request, admitted)) = admit_host_request::<ExtensionExecRequest>(
+                    state,
+                    object,
+                    method,
+                    "process_exec_v1",
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if let Err(detail) = request.validate() {
+                    reject_typed_child_request(
+                        state,
+                        admitted.request_id,
+                        ExtensionRequestFailure::InvalidRequest,
+                        detail,
+                    )?;
+                    return Ok(());
+                }
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ExecRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: admitted.owner.clone(),
+                        request,
+                    }
+                })?;
+            }
+            "process/exec/cancel" => {
+                if object.contains_key("id") {
+                    return Err("exec cancellation must be a notification".into());
+                }
+                require_feature(state, "process_exec_v1")?;
+                let id: ExtensionRequestId =
+                    serde_json::from_value(params.get("id").cloned().unwrap_or_default())
+                        .map_err(|error| format!("invalid exec cancellation: {error}"))?;
+                if let Some(child) = lock_std_mutex(&state.child_requests).get_mut(&id) {
+                    child.exec_cancelled = true;
+                }
+            }
             methods::SESSION_CREATE => {
                 let id = parse_child_request_id(object, methods::SESSION_CREATE)?;
                 api_v03::parse_session_create_params(params)
@@ -625,7 +716,10 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 queue_api_v03_session_lifecycle_operation(
                     state,
                     id,
-                    ExtensionSessionLifecycleOperation::Fork,
+                    ExtensionSessionLifecycleOperation::Fork {
+                        entry_id: None,
+                        at: false,
+                    },
                 )?;
             }
             methods::SESSION_RELOAD => {
@@ -925,7 +1019,41 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 ) {
                     return refuse_admitted_request(state, &admitted, failure);
                 }
-                let operation = if method == methods::COMPOSER_SET {
+                let operation = if let Some(checkpoint) = request.editor_checkpoint {
+                    if method != methods::COMPOSER_SET {
+                        return refuse_admitted_request(
+                            state,
+                            &admitted,
+                            (
+                                ExtensionRequestFailure::InvalidRequest,
+                                "editor checkpoints are only permitted on composer/set".into(),
+                            ),
+                        );
+                    }
+                    let checkpoint_supported = {
+                        let protocol = read_std_lock(&state.protocol);
+                        protocol.version == EXTENSION_API_VERSION_0_4
+                            && protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
+                    };
+                    if !checkpoint_supported {
+                        return refuse_admitted_request(
+                            state,
+                            &admitted,
+                            (
+                                ExtensionRequestFailure::UnsupportedFeature,
+                                "editor checkpoints require API 0.4 remote_ui".into(),
+                            ),
+                        );
+                    }
+                    if let Err(failure) = checkpoint.validate() {
+                        return refuse_admitted_request(state, &admitted, failure);
+                    }
+                    ExtensionComposerOperation::Checkpoint {
+                        text: request.text,
+                        owner: admitted.owner.clone(),
+                        checkpoint,
+                    }
+                } else if method == methods::COMPOSER_SET {
                     ExtensionComposerOperation::Set { text: request.text }
                 } else {
                     ExtensionComposerOperation::Insert { text: request.text }
@@ -1188,31 +1316,39 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 else {
                     return Ok(());
                 };
-                let injection = match request.role.as_str() {
-                    "assistant" => ExtensionMessageInjection::Assistant { text: request.text },
-                    "system" => ExtensionMessageInjection::System { text: request.text },
-                    role => {
-                        return refuse_admitted_request(
-                            state,
-                            &admitted,
-                            (
-                                ExtensionRequestFailure::InvalidRequest,
-                                format!(
-                                    "session/send_message role `{role}` must be exactly `assistant` or `system`; user text uses session/send_user_message"
-                                ),
-                            ),
-                        );
-                    }
+                let injection = ExtensionMessageInjection::Custom {
+                    custom_type: request.custom_type,
+                    content: request.content,
+                    display: request.display,
+                    details: request.details,
+                    deliver_as: request.deliver_as,
+                    trigger_turn: request.trigger_turn,
                 };
-                if let Err(failure) = bounded_plain_text_failure(
-                    "injected message",
-                    match &injection {
-                        ExtensionMessageInjection::Assistant { text }
-                        | ExtensionMessageInjection::System { text }
-                        | ExtensionMessageInjection::User { text } => text,
-                    },
-                    MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
-                ) {
+                let ExtensionMessageInjection::Custom {
+                    custom_type,
+                    content,
+                    display,
+                    details,
+                    ..
+                } = &injection
+                else {
+                    unreachable!()
+                };
+                let custom = crate::session::CustomMessage {
+                    custom_type: custom_type.clone(),
+                    content: content.clone(),
+                    display: *display,
+                    details: details.clone(),
+                };
+                if let Err(failure) = bounded_plain_text_failure("custom type", custom_type, 128)
+                    .and_then(|()| {
+                        bounded_plain_text_failure(
+                            "injected message",
+                            &custom.text(),
+                            MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
+                        )
+                    })
+                {
                     return refuse_admitted_request(state, &admitted, failure);
                 }
                 dispatch_host_request_event(state, &admitted, move |admitted| {
@@ -1242,7 +1378,11 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 ) {
                     return refuse_admitted_request(state, &admitted, failure);
                 }
-                let injection = ExtensionMessageInjection::User { text: request.text };
+                let injection = ExtensionMessageInjection::User {
+                    text: request.text,
+                    content: request.content,
+                    deliver_as: request.deliver_as,
+                };
                 if let Err(detail) = injection.validate() {
                     return refuse_admitted_request(
                         state,
@@ -1256,6 +1396,26 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         generation: admitted.generation,
                         owner: Some(admitted.owner.clone()),
                         injection,
+                    }
+                })?;
+            }
+            "tools/snapshot" => {
+                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                    state,
+                    object,
+                    method,
+                    EXTENSION_FEATURE_ACTIVE_TOOLS,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ContextSnapshotRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionContextOperation::Tools,
                     }
                 })?;
             }
@@ -1471,6 +1631,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         idempotency_key: request.idempotency_key,
                         policy: Box::new(policy),
                     },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_MESSAGE => {
@@ -1495,6 +1656,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         target: request.target,
                         message: request.message,
                     },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_FOLLOW_UP => {
@@ -1519,6 +1681,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         target: request.target,
                         message: request.message,
                     },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_MODELS => {
@@ -1549,6 +1712,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         query: request.query,
                         limit: request.limit.unwrap_or(50),
                     },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_LIST => {
@@ -1570,6 +1734,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.parent_request_id,
                     methods::AGENT_LIST,
                     AgentSessionOperation::List,
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_WAIT => {
@@ -1597,6 +1762,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.parent_request_id,
                     methods::AGENT_WAIT,
                     AgentSessionOperation::Wait { timeout },
+                    request.resource_owner,
                 )?;
             }
             methods::AGENT_INTERRUPT => {
@@ -1620,7 +1786,79 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     AgentSessionOperation::Interrupt {
                         target: request.target,
                     },
+                    request.resource_owner,
                 )?;
+            }
+            methods::AGENT_EVENTS | methods::AGENT_STOP => {
+                let id = parse_child_request_id(object, method)?;
+                let feature = if method == methods::AGENT_EVENTS {
+                    EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1
+                } else {
+                    EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1
+                };
+                if read_std_lock(&state.protocol).version != EXTENSION_API_VERSION_0_4
+                    || require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS).is_err()
+                    || require_feature(state, feature).is_err()
+                {
+                    return reject_typed_child_request(
+                        state,
+                        id,
+                        ExtensionRequestFailure::UnsupportedFeature,
+                        format!("{method} requires API 0.4 agent_sessions and {feature}"),
+                    );
+                }
+                let (parent, owner, method, operation) = if method == methods::AGENT_EVENTS {
+                    let request: AgentSessionEventsRequest = match serde_json::from_value(params) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            return reject_typed_child_request(
+                                state,
+                                id,
+                                ExtensionRequestFailure::InvalidRequest,
+                                format!("invalid agent events request: {error}"),
+                            )
+                        }
+                    };
+                    if request.timeout_ms > 25_000 {
+                        return reject_typed_child_request(
+                            state,
+                            id,
+                            ExtensionRequestFailure::InvalidRequest,
+                            "child event wait must not exceed 25000 milliseconds",
+                        );
+                    }
+                    (
+                        request.parent_request_id,
+                        request.resource_owner,
+                        methods::AGENT_EVENTS,
+                        AgentSessionOperation::Events {
+                            target: request.target,
+                            after_sequence: request.after_sequence,
+                            timeout: Duration::from_millis(request.timeout_ms),
+                        },
+                    )
+                } else {
+                    let request: AgentSessionTargetRequest = match serde_json::from_value(params) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            return reject_typed_child_request(
+                                state,
+                                id,
+                                ExtensionRequestFailure::InvalidRequest,
+                                format!("invalid agent stop request: {error}"),
+                            )
+                        }
+                    };
+                    (
+                        request.parent_request_id,
+                        request.resource_owner,
+                        methods::AGENT_STOP,
+                        AgentSessionOperation::Stop {
+                            target: request.target,
+                        },
+                    )
+                };
+                queue_agent_session_operation(state, id, parent, method, operation, owner)?;
             }
             methods::SECRET_GET => {
                 require_feature(state, EXTENSION_FEATURE_SECRETS)?;
@@ -1793,6 +2031,18 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
         .get("id")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "response requires a numeric id".to_owned())?;
+    if (read_std_lock(&state.protocol)
+        .features
+        .contains(EXTENSION_FEATURE_RESOURCE_REFS_V1)
+        || read_std_lock(&state.protocol)
+            .features
+            .contains(EXTENSION_FEATURE_BULK_OBJECTS_V1))
+        && object.contains_key("result") == object.contains_key("error")
+    {
+        // A malformed envelope is not evidence that native execution ended.
+        // Tear down the whole generation, rather than unlock one execution.
+        return Err("response requires exactly one of result or error".into());
+    }
     let reply = if let Some(error) = object.get("error") {
         if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_3 {
             let error: api_v03::ErrorObject = serde_json::from_value(error.clone())
@@ -1816,6 +2066,14 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     };
     let request = {
         let mut pending = lock_std_mutex(&state.pending);
+        // This recognized terminal settles native execution even if the caller
+        // has gone away or its bounded late-response tombstone was pruned.
+        if lock_std_mutex(&state.resources).settle_execution(id) {
+            let _ = state.events.send(ExtensionEvent::Diagnostic {
+                message: format!("resource execution settled: request={id}"),
+            });
+        }
+        state.resource_cleanup_changed.notify_one();
         let completed = pending.get(&id).is_some_and(|request| {
             request
                 .terminal
@@ -1828,7 +2086,28 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 .is_ok()
         });
         if completed {
-            pending.remove(&id)
+            let request = pending.remove(&id);
+            // Share the checkpoint's pending -> surface disposition through
+            // retirement. A cancelled terminal may not leave a committable
+            // surface behind after releasing the parent lock.
+            state.remote_ui.settle_parent(id, reply.is_err());
+            if matches!(
+                &reply,
+                Err(PendingError::Remote {
+                    code: JSON_RPC_REQUEST_CANCELLED,
+                    ..
+                })
+            ) && read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_REMOTE_UI)
+            {
+                if let Some(owner) = request
+                    .as_ref()
+                    .and_then(|request| request.resource_owner.as_ref())
+                {
+                    lock_std_mutex(&state.issued_resource_owners).remove(owner);
+                    state.remote_ui.discard_owner(owner);
+                }
+            }
+            request
         } else {
             None
         }
@@ -1836,20 +2115,6 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     if let Some(request) = request {
         state.pending_changed.notify_waiters();
         cancel_children_from_reader(state, id, "parent settled");
-        state.remote_ui.settle_parent(id, reply.is_err());
-        if matches!(
-            &reply,
-            Err(PendingError::Remote {
-                code: JSON_RPC_REQUEST_CANCELLED,
-                ..
-            })
-        ) && read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_REMOTE_UI)
-        {
-            if let Some(owner) = &request.resource_owner {
-                lock_std_mutex(&state.issued_resource_owners).remove(owner);
-                state.remote_ui.discard_owner(owner);
-            }
-        }
         let _ = request.sender.send(reply);
     } else if lock_std_mutex(&state.tombstones).remove(id) {
         let _ = state.events.send(ExtensionEvent::Diagnostic {

@@ -393,6 +393,9 @@ mod tests {
                 context: CallContext {
                     terminal: Default::default(),
                     host_context: json!({}),
+                    progress: None,
+                    resources: None,
+                    bulk: None,
                 },
                 result: None,
             };

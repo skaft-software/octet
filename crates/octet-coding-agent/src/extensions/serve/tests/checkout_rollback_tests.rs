@@ -14,6 +14,107 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use super::test_support::*;
 
+struct TreeHook {
+    veto: bool,
+    fail_after: bool,
+    seen: Arc<Mutex<Vec<octet_agent::compaction::SessionOperation>>>,
+}
+
+struct TreeReply(Option<octet_agent::compaction::SessionOperationDecision>);
+
+impl octet_agent::compaction::SessionOperationInvocation for TreeReply {
+    fn take_future(&mut self) -> octet_agent::compaction::SessionOperationFuture {
+        let decision = self.0.take().unwrap();
+        Box::pin(async move { Ok(decision) })
+    }
+}
+
+impl octet_agent::compaction::SessionOperationHook for TreeHook {
+    fn begin(
+        &self,
+        session: &Session,
+        operation: &octet_agent::compaction::SessionOperation,
+    ) -> Result<Option<Box<dyn octet_agent::compaction::SessionOperationInvocation>>, String> {
+        use octet_agent::compaction::{SessionOperation, SessionOperationDecision};
+        self.seen.lock().unwrap().push(operation.clone());
+        let decision = match operation {
+            SessionOperation::BeforeTree { .. } if self.veto => SessionOperationDecision::Cancel,
+            SessionOperation::Tree { new_head, .. } => {
+                assert_eq!(&session.head(), new_head);
+                assert_eq!(
+                    Session::open_read_only(session.path()).unwrap().head(),
+                    *new_head
+                );
+                if self.fail_after {
+                    return Err("post-checkout failure".into());
+                }
+                SessionOperationDecision::Continue
+            }
+            _ => SessionOperationDecision::Continue,
+        };
+        Ok(Some(Box::new(TreeReply(Some(decision)))))
+    }
+}
+
+#[tokio::test]
+async fn live_checkout_boundary_honors_veto_and_never_rolls_back_failed_after_hook() {
+    for (veto, fail_after) in [(true, false), (false, false), (false, true)] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (_directory, mut app) = crate::compaction::tests::app_for_session_operation(TreeHook {
+            veto,
+            fail_after,
+            seen: seen.clone(),
+        });
+        let target = app
+            .agent
+            .session_mut()
+            .append(EntryValue::Config {
+                model: Some("gpt-4o-mini".into()),
+                reasoning: None,
+                reasoning_mode: None,
+            })
+            .unwrap();
+        let old_head = app
+            .agent
+            .session_mut()
+            .append(EntryValue::Config {
+                model: Some("gpt-4o".into()),
+                reasoning: None,
+                reasoning_mode: None,
+            })
+            .unwrap();
+        let result = super::runs::navigate_checkout(&mut app.agent, target.clone()).await;
+        if veto {
+            assert_eq!(result, Err(ServiceError::InvalidBoundary));
+            assert_eq!(app.agent.session().head(), Some(old_head.clone()));
+            assert_eq!(seen.lock().unwrap().len(), 1);
+        } else {
+            assert_eq!(
+                result,
+                if fail_after {
+                    Err(ServiceError::OwnerLost)
+                } else {
+                    Ok(())
+                }
+            );
+            assert_eq!(app.agent.session().head(), Some(target.clone()));
+            let events = seen.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert!(
+                matches!(&events[1], octet_agent::compaction::SessionOperation::Tree {
+                old_head: Some(old), new_head: Some(new),
+            } if old == &old_head && new == &target)
+            );
+        }
+        let path = app.agent.session().path().to_owned();
+        drop(app);
+        assert_eq!(
+            Session::open_read_only(path).unwrap().head(),
+            Some(if veto { old_head } else { target })
+        );
+    }
+}
+
 #[test]
 fn prepared_session_descriptor_is_consumed_once_and_checkout_rebuild_reopens_path() {
     let directory = tempfile::tempdir().unwrap();

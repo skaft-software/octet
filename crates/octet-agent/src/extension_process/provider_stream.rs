@@ -126,6 +126,7 @@ pub(super) enum ProviderStreamWait {
     Event(Option<api_v03::ProviderStreamEvent>),
     Idle,
     Deadline,
+    RouteInvalidated,
 }
 
 pub(super) fn invalid_provider_stream_event() -> AiError {
@@ -284,9 +285,15 @@ pub(super) fn extension_provider_response_stream(
     model: HostStreamModel,
     request: octet_ai::Request,
     diagnostics: Vec<Diagnostic>,
+    route: (
+        Arc<ExtensionProviderRegistry>,
+        crate::extension_provider::ExtensionProviderRoute,
+    ),
 ) -> ResponseStream {
+    // Own cancellation before the first poll: dropping a successfully opened
+    // but never-polled stream must still release the accepted provider job.
+    let mut cancellation = ProviderStreamCancellation::new(&connection, stream_id.clone());
     Box::pin(async_stream::try_stream! {
-        let mut cancellation = ProviderStreamCancellation::new(&connection, stream_id.clone());
         let mut assembler = CanonicalStreamAssembler::new(
             model.id,
             model.protocol,
@@ -299,13 +306,18 @@ pub(super) fn extension_provider_response_stream(
         let mut last_event_at = started_at;
 
         loop {
+            if !connection_is_usable(&connection) || !route.0.route_is_active(&route.1) {
+                Err(provider_unavailable_error())?;
+            }
             let idle_deadline = last_event_at + connection.provider_stream_idle_timeout;
             let waiting = tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => ProviderStreamWait::Deadline,
                 _ = tokio::time::sleep_until(idle_deadline) => ProviderStreamWait::Idle,
                 event = receiver.recv() => ProviderStreamWait::Event(event),
+                _ = route.0.route_invalidated(&route.1) => ProviderStreamWait::RouteInvalidated,
             };
             let event = match waiting {
+                ProviderStreamWait::RouteInvalidated => Err(provider_unavailable_error())?,
                 ProviderStreamWait::Deadline => Err(provider_transport_error(
                     TransportPhase::Body,
                     true,
@@ -321,6 +333,9 @@ pub(super) fn extension_provider_response_stream(
                     Err(AiError::StreamProtocol(octet_ai::StreamProtocolError::MissingFinish))?
                 }
             };
+            if !connection_is_usable(&connection) || !route.0.route_is_active(&route.1) {
+                Err(provider_unavailable_error())?;
+            }
             last_event_at = tokio::time::Instant::now();
             assembler.observe_transport_event()?;
             match decode_provider_stream_event(event)? {
@@ -363,6 +378,15 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
             .upgrade()
             .ok_or_else(provider_unavailable_error)?;
         let connection = read_std_lock(&process.connection).clone();
+        {
+            let protocol = read_std_lock(&connection.protocol);
+            if protocol.version != EXTENSION_API_VERSION_0_3
+                && (protocol.version != EXTENSION_API_VERSION_0_4
+                    || !protocol.supports("provider_proxy_v1"))
+            {
+                return Err(provider_unavailable_error());
+            }
+        }
         if !connection_is_usable(&connection)
             || connection
                 .require_api_v03_host_method(methods::PROVIDER_STREAM)
@@ -449,6 +473,10 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
             );
         }
 
+        // Protect the acceptance wait too. Cancellation at an ambiguous
+        // acceptance boundary never leaves an ingress/job without an owner.
+        let mut opening_cancellation =
+            ProviderStreamCancellation::new(&connection, stream_id.clone());
         let accepted = match connection
             .request(
                 methods::PROVIDER_STREAM,
@@ -496,6 +524,7 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
             return Err(provider_unavailable_error());
         }
 
+        opening_cancellation.disarm();
         Ok(extension_provider_response_stream(
             connection,
             stream_id,
@@ -503,6 +532,7 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
             model,
             request,
             diagnostics,
+            (registry, route),
         ))
     }
 }
@@ -537,6 +567,15 @@ pub(super) enum ProviderHostResponseError {
 pub(super) fn provider_registry_for_request(
     state: &ProtocolReadState,
 ) -> Result<Arc<ExtensionProviderRegistry>, ProviderHostResponseError> {
+    {
+        let protocol = read_std_lock(&state.protocol);
+        if protocol.version != EXTENSION_API_VERSION_0_3
+            && (protocol.version != EXTENSION_API_VERSION_0_4
+                || !protocol.supports("provider_proxy_v1"))
+        {
+            return Err(ProviderHostResponseError::Unavailable);
+        }
+    }
     state
         .provider_registry
         .clone()
@@ -637,6 +676,8 @@ pub(super) fn dispatch_provider_stream_event(
     state: &ProtocolReadState,
     event: api_v03::ProviderStreamEvent,
 ) -> Result<(), String> {
+    provider_registry_for_request(state)
+        .map_err(|_| "provider stream service is unavailable".to_owned())?;
     let payload = api_v03::canonical_json(&event.payload)
         .map_err(|error| format!("invalid provider stream payload: {error}"))?;
     if payload.len() > api_v03::MAX_PROVIDER_STREAM_EVENT_BYTES {

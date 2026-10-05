@@ -78,7 +78,11 @@ pub mod events;
 pub mod extension;
 #[rustfmt::skip]
 pub mod extension_api_v03;
+pub(crate) mod extension_bulk;
+mod extension_bulk_host;
+pub mod extension_diagnostics;
 pub mod extension_menu;
+pub mod extension_operations;
 pub mod extension_policy;
 pub mod extension_presentation;
 pub mod extension_process;
@@ -158,6 +162,9 @@ pub use extension::{
     MAX_POST_MUTATION_ID_BYTES, MAX_POST_MUTATION_RESOURCE_ID_BYTES,
     MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
 };
+pub use extension_bulk::{BlobDigest, BlobRef, BulkError, BulkLimits};
+pub use extension_bulk_host::BulkStorage;
+pub use extension_diagnostics::Diagnostic;
 pub use extension_menu::{
     ExtensionMenu, ExtensionMenuItem, MAX_EXTENSION_MENU_ARGUMENTS,
     MAX_EXTENSION_MENU_ARGUMENT_BYTES, MAX_EXTENSION_MENU_BYTES, MAX_EXTENSION_MENU_DEPTH,
@@ -181,8 +188,8 @@ pub use extension_presentation::{
 };
 pub use extension_process::{
     default_extension_roots, discover_extension_manifests, load_extension_manifest_paths,
-    AgentSessionListRequest, AgentSessionMessageRequest, AgentSessionSpawnRequest,
-    AgentSessionTargetRequest, AgentSessionWaitRequest,
+    AgentSessionEventsRequest, AgentSessionListRequest, AgentSessionMessageRequest,
+    AgentSessionSpawnRequest, AgentSessionTargetRequest, AgentSessionWaitRequest,
     CommandDefinition as ExtensionCommandDefinition, CommandOutput as ExtensionCommandOutput,
     ConfirmationRequest as ExtensionConfirmationRequest,
     ConfirmationResponse as ExtensionConfirmationResponse, ContextContribution,
@@ -200,18 +207,20 @@ pub use extension_process::{
     ExtensionProtocolRequest, ExtensionProtocolResponse, ExtensionProviderRetryAdvice,
     ExtensionReloadReport, ExtensionRequestId, ExtensionResourceOwner, ExtensionRoot,
     ExtensionRuntimeConfig, ExtensionRuntimeError, ExtensionSource, ExtensionStatusContribution,
-    ExtensionTrust, ExtensionUiSurface, RenderedToolCall,
+    ExtensionTrust, ExtensionUiSurface, OperationDescriptor, RenderedToolCall, ResourceAccess,
+    ResourceCleanupStatus, ResourceInput, ResourceOutput, ResourceRef, ResourceReleaseStatus,
     ToolCallOutput as ExtensionToolCallOutput, ToolCatalogUpdateResponse,
     ToolDefinition as ExtensionToolDefinition, ToolRegistrationRequest, ToolRenderSegment,
     DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION, EXTENSION_API_VERSION_0_1,
     EXTENSION_API_VERSION_0_2, EXTENSION_API_VERSION_0_3, EXTENSION_API_VERSION_0_4,
-    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_APPROVALS, EXTENSION_FEATURE_ARTIFACTS,
-    EXTENSION_FEATURE_COMPACTION_STRATEGY, EXTENSION_FEATURE_CONTENT_PARTS,
-    EXTENSION_FEATURE_DELEGATION_TELEMETRY, EXTENSION_FEATURE_DYNAMIC_TOOLS,
-    EXTENSION_FEATURE_LIFECYCLE_EVENTS, EXTENSION_FEATURE_POLICY_INTENTS,
-    EXTENSION_FEATURE_PROGRESS_DECORATION, EXTENSION_FEATURE_REQUEST_CANCELLATION,
-    EXTENSION_FEATURE_REQUEST_PROGRESS, EXTENSION_FEATURE_RUNTIME_COMMANDS,
-    EXTENSION_FEATURE_SECRETS, EXTENSION_MANIFEST_FILENAME,
+    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1,
+    EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1, EXTENSION_FEATURE_APPROVALS,
+    EXTENSION_FEATURE_ARTIFACTS, EXTENSION_FEATURE_COMPACTION_STRATEGY,
+    EXTENSION_FEATURE_CONTENT_PARTS, EXTENSION_FEATURE_DELEGATION_TELEMETRY,
+    EXTENSION_FEATURE_DYNAMIC_TOOLS, EXTENSION_FEATURE_LIFECYCLE_EVENTS,
+    EXTENSION_FEATURE_POLICY_INTENTS, EXTENSION_FEATURE_PROGRESS_DECORATION,
+    EXTENSION_FEATURE_REQUEST_CANCELLATION, EXTENSION_FEATURE_REQUEST_PROGRESS,
+    EXTENSION_FEATURE_RUNTIME_COMMANDS, EXTENSION_FEATURE_SECRETS, EXTENSION_MANIFEST_FILENAME,
     MAX_EXTENSION_CHILD_REQUEST_IDS_PER_GENERATION, MAX_EXTENSION_INPUT_PROMPT_BYTES,
     MAX_EXTENSION_INPUT_VALUE_BYTES, MAX_EXTENSION_RESULT_CONTENT_PARTS,
     MAX_EXTENSION_RESULT_MEDIA_BYTES,
@@ -222,17 +231,18 @@ pub use extension_provider::{
     ExtensionProviderRegistryError, ExtensionProviderRoute,
 };
 pub use extension_remote_ui::{
-    validate_remote_ui_line, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiCloseResult,
-    ExtensionRemoteUiClosed, ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification,
-    ExtensionRemoteUiKey, ExtensionRemoteUiKeyKind, ExtensionRemoteUiKeyModifier,
-    ExtensionRemoteUiMouse, ExtensionRemoteUiMouseButton, ExtensionRemoteUiMouseKind,
-    ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOpenResult, ExtensionRemoteUiOperation,
-    ExtensionRemoteUiPlacement, ExtensionRemoteUiResize, EXTENSION_FEATURE_REMOTE_UI,
-    MAX_EXTENSION_REMOTE_UI_FRAME_BYTES, MAX_EXTENSION_REMOTE_UI_KEY_BYTES,
-    MAX_EXTENSION_REMOTE_UI_LINES, MAX_EXTENSION_REMOTE_UI_LINE_BYTES,
-    MAX_EXTENSION_REMOTE_UI_REASON_BYTES, MAX_EXTENSION_REMOTE_UI_REVISION,
-    MAX_EXTENSION_REMOTE_UI_SGR_BYTES, MAX_EXTENSION_REMOTE_UI_SURFACES,
-    MAX_EXTENSION_REMOTE_UI_SURFACE_ID_BYTES, MAX_EXTENSION_REMOTE_UI_TITLE_BYTES,
+    validate_remote_ui_line, ExtensionRemoteUiChrome, ExtensionRemoteUiChromeRequest,
+    ExtensionRemoteUiCloseRequest, ExtensionRemoteUiCloseResult, ExtensionRemoteUiClosed,
+    ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey,
+    ExtensionRemoteUiKeyKind, ExtensionRemoteUiKeyModifier, ExtensionRemoteUiMouse,
+    ExtensionRemoteUiMouseButton, ExtensionRemoteUiMouseKind, ExtensionRemoteUiOpenRequest,
+    ExtensionRemoteUiOpenResult, ExtensionRemoteUiOperation, ExtensionRemoteUiPlacement,
+    ExtensionRemoteUiResize, EXTENSION_FEATURE_REMOTE_UI, MAX_EXTENSION_REMOTE_UI_FRAME_BYTES,
+    MAX_EXTENSION_REMOTE_UI_KEY_BYTES, MAX_EXTENSION_REMOTE_UI_LINES,
+    MAX_EXTENSION_REMOTE_UI_LINE_BYTES, MAX_EXTENSION_REMOTE_UI_REASON_BYTES,
+    MAX_EXTENSION_REMOTE_UI_REVISION, MAX_EXTENSION_REMOTE_UI_SGR_BYTES,
+    MAX_EXTENSION_REMOTE_UI_SURFACES, MAX_EXTENSION_REMOTE_UI_SURFACE_ID_BYTES,
+    MAX_EXTENSION_REMOTE_UI_TITLE_BYTES,
 };
 pub use extension_secret::{
     ExtensionSecretBroker, ExtensionSecretError, ExtensionSecretRequest, ExtensionSecretValue,

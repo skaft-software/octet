@@ -57,6 +57,8 @@ pub(super) struct ProcessConnection {
     pub(super) writer: mpsc::Sender<WriterFrame>,
     pub(super) child: Arc<Mutex<Child>>,
     pub(super) pending: PendingRequests,
+    pub(super) resources: Resources,
+    pub(super) resource_cleanup_changed: Arc<Notify>,
     pub(super) issued_resource_owners: IssuedResourceOwners,
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
@@ -126,6 +128,7 @@ pub(super) type PendingReply = Result<serde_json::Value, PendingError>;
 pub(super) type PendingSender = oneshot::Sender<PendingReply>;
 
 pub(super) struct PendingRequest {
+    pub(super) method: String,
     pub(super) sender: PendingSender,
     pub(super) terminal: Arc<AtomicU8>,
     pub(super) frame_state: Arc<AtomicU8>,
@@ -157,6 +160,7 @@ pub(super) const CHILD_RESPONDING: u8 = 1;
 pub(super) const CHILD_SETTLED: u8 = 2;
 
 pub(super) struct ChildRequest {
+    pub(super) exec_cancelled: bool,
     pub(super) parent_request_id: u64,
     pub(super) response_state: Arc<ChildResponseState>,
     pub(super) policy_intent: Option<ExtensionActionIntent>,
@@ -188,10 +192,18 @@ pub(super) struct ChildResponseClaim {
 
 impl ChildResponseClaim {
     pub(super) fn mark_admitted(&mut self) {
+        let child_requests = Arc::clone(&self.child_requests);
+        let mut children = lock_std_mutex(&child_requests);
+        self.mark_admitted_with_children(&mut children);
+    }
+
+    fn mark_admitted_with_children(
+        &mut self,
+        children: &mut HashMap<ExtensionRequestId, ChildRequest>,
+    ) {
         self.response_state
             .state
             .store(CHILD_SETTLED, Ordering::Release);
-        let mut children = lock_std_mutex(&self.child_requests);
         if children
             .get(&self.id)
             .is_some_and(|child| Arc::ptr_eq(&child.response_state, &self.response_state))
@@ -759,7 +771,7 @@ impl ProcessConnection {
         timeout: Duration,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         self.request_inner(
-            method, params, timeout, true, true, None, None, None, None, None,
+            method, params, timeout, true, true, None, None, None, None, None, None,
         )
         .await
     }
@@ -781,6 +793,7 @@ impl ProcessConnection {
             None,
             None,
             resource_owner,
+            None,
             None,
         )
         .await
@@ -805,32 +818,7 @@ impl ProcessConnection {
             None,
             resource_owner,
             Some(request_started),
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn request_with_cancellation(
-        self: &Arc<Self>,
-        method: &str,
-        params: serde_json::Value,
-        timeout: Duration,
-        cancellation: CancellationToken,
-        progress: ToolProgressSink,
-        resource_owner: Option<ExtensionResourceOwner>,
-        request_started: oneshot::Sender<ExtensionOperationToken>,
-    ) -> Result<serde_json::Value, ExtensionRuntimeError> {
-        self.request_inner(
-            method,
-            params,
-            timeout,
-            true,
-            true,
-            Some(cancellation),
-            Some(progress.clone()),
-            Some(progress),
-            resource_owner,
-            Some(request_started),
+            None,
         )
         .await
     }
@@ -859,6 +847,7 @@ impl ProcessConnection {
             None,
             resource_owner,
             Some(request_started),
+            None,
         )
         .await
     }
@@ -870,7 +859,7 @@ impl ProcessConnection {
         timeout: Duration,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         self.request_inner(
-            method, params, timeout, false, false, None, None, None, None, None,
+            method, params, timeout, false, false, None, None, None, None, None, None,
         )
         .await
     }
@@ -896,8 +885,46 @@ impl ProcessConnection {
             None,
             Some(resource_owner),
             None,
+            None,
         )
         .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn request_tool(
+        self: &Arc<Self>,
+        definition: ToolDefinition,
+        params: serde_json::Value,
+        timeout: Duration,
+        owner: Option<ExtensionResourceOwner>,
+        cancellation: Option<CancellationToken>,
+        progress: Option<ToolProgressSink>,
+        request_started: Option<oneshot::Sender<ExtensionOperationToken>>,
+        policy: Option<DynamicToolRegistration>,
+    ) -> Result<ToolCallOutput, ExtensionRuntimeError> {
+        let admission = Arc::new(ToolResultAdmission {
+            definition,
+            policy,
+            output: StdMutex::new(None),
+        });
+        self.request_inner(
+            methods::TOOL_CALL,
+            params,
+            timeout,
+            true,
+            true,
+            cancellation,
+            progress.clone(),
+            progress,
+            owner,
+            request_started,
+            Some(Arc::clone(&admission)),
+        )
+        .await?;
+        let output = lock_std_mutex(&admission.output)
+            .take()
+            .expect("successful tool result admitted");
+        Ok(output)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -913,6 +940,7 @@ impl ProcessConnection {
         child_interaction_progress: Option<ToolProgressSink>,
         resource_owner: Option<ExtensionResourceOwner>,
         request_started: Option<oneshot::Sender<ExtensionOperationToken>>,
+        tool_admission: Option<Arc<ToolResultAdmission>>,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(ExtensionRuntimeError::Closed("stdout is closed".into()));
@@ -923,6 +951,39 @@ impl ProcessConnection {
             ));
         }
 
+        let deadline = Instant::now() + timeout;
+        let admission_cancellation = cancellation.clone();
+        let resource_enabled =
+            read_std_lock(&self.protocol).supports(EXTENSION_FEATURE_RESOURCE_REFS_V1);
+        let bulk_enabled =
+            read_std_lock(&self.protocol).supports(EXTENSION_FEATURE_BULK_OBJECTS_V1);
+        let bulk_inputs = if bulk_enabled && tool_admission.is_some() {
+            Some(collect_blob_refs(&params["arguments"])?)
+        } else {
+            None
+        };
+        let resource_epoch = lock_std_mutex(&self.resources).retirement_epoch;
+        let resource_inputs = if resource_enabled {
+            tool_admission
+                .as_ref()
+                .map(|a| operation_inputs(&a.definition, &params["arguments"]))
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if resource_enabled
+            && resource_owner.is_none()
+            && tool_admission
+                .as_ref()
+                .and_then(|a| a.definition.operation.as_ref())
+                .is_some_and(|o| !o.resource_inputs.is_empty() || !o.resource_outputs.is_empty())
+        {
+            return Err(resource_error("resource_unavailable"));
+        }
+        if resource_owner.is_none() && bulk_inputs.as_ref().is_some_and(|refs| !refs.is_empty()) {
+            return Err(resource_error("blob_unavailable"));
+        }
         let cancellation_reason = Arc::new(StdMutex::new("request dropped".to_owned()));
         let operation_reason = Arc::clone(&cancellation_reason);
         let connection = Arc::clone(self);
@@ -946,6 +1007,12 @@ impl ProcessConnection {
                     "extension generation is draining".into(),
                 ));
             }
+            let mut params = params;
+            session_leaf::attach_request_session_mirror(
+                &connection,
+                resource_owner.as_ref(),
+                &mut params,
+            )?;
             let id = connection.next_id.fetch_add(1, Ordering::Relaxed);
             let message = serde_json::json!({
                 "jsonrpc": "2.0",
@@ -954,6 +1021,43 @@ impl ProcessConnection {
                 "params": params,
             });
             let line = connection.serialize_message(&message)?;
+            // Capacity waits hold no pins. Reserve the writer before the final,
+            // synchronous liveness/catalog recheck and exclusive admission.
+            let writer = connection
+                .writer
+                .reserve()
+                .await
+                .map_err(|_| ExtensionRuntimeError::Closed("extension writer closed".into()))?;
+            if connection.closed.load(Ordering::Acquire)
+                || (use_request_slot && connection.draining.load(Ordering::Acquire))
+            {
+                return Err(resource_error("resource_unavailable"));
+            }
+            if resource_enabled || bulk_enabled {
+                if let Some(admission) = &tool_admission {
+                    // Policy is live; definition/handler/revision stay frozen.
+                    if admission.definition.operation.is_some()
+                        && admission.policy.as_ref().is_some_and(|policy| {
+                            !policy.permits_operation(&admission.definition.name)
+                        })
+                    {
+                        return Err(ExtensionRuntimeError::Protocol(
+                            "operation execution policy denied".into(),
+                        ));
+                    }
+                    if let Some(owner) = &resource_owner {
+                        lock_std_mutex(&connection.resources).admit(
+                            id,
+                            owner.clone(),
+                            resource_epoch,
+                            &resource_inputs,
+                            bulk_inputs.as_deref(),
+                            &admission.definition,
+                            &message["params"]["arguments"],
+                        )?;
+                    }
+                }
+            }
             let (reply_tx, reply_rx) = oneshot::channel();
             let terminal = Arc::new(AtomicU8::new(REQUEST_ACTIVE));
             let frame_state = Arc::new(AtomicU8::new(FRAME_QUEUED));
@@ -964,13 +1068,14 @@ impl ProcessConnection {
             lock_std_mutex(&connection.pending).insert(
                 id,
                 PendingRequest {
+                    method: method.to_owned(),
                     sender: reply_tx,
                     terminal,
                     frame_state: Arc::clone(&frame_state),
                     cancellation_sent,
                     progress,
                     child_interaction_progress,
-                    resource_owner,
+                    resource_owner: resource_owner.clone(),
                     last_progress_sequence: None,
                     composition_files: Arc::new(CompositionFiles::default()),
                     tool_call_policy_digest: (method == methods::TOOL_CALL)
@@ -991,26 +1096,127 @@ impl ProcessConnection {
             }
             let mut registration =
                 PendingRegistration::new(&connection, id, Arc::clone(&operation_reason));
-            connection
-                .writer
-                .send(WriterFrame {
-                    line,
-                    state: frame_state,
-                    completion: None,
-                    bus_delivery: None,
-                })
-                .await
-                .map_err(|_| ExtensionRuntimeError::Closed("extension writer closed".into()))?;
+            writer.send(WriterFrame {
+                line,
+                state: frame_state,
+                completion: None,
+                bus_delivery: None,
+            });
 
             let reply = match reply_rx.await {
                 Ok(reply) => reply,
                 Err(_) => Err(PendingError::Closed("response channel closed".into())),
             };
+            // Receiving a terminal is execution settlement, NOT result admission.
+            // Complete decoding precedes the shared owner/cancellation disposition gate.
+            let reply = reply.map_err(|error| pending_error(error, method))?;
+            if let Some(admission) = &tool_admission {
+                let output = decode_tool_call_output(
+                    &connection,
+                    &admission.definition,
+                    resource_owner.as_ref().map(|o| o.session_id.as_str()),
+                    reply.clone(),
+                )?;
+                let outputs = if resource_enabled {
+                    operation_outputs(&admission.definition, &output)?
+                } else {
+                    Vec::new()
+                };
+                let blobs = if bulk_enabled {
+                    let blobs = collect_blob_refs(
+                        output
+                            .structured_content
+                            .as_ref()
+                            .unwrap_or(&serde_json::Value::Null),
+                    )?;
+                    if !collect_blob_refs(&output.metadata)?.is_empty()
+                        || (!blobs.is_empty()
+                            && (output.is_error || admission.definition.output_schema.is_none()))
+                    {
+                        return Err(resource_error("blob_unavailable"));
+                    }
+                    let storage = lock_std_mutex(&connection.resources)
+                        .bulk
+                        .clone()
+                        .expect("negotiated bulk store");
+                    let transfer = storage.lock().transfer_directory().to_owned();
+                    validate_no_bulk_locators(&reply, &transfer)?;
+                    blobs
+                } else {
+                    Vec::new()
+                };
+                let diagnostics = diagnostic_blob_ids(
+                    &connection,
+                    resource_owner.as_ref().map(|o| o.session_id.as_str()),
+                    &output.metadata,
+                )?;
+                if !diagnostics.is_empty() && !bulk_enabled {
+                    return Err(resource_error("unsupported_feature"));
+                }
+                #[cfg(test)]
+                {
+                    let barrier = {
+                        lock_std_mutex(&connection.resources)
+                            .before_result_admission
+                            .take()
+                    };
+                    if let Some(barrier) = barrier {
+                        barrier.pause().await;
+                    }
+                }
+                if resource_enabled || bulk_enabled {
+                    if resource_owner.is_some() {
+                        let mut registry = lock_std_mutex(&connection.resources);
+                        if admission_cancellation
+                            .as_ref()
+                            .is_some_and(|c| c.is_cancelled())
+                        {
+                            return Err(ExtensionRuntimeError::Cancelled {
+                                method: method.to_owned(),
+                                reason: "user".into(),
+                            });
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(ExtensionRuntimeError::Timeout {
+                                method: method.to_owned(),
+                            });
+                        }
+                        admit_reference_outputs(
+                            &mut registry,
+                            id,
+                            &outputs,
+                            bulk_enabled.then_some(blobs.as_slice()),
+                            &diagnostics,
+                            output.is_error,
+                        )?;
+                        let _ = connection.events.send(ExtensionEvent::Diagnostic {
+                            message: format!(
+                                "reference publication {}: request={id}, resources={}, blobs={}",
+                                if output.is_error {
+                                    "abandoned"
+                                } else {
+                                    "committed"
+                                },
+                                outputs.len(),
+                                blobs.len()
+                            ),
+                        });
+                    } else if !outputs.is_empty() || !blobs.is_empty() || !diagnostics.is_empty() {
+                        return Err(resource_error(if !outputs.is_empty() {
+                            "resource_unavailable"
+                        } else {
+                            "blob_unavailable"
+                        }));
+                    }
+                    connection.resource_cleanup_changed.notify_one();
+                }
+                *lock_std_mutex(&admission.output) = Some(output);
+            }
             registration.disarm();
             // Pending cancellation carries a reason, while this future retains
             // the admitted JSON-RPC method. Keep that provenance on shutdown or
             // reload just as on the direct cancellation and timeout paths.
-            reply.map_err(|error| pending_error(error, method))
+            Ok(reply)
         };
         tokio::pin!(operation);
         let timed = tokio::time::timeout(timeout, &mut operation);
@@ -1144,6 +1350,10 @@ impl ProcessConnection {
     pub(super) fn cancel_request(self: &Arc<Self>, id: u64, reason: &str) {
         let request = {
             let mut pending = lock_std_mutex(&self.pending);
+            if lock_std_mutex(&self.resources).cancel_parent(id) {
+                let _ = self.events.send(ExtensionEvent::Diagnostic { message: format!("resource parent abandoned: request={id}; cancellation requested, execution independently tracked") });
+            }
+            self.resource_cleanup_changed.notify_one();
             let Some(request) = pending.get(&id) else {
                 return;
             };
@@ -1159,7 +1369,22 @@ impl ProcessConnection {
             {
                 return;
             }
-            pending.remove(&id)
+            let request = pending.remove(&id);
+            // Checkpoint commit holds pending through native mutation and ACK
+            // admission. Publish retirement before releasing that disposition;
+            // there must be no cancelled-terminal/current-surface window.
+            lock_std_mutex(&self.tombstones).insert(id, self.tombstone_ttl);
+            self.remote_ui.settle_parent(id, true);
+            if read_std_lock(&self.protocol).supports(EXTENSION_FEATURE_REMOTE_UI) {
+                if let Some(owner) = request
+                    .as_ref()
+                    .and_then(|request| request.resource_owner.as_ref())
+                {
+                    lock_std_mutex(&self.issued_resource_owners).remove(owner);
+                    self.remote_ui.discard_owner(owner);
+                }
+            }
+            request
         };
         let Some(request) = request else {
             return;
@@ -1168,15 +1393,7 @@ impl ProcessConnection {
         let _ = request
             .sender
             .send(Err(PendingError::Cancelled(reason.to_owned())));
-        lock_std_mutex(&self.tombstones).insert(id, self.tombstone_ttl);
         self.cancel_children(id, reason);
-        self.remote_ui.settle_parent(id, true);
-        if read_std_lock(&self.protocol).supports(EXTENSION_FEATURE_REMOTE_UI) {
-            if let Some(owner) = &request.resource_owner {
-                lock_std_mutex(&self.issued_resource_owners).remove(owner);
-                self.remote_ui.discard_owner(owner);
-            }
-        }
 
         let frame_was_admitted = request
             .frame_state
@@ -1187,6 +1404,11 @@ impl ProcessConnection {
                 Ordering::Acquire,
             )
             .is_err();
+        if !frame_was_admitted {
+            lock_std_mutex(&self.resources).settle_execution(id);
+            self.resource_cleanup_changed.notify_one();
+            lock_std_mutex(&self.tombstones).remove(id);
+        }
         let cancellation_supported = read_std_lock(&self.protocol).supports("request_cancellation");
         if frame_was_admitted
             && cancellation_supported
@@ -1196,6 +1418,8 @@ impl ProcessConnection {
                 methods::CANCEL_REQUEST,
                 serde_json::json!({"id": id, "reason": reason}),
             );
+            self.schedule_cancellation_escalation(id);
+        } else if frame_was_admitted && !cancellation_supported {
             self.schedule_cancellation_escalation(id);
         }
     }
@@ -1214,7 +1438,8 @@ impl ProcessConnection {
         let connection = Arc::clone(self);
         tokio::spawn(async move {
             tokio::time::sleep(connection.cancellation_grace).await;
-            let unresolved = lock_std_mutex(&connection.tombstones).contains(id);
+            let unresolved = lock_std_mutex(&connection.tombstones).contains(id)
+                || lock_std_mutex(&connection.resources).execution_pending(id);
             if unresolved && !connection.closed.load(Ordering::Acquire) {
                 update_health(
                     &connection.health,
@@ -1237,6 +1462,109 @@ impl ProcessConnection {
         for id in ids {
             self.cancel_request(id, reason);
         }
+    }
+
+    /// Synchronous editor-only mutation/ACK disposition. Reserve capacity before
+    /// claiming anything, then hold pending -> children -> surface through commit.
+    /// Cancellation and retirement take these same locks, never the reverse.
+    pub(super) fn commit_editor_checkpoint(
+        &self,
+        id: &ExtensionRequestId,
+        owner: &ExtensionResourceOwner,
+        checkpoint: &ExtensionEditorCheckpoint,
+        commit: impl FnOnce() -> Result<(), (ExtensionRequestFailure, String)>,
+    ) -> Result<(), (ExtensionRequestFailure, String)> {
+        let stale = || {
+            (
+                ExtensionRequestFailure::NotForegroundOwner,
+                "editor checkpoint disposition is no longer current".to_owned(),
+            )
+        };
+        checkpoint.validate()?;
+        let response = serde_json::json!({
+            "jsonrpc":"2.0", "id":id, "result":{
+                "input_revision":checkpoint.input_revision,
+                "checkpoint_revision":checkpoint.checkpoint_revision,
+            }
+        });
+        // Match send_child_envelope_admitted's version-specific wire path; do
+        // not silently apply another API version's envelope/number restrictions.
+        let mut line = if is_canonical_api(&read_std_lock(&self.protocol).version) {
+            api_v03::parse_json_rpc_envelope(response.clone())
+                .map_err(|error| (ExtensionRequestFailure::InvalidRequest, error.to_string()))?;
+            api_v03::canonical_json(&response)
+                .map_err(|error| (ExtensionRequestFailure::InvalidRequest, error.to_string()))?
+                .into_bytes()
+        } else {
+            serde_json::to_vec(&response).expect("editor checkpoint acknowledgement is JSON")
+        };
+        line.push(b'\n');
+        if line.len() > self.max_message_bytes() {
+            return Err((
+                ExtensionRequestFailure::BoundsExceeded,
+                "editor checkpoint acknowledgement exceeds the transport bound".into(),
+            ));
+        }
+        let permit = self.writer.try_reserve().map_err(|error| {
+            (
+                ExtensionRequestFailure::InvalidRequest,
+                format!("editor checkpoint writer admission unavailable: {error}"),
+            )
+        })?;
+        let pending = lock_std_mutex(&self.pending);
+        if !lock_std_mutex(&self.issued_resource_owners).contains(owner) {
+            return Err(stale());
+        }
+        let mut children = lock_std_mutex(&self.child_requests);
+        let child = children.get(id).ok_or_else(stale)?;
+        if child.parent_request_id != 0
+            && !pending
+                .get(&child.parent_request_id)
+                .is_some_and(|parent| parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE)
+        {
+            return Err(stale());
+        }
+        let response_state = Arc::clone(&child.response_state);
+        response_state
+            .state
+            .compare_exchange(
+                CHILD_ACTIVE,
+                CHILD_RESPONDING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| stale())?;
+        let mut claim = ChildResponseClaim {
+            child_requests: Arc::clone(&self.child_requests),
+            id: id.clone(),
+            response_state,
+            admitted: false,
+            abort_cancel: Some((self.writer.clone(), Arc::clone(&self.frame_limit))),
+        };
+        let result = self
+            .remote_ui
+            .with_editor_checkpoint(owner, checkpoint, || {
+                if self.closed.load(Ordering::Acquire) || self.draining.load(Ordering::Acquire) {
+                    return Err(stale());
+                }
+                // The callback is only local shell validation/mutation: no await,
+                // process/mailbox reentry, or IO. Nothing fallible follows mutation.
+                commit()?;
+                claim.mark_admitted_with_children(&mut children);
+                permit.send(WriterFrame {
+                    line,
+                    state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
+                    completion: None,
+                    bus_delivery: None,
+                });
+                Ok(())
+            });
+        drop(children);
+        // Failed validation restores the existing claim only after its map lock
+        // is released; true parent cancellation remains excluded until then.
+        drop(claim);
+        drop(pending);
+        result
     }
 
     pub(super) async fn send_child_response<T: Serialize + ?Sized>(
@@ -1467,6 +1795,7 @@ impl ProcessConnection {
                 tokio::pin!(changed);
                 changed.as_mut().enable();
                 if lock_std_mutex(&self.pending).is_empty()
+                    && !lock_std_mutex(&self.resources).has_executions()
                     && self.active_admissions.load(Ordering::Acquire) == 0
                     && self.artifact_leases.load(Ordering::Acquire) == 0
                 {
@@ -1480,6 +1809,7 @@ impl ProcessConnection {
     }
 
     pub(super) async fn shutdown(self: &Arc<Self>) -> bool {
+        lock_std_mutex(&self.resources).retire_generation();
         self.begin_drain();
         self.cancel_all_pending("shutdown");
         self.cancel_all_provider_streams("shutdown");
@@ -1548,6 +1878,8 @@ impl ProcessConnection {
             }
         };
         self.closed.store(true, Ordering::Release);
+        lock_std_mutex(&self.resources).terminate_generation();
+        self.resource_cleanup_changed.notify_one();
         update_health(&self.health, ExtensionHealthState::Stopped, None);
         if quiescent {
             self.settle_artifacts();
@@ -1556,6 +1888,7 @@ impl ProcessConnection {
     }
 
     pub(super) async fn terminate(&self) {
+        lock_std_mutex(&self.resources).retire_generation();
         self.draining.store(true, Ordering::Release);
         self.session_leaf.clear();
         self.remote_ui.clear();
@@ -1567,6 +1900,8 @@ impl ProcessConnection {
         let _ = child.kill().await;
         let _ = child.wait().await;
         self.closed.store(true, Ordering::Release);
+        lock_std_mutex(&self.resources).terminate_generation();
+        self.resource_cleanup_changed.notify_one();
         let current = read_std_lock(&self.health).state;
         if !matches!(
             current,

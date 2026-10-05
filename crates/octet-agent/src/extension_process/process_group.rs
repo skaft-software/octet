@@ -63,6 +63,12 @@ pub const EXTENSION_FEATURE_AGENT_SESSIONS: &str = "agent_sessions";
 /// Host-confirmed configured worker routing and bounded discovery.
 pub const EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1: &str = "agent_model_selection_v1";
 
+/// API 0.4 bounded, owner-scoped child observations with loss-detecting cursors.
+pub const EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1: &str = "agent_session_events_v1";
+
+/// API 0.4 retained issued-owner child calls and explicit owned-tree shutdown.
+pub const EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1: &str = "agent_session_lifetime_v1";
+
 /// API `0.2` first-party delegation telemetry contract.
 pub const EXTENSION_FEATURE_DELEGATION_TELEMETRY: &str = "delegation_telemetry_v1";
 
@@ -89,6 +95,10 @@ pub const EXTENSION_FEATURE_TERMINAL_INPUT: &str = "terminal_input";
 
 /// API `0.2` bounded host-mediated autocomplete queries.
 pub const EXTENSION_FEATURE_AUTOCOMPLETE: &str = "autocomplete";
+
+/// API `0.4` bounded suffix replacement and intra-value completion cursors.
+/// Requires the existing host-mediated `autocomplete` feature.
+pub const EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1: &str = "autocomplete_edit_v1";
 
 /// API `0.2` initialization-time semantic tool-renderer discovery.
 pub const EXTENSION_FEATURE_DYNAMIC_TOOL_RENDERERS: &str = "dynamic_tool_renderers";
@@ -145,6 +155,12 @@ pub const EXTENSION_FEATURE_CACHE_WARMING_DECISION: &str = "cache_warming_decisi
 
 /// API 0.4 host-owned local compaction replacement (vision models only).
 pub const EXTENSION_FEATURE_COMPACTION_STRATEGY: &str = "compaction_strategy";
+
+/// API 0.4 before-prompt system disclosure and per-run replacement.
+pub const EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1: &str = "before_prompt_state_v1";
+
+/// API 0.4 real encoded provider request, header and response hooks.
+pub const EXTENSION_FEATURE_PIPELINE_HOOKS_V1: &str = "pipeline_hooks_v1";
 
 /// Optional API `0.4` request-scoped host tool composition service.
 pub const EXTENSION_FEATURE_TOOL_COMPOSITION: &str = "tool_composition_v1";
@@ -868,6 +884,17 @@ impl ProcessGroupGuard {
                 registration_id: self.registration_id,
             }
         }
+    }
+
+    /// Send SIGTERM to this registered group without disarming its cleanup guard.
+    /// Callers still own the bounded SIGKILL/reap fallback.
+    pub fn signal_terminate(&self) {
+        #[cfg(unix)]
+        if let Some(id) = valid_process_group_id(self.process_group_id.load(Ordering::Acquire)) {
+            signal_registered_processes(&[(id, self.registration_id)], libc::SIGTERM);
+        }
+        #[cfg(not(unix))]
+        self.terminate_now();
     }
 
     /// Immediately force-terminates the owned process group.

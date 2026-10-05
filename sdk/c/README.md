@@ -36,8 +36,10 @@ integers (-9007199254740991..9007199254740991), booleans, required/optional fiel
 String schema lengths count Unicode scalars; a separate 128 KiB UTF-8 byte cap
 applies. Tool names follow the actual API 0.4 host's 64-byte ASCII bound.
 Nested structs, array/union builders, defaults and host context aren't exposed
-through this initial C ABI. All languages share its tool-only feature limitations;
-see the [complete missing-capability list](../rust/README.md#concrete-missing-capabilities).
+through this initial C ABI. ABI 1 remains text-result-only: Rust's additive
+`typed_tool`, structured results, diagnostics and progress authoring helpers do
+not change C layouts or callbacks. The shared runtime may negotiate progress,
+but this C surface does not emit it. See the [complete missing-capability list](../rust/README.md#concrete-missing-capabilities).
 
 ## Local source build
 

@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "editor_checkpoint_tests.rs"]
+mod editor_checkpoint_tests;
+
 /// One admitted Wave-1 owner-scoped request awaiting a foreground projection.
 pub(super) struct AdmittedExtensionRequest {
     pub(super) request_id: ExtensionRequestId,
@@ -187,6 +191,11 @@ where
         )?;
         return Ok(None);
     }
+    let is_editor_checkpoint = method == methods::COMPOSER_SET
+        && params
+            .get("editor_checkpoint")
+            .is_some_and(|checkpoint| !checkpoint.is_null());
+    let editor_checkpoint = validated_editor_checkpoint(state, method, &params);
     let request: T = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(error) => {
@@ -200,14 +209,38 @@ where
         }
     };
     let parent_request_id = request.parent_request_id();
-    let parent_active = lock_std_mutex(&state.pending)
-        .get(&parent_request_id)
-        .is_some_and(|pending| pending.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE);
-    let owner = if parent_active {
-        let Some(registered) =
-            register_child_request(state, request_id.clone(), Some(parent_request_id), method)?
-        else {
+    let parent_active = {
+        let pending = lock_std_mutex(&state.pending);
+        if is_editor_checkpoint && lock_std_mutex(&state.tombstones).contains(parent_request_id) {
+            reject_typed_child_request(
+                state,
+                request_id,
+                ExtensionRequestFailure::NotForegroundOwner,
+                "editor checkpoint parent was cancelled",
+            )?;
             return Ok(None);
+        }
+        pending
+            .get(&parent_request_id)
+            .is_some_and(|pending| pending.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE)
+    };
+    let owner = if parent_active {
+        let retained = register_retained_editor_checkpoint(
+            state,
+            &request_id,
+            parent_request_id,
+            request.request_resource_owner(),
+            editor_checkpoint.as_ref(),
+        )?;
+        let registered = if let Some(registered) = retained {
+            registered
+        } else {
+            let Some(registered) =
+                register_child_request(state, request_id.clone(), Some(parent_request_id), method)?
+            else {
+                return Ok(None);
+            };
+            registered
         };
         registered.resource_owner
     } else {
@@ -255,6 +288,65 @@ where
             owner,
         },
     )))
+}
+
+/// Only a bounded, negotiated editor checkpoint can outlive an active parent.
+/// Typed body parsing and the normal composer gate still run in admission.
+fn validated_editor_checkpoint(
+    state: &ProtocolReadState,
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<ExtensionEditorCheckpoint> {
+    if method != methods::COMPOSER_SET || require_remote_ui(state).is_err() {
+        return None;
+    }
+    let checkpoint: ExtensionEditorCheckpoint =
+        serde_json::from_value(params.get("editor_checkpoint")?.clone()).ok()?;
+    checkpoint.validate().ok()?;
+    bounded_plain_text_failure(
+        "composer text",
+        params.get("text")?.as_str()?,
+        MAX_EXTENSION_COMPOSER_TEXT_BYTES,
+    )
+    .ok()?;
+    Some(checkpoint)
+}
+
+fn register_retained_editor_checkpoint(
+    state: &ProtocolReadState,
+    request_id: &ExtensionRequestId,
+    parent_request_id: u64,
+    explicit_owner: Option<&ExtensionResourceOwner>,
+    checkpoint: Option<&ExtensionEditorCheckpoint>,
+) -> Result<Option<RegisteredChildRequest>, String> {
+    let (Some(owner), Some(checkpoint)) = (explicit_owner, checkpoint) else {
+        return Ok(None);
+    };
+    // Hold the ordinary registration lock so only a still-active authoritative
+    // parent can grant this lifetime. This is not a later shell commit guard.
+    let pending = lock_std_mutex(&state.pending);
+    let authoritative = pending
+        .get(&parent_request_id)
+        .filter(|pending| pending.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE)
+        .and_then(|pending| pending.resource_owner.as_ref());
+    if authoritative != Some(owner)
+        || validate_explicit_request_owner(state, owner).is_err()
+        || state
+            .remote_ui
+            .with_editor_checkpoint(owner, checkpoint, || Ok(()))
+            .is_err()
+    {
+        return Ok(None);
+    }
+    // The mailbox proves an acknowledged editor and exact mount identity.
+    // Commit rechecks these under the shared disposition; the product also
+    // validates input/checkpoint clocks, foreground and native draft revision.
+    // Keep the real wire parent and authoritative owner; only this child's
+    // cancellation lifetime is independent of normal successful settlement.
+    let mut registered = insert_child_request(state, request_id.clone(), None, None)?;
+    registered.resource_owner = Some(owner.clone());
+    drop(pending);
+    Ok(Some(registered))
 }
 
 /// Validates one explicit resource owner against this process generation and
@@ -421,6 +513,7 @@ pub(super) fn insert_child_request(
     match children.entry(id) {
         std::collections::hash_map::Entry::Vacant(entry) => {
             entry.insert(ChildRequest {
+                exec_cancelled: false,
                 parent_request_id: parent,
                 response_state: Arc::clone(&response_state),
                 policy_intent: None,
@@ -635,7 +728,7 @@ pub(super) fn dispatch_progress(
     state: &ProtocolReadState,
     notification: ExtensionProgressNotification,
 ) -> Result<(), String> {
-    let sink = {
+    let (sink, owner, method) = {
         let mut pending = lock_std_mutex(&state.pending);
         let Some(request) = pending.get_mut(&notification.request_id) else {
             let _ = state.events.send(ExtensionEvent::Diagnostic {
@@ -659,12 +752,29 @@ pub(super) fn dispatch_progress(
             return Ok(());
         }
         request.last_progress_sequence = Some(notification.sequence);
-        request.progress.clone()
+        (
+            request.progress.clone(),
+            request.resource_owner.clone(),
+            request.method.clone(),
+        )
     };
     let Some(sink) = sink else {
         return Ok(());
     };
     match notification.event {
+        ExtensionProgressEvent::PartialResult { result } => {
+            require_feature(state, EXTENSION_FEATURE_CONTENT_PARTS)?;
+            if method != methods::TOOL_CALL {
+                return Err("partial results require an active tool/call".into());
+            }
+            let output = decode_progress_output(
+                state,
+                owner.as_ref().map(|owner| owner.session_id.as_str()),
+                result,
+            )
+            .map_err(|error| error.to_string())?;
+            sink.send_one(crate::tool::ToolProgress::PartialResult(Arc::new(output)));
+        }
         ExtensionProgressEvent::Status {
             mut message,
             current,

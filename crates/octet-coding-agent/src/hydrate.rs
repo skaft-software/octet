@@ -459,6 +459,12 @@ pub enum TranscriptItem {
         /// Exact immutable sRGB gutter colour recorded with the prompt.
         prompt_color: Option<String>,
     },
+    /// Visible extension message, distinct from user-authored prompts.
+    CustomMessage {
+        custom_type: String,
+        text: String,
+        details: Option<serde_json::Value>,
+    },
     Assistant(String),
     Reasoning(String),
     ToolCall {
@@ -811,6 +817,20 @@ fn hydrate_entries_with_image_budget(
     let mut items = Vec::new();
     let mut image_budget = ToolImageBudget::default();
     for entry in entries {
+        if let Some(custom) = entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.custom_message.as_ref())
+        {
+            if custom.display {
+                items.push(TranscriptItem::CustomMessage {
+                    custom_type: custom.custom_type.clone(),
+                    text: custom.text(),
+                    details: custom.details.clone(),
+                });
+            }
+            continue;
+        }
         match &entry.value {
             EntryValue::Message(message) => {
                 // New sessions attach the exact prompt model/source to the
@@ -1436,6 +1456,7 @@ mod tests {
             .append_with_metadata(
                 user("prompt for model A"),
                 Some(EntryMetadata {
+                    custom_message: None,
                     prompt_model: Some(ModelId("local-alias-a".into())),
                     prompt_model_source: Some("deepseek".into()),
                     prompt_color: Some("#123456".into()),
@@ -1462,6 +1483,7 @@ mod tests {
             .append_with_metadata(
                 user("prompt for model B"),
                 Some(EntryMetadata {
+                    custom_message: None,
                     prompt_model: Some(ModelId("local-alias-b".into())),
                     prompt_model_source: Some("anthropic".into()),
                     prompt_color: Some("#abcdef".into()),

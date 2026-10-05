@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use octet_agent::extension_process::{
-    ExtensionProcess, ExtensionRequestFailure, ExtensionResourceOwner,
+    ExtensionEditorCheckpoint, ExtensionProcess, ExtensionRequestFailure, ExtensionResourceOwner,
 };
 use octet_agent::extension_remote_ui::{
-    ExtensionRemoteUiClosed, ExtensionRemoteUiFrame, ExtensionRemoteUiKey,
-    ExtensionRemoteUiKeyKind, ExtensionRemoteUiKeyModifier, ExtensionRemoteUiMouse,
-    ExtensionRemoteUiMouseButton, ExtensionRemoteUiMouseKind, ExtensionRemoteUiOperation,
-    ExtensionRemoteUiPlacement, ExtensionRemoteUiResize,
+    ExtensionRemoteUiClosed, ExtensionRemoteUiEditorInput, ExtensionRemoteUiFrame,
+    ExtensionRemoteUiKey, ExtensionRemoteUiKeyKind, ExtensionRemoteUiKeyModifier,
+    ExtensionRemoteUiMouse, ExtensionRemoteUiMouseButton, ExtensionRemoteUiMouseKind,
+    ExtensionRemoteUiOperation, ExtensionRemoteUiPlacement, ExtensionRemoteUiResize,
+    MAX_EXTENSION_REMOTE_UI_REVISION,
 };
 
 use crate::tui::extension_components::{ExtensionComponentSurface, MAX_LIVE_COMPONENTS};
@@ -20,6 +21,20 @@ use crate::tui::view::InteractiveShell;
 pub(crate) struct Projection {
     pub(crate) components: Arc<ExtensionComponentSurface>,
     pub(crate) mounts: Vec<MountView>,
+    pub(crate) chrome: Option<ChromeState>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChromeState {
+    pub(crate) title: Option<String>,
+    pub(crate) working: crate::tui::view::ShellExtensionWorking,
+    pub(crate) hidden_thinking_label: Option<String>,
+}
+
+struct ChromeLease {
+    process: ExtensionProcess,
+    owner: ExtensionResourceOwner,
+    state: ChromeState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +72,25 @@ struct Mount {
     surface_id: String,
     view: MountView,
     revision: Option<u64>,
+    editor: Option<EditorRecovery>,
+}
+
+/// The hidden native composer is the recovery point, not the last painted frame.
+/// A mount's clock is independent of render revisions and never survives removal.
+struct EditorRecovery {
+    input_revision: u64,
+    acknowledged_input_revision: u64,
+    checkpoint_revision: u64,
+    composer_revision: u64,
+}
+
+impl EditorRecovery {
+    fn notice(&self) -> Option<String> {
+        let pending = self.input_revision - self.acknowledged_input_revision;
+        (pending != 0).then(|| format!(
+            "Custom editor closed; {pending} input events were not acknowledged and may contain edits that were not recovered. The native draft retains the last host checkpoint."
+        ))
+    }
 }
 
 #[derive(Default)]
@@ -64,19 +98,21 @@ pub(super) struct RemoteUi {
     mounts: Vec<Mount>,
     components: Arc<ExtensionComponentSurface>,
     next_id: u64,
+    chrome: Option<ChromeLease>,
 }
 
 type Refusal = (ExtensionRequestFailure, String);
 
 impl RemoteUi {
     pub(super) fn is_empty(&self) -> bool {
-        self.mounts.is_empty()
+        self.mounts.is_empty() && self.chrome.is_none()
     }
 
     pub(super) fn projection(&self) -> Projection {
         Projection {
             components: self.components.clone(),
             mounts: self.mounts.iter().map(|mount| mount.view.clone()).collect(),
+            chrome: self.chrome.as_ref().map(|lease| lease.state.clone()),
         }
     }
 
@@ -90,6 +126,44 @@ impl RemoteUi {
     ) -> Result<serde_json::Value, Refusal> {
         operation.validate()?;
         match operation {
+            ExtensionRemoteUiOperation::Chrome { chrome } => {
+                use octet_agent::extension_remote_ui::ExtensionRemoteUiChrome as Chrome;
+                match chrome {
+                    Chrome::Get => {}
+                    Chrome::ToolsExpanded { expanded } => shell.set_verbose_tools(expanded),
+                    change => {
+                        if self
+                            .chrome
+                            .as_ref()
+                            .is_none_or(|lease| lease.owner != owner)
+                        {
+                            self.chrome = Some(ChromeLease {
+                                process,
+                                owner,
+                                state: ChromeState::default(),
+                            });
+                        }
+                        let state = &mut self.chrome.as_mut().expect("chrome lease").state;
+                        match change {
+                            Chrome::Title { title } => state.title = Some(title),
+                            Chrome::WorkingMessage { message } => state.working.message = message,
+                            Chrome::WorkingVisible { visible } => {
+                                state.working.visible = Some(visible)
+                            }
+                            Chrome::WorkingIndicator {
+                                frames,
+                                interval_ms,
+                            } => {
+                                state.working.frames = frames;
+                                state.working.interval_ms = interval_ms;
+                            }
+                            Chrome::HiddenThinking { label } => state.hidden_thinking_label = label,
+                            Chrome::Get | Chrome::ToolsExpanded { .. } => unreachable!(),
+                        }
+                    }
+                }
+                Ok(serde_json::json!({"tools_expanded": shell.verbose_tools()}))
+            }
             ExtensionRemoteUiOperation::Open {
                 surface_id,
                 title,
@@ -147,6 +221,17 @@ impl RemoteUi {
                     .map_err(|error| {
                         (ExtensionRequestFailure::BoundsExceeded, error.to_string())
                     })?;
+                let editor =
+                    (placement == ExtensionRemoteUiPlacement::Editor).then(|| EditorRecovery {
+                        input_revision: 0,
+                        acknowledged_input_revision: 0,
+                        checkpoint_revision: 0,
+                        composer_revision: shell.extension_editor_snapshot().revision,
+                    });
+                let mut result = serde_json::json!({"columns": columns, "rows": rows});
+                if editor.is_some() {
+                    result["editor_mount_id"] = id.clone().into();
+                }
                 self.mounts.push(Mount {
                     process,
                     owner,
@@ -160,8 +245,9 @@ impl RemoteUi {
                         mouse_capture,
                     },
                     revision: None,
+                    editor,
                 });
-                Ok(serde_json::json!({"columns": columns, "rows": rows}))
+                Ok(result)
             }
             ExtensionRemoteUiOperation::Close { surface_id } => {
                 let index = self
@@ -176,13 +262,15 @@ impl RemoteUi {
                     })?;
                 // The ordinary close reply commits the backend removal. A
                 // ui/closed notification here would remove it before that reply.
-                self.remove(index, "closed by extension", false);
+                if let Some(notice) = self.remove(index, "closed by extension", false) {
+                    shell.notice(notice);
+                }
                 Ok(serde_json::json!({}))
             }
         }
     }
 
-    fn remove(&mut self, index: usize, reason: &str, notify: bool) {
+    fn remove(&mut self, index: usize, reason: &str, notify: bool) -> Option<String> {
         let mount = self.mounts.remove(index);
         Arc::make_mut(&mut self.components).remove_component(&mount.view.id);
         if notify
@@ -197,15 +285,78 @@ impl RemoteUi {
                     reason: reason.to_owned(),
                 });
         }
+        mount.editor.as_ref().and_then(EditorRecovery::notice)
     }
 
-    pub(super) fn revoke(&mut self, reason: &str) {
+    pub(super) fn revoke(&mut self, reason: &str) -> Vec<String> {
+        self.chrome = None;
+        let mut notices = Vec::new();
         while !self.mounts.is_empty() {
-            self.remove(self.mounts.len() - 1, reason, true);
+            notices.extend(self.remove(self.mounts.len() - 1, reason, true));
         }
+        notices
+    }
+
+    pub(super) fn editor_owns_composer(&self) -> bool {
+        self.mounts.iter().any(|mount| mount.editor.is_some())
+    }
+
+    /// Local half of the synchronous process checkpoint commit. The caller must
+    /// hold `ExtensionProcess::commit_editor_checkpoint`'s disposition through
+    /// this mutation and ACK admission; never reenter process APIs here.
+    pub(super) fn checkpoint_editor(
+        &mut self,
+        owner: &ExtensionResourceOwner,
+        checkpoint: &ExtensionEditorCheckpoint,
+        text: String,
+        shell: &mut InteractiveShell,
+    ) -> Result<(), Refusal> {
+        let invalid = |detail: &str| (ExtensionRequestFailure::InvalidRequest, detail.to_owned());
+        let mount = self
+            .mounts
+            .iter_mut()
+            .find(|mount| {
+                mount.owner == *owner
+                    && mount.surface_id == checkpoint.surface_id
+                    && mount.view.id == checkpoint.mount_id
+            })
+            .ok_or_else(|| invalid("editor checkpoint belongs to a retired or foreign mount"))?;
+        let editor = mount
+            .editor
+            .as_mut()
+            .ok_or_else(|| invalid("composer checkpoints require an editor mount"))?;
+        if checkpoint.input_revision > editor.input_revision
+            || checkpoint.input_revision < editor.acknowledged_input_revision
+            || checkpoint.checkpoint_revision <= editor.checkpoint_revision
+        {
+            return Err(invalid(
+                "editor checkpoint revision is stale or was never issued",
+            ));
+        }
+        let snapshot = shell.extension_editor_snapshot();
+        if !snapshot.focused || snapshot.revision != editor.composer_revision {
+            return Err(invalid(
+                "native composer changed or has another input owner",
+            ));
+        }
+        // The process guard excludes concurrent cancellation and retirement;
+        // the same shell owner serializes rescue, local edits and focus changes.
+        let committed = shell.extension_set_editor(text);
+        editor.composer_revision = committed.revision;
+        editor.acknowledged_input_revision = checkpoint.input_revision;
+        editor.checkpoint_revision = checkpoint.checkpoint_revision;
+        Ok(())
     }
 
     pub(super) fn reconcile(&mut self, foreground: Option<&str>, size: (u16, u16)) -> Vec<String> {
+        if self.chrome.as_ref().is_some_and(|lease| {
+            foreground != Some(lease.owner.session_id.as_str())
+                || !lease.process.is_running()
+                || lease.process.extension_instance_id() != lease.owner.extension_instance_id
+                || lease.process.health_snapshot().generation != lease.owner.process_generation
+        }) {
+            self.chrome = None;
+        }
         let mut errors = Vec::new();
         let (columns, rows) = (size.0.max(1), size.1.max(1));
         let mut index = 0;
@@ -219,11 +370,11 @@ impl RemoteUi {
                     .process
                     .remote_ui_surface_is_current(&mount.owner, &mount.surface_id)
             {
-                self.remove(
+                errors.extend(self.remove(
                     index,
                     "remote UI foreground owner or process generation ended",
                     true,
-                );
+                ));
                 continue;
             }
             if (mount.view.columns, mount.view.rows) != (columns, rows) {
@@ -248,7 +399,7 @@ impl RemoteUi {
                         "remote UI {} resize delivery failed: {error}",
                         mount.view.title
                     );
-                    self.remove(index, "remote UI resize delivery failed", true);
+                    errors.extend(self.remove(index, "remote UI resize delivery failed", true));
                     errors.push(detail);
                     continue;
                 }
@@ -317,13 +468,36 @@ impl RemoteUi {
                 && key.modifiers.contains(KeyModifiers::CONTROL)
             {
                 if key.kind == KeyEventKind::Press {
-                    self.remove(index, "returned to octet with Ctrl+G", true);
+                    if let Some(notice) = self.remove(index, "returned to octet with Ctrl+G", true)
+                    {
+                        shell.notice(notice);
+                    }
                 }
                 return true;
             }
-            if let Some(key) = normalized_key(&self.mounts[index].surface_id, key) {
+            if let Some(mut key) = normalized_key(&self.mounts[index].surface_id, key) {
+                let mount = &mut self.mounts[index];
+                if let Some(editor) = &mut mount.editor {
+                    if editor.input_revision == MAX_EXTENSION_REMOTE_UI_REVISION {
+                        if let Some(notice) =
+                            self.remove(index, "editor input revision exhausted", true)
+                        {
+                            shell.notice(notice);
+                        }
+                        shell.error("Custom editor closed because its input revision was exhausted; the last key was not delivered.".into());
+                        return true;
+                    }
+                    editor.input_revision += 1;
+                    key.editor_input = Some(ExtensionRemoteUiEditorInput {
+                        mount_id: mount.view.id.clone(),
+                        input_revision: editor.input_revision,
+                    });
+                }
                 if let Err(error) = self.mounts[index].process.notify_remote_ui_key(key) {
-                    self.remove(index, "remote UI key delivery failed", true);
+                    if let Some(notice) = self.remove(index, "remote UI key delivery failed", true)
+                    {
+                        shell.notice(notice);
+                    }
                     shell.error(format!(
                         "remote UI closed because key delivery failed: {error}"
                     ));
@@ -339,7 +513,11 @@ impl RemoteUi {
             {
                 if let Some(mouse) = normalized_mouse(&mount.surface_id, mouse) {
                     if let Err(error) = mount.process.notify_remote_ui_mouse(mouse) {
-                        self.remove(index, "remote UI mouse delivery failed", true);
+                        if let Some(notice) =
+                            self.remove(index, "remote UI mouse delivery failed", true)
+                        {
+                            shell.notice(notice);
+                        }
                         shell.error(format!(
                             "remote UI closed because mouse delivery failed: {error}"
                         ));
@@ -348,8 +526,15 @@ impl RemoteUi {
             }
             return true;
         }
-        // Unsupported component gestures never mutate the hidden composer.
-        matches!(event, Event::Paste(_))
+        // Unsupported component gestures never mutate the hidden composer or
+        // silently pretend to have reached an editor checkpoint.
+        if matches!(event, Event::Paste(_)) {
+            if self.mounts[index].editor.is_some() {
+                shell.notice("Paste was not delivered: this custom editor transport does not support paste. Use Ctrl+G to paste in the native editor.");
+            }
+            return true;
+        }
+        false
     }
 }
 
@@ -397,6 +582,7 @@ pub(crate) fn normalized_key(
             KeyEventKind::Release => ExtensionRemoteUiKeyKind::Release,
         },
         modifiers,
+        editor_input: None,
     })
 }
 

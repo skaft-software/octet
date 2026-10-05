@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { mkdtemp, writeFile, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { launch, root, owner, host } from './helper.mjs';
+import { inspect, launch, root, owner, host } from './helper.mjs';
 import { RemoteTUI, safeLines } from '../lib/remote-ui.mjs';
 import { keyData, mouseData } from '../lib/keys.mjs';
 import { isKeyRelease, isKeyRepeat, matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
@@ -53,7 +53,7 @@ test('genuine remote selection returns chosen value and overlays preserve compon
   const peer = launch(t); await peer.init(); const command = peer.command('select');
   const open = await peer.wait(f => f.method === 'ui/open'); await command.response;
   peer.notify('ui/key', { surface_id: open.params.surface_id, key: 'ArrowDown', kind: 'press', modifiers: [] });
-  await peer.wait(frame('> two'));
+  await peer.wait(frame('→ two'));
   peer.notify('ui/key', { surface_id: open.params.surface_id, key: 'Enter', kind: 'press', modifiers: [] });
   await peer.wait(f => f.method === 'notification' && f.params.message === 'selected:two');
 });
@@ -97,9 +97,13 @@ test('EOF, crash transport and active shutdown are bounded without model/runtime
   const bad = launch(t); const badExit = once(bad.child, 'exit'); bad.child.stdin.write(' '.repeat(1048577)); assert.equal((await badExit)[0], 1);
   const malformed = launch(t); const malformedExit = once(malformed.child, 'exit'); malformed.child.stdin.write('{bad json}\n'); assert.equal((await malformedExit)[0], 1);
 });
-test('unsupported options/results and forbidden Pi runtime calls never silently disappear', async t => {
+test('unsupported options/results and unnegotiated child calls never silently disappear', async t => {
   const peer = launch(t); await peer.init();
-  for (const [mode, reason] of [['unsupported', /ctx.ui.setTitle/], ['unsafe-output', /direct terminal control/], ['runtime', /createAgentSession.*Rust owns agent sessions/], ['media', /content part.data/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
+  for (const [mode, reason] of [['unsafe-output', /direct terminal control/], ['runtime', /unsupported_feature agent_sessions: feature was not negotiated/], ['media', /unsupported_feature artifacts/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
+});
+test('native chrome refuses calls without a negotiated UI consumer', async t => {
+  const peer = launch(t); await peer.init([]);
+  assert.match((await peer.call('unsupported').response).error.message, /unsupported_feature remote_ui/);
 });
 test('shared events preserve synchronous object/function identity across multiple unchanged factories', async t => {
   const dir = await temporary(t), a = join(dir, 'a.ts'), b = join(dir, 'b.ts');
@@ -138,10 +142,18 @@ test('configure captures explicitly reviewed metadata only and never enables/tru
   const extensions = [join(root, 'test/fixtures/core.ts')];
   assert.throws(() => configure({ output, extensions }), /--reviewed/);
   const result = configure({ output, extensions, reviewed: true }); assert.equal(result.registrations.tools[0].name, 'core');
-  const manifest = await readFile(join(output, 'extension.toml'), 'utf8'); assert.match(manifest, /hooks = \["before_tool_call", "session_end", "session_start"\]/);
+  const { hookEvents } = await import('../lib/api.mjs');
+  // Provider wire hooks are reserved only when the factory registered them.
+  const captured = inspect(extensions).hooks, wire = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']);
+  const subscribedHooks = [...new Set(Object.values(hookEvents))].filter(h => !wire.has(h) || captured.includes(h)).sort();
+  assert.deepEqual(result.registrations.hooks, subscribedHooks);
+  const manifest = await readFile(join(output, 'extension.toml'), 'utf8');
+  assert.deepEqual(JSON.parse(manifest.match(/^hooks = (\[.*\])$/m)[1]), subscribedHooks);
   assert.doesNotMatch(manifest, /enabled_extensions|trusted_extensions/); assert.deepEqual((await readdir(dir)).sort(), ['octet-pi-compat']);
   assert.throws(() => configure({ output, extensions, reviewed: true }), /exists/);
-  const peer = launch(t, extensions, { config: join(output, 'bridge.json') }); await peer.init();
+  const peer = launch(t, extensions, { config: join(output, 'bridge.json') });
+  peer.metadata.hooks = result.registrations.hooks; // Admit the reviewed configured catalog, not bare-factory inspection.
+  await peer.init(['remote_ui', 'resource_paths_v1', 'session_entries', 'pipeline_hooks_v1']);
   assert.ok((await peer.call('normal').response).result); await peer.close();
 });
 
@@ -159,7 +171,7 @@ test('remote overlay composition has real focus, hide/unfocus and component iden
 
 test('production imports and pinned dependency graph never include the Pi coding-agent runtime', async () => {
   const lock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
-  assert.deepEqual(Object.keys(lock.packages).sort(), ['', 'node_modules/@earendil-works/pi-tui', 'node_modules/@sinclair/typebox', 'node_modules/get-east-asian-width', 'node_modules/jiti', 'node_modules/marked', 'node_modules/typebox'].sort());
+  assert.deepEqual(Object.keys(lock.packages).sort(), ['', 'node_modules/@earendil-works/pi-tui', 'node_modules/@sinclair/typebox', 'node_modules/get-east-asian-width', 'node_modules/jiti', 'node_modules/marked', 'node_modules/typebox', 'node_modules/yaml'].sort());
   for (const dir of ['lib', 'shims']) for (const file of await readdir(join(root, dir))) {
     if (!file.endsWith('.mjs')) continue;
     const code = await readFile(join(root, dir, file), 'utf8');

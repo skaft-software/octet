@@ -154,7 +154,8 @@ impl Agent {
         // This snapshot is both the preflight boundary and the first provider
         // request's frozen tool surface. Refusing it before the prompt append
         // leaves a frontend free to revise and retry the same draft.
-        let (initial_tool_revision, initial_tools) = self.extensions.tool_snapshot();
+        let (initial_tool_revision, initial_tools) =
+            self.extensions.model_tool_snapshot(&self.resource_owner);
         let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
             advertised_tool_surface(&initial_tools, &self.model)
         } else {
@@ -185,9 +186,8 @@ impl Agent {
         if self.model.responses_features().reasoning_effort_updates {
             persist_reasoning_selection(&mut self.session, &self.model, &self.reasoning)?;
         }
-        let first_entry = self
-            .session
-            .append_with_metadata(user_message(input), Some(prompt_metadata.clone()))?;
+        let custom_message_cursor = self.session.entries().len();
+        let first_entry = input.append_to(&mut self.session, Some(prompt_metadata.clone()))?;
         if let Some(input) = observer_input.as_ref() {
             for observer in &self.extensions.observers {
                 observer.on_run_started_for_owner(
@@ -228,7 +228,11 @@ impl Agent {
         // Disjoint borrows: the run stream owns clones of everything except
         // the session, which it borrows mutably for the run's lifetime —
         // preserving one authoritative head.
-        let client = self.client.clone();
+        let client = provider_context::provider_request_client(
+            &self.client,
+            &self.extensions.provider_request_hooks,
+            &self.resource_owner,
+        )?;
         let model = self.model.clone();
         let compaction_model = self
             .compaction_model
@@ -312,6 +316,10 @@ impl Agent {
             let session = &mut *session_guard.session;
             let cache_warmer = &mut *session_guard.cache_warmer;
             let mut context_capacity = initial_capacity;
+            let mut custom_message_cursor = custom_message_cursor;
+            for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                notify_observers(&observers, &event); yield event;
+            }
             // Parity 1e.2 durability half: republish the partial assistant
             // turn a killed stream left behind. The frame journal is consumed
             // exactly once and only its user-visible text/reasoning progress is
@@ -371,12 +379,15 @@ impl Agent {
             let mut native = native_steering::NativeState::default();
             let (native_updates_tx, mut native_updates_rx) = mpsc::channel(128);
             let native_enabled = model.responses_features().steering
+                && extension_host.provider_request_hooks.is_empty()
+                && extension_host.provider_context_hooks.is_empty()
                 && model.endpoint.transport == octet_ai::EndpointTransport::WebSocketPreferred
                 && max_session_tokens.is_none() && max_session_cost_microdollars.is_none();
             let mut background_tools = background_tools::BackgroundTools::new(parallel_read_wave_width);
             let background_cancellation = abort.cancellation.clone();
             let mut pending_reasoning = None;
             let mut pending_steer: Vec<ReservedInput> = Vec::new();
+            let mut pending_context: Vec<ReservedInput> = Vec::new();
             let mut followups: VecDeque<ReservedInput> = VecDeque::new();
             // Preserve octet's historical defaults; frontends that expose queue
             // modes can update either mode through RunControl.
@@ -386,6 +397,9 @@ impl Agent {
             let mut answer_only = !tools_enabled;
             let mut finish_pending = false;
             let mut completed_turns: u64 = 0;
+            let mut model_turn_hooks = model_turn::ModelTurnHooks::new(
+                &extension_host.session_operation_hooks, &effect_run_id,
+            );
             let mut context_retries = 0usize;
             // Shared by open/body retries, re-preparation and transport fallback.
             // Reset only on a complete successful assistant response.
@@ -413,6 +427,9 @@ impl Agent {
             let mut turn_attempt_succeeded = false;
 
             let mut reason: FinishReason = 'run: loop {
+                for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                    notify_observers(&observers, &event); yield event;
+                }
                 // Row 3.5: an iteration is one turn boundary. The previous
                 // turn is settled here (a `continue 'run` continuation is a
                 // completed turn, not an error) and the current one begins.
@@ -543,6 +560,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -567,6 +585,7 @@ impl Agent {
                     match control_rx.try_recv() {
                         Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                         Ok(Control::FollowUp(input)) => followups.push_back(input),
+                        Ok(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                         Ok(Control::FinishNow(input)) => {
                             input.push_pending(&mut pending_steer);
                             answer_only = true;
@@ -601,6 +620,19 @@ impl Agent {
                     context_capacity.invalidate();
                 }
                 if abort.is_set() { break 'run FinishReason::Aborted; }
+                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                    break 'run finish;
+                }
+
+                if background_tools.is_empty() && !native.has_pending() {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
+                        break 'run FinishReason::Failed(error);
+                    }
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
+                    context_capacity.invalidate();
+                }
 
                 if let Some(selection) = if native.connection.is_none() { pending_reasoning.take() } else { None } {
                     if let Err(error) = persist_reasoning_selection(session, &model, &selection) {
@@ -646,12 +678,18 @@ impl Agent {
                         Some(&abort),
                     ).await {
                         ControlDelivery::Completed { event } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                             if let Some(ev) = event {
                                 notify_observers(&observers, &ev);
                                 yield ev;
                             }
                         }
                         ControlDelivery::Interrupted { event, finish } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                             if let Some(ev) = event {
                                 notify_observers(&observers, &ev);
                                 yield ev;
@@ -668,11 +706,17 @@ impl Agent {
                     }
                 }
 
+                // Await the real logical-iteration observation before request
+                // preparation. Recovery/compaction re-entry must not repeat it.
+                if let Err(finish) = model_turn_hooks.start(session, completed_turns, &abort.cancellation).await {
+                    break 'run finish;
+                }
+
                 // Freeze one coherent schema/implementation snapshot after
                 // control and steering have settled but before context sizing.
                 // Every call emitted by this request resolves against exactly
                 // the tool set the provider saw.
-                let (current_revision, current_tools) = extension_host.tool_snapshot();
+                let (current_revision, current_tools) = extension_host.model_tool_snapshot(&resource_owner);
                 if current_revision != tool_revision {
                     tool_revision = current_revision;
                     if tools_enabled && !answer_only {
@@ -714,6 +758,7 @@ impl Agent {
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
                         compaction_strategy: extension_host.compaction_strategy.as_ref(),
+                        session_operation_hooks: &extension_host.session_operation_hooks,
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -761,6 +806,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -869,7 +915,7 @@ impl Agent {
                     request,
                     input_tokens,
                 );
-                let current_tool_generation = extension_host.tool_snapshot().0;
+                let current_tool_generation = extension_host.model_tool_snapshot(&resource_owner).0;
                 if !prepared.is_current(session, &active_system, current_tool_generation) {
                     // Re-enter the boundary so a publication or append that
                     // crossed compaction cannot pair an old request with a new
@@ -1013,6 +1059,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open && !native_enabled => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -1071,6 +1118,7 @@ impl Agent {
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
                         compaction_strategy: extension_host.compaction_strategy.as_ref(),
+                        session_operation_hooks: &extension_host.session_operation_hooks,
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -1109,6 +1157,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -1232,7 +1281,12 @@ impl Agent {
                         }
                     }
                     match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
-                        Ok(Some(event)) => { notify_observers(&observers, &event); yield event; },
+                        Ok(Some(event)) => {
+                        for custom in committed_custom_message_events(session, &mut custom_message_cursor) {
+                            notify_observers(&observers, &custom); yield custom;
+                        }
+                        notify_observers(&observers, &event); yield event;
+                    },
                         Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
                     }
                     let Some(next) = next else { continue; };
@@ -1261,6 +1315,7 @@ impl Agent {
                         },
                         Next::Steering(_) => unreachable!("handled above"),
                         Next::Ctl(Some(Control::FollowUp(input))) => followups.push_back(input),
+                        Next::Ctl(Some(Control::AppendCustom(input))) => input.push_pending(&mut pending_context),
                         Next::Ctl(Some(Control::FinishNow(input))) => {
                             input.push_pending(&mut pending_steer);
                             answer_only = true;
@@ -1330,6 +1385,7 @@ impl Agent {
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
                         compaction_strategy: extension_host.compaction_strategy.as_ref(),
+                        session_operation_hooks: &extension_host.session_operation_hooks,
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -1368,6 +1424,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -1517,7 +1574,7 @@ impl Agent {
                 let deferred_handle = response.deferred.clone();
                 let deferred_diagnostics = response.diagnostics.clone();
                 let assistant = response.message;
-                let calls: Vec<ToolCall> = assistant
+                let mut calls: Vec<ToolCall> = assistant
                     .content
                     .iter()
                     .filter_map(|part| match part {
@@ -1525,6 +1582,25 @@ impl Agent {
                         _ => None,
                     })
                     .collect();
+                let mut preparation_errors = HashMap::new();
+                for call in &mut calls {
+                    let Some(tool) = tool_map.get(&call.name).filter(|tool| tool.prepares_arguments()) else { continue; };
+                    let Ok(arguments) = call.arguments_value() else { continue; };
+                    let prepared = tokio::select! {
+                        biased;
+                        _ = abort.wait() => Err(cancelled_tool_error()),
+                        result = tool.prepare_arguments(arguments, &resource_owner, abort.cancellation.clone()) => result,
+                    };
+                    match prepared {
+                        Ok(arguments) => {
+                            call.arguments_json = serde_json::to_string(&arguments).expect("JSON arguments serialize");
+                            call.argument_error = if matches!(octet_ai::validate_tool_arguments(&call.name, &arguments, &request_tool_defs), Ok(octet_ai::ToolArgumentValidation::Valid)) {
+                                None
+                            } else { Some(ToolCallArgumentError::SchemaMismatch) };
+                        },
+                        Err(error) => { call.argument_error = Some(ToolCallArgumentError::SchemaMismatch); preparation_errors.insert(call.id.clone(), error); },
+                    }
+                }
 
                 if auto_compaction_mode == AgentCompactionMode::NativeResponses
                     && model.spec.protocol == Protocol::OpenAiResponses
@@ -1673,10 +1749,16 @@ impl Agent {
                     Ok(entry) => entry,
                     Err(error) => break 'run FinishReason::Failed(error.into()),
                 };
+                model_turn_hooks.committed(session, completed_turns - 1, &assistant_entry, &calls);
                 if let Err(error) = native.settle_successor(session, &model, assistant_entry) { break 'run FinishReason::Failed(error); }
                 native.completed_prefix();
                 match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
-                    Ok(Some(event)) => { notify_observers(&observers, &event); yield event; },
+                    Ok(Some(event)) => {
+                        for custom in committed_custom_message_events(session, &mut custom_message_cursor) {
+                            notify_observers(&observers, &custom); yield custom;
+                        }
+                        notify_observers(&observers, &event); yield event;
+                    },
                     Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
                 }
                 context_capacity.observe_assistant_response(session, &model, &turn_usage);
@@ -1740,6 +1822,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer); answer_only = true; finish_pending = true;
                                 }
@@ -1758,6 +1841,13 @@ impl Agent {
                     context_capacity.invalidate();
                 }
 
+                // Prior async batches have now settled; no-tool assistants are
+                // also durable. A tool-emitting current turn stays pending until
+                // its own complete result batch commits below.
+                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                    break 'run finish;
+                }
+
                 // Drain control before deciding whether a provisional candidate
                 // is terminal. New user input takes precedence over the gate.
                 {
@@ -1766,6 +1856,7 @@ impl Agent {
                         match control_rx.try_recv() {
                             Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                             Ok(Control::FollowUp(input)) => followups.push_back(input),
+                            Ok(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                             Ok(Control::FinishNow(input)) => {
                                 input.push_pending(&mut pending_steer);
                                 answer_only = true;
@@ -1788,6 +1879,16 @@ impl Agent {
                         && pending_steer.is_empty() && pending_reasoning.is_none() && followups.is_empty() {
                         *admission = false;
                     }
+                }
+
+                if background_tools.is_empty() && calls.is_empty() && !native.has_pending() {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
+                        break 'run FinishReason::Failed(error);
+                    }
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
+                    context_capacity.invalidate();
                 }
 
                 // A response is not successful merely because it contains no
@@ -1898,12 +1999,18 @@ impl Agent {
                             Some(&abort),
                         ).await {
                             ControlDelivery::Completed { event } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                 if let Some(ev) = event {
                                     notify_observers(&observers, &ev);
                                     yield ev;
                                 }
                             }
                             ControlDelivery::Interrupted { event, finish } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                 if let Some(ev) = event {
                                     notify_observers(&observers, &ev);
                                     yield ev;
@@ -1943,6 +2050,7 @@ impl Agent {
                                     control = control_rx.recv(), if control_open => match control {
                                         Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                         Some(Control::FollowUp(input)) => followups.push_back(input),
+                                        Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                         Some(Control::FinishNow(input)) => {
                                             input.push_pending(&mut pending_steer);
                                             answer_only = true;
@@ -1990,6 +2098,7 @@ impl Agent {
                                 match control_rx.try_recv() {
                                     Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                     Ok(Control::FollowUp(input)) => followups.push_back(input),
+                                    Ok(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                     Ok(Control::FinishNow(input)) => {
                                         input.push_pending(&mut pending_steer);
                                         answer_only = true;
@@ -2075,12 +2184,18 @@ impl Agent {
                                     Some(&abort),
                                 ).await {
                                     ControlDelivery::Completed { event } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                         if let Some(ev) = event {
                                             notify_observers(&observers, &ev);
                                             yield ev;
                                         }
                                     }
                                     ControlDelivery::Interrupted { event, finish } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                         if let Some(ev) = event {
                                             notify_observers(&observers, &ev);
                                             yield ev;
@@ -2293,6 +2408,7 @@ impl Agent {
                                     control = control_rx.recv(), if control_open => match control {
                                         Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                         Some(Control::FollowUp(input)) => followups.push_back(input),
+                                        Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                         Some(Control::FinishNow(input)) => {
                                             input.push_pending(&mut pending_steer);
                                             answer_only = true;
@@ -2339,7 +2455,7 @@ impl Agent {
                             for (guard, entry) in
                                 wave_tool_guards.into_iter().zip(completed.iter())
                             {
-                                if let Ok(output) = &entry.execution.result {
+                                if let Some(output) = resolved_tool_output(&entry.execution.result) {
                                     if let Some(usage) = output.usage() {
                                         CompletionAttributes::usage(usage).record(&guard.span);
                                     }
@@ -2498,13 +2614,13 @@ impl Agent {
                                     .expect("policy decision slot is not poisoned") = Some(decision);
                                 Err(error)
                             }
-                            (Some(tool), Ok(args)) => {
+                            (Some(tool), Ok(args)) => 'dispatch: {
                                 let active_skills = session
                                     .head()
                                     .and_then(|head| session.resolve_active_skills(&head).ok())
                                     .map(|state| state.active_skills)
                                     .unwrap_or_default();
-                                let composition_scope = tool.composition_config().map(|_| CompositionDispatcher::scope(
+                                let composition_scope = tool.nested_execution().then(|| CompositionDispatcher::scope(
                                     call.id.clone(), call.name.clone(), composition_tools.clone(),
                                     sandbox.clone(), tool_scope.clone(), resource_owner.clone(),
                                     effect_run_id.clone(), tool_revision, active_skills.clone(),
@@ -2523,12 +2639,38 @@ impl Agent {
                                     resource_owner: &resource_owner,
                                     active_skills: &active_skills,
                                     registered_tools: &registered_tools,
-                                    progress: tool_progress,
+                                    progress: tool_progress.with_tool_call_identity(call.id.0.clone(), None),
                                     cancellation: abort.cancellation.clone(),
                                 };
+                                let original_hook_arguments = args.clone();
+                                let args = match transform_tool_arguments(
+                                    &tool_call_hooks,
+                                    tool.as_ref(),
+                                    &call.name,
+                                    args,
+                                    &tool_ctx,
+                                )
+                                .await
+                                {
+                                    Ok(args) => args,
+                                    Err(error) => {
+                                        if tool_ctx.cancellation.is_cancelled() {
+                                            cancellation_won = true;
+                                            break 'dispatch Err(cancelled_tool_error());
+                                        }
+                                        let (_, decision) =
+                                            secondary_hook_denial(&sandbox, &effect_broker, None);
+                                        *policy_decision_slot
+                                            .lock()
+                                            .expect("policy decision slot is not poisoned") =
+                                            Some(decision);
+                                        break 'dispatch settle_tool_result_hooks(
+                                            &tool_call_hooks, &call.name, &original_hook_arguments,
+                                            Err(error), &tool_ctx,
+                                        ).await;
+                                    }
+                                };
                                 let hook_arguments = args.clone();
-                                let effect_committed = Arc::new(AtomicBool::new(false));
-                                let committed_marker = Arc::clone(&effect_committed);
                                 let policy_decision_marker = Arc::clone(&policy_decision_slot);
                                 let operation = async {
                                     let admission = reserve_tool_effect(
@@ -2609,7 +2751,6 @@ impl Agent {
                                             Some(receipt.authorization()),
                                             None,
                                         ));
-                                    committed_marker.store(true, Ordering::Release);
                                     started_at_marker
                                         .store(crate::session::now_unix_millis(), Ordering::Release);
                                     if composition_scope.is_some() {
@@ -2637,6 +2778,7 @@ impl Agent {
                                         c = control_rx.recv(), if control_open => match c {
                                             Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                             Some(Control::FollowUp(input)) => followups.push_back(input),
+                                            Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                             Some(Control::FinishNow(input)) => {
                                                 input.push_pending(&mut pending_steer);
                                                 answer_only = true;
@@ -2788,23 +2930,14 @@ impl Agent {
                                     notify_observers(&observers, &ev);
                                     yield ev;
                                 }
-                                if effect_committed.load(Ordering::Acquire) {
-                                    let (output, is_error) = match &result {
-                                        Ok(output) => (output.text.as_str(), output.is_error()),
-                                        Err(error) => (error.message.as_str(), true),
-                                    };
-                                    for hook in &tool_call_hooks {
-                                        hook.after_tool_call(
-                                            &call.name,
-                                            &hook_arguments,
-                                            output,
-                                            is_error,
-                                            &tool_ctx,
-                                        )
-                                        .await;
-                                    }
-                                }
-                                result
+                                settle_tool_result_hooks(
+                                    &tool_call_hooks,
+                                    &call.name,
+                                    &hook_arguments,
+                                    result,
+                                    &tool_ctx,
+                                )
+                                .await
                             }
                         }
                         };
@@ -2826,11 +2959,11 @@ impl Agent {
                             cancellation_won,
                         }
                     };
-                    if let Some(after) = deferred_after {
+                    let result = if let Some(after) = deferred_after {
                         run_parallel_after_tool_hooks(
                             after,
                             &tool_call_hooks,
-                            &result,
+                            result,
                             &sandbox,
                             &tool_scope,
                             &resource_owner,
@@ -2838,8 +2971,10 @@ impl Agent {
                             &registered_tools,
                             abort.cancellation.clone(),
                         )
-                        .await;
-                    }
+                        .await
+                    } else {
+                        result
+                    };
                     let result = if should_annotate_repetition {
                         annotate_repeated_tool_result(result, repeated_recently)
                     } else {
@@ -2852,13 +2987,9 @@ impl Agent {
                     // nested calls. Persist their aggregate before another
                     // script is admitted; checkpoints alone are not the hard
                     // session-limit ledger.
-                    let usage_commit = if composition_tools.iter().any(|tool| {
-                        tool.definition().name == call.name && tool.composition_config().is_some()
-                    }) {
-                        if let Some(usage) = result.as_ref().ok().and_then(|output| output.usage()).copied() {
-                            run_cost.add(None);
-                            session.record_tool_composition_usage(call.id.0.clone(), usage)
-                        } else { Ok(()) }
+                    let usage_commit = if let Some(usage) = resolved_tool_output(&result).and_then(ToolOutput::usage).copied() {
+                        run_cost.add(None);
+                        session.record_tool_composition_usage(call.id.0.clone(), usage)
                     } else { Ok(()) };
 
                     // Emit policy metadata before the durable result commit: a
@@ -2891,7 +3022,7 @@ impl Agent {
                     // Announce tools that appeared as a consequence of this
                     // execution (extension/MCP registrations). Later requests
                     // exclude announced schemas under deferred tool loading.
-                    let (_, snapshot_tools) = extension_host.tool_snapshot();
+                    let (_, snapshot_tools) = extension_host.model_tool_snapshot(&resource_owner);
                     let snapshot_tools = crate::tool_composition::direct_surface(&snapshot_tools);
                     let newly_added: Vec<String> = snapshot_tools
                         .iter()
@@ -2906,7 +3037,7 @@ impl Agent {
                     // that was not actually placed. A failed call has no
                     // result and never requests termination.
                     termination_requests
-                        .push(result.as_ref().map(ToolOutput::terminates_run).unwrap_or(false));
+                        .push(tool_result_terminates_run(&result));
                     let (message, accepted_media, text, is_error, details) = lower_tool_result(
                         call.id.clone(),
                         &result,
@@ -2996,10 +3127,7 @@ impl Agent {
                     // Pi's per-tool-result usage is billed turn accounting, not
                     // model context: it is added to the run's cumulative totals
                     // below and never to `turn_usage` or a context estimate.
-                    let tool_usage = result
-                        .as_ref()
-                        .ok()
-                        .and_then(|output| output.usage().copied());
+                    let tool_usage = resolved_tool_output(&result).and_then(ToolOutput::usage).copied();
                     let tool_failed = tool_execution_failed(&result);
                     let mut ev = AgentEvent::ToolFinished {
                         id: call.id.clone(),
@@ -3032,6 +3160,22 @@ impl Agent {
                     }
                 }
 
+                // Unlike TurnFinished, this awaited boundary includes every
+                // paired tool result, in actual durable commit order.
+                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                    break 'run finish;
+                }
+
+                if background_tools.is_empty() && !native.has_pending() {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
+                        break 'run FinishReason::Failed(error);
+                    }
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
+                    context_capacity.invalidate();
+                }
+
                 // Every emitted call now has a durable result, including calls
                 // that were never started because the user aborted. Do not
                 // enter another model turn after controlled cancellation.
@@ -3055,6 +3199,7 @@ impl Agent {
                             match control_rx.try_recv() {
                                 Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Ok(Control::FollowUp(input)) => followups.push_back(input),
+                                Ok(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Ok(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -3095,9 +3240,15 @@ impl Agent {
                         match deliver_control_inputs(queued, ControlDeliveryKind::FollowUp, session,
                             &control_prompt_metadata, &mut terminal_gate_evidence, &observation, Some(&abort)).await {
                             ControlDelivery::Completed { event } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                 if let Some(ev) = event { notify_observers(&observers, &ev); yield ev; }
                             }
                             ControlDelivery::Interrupted { event, finish } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                 if let Some(ev) = event { notify_observers(&observers, &ev); yield ev; }
                                 break 'run finish;
                             }
@@ -3114,6 +3265,13 @@ impl Agent {
                 // Context reconstruction coalesces the consecutive tool-result
                 // entries into the provider-required single user message.
             };
+
+            // Semantic/provider failure may follow a durable no-tool response.
+            // Observe only genuinely settled entries; cancelled or failed hook
+            // activations are never retried, including in terminal cleanup.
+            if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                reason = finish;
+            }
 
             if session.has_unsettled_native_steering() {
                 if let Err(error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "native_steering") { reason = FinishReason::Failed(error.into()); }
@@ -3143,7 +3301,16 @@ impl Agent {
             }
             *control_admission.lock().unwrap_or_else(|error| error.into_inner()) = false;
             control_rx.close();
-            while control_rx.try_recv().is_ok() {}
+            while let Ok(control) = control_rx.try_recv() {
+                if let Control::AppendCustom(input) = control { input.push_pending(&mut pending_context); }
+            }
+            // No terminal path silently drops an admitted context-only message.
+            if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
+                reason = FinishReason::Failed(error);
+            }
+            for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                notify_observers(&observers, &event); yield event;
+            }
             pending_steer.clear();
             followups.clear();
             // A fully driven prompt always leaves an explicit durable restore

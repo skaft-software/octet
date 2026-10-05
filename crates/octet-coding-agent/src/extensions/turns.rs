@@ -2,7 +2,99 @@
 
 use super::*;
 
+/// Input accepted by Pi's early raw-input hook, before prompt composition.
+pub struct ExtensionInput {
+    pub text: String,
+    pub images: Option<Vec<octet_ai::Media>>,
+    pub transformed: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum InputEventResult {
+    Continue,
+    Handled,
+    Transform {
+        text: String,
+        #[serde(default)]
+        images: Option<Vec<octet_ai::Media>>,
+    },
+}
+
 impl ExecutableExtensions {
+    /// Run ordered early input handlers. `None` means handled: do not persist
+    /// a prompt or start a provider request. Images omitted by a transform stay.
+    pub async fn process_input(
+        &mut self,
+        text: String,
+        images: Option<Vec<octet_ai::Media>>,
+        source: &str,
+        streaming_behavior: Option<&str>,
+    ) -> anyhow::Result<Option<ExtensionInput>> {
+        anyhow::ensure!(
+            ["interactive", "rpc", "extension"].contains(&source),
+            "invalid input source"
+        );
+        anyhow::ensure!(
+            streaming_behavior.is_none_or(|value| ["steer", "followUp"].contains(&value)),
+            "invalid input delivery"
+        );
+        let mut input = ExtensionInput {
+            text,
+            images,
+            transformed: false,
+        };
+        for process in &self.processes {
+            if !process.supports_feature("input_transform_v1")
+                || !process
+                    .contributions()
+                    .hooks
+                    .contains(&ExtensionHook::BeforePrompt)
+            {
+                continue;
+            }
+            let output = tokio::time::timeout(
+                PROMPT_RPC_DEADLINE,
+                process.run_hook(
+                    ExtensionHook::BeforePrompt,
+                    serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
+                    "source":source, "streaming_behavior":streaming_behavior}),
+                    extension_execution_context(process, self.resource_owner.as_deref()),
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("extension input hook timed out"))??;
+            anyhow::ensure!(
+                output.disposition == ExtensionHookDisposition::Continue,
+                "extension input hook refused input"
+            );
+            let result = output
+                .input_event
+                .map(serde_json::from_value::<InputEventResult>)
+                .transpose()?;
+            match result.unwrap_or(InputEventResult::Continue) {
+                InputEventResult::Continue => {}
+                InputEventResult::Handled => return Ok(None),
+                InputEventResult::Transform { text, images } => {
+                    anyhow::ensure!(
+                        text.len() <= 262144 && !text.contains('\0'),
+                        "transformed input exceeds bounds"
+                    );
+                    if let Some(images) = images {
+                        anyhow::ensure!(
+                            images.len() <= 256,
+                            "transformed input image count exceeds bounds"
+                        );
+                        input.images = Some(images);
+                    }
+                    input.text = text;
+                    input.transformed = true;
+                }
+            }
+        }
+        Ok(Some(input))
+    }
+
     pub async fn begin_turn(&self) -> ExtensionTurnLifecycle {
         let sequence = NEXT_EXTENSION_RUN_ID.fetch_add(1, Ordering::Relaxed);
         let session_id = self
@@ -78,6 +170,7 @@ impl ExecutableExtensions {
     /// process snapshot, starts observation for the replacement session, and
     /// fences queued active-session mutations from the previous snapshot. The
     /// active agent has already changed by the time this is called.
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub fn transition_active_session(
         &mut self,
         session: &Session,
@@ -85,6 +178,19 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
+        self.transition_active_session_with_setup(session, model, reasoning, sessions, None);
+    }
+
+    pub fn transition_active_session_with_setup(
+        &mut self,
+        session: &Session,
+        model: &Model,
+        reasoning: &ReasoningConfig,
+        sessions: &SessionStore,
+        setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
+    ) {
+        self.pending_session_setup = setup;
+        self.retire_active_resources();
         self.cancel_session_hook_starts();
         if self.session_lifecycle_started {
             let outcome = ExtensionLifecycleOutcome::Completed;
@@ -133,10 +239,37 @@ impl ExecutableExtensions {
             view.resource_owner.is_none() || view.resource_owner.as_deref() == active_owner
         });
         self.refresh_host_state(session, model, reasoning, sessions);
-        self.start_session_lifecycle();
+        if self.pending_session_setup.is_none() {
+            self.start_session_lifecycle();
+        }
         // The session changed in place, so requests admitted against the old
         // snapshot must not run against this replacement.
         self.activate_session_lifecycle_driver();
+    }
+
+    /// Validate every setup mutation against its original parent and live owner.
+    pub fn session_setup_is_current(
+        &self,
+        parent: u64,
+        owner: &octet_agent::extension_process::ExtensionResourceOwner,
+    ) -> bool {
+        self.resource_owner.as_deref() == Some(owner.session_id.as_str())
+            && self
+                .pending_session_setup
+                .as_ref()
+                .is_some_and(|(id, admitted)| {
+                    *id == parent
+                        && admitted.extension_instance_id == owner.extension_instance_id
+                        && admitted.process_generation == owner.process_generation
+                })
+    }
+
+    /// Start only after setup writes are complete; return the exact process
+    /// handles whose deferred session_start callbacks the caller must await.
+    pub fn complete_session_setup(&mut self) -> Vec<(ExtensionProcess, String)> {
+        self.pending_session_setup = None;
+        self.start_session_lifecycle();
+        std::mem::take(&mut self.pending_session_hook_starts)
     }
 
     /// The launch already projected skills and session metadata for initialize.
@@ -154,7 +287,8 @@ impl ExecutableExtensions {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let unchanged = initial.model.as_deref() == Some(&model.spec.id.0)
             && initial.model_view == extension_model_view(model)
-            && initial.reasoning == Some(serde_json::Value::String(format!("{reasoning:?}")));
+            && initial.reasoning
+                == pi_thinking_level(model, reasoning).map(serde_json::Value::String);
         drop(initial);
         if !unchanged {
             self.refresh_host_state(session, model, reasoning, sessions);
@@ -168,13 +302,24 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
-        let state = host_state(session, model, reasoning, sessions);
+        let mut state = host_state(session, model, reasoning, sessions);
+        state.pi_models = self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pi_models
+            .clone();
         self.session_id = state.session_id.clone();
         for process in &self.processes {
             if process.descriptor().manifest.runtime.sharing
                 == octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
             {
-                process.set_host_state(state.clone());
+                if let Err(error) = process.set_host_state_with_session(state.clone(), session) {
+                    self.diagnostics.push(format!(
+                        "warning: extension {:?} session mirror unavailable: {error}",
+                        process.descriptor().manifest.name,
+                    ));
+                }
             }
         }
         // Every session or model boundary refreshes this cache, so a read-only
@@ -225,6 +370,8 @@ impl ExecutableExtensions {
         prompt: String,
     ) -> anyhow::Result<ExtensionPromptComposition> {
         let mut notifications = self.drain_events();
+        let mut effective_system = base_system.to_owned();
+        let mut custom_messages = Vec::new();
         // Composition is transactional. Context already queued by an
         // extension remains pending until the complete composed prompt has
         // passed validation and can be submitted durably.
@@ -248,7 +395,11 @@ impl ExecutableExtensions {
                     PROMPT_RPC_DEADLINE,
                     process.run_hook(
                         ExtensionHook::BeforePrompt,
-                        before_prompt_hook_payload(&prompt),
+                        if process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1) {
+                            serde_json::json!({"prompt": &prompt, "system_prompt": &effective_system})
+                        } else {
+                            before_prompt_hook_payload(&prompt)
+                        },
                         execution.clone(),
                     ),
                 )
@@ -271,6 +422,19 @@ impl ExecutableExtensions {
                         "extension {:?} denied the prompt: {reason}",
                         process.descriptor().manifest.name
                     );
+                }
+                if let Some(system) = output.system_prompt {
+                    anyhow::ensure!(process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1),
+                        "extension returned an unnegotiated before_prompt system replacement");
+                    anyhow::ensure!(
+                        system.len() <= 256 * 1024 && !system.contains('\0'),
+                        "extension before_prompt system replacement exceeds bounds"
+                    );
+                    effective_system = system;
+                }
+                for message in output.custom_messages {
+                    message.validate()?;
+                    custom_messages.push(message);
                 }
                 let mut dropped = 0usize;
                 let mut last_error = None;
@@ -330,9 +494,10 @@ impl ExecutableExtensions {
 
         notifications.extend(rejected_context.iter().cloned());
         self.diagnostics.extend(rejected_context);
-        let (system, prompt) = compose_context(base_system, prompt, context.into_vec())?;
+        let (system, prompt) = compose_context(&effective_system, prompt, context.into_vec())?;
         notifications.extend(self.drain_events());
         Ok(ExtensionPromptComposition {
+            custom_messages,
             system,
             prompt,
             notifications,

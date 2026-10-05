@@ -302,6 +302,7 @@ pub(super) struct ActiveSessionHookBinding {
     pub(super) session_id: String,
     pub(super) started_at: Instant,
     pub(super) endpoint: LifecycleEndpoint,
+    pub(super) start_outcome: Arc<SessionHookStartOutcome>,
 }
 
 #[derive(Clone)]
@@ -331,6 +332,8 @@ pub(super) fn candidate_event_requires_host_response(event: &ExtensionEvent) -> 
     matches!(
         event,
         ExtensionEvent::ConfirmationRequested { .. }
+            | ExtensionEvent::ExecRequested { .. }
+            | ExtensionEvent::McpRegistrationRequested { .. }
             | ExtensionEvent::PolicyEvaluationRequested { .. }
             | ExtensionEvent::InputRequested { .. }
             | ExtensionEvent::RemoteUiRequested { .. }
@@ -414,4 +417,29 @@ pub(super) fn clear_matching_lifecycle_turn(
     lifecycle.tools.retain(|(owner, _), tool| {
         resource_owner.is_some_and(|expected| expected != owner) || tool.context.turn_id != turn_id
     });
+}
+
+/// Retained host dispatch outcome, separate from ownership retained before dispatch.
+/// Finishing a cancelled wait does not establish that extension execution stopped.
+#[derive(Default)]
+pub(super) struct SessionHookStartOutcome {
+    finished: AtomicBool,
+    succeeded: AtomicBool,
+}
+impl SessionHookStartOutcome {
+    pub(super) fn succeeded(&self) -> bool {
+        self.finished.load(Ordering::Acquire) && self.succeeded.load(Ordering::Relaxed)
+    }
+}
+/// Dropping an in-flight host attempt refuses discovery, never implying success.
+pub(super) struct SessionHookStartAttempt(pub(super) Arc<SessionHookStartOutcome>);
+impl SessionHookStartAttempt {
+    pub(super) fn finish(&self, succeeded: bool) {
+        self.0.succeeded.store(succeeded, Ordering::Relaxed);
+    }
+}
+impl Drop for SessionHookStartAttempt {
+    fn drop(&mut self) {
+        self.0.finished.store(true, Ordering::Release);
+    }
 }

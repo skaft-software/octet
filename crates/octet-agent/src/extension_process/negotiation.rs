@@ -129,8 +129,14 @@ pub(super) fn negotiate_api_v03_contributions(
             description: tool.description,
             parameters: tool.parameters,
             output_schema: tool.output_schema,
+            prompt_snippet: None,
+            prompt_guidelines: Vec::new(),
+            operation: None,
             composition: None,
             constrained_sampling: None,
+            default_active: None,
+            nested_execution: false,
+            prepare_arguments: false,
         })
         .collect::<Vec<_>>();
     let protocol = ExtensionNegotiatedProtocol {
@@ -216,6 +222,20 @@ pub(super) fn negotiate_contributions_with_host_services(
                 .chain(API_0_2_OPTIONAL_FEATURES)
                 .copied()
                 .collect::<BTreeSet<_>>();
+            if manifest.api_version == EXTENSION_API_VERSION_0_4 {
+                allowed.insert(EXTENSION_FEATURE_RESOURCE_REFS_V1);
+                allowed.insert(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1);
+                allowed.insert(EXTENSION_FEATURE_TOOL_PROMPT_METADATA);
+                allowed.insert(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1);
+            }
+            if negotiated.limits.resource_refs_v1.is_some_and(|limits| {
+                manifest.api_version != EXTENSION_API_VERSION_0_4
+                    || limits != ResourceProtocolLimits::default()
+            }) {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "unsupported resource registry limits".into(),
+                ));
+            }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
                 && manifest
                     .contributes
@@ -232,6 +252,100 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 allowed.insert(EXTENSION_FEATURE_CACHE_WARMING_DECISION);
             }
+            if manifest
+                .contributes
+                .hooks
+                .iter()
+                .any(|hook| hook.is_session_operation())
+                && !features.contains(EXTENSION_FEATURE_SESSION_ENTRIES)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "session operation hooks require negotiated session_entries".into(),
+                ));
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest.capabilities.system_prompt
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::BeforePrompt)
+            {
+                allowed.insert(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1);
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::BeforePrompt)
+            {
+                allowed.insert("input_transform_v1");
+            }
+            if offered_host_services.provider_proxy {
+                allowed.insert("provider_proxy_v1");
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && offered_host_services.provider_pipeline
+                && manifest
+                    .contributes
+                    .hooks
+                    .iter()
+                    .any(|hook| hook.is_provider_pipeline())
+            {
+                allowed.insert(EXTENSION_FEATURE_PIPELINE_HOOKS_V1);
+            }
+            if manifest
+                .contributes
+                .hooks
+                .iter()
+                .any(|hook| hook.is_provider_pipeline())
+                && !features.contains(EXTENSION_FEATURE_PIPELINE_HOOKS_V1)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "provider pipeline hooks require a negotiated pipeline_hooks_v1 consumer"
+                        .into(),
+                ));
+            }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && offered_host_services.session_lifecycle
+            {
+                allowed.insert(EXTENSION_FEATURE_SESSION_CONTROL_V1);
+                allowed.insert("process_exec_v1");
+                allowed.insert("mcp_registration_v1");
+                if offered_host_services.session_compaction {
+                    allowed.insert(EXTENSION_FEATURE_SESSION_COMPACTION_V1);
+                }
+            }
+            if features.contains(EXTENSION_FEATURE_SESSION_COMPACTION_V1)
+                && !features.contains(EXTENSION_FEATURE_SESSION_CONTROL_V1)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "session_compaction_v1 requires session_control_v1".into(),
+                ));
+            }
+            if offered_host_services.resource_paths
+                && manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::ResourcesDiscover)
+            {
+                allowed.insert(EXTENSION_FEATURE_RESOURCE_PATHS);
+            }
+            if manifest
+                .contributes
+                .hooks
+                .contains(&ExtensionHook::ResourcesDiscover)
+                && !features.contains(EXTENSION_FEATURE_RESOURCE_PATHS)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "resources_discover requires a negotiated resource_paths_v1 consumer".into(),
+                ));
+            }
+            if offered_host_services.bulk_objects
+                && manifest.api_version == EXTENSION_API_VERSION_0_4
+            {
+                allowed.insert(EXTENSION_FEATURE_BULK_OBJECTS_V1);
+            }
             if offered_host_services.tool_composition
                 && manifest.api_version == EXTENSION_API_VERSION_0_4
             {
@@ -244,6 +358,10 @@ pub(super) fn negotiate_contributions_with_host_services(
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
                 allowed.insert(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1);
+                if manifest.api_version == EXTENSION_API_VERSION_0_4 {
+                    allowed.insert(EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1);
+                    allowed.insert(EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1);
+                }
                 if manifest.name == "octet-subagents" {
                     allowed.insert(EXTENSION_FEATURE_DELEGATION_TELEMETRY);
                 }
@@ -313,12 +431,25 @@ pub(super) fn negotiate_contributions_with_host_services(
                     "first-party octet-subagents requires `{EXTENSION_FEATURE_DELEGATION_TELEMETRY}`; reinstall the current workspace bundle"
                 )));
             }
-            if features.contains(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
-                && !features.contains(EXTENSION_FEATURE_AGENT_SESSIONS)
+            if features.contains(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1)
+                && !features.contains(EXTENSION_FEATURE_AUTOCOMPLETE)
             {
                 return Err(ExtensionRuntimeError::Protocol(
-                    "agent_model_selection_v1 negotiation requires agent_sessions".into(),
+                    "autocomplete_edit_v1 negotiation requires autocomplete".into(),
                 ));
+            }
+            for feature in [
+                EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1,
+                EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1,
+                EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1,
+            ] {
+                if features.contains(feature)
+                    && !features.contains(EXTENSION_FEATURE_AGENT_SESSIONS)
+                {
+                    return Err(ExtensionRuntimeError::Protocol(format!(
+                        "{feature} negotiation requires agent_sessions"
+                    )));
+                }
             }
             if features.contains(EXTENSION_FEATURE_APPROVALS)
                 && !features.contains(EXTENSION_FEATURE_POLICY_INTENTS)
@@ -468,7 +599,7 @@ pub(super) fn negotiate_contributions_with_host_services(
             confirmations: manifest.contributes.confirmations,
             presentation: manifest.contributes.presentation,
             menu: manifest.contributes.menu,
-            providers: false,
+            providers: manifest.contributes.providers && protocol.supports("provider_proxy_v1"),
         },
         protocol,
     ))

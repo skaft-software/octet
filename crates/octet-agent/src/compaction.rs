@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::{Entry, EntryId, EntryValue, Session, SessionError};
 
+mod session_operations;
+pub use session_operations::{
+    run_session_operation_hooks, session_operation_branch, SessionCompactionReason,
+    SessionCompactionReplacement, SessionOperation, SessionOperationDecision,
+    SessionOperationError, SessionOperationFuture, SessionOperationHook,
+    SessionOperationInvocation, SessionSourceRevision,
+};
+
 /// System instruction shared by every compaction/handoff summarizer call.
 pub const SUMMARIZATION_SYSTEM_PROMPT: &str = r#"You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
 
@@ -164,7 +172,7 @@ pub struct CompactionDetails {
 }
 
 /// Owned input for one structured handoff request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct HandoffPreparation {
     /// Older messages being folded into the checkpoint.
     pub messages: Vec<Message>,

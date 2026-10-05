@@ -13,6 +13,8 @@ import stat
 from typing import Any, Mapping, Optional, Union
 from urllib.parse import urlsplit
 
+from .ownership import ResourceOwner
+
 
 MAX_CONFIG_BYTES = 256 * 1024
 MAX_TRUSTED_PROJECTS = 8
@@ -138,6 +140,8 @@ class ServerConfig:
     transport: str = "stdio"
     url: Optional[str] = field(default=None, repr=False)
     auth: Optional[HttpAuthConfig] = field(default=None, repr=False)
+    # Internal transient binding, never admitted from persisted JSON config.
+    registration_owner: Optional[ResourceOwner] = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

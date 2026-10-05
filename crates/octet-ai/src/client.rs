@@ -40,7 +40,7 @@ use crate::error::{
 };
 use crate::host_transport::{HostStreamModel, HostStreamTransport};
 use crate::responses_ws::{ResponsesWsLiveness, ResponsesWsPool};
-use crate::runtime::{is_reserved_header, HookModelContext, HostRequestOptions};
+use crate::runtime::{HookModelContext, HostRequestOptions, ProviderRequestHook};
 use crate::stream::{ResponseStream, StreamEvent};
 use crate::types::{EndpointId, Protocol, Request, Response};
 use crate::{ResponsesCompactRequest, ResponsesCompactResponse};
@@ -51,7 +51,10 @@ use self::batch::{
 // Re-exported rather than re-homed: both are crate-internal and are already
 // addressed as `crate::client::` from `images` and `responses_ws`.
 pub(crate) use self::diagnostics::sanitize_ai_error;
-use self::hooks::{apply_payload_hook, merge_preset_headers, prepare_host_request};
+use self::hooks::{
+    apply_payload_hook, merge_preset_headers, prepare_host_request, validate_hook_headers,
+    ProviderRequestAttempt,
+};
 use self::stream::{stream_http, websocket_open_failure_is_replay_safe, HttpStreamRequest};
 pub(crate) use self::transport::DEFAULT_CONNECT_TIMEOUT;
 use self::transport::{
@@ -232,6 +235,7 @@ pub struct AiClient {
     stream_idle_timeout: Duration,
     stream_deadline: Duration,
     request_dispatch: Option<Arc<std::sync::atomic::AtomicBool>>,
+    provider_request_hooks: Vec<Arc<dyn ProviderRequestHook>>,
 }
 
 impl Default for AiClient {
@@ -241,6 +245,23 @@ impl Default for AiClient {
 }
 
 impl AiClient {
+    /// Clones this client, appending an owner-bound async HTTP hook chain.
+    ///
+    /// Existing clients and their shared transport registry remain unchanged.
+    /// Hooks apply to conversational requests and native HTTP compaction, not
+    /// batch/image/deferred services. Preferred WebSockets use HTTP while hooks
+    /// are installed; opaque host transports/native steering fail explicitly.
+    pub fn with_provider_request_hooks(&self, hooks: Vec<Arc<dyn ProviderRequestHook>>) -> Self {
+        let mut client = self.clone();
+        client.provider_request_hooks.extend(hooks);
+        client
+    }
+
+    /// Whether this client has an async provider-boundary subscriber.
+    pub fn has_provider_request_hooks(&self) -> bool {
+        !self.provider_request_hooks.is_empty()
+    }
+
     /// Clones this client with fresh, sticky dispatch tracking for one attempt.
     /// The original client is unaffected. Do not reuse this clone for a new attempt.
     pub fn track_request_dispatch(&self) -> Self {
@@ -316,6 +337,7 @@ impl AiClient {
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             stream_deadline: DEFAULT_STREAM_DEADLINE,
             request_dispatch: None,
+            provider_request_hooks: Vec::new(),
         })
     }
 
@@ -330,6 +352,7 @@ impl AiClient {
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             stream_deadline: DEFAULT_STREAM_DEADLINE,
             request_dispatch: None,
+            provider_request_hooks: Vec::new(),
         }
     }
 
@@ -483,7 +506,7 @@ impl AiClient {
             )
             .into());
         }
-        if host_transport && host_options.has_wire_hooks() {
+        if host_transport && (host_options.has_wire_hooks() || self.has_provider_request_hooks()) {
             return Err(crate::ConfigError::Parse(
                 "per-request api key, metadata, and payload/header/response hooks are unsupported by a host stream transport".into(),
             )
@@ -577,6 +600,12 @@ impl AiClient {
         mut req: Request,
     ) -> Result<crate::steering::SteeringSession, AiError> {
         use crate::steering::{SteeringControl, SteeringSession};
+        if self.has_provider_request_hooks() {
+            return Err(crate::ConfigError::Parse(
+                "async HTTP provider hooks are unsupported by native steering".into(),
+            )
+            .into());
+        }
         crate::steering::validate_request(&req)?;
         let started_at = Instant::now();
         let mut prepared = model.clone();
@@ -724,6 +753,9 @@ impl AiClient {
         request: Request,
         warm_request: Request,
     ) -> Result<ResponseStream, AiError> {
+        if self.has_provider_request_hooks() {
+            return self.stream(model, request).await;
+        }
         let mut prepared = model.clone();
         crate::catalog::validate_endpoint(&prepared.endpoint)?;
         crate::catalog::validate_model_spec(&prepared.spec)?;
@@ -749,6 +781,10 @@ impl AiClient {
     /// the result; ordinary [`Self::stream`] calls always retain HTTP/SSE
     /// fallback behavior.
     pub async fn prewarm_responses(&self, model: &Model, req: Request) -> Result<(), AiError> {
+        if self.has_provider_request_hooks() {
+            // The hooked request uses HTTP; do not create an unobserved socket.
+            return Ok(());
+        }
         let mut prepared = model.clone();
         crate::declarations::azure::apply(&mut prepared, None, &Default::default())?;
         let model = &prepared;
@@ -905,6 +941,14 @@ impl AiClient {
         if let Some(hook) = &host_options.on_payload {
             parts.body = apply_payload_hook(hook, model, parts.body)?;
         }
+        let provider_hooks = ProviderRequestAttempt::new(
+            model,
+            &self.provider_request_hooks,
+            &host_options.provider_hooks,
+        );
+        if let Some(hooks) = &provider_hooks {
+            parts.body = hooks.payload(parts.body).await?;
+        }
 
         let proxy = self.request_proxy(&parts.url)?;
 
@@ -939,11 +983,10 @@ impl AiClient {
         if let Some(transform) = &host_options.transform_headers {
             let before = headers.clone();
             transform.transform_headers(&mut headers, &HookModelContext::from_model(model))?;
-            for name in headers.keys() {
-                if is_reserved_header(name) && before.get(name) != headers.get(name) {
-                    return Err(crate::ConfigError::ReservedHeader(name.clone()).into());
-                }
-            }
+            validate_hook_headers(&before, &headers)?;
+        }
+        if let Some(hooks) = &provider_hooks {
+            hooks.headers(&mut headers).await?;
         }
 
         // Request-aware signers (SigV4) must run after body encoding, so the
@@ -991,6 +1034,7 @@ impl AiClient {
             buffer_ambiguous_compatibility_content,
             diagnostic_redactor: diagnostic_redactor.clone(),
             on_response: host_options.on_response.clone(),
+            provider_hooks,
         };
 
         // Responses WebSockets are deliberately opt-in per endpoint. A
@@ -1006,6 +1050,7 @@ impl AiClient {
             session_key.is_some(),
         );
         if transport.uses_websocket()
+            && fallback_request.provider_hooks.is_none()
             && model.spec.protocol == Protocol::OpenAiResponses
             && !request_aware_signer
             && proxy.is_none()
@@ -1202,7 +1247,12 @@ impl AiClient {
         // Codex compresses ordinary streaming Responses requests, but its
         // compact endpoint contract is plain JSON. Do not apply the normal
         // Responses transport compression policy here.
-        let body = bytes::Bytes::from(body);
+        let mut body = bytes::Bytes::from(body);
+        let provider_hooks = ProviderRequestAttempt::new(model, &self.provider_request_hooks, &[]);
+        if let Some(hooks) = &provider_hooks {
+            body = hooks.payload(body).await?;
+            hooks.headers(&mut headers).await?;
+        }
         let resolved_headers = crate::auth::resolve_headers(&model.endpoint.auth)
             .await
             .map_err(AiError::Auth)?;
@@ -1235,13 +1285,19 @@ impl AiClient {
         })?
         .map_err(|error| request_open_transport_error(error, "compact request"))
         .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
+        let opened_at = Instant::now();
+        if let Some(hooks) = &provider_hooks {
+            hooks
+                .response(response.status(), response.headers())
+                .await?;
+        }
         Ok(PendingResponsesCompact {
             response,
             diagnostic_redactor,
             stream_idle_timeout: self.stream_idle_timeout,
             stream_initial_timeout: self.stream_initial_timeout,
             stream_deadline: self.stream_deadline,
-            opened_at: Instant::now(),
+            opened_at,
         })
     }
 

@@ -37,6 +37,80 @@ pub(crate) fn generated<T: schemars::JsonSchema>() -> Result<Value, Error> {
     Ok(value)
 }
 
+/// Canonical typed profile, separate from the retained lower-level input API.
+pub(crate) fn typed_generated<T: schemars::JsonSchema>(input: bool) -> Result<Value, Error> {
+    let mut settings = schemars::gen::SchemaSettings::draft07();
+    settings.inline_subschemas = true;
+    let root = settings.into_generator().into_root_schema_for::<T>();
+    let mut value = serde_json::to_value(root).map_err(|_| Error::internal())?;
+    normalize_typed(&mut value)?;
+    strip_numeric_formats(&mut value);
+    if input { definition(&value)?; } else { bounded_definition(&value)?; }
+    Ok(value)
+}
+
+fn normalize_typed(value: &mut Value) -> Result<(), Error> {
+    use serde_json::json;
+    let object = value.as_object_mut().ok_or_else(|| Error::invalid("unsupported typed schema"))?;
+    object.remove("$schema");
+    object.remove("title");
+    if let Some(kinds) = object.get("type").and_then(Value::as_array).cloned() {
+        object.remove("type");
+        let mut branches = Vec::new();
+        for kind in kinds {
+            let mut child = if kind == "null" { json!({}) } else { Value::Object(object.clone()) };
+            child.as_object_mut().unwrap().remove("default");
+            child["type"] = kind;
+            normalize_typed(&mut child)?;
+            branches.push(child);
+        }
+        let default = object.remove("default");
+        object.clear();
+        object.insert("anyOf".into(), branches.into());
+        if let Some(default) = default { object.insert("default".into(), default); }
+    } else {
+        match object.get("type").and_then(Value::as_str) {
+            Some("integer") => {
+                let min = object.get("minimum").and_then(Value::as_i64).unwrap_or(-crate::values::MAX_INTEGER).max(-crate::values::MAX_INTEGER);
+                let max = object.get("maximum").and_then(Value::as_i64).unwrap_or(crate::values::MAX_INTEGER).min(crate::values::MAX_INTEGER);
+                object.insert("minimum".into(), min.into());
+                object.insert("maximum".into(), max.into());
+            }
+            Some("object") => {
+                if object.get("additionalProperties").is_some_and(|v| v.is_object() || v == &Value::Bool(true)) {
+                    return Err(Error::invalid("typed maps and open records are unsupported"));
+                }
+                object.insert("additionalProperties".into(), false.into());
+                object.entry("required").or_insert_with(|| json!([]));
+                let properties = object.entry("properties").or_insert_with(|| json!({})).as_object_mut().ok_or_else(|| Error::invalid("invalid typed properties"))?;
+                for child in properties.values_mut() {
+                    normalize_typed(child)?;
+                }
+            }
+            Some("array") => {
+                normalize_typed(object.get_mut("items").ok_or_else(|| Error::invalid("typed arrays require homogeneous items"))?)?;
+            }
+            Some("number") if object.get("format").and_then(Value::as_str) == Some("float") => {
+                // Serde narrows f64 JSON into f32; refuse overflow before domain dispatch.
+                let limit = f32::MAX as f64;
+                let min = object.get("minimum").and_then(Value::as_f64).unwrap_or(-limit).max(-limit);
+                let max = object.get("maximum").and_then(Value::as_f64).unwrap_or(limit).min(limit);
+                object.insert("minimum".into(), json!(min));
+                object.insert("maximum".into(), json!(max));
+            }
+            Some("string" | "boolean" | "number" | "null") => {}
+            None if ["anyOf", "oneOf", "allOf"].iter().any(|k| object.contains_key(*k)) => {}
+            _ => return Err(Error::invalid("untyped or unsupported typed schema")),
+        }
+        for key in ["anyOf", "oneOf", "allOf"] {
+            if let Some(branches) = object.get_mut(key).and_then(Value::as_array_mut) {
+                for child in branches { normalize_typed(child)?; }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn strip_numeric_formats(value: &mut Value) {
     if let Some(object) = value.as_object_mut() {
         if object.get("type").is_some_and(|kind| {
@@ -75,6 +149,9 @@ pub(crate) fn definition(schema: &Value) -> Result<(), Error> {
     if schema.get("type").and_then(Value::as_str) != Some("object") {
         return Err(Error::invalid("tool input must be an object schema"));
     }
+    bounded_definition(schema)
+}
+fn bounded_definition(schema: &Value) -> Result<(), Error> {
     if serde_json::to_vec(schema)
         .map_err(|_| Error::internal())?
         .len()
@@ -349,6 +426,39 @@ mod tests {
         assert!(arguments(&schema, &json!({"nested":{"value":1},"values":["a"]})).is_err());
         assert!(arguments(&schema, &json!({"nested":{"value":true},"values":[1]})).is_err());
         assert!(generated::<Recursive>().is_err());
+    }
+    #[test]
+    fn typed_defaults_nullable_enums_and_portable_schema() {
+        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        #[serde(rename_all = "snake_case")]
+        enum Choice { One, Two }
+        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Typed {
+            count: i64,
+            #[serde(default)]
+            label: String,
+            note: Option<String>,
+            choice: Choice,
+        }
+        let schema = typed_generated::<Typed>(true).unwrap();
+        assert_eq!(schema["properties"]["count"]["minimum"], -crate::values::MAX_INTEGER);
+        assert_eq!(schema["properties"]["count"]["maximum"], crate::values::MAX_INTEGER);
+        assert_eq!(schema["properties"]["label"]["default"], "");
+        let input = json!({"count": 1, "choice":"one"});
+        arguments(&schema, &input).unwrap();
+        let decoded: Typed = serde_json::from_value(input).unwrap();
+        assert_eq!(decoded.label, "");
+        assert!(decoded.note.is_none());
+        assert!(arguments(&schema, &json!({"count":1,"choice":"other"})).is_err());
+        assert!(arguments(&schema, &json!({"count":1,"choice":"two","label":null})).is_err());
+        assert!(arguments(&schema, &json!({"count":1,"choice":"two","extra":true})).is_err());
+        assert!(typed_generated::<std::collections::BTreeMap<String, String>>(true).is_err());
+        assert!(typed_generated::<serde_json::Value>(false).is_err());
+        assert!(typed_generated::<(String, bool)>(false).is_err());
+        let float_schema = typed_generated::<f32>(false).unwrap();
+        assert!(arguments(&float_schema, &json!(1e39)).is_err());
+        assert!(arguments(&float_schema, &json!(1.25)).is_ok());
     }
     #[test]
     fn constraints_and_unsupported_vocabulary() {

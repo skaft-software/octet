@@ -108,34 +108,6 @@ fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<Stri
             render_extension_line(state, &line.text, line.style_role.as_deref(), width)
         }),
     );
-    if state.run.is_active() {
-        if let Some(working) = &state.extension_ui.working {
-            if working.visible != Some(false) {
-                let message = working.message.as_deref().or_else(|| {
-                    working.frames.as_ref().and_then(|frames| {
-                        (!frames.is_empty())
-                            .then(|| frames[state.event_spinner_frame % frames.len()].as_str())
-                    })
-                });
-                if let Some(message) = message {
-                    above.push(render_extension_line(
-                        state,
-                        message,
-                        Some("extension.pi.accent"),
-                        width,
-                    ));
-                }
-            }
-        }
-        if let Some(label) = state.extension_ui.hidden_thinking_label.as_deref() {
-            above.push(render_extension_line(
-                state,
-                &format!("thinking: {label}"),
-                Some("extension.pi.muted"),
-                width,
-            ));
-        }
-    }
     let mut below = state
         .extension_ui
         .below_editor

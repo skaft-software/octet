@@ -1,6 +1,9 @@
 //! ExecutableExtensions commands, menus, shortcuts and presentation actions.
 
 use super::*;
+use octet_agent::extension_process::{
+    CommandOutput, ExtensionOperationToken, ExtensionRuntimeError,
+};
 
 impl ExecutableExtensions {
     /// Resolve a host-validated extension shortcut from one terminal event.
@@ -161,17 +164,12 @@ impl ExecutableExtensions {
         })
     }
 
-    pub async fn execute_presentation_action_with_confirmation<H>(
-        &mut self,
+    pub(crate) fn resolve_presentation_action(
+        &self,
         extension: &str,
         action_id: &str,
-        confirmations: &mut H,
-    ) -> anyhow::Result<String>
-    where
-        H: ExtensionConfirmationHandler + ?Sized,
-    {
-        let action = self
-            .presentation_views()
+    ) -> anyhow::Result<octet_agent::ExtensionPresentationAction> {
+        self.presentation_views()
             .into_iter()
             .find(|view| view.extension == extension)
             .and_then(|view| {
@@ -184,7 +182,20 @@ impl ExecutableExtensions {
                 anyhow::anyhow!(
                 "extension presentation action {extension:?}/{action_id:?} is unavailable or stale"
             )
-            })?;
+            })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
+    pub async fn execute_presentation_action_with_confirmation<H>(
+        &mut self,
+        extension: &str,
+        action_id: &str,
+        confirmations: &mut H,
+    ) -> anyhow::Result<String>
+    where
+        H: ExtensionConfirmationHandler + ?Sized,
+    {
+        let action = self.resolve_presentation_action(extension, action_id)?;
         let mut approval_budget = 0;
         if action.destructive {
             let request = ConfirmationRequest {
@@ -309,6 +320,7 @@ impl ExecutableExtensions {
     /// a host confirmation when the extension marked it destructive. `place`
     /// names the menu the action was chosen from.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub async fn execute_menu_action_with_confirmation<H>(
         &mut self,
         extension: &str,
@@ -353,6 +365,7 @@ impl ExecutableExtensions {
         .ok_or_else(|| anyhow::anyhow!("{extension} no longer offers {label:?}"))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub async fn execute_command_with_confirmation<H>(
         &mut self,
         name: &str,
@@ -366,6 +379,90 @@ impl ExecutableExtensions {
             .await
     }
 
+    /// Prepare an owned command. No fleet or frontend borrow survives this call,
+    /// so the interactive owner can apply a real session mutation while it waits.
+    pub(crate) fn prepare_owned_command(
+        &mut self,
+        extension: Option<&str>,
+        name: &str,
+        arguments: Vec<String>,
+        attended: bool,
+        approval_budget: usize,
+    ) -> Option<OwnedExtensionCommand> {
+        let process = self
+            .processes
+            .iter()
+            .find(|process| {
+                extension.is_none_or(|extension| process.descriptor().manifest.name == extension)
+                    && process
+                        .contributions()
+                        .commands
+                        .iter()
+                        .any(|command| command.name == name)
+            })?
+            .clone();
+        let extension_name = process.descriptor().manifest.name.clone();
+        let generation = process.health_snapshot().generation;
+        let execution_context =
+            extension_execution_context(&process, self.resource_owner.as_deref());
+        let events = process.subscribe();
+        self.command_dialog_process = Some((extension_name.clone(), generation));
+        let (request_started, started) = tokio::sync::oneshot::channel();
+        let cancellation_token = CancellationToken::default();
+        let cancellation = cancellation_token.clone();
+        let (progress_sink, progress_rx) = ToolProgressSink::bounded_channel();
+        let executing_process = process.clone();
+        let command_name = name.to_owned();
+        let execution = Box::pin(async move {
+            if attended {
+                executing_process
+                    .execute_attended_command_with_progress(
+                        command_name,
+                        arguments,
+                        execution_context,
+                        cancellation,
+                        progress_sink,
+                        request_started,
+                        MENU_ACTION_DEADLINE,
+                    )
+                    .await
+            } else {
+                executing_process
+                    .execute_command_controlled_with_progress(
+                        command_name,
+                        arguments,
+                        execution_context,
+                        cancellation,
+                        progress_sink,
+                        request_started,
+                    )
+                    .await
+            }
+        });
+        let mut frontend_tick = tokio::time::interval(Duration::from_millis(50));
+        frontend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Some(OwnedExtensionCommand {
+            process,
+            name: name.to_owned(),
+            extension_name,
+            generation,
+            owner: self.resource_owner.clone(),
+            events,
+            events_open: true,
+            remote_ui_wake: self.remote_ui_wake(),
+            frontend_tick,
+            started,
+            operation: None,
+            cancellation_token,
+            execution,
+            progress_rx,
+            approval_budget,
+            output: None,
+            owner_replaced: false,
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub(super) async fn execute_command_with_confirmation_scoped<H>(
         &mut self,
         extension: Option<&str>,
@@ -377,220 +474,18 @@ impl ExecutableExtensions {
     where
         H: ExtensionConfirmationHandler + ?Sized,
     {
-        let Some(process) = self
-            .processes
-            .iter()
-            .find(|process| {
-                extension.is_none_or(|extension| process.descriptor().manifest.name == extension)
-                    && process
-                        .contributions()
-                        .commands
-                        .iter()
-                        .any(|command| command.name == name)
-            })
-            .cloned()
+        let Some(mut command) =
+            self.prepare_owned_command(extension, name, arguments, attended_deadline.is_some(), 0)
         else {
             return Ok(None);
         };
-        let extension_name = process.descriptor().manifest.name.clone();
-        let execution_context =
-            extension_execution_context(&process, self.resource_owner.as_deref());
-        let mut events = process.subscribe();
-        self.command_dialog_process =
-            Some((extension_name.clone(), process.health_snapshot().generation));
-        let remote_ui_wake = self.remote_ui_wake();
-        let mut frontend_tick = tokio::time::interval(Duration::from_millis(50));
-        frontend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let output: anyhow::Result<_> = async {
-            let legacy_uncorrelated = process.api_version() == EXTENSION_API_VERSION_0_1;
-            let (request_started, started) = tokio::sync::oneshot::channel();
-            let mut started = Box::pin(started);
-            let mut operation = None;
-            let cancellation_token = CancellationToken::default();
-            let (progress_sink, mut progress_rx) = ToolProgressSink::bounded_channel();
-            let mut execution: Pin<Box<dyn Future<Output = _> + Send + '_>> =
-                match attended_deadline {
-                    Some(deadline) => Box::pin(process.execute_attended_command_with_progress(
-                        name.to_owned(),
-                        arguments,
-                        execution_context,
-                        cancellation_token.clone(),
-                        progress_sink,
-                        request_started,
-                        deadline,
-                    )),
-                    None => Box::pin(process.execute_command_controlled_with_progress(
-                        name.to_owned(),
-                        arguments,
-                        execution_context,
-                        cancellation_token.clone(),
-                        progress_sink,
-                        request_started,
-                    )),
-                };
-            let mut events_open = true;
-            let result = loop {
-                if let Some(shell) = confirmations.command_shell() {
-                    for message in self.drain_events_for_shell(shell) { shell.notice(message); }
-                    if self.sync_semantic_ui(shell) { shell.render(); }
-                }
-                // The cancellation future and confirmation UI borrow the same
-                // frontend. Keep the select in its own scope so cancellation
-                // is dropped before a confirmation prompt borrows it again.
-                let mut command_progress = None;
-                let mut command_input = None;
-                let event = {
-                    let cancellation = confirmations.wait_for_command_event();
-                    tokio::pin!(cancellation);
-                    tokio::select! {
-                        result = &mut execution => break result?,
-                        started = &mut started, if operation.is_none() => match started {
-                            Ok(started) => {
-                                operation = Some(started);
-                                None
-                            }
-                            Err(_) => break execution.await?,
-                        },
-                        progress = progress_rx.recv() => {
-                            command_progress = progress;
-                            None
-                        },
-                        event = events.recv(), if events_open && operation.is_some() => Some(event),
-                        incoming = &mut cancellation => {
-                            command_input = Some(incoming.with_context(|| format!(
-                                "command input failed for extension {extension_name:?}"
-                            ))?);
-                            None
-                        }
-                        _ = remote_ui::notified(&remote_ui_wake) => None,
-                        _ = frontend_tick.tick() => None,
-                    }
-                };
-                if let Some(incoming) = command_input {
-                    let cancelled = match incoming {
-                        None => true,
-                        Some(event) => {
-                            if confirmations.command_cancellation_event(&event) {
-                                true
-                            } else {
-                                let consumed = confirmations.command_shell().is_some_and(|shell| {
-                                    self.route_remote_ui_event(shell, &event)
-                                });
-                                !consumed && confirmations.command_event(event)
-                            }
-                        }
-                    };
-                    if cancelled {
-                        cancellation_token.cancel();
-                        anyhow::bail!("extension command {name:?} cancelled");
-                    }
-                    continue;
-                }
-                if let Some(progress) = command_progress {
-                    confirmations.progress(&extension_name, &progress);
-                    continue;
-                }
-                let Some(event) = event else {
-                    continue;
-                };
-                match event {
-                    Ok(ExtensionEvent::ConfirmationRequested {
-                        request_id,
-                        generation,
-                        parent_request_id,
-                        request,
-                    }) if parent_request_id.is_some_and(|parent| {
-                        operation.is_some_and(|operation| operation.owns(generation, parent))
-                    }) || (legacy_uncorrelated
-                        && parent_request_id.is_none()
-                        && operation
-                            .is_some_and(|operation| operation.generation == generation)) =>
-                    {
-                        if process.confirmation_answered(&request_id, generation) {
-                            continue;
-                        }
-                        let confirmed = confirmations
-                            .confirm(&extension_name, &request)
-                            .await
-                            .with_context(|| {
-                                format!("confirmation UI failed for extension {extension_name:?}")
-                            })?;
-                        process
-                            .respond_to_confirmation(
-                                request_id,
-                                generation,
-                                ConfirmationResponse { confirmed },
-                            )
-                            .await?;
-                    }
-                    Ok(ExtensionEvent::PolicyEvaluationRequested { .. }) => {}
-                    Ok(ExtensionEvent::InputRequested {
-                        request_id,
-                        generation,
-                        parent_request_id,
-                        request,
-                    }) if operation
-                        .is_some_and(|operation| operation.owns(generation, parent_request_id)) =>
-                    {
-                        if process.input_answered(&request_id, generation) {
-                            continue;
-                        }
-                        let value = confirmations
-                            .input(&extension_name, &request)
-                            .await
-                            .with_context(|| {
-                                format!("input UI failed for extension {extension_name:?}")
-                            })?;
-                        process
-                            .respond_to_input(
-                                request_id,
-                                generation,
-                                ExtensionInputResponse { value },
-                            )
-                            .await?;
-                    }
-                    Ok(_) => {
-                        // The product's persistent receiver owns ordinary
-                        // notifications, status, context, and diagnostics.
-                    }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        self.diagnostics.push(format!(
-                                "warning: {extension_name}: confirmation listener lagged by {count} events"
-                            ));
-                    }
-                    Err(broadcast::error::RecvError::Closed) => events_open = false,
-                }
-            };
-            Ok::<_, anyhow::Error>(result)
-        }
-        .await;
-        self.command_dialog_process = None;
-        if let Some(shell) = confirmations.command_shell() {
-            for message in self.drain_events_for_shell(shell) {
-                shell.notice(message);
-            }
-            self.sync_semantic_ui(shell);
-            shell.render();
-        }
-        confirmations.finish_progress(&extension_name);
-        let output = output?;
-        self.enqueue_contexts(&extension_name, output.context);
-        let mut blocks = Vec::new();
-        if !output.text.trim().is_empty() {
-            blocks.push(output.text);
-        }
-        blocks.extend(
-            output
-                .notifications
-                .iter()
-                .map(|notification| format_notification(name, notification)),
-        );
-        if let Some(shell) = confirmations.command_shell() {
-            blocks.extend(self.drain_events_for_shell(shell));
-        } else {
-            blocks.extend(self.drain_events());
-        }
-        Ok(Some(blocks.join("\n")))
+        // Frontends without the App owner retain idle barriers only. The
+        // interactive runner opts into yielding mutations to its sole owner.
+        let failure = command
+            .advance(self, confirmations, false, None)
+            .await
+            .err();
+        command.finish(self, confirmations, failure).await.map(Some)
     }
 
     /// Executes an extension command at a non-interactive boundary.
@@ -721,24 +616,107 @@ impl ExecutableExtensions {
         true
     }
 
+    fn autocomplete_fence_is_current(&self, fence: &AutocompleteFence) -> bool {
+        self.resource_owner.as_deref() == Some(fence.resource_owner.as_str())
+            && !self.remote_ui.editor_owns_composer()
+            && self.session_id == fence.session_id
+            && fence.providers.iter().all(|provider| {
+                self.autocomplete_registrations
+                    .get(&provider.extension)
+                    .is_some_and(|registration| {
+                        registration.extension_instance_id == provider.extension_instance_id
+                            && registration.generation == provider.generation
+                            && registration.process.is_running()
+                            && registration.process.extension_instance_id()
+                                == provider.extension_instance_id
+                            && registration.process.health_snapshot().generation
+                                == provider.generation
+                    })
+            })
+    }
+
+    /// Remove a displayed menu when its session or registered process is retired.
+    pub(crate) fn reconcile_editor_autocomplete(&mut self, shell: &mut InteractiveShell) -> bool {
+        self.prune_semantic_ui();
+        if self.displayed_autocomplete.as_ref().is_some_and(|fence| {
+            !self.autocomplete_fence_is_current(fence) || !shell.extension_editor_snapshot().focused
+        }) {
+            self.displayed_autocomplete = None;
+            return shell.clear_extension_autocomplete();
+        }
+        false
+    }
+
+    /// Correlate a background result again at display, not just RPC completion.
+    pub(crate) fn set_editor_autocomplete(
+        &mut self,
+        shell: &mut InteractiveShell,
+        update: ExtensionAutocompleteUpdate,
+    ) -> bool {
+        self.reconcile_editor_autocomplete(shell);
+        if !self.autocomplete_fence_is_current(&update.fence) {
+            return false;
+        }
+        let claimed = !update.items.is_empty();
+        if !shell.set_extension_autocomplete(&update.snapshot, update.prefix, update.items) {
+            return false;
+        }
+        self.displayed_autocomplete = claimed.then_some(update.fence);
+        true
+    }
+
+    /// Explicit user acceptance is independently fenced against the live owner.
+    pub(crate) fn accept_editor_autocomplete(&mut self, shell: &mut InteractiveShell) -> bool {
+        self.reconcile_editor_autocomplete(shell);
+        if self.displayed_autocomplete.take().is_none() {
+            shell.clear_extension_autocomplete();
+            return false;
+        }
+        shell.accept_extension_autocomplete()
+    }
+
     /// Start one host-mediated autocomplete request for the active editor
-    /// snapshot. A late result is fenced by the shell revision before display.
+    /// snapshot. Display and acceptance retain session/provider correlation.
     pub fn request_editor_autocomplete(&mut self, snapshot: ShellEditorSnapshot) -> bool {
         self.prune_semantic_ui();
         self.autocomplete_tasks.retain(|task| !task.is_finished());
         if self.autocomplete_tasks.len() >= MAX_EXTENSION_AUTOCOMPLETE_TASKS {
             return true;
         }
-        let Some(registration) = self.autocomplete_registrations.values().next().cloned() else {
+        let Some(resource_owner) = self.resource_owner.clone() else {
             return false;
         };
-        let process = registration.process;
-        if !process.is_running()
-            || process.health_snapshot().generation != registration.generation
-            || process.extension_instance_id() != registration.extension_instance_id
-        {
+        let registrations: Vec<_> = self
+            .autocomplete_registrations
+            .iter()
+            .filter(|(_, registration)| {
+                registration.process.is_running()
+                    && registration.process.health_snapshot().generation == registration.generation
+                    && registration.process.extension_instance_id()
+                        == registration.extension_instance_id
+            })
+            .map(|(extension, registration)| {
+                (
+                    AutocompleteProviderFence {
+                        extension: extension.clone(),
+                        extension_instance_id: registration.extension_instance_id.clone(),
+                        generation: registration.generation,
+                    },
+                    registration.clone(),
+                )
+            })
+            .collect();
+        if registrations.is_empty() {
             return false;
         }
+        let mut fence = AutocompleteFence {
+            resource_owner,
+            session_id: self.session_id.clone(),
+            providers: registrations
+                .iter()
+                .map(|(provider, _)| provider.clone())
+                .collect(),
+        };
         let request = ExtensionAutocompleteRequest {
             text: snapshot.text.clone(),
             cursor: snapshot.cursor,
@@ -746,50 +724,381 @@ impl ExecutableExtensions {
         };
         let sender = self.background_tx.clone();
         let Ok(handle) = Handle::try_current() else {
-            self.diagnostics.push(format!(
-                "warning: {}: autocomplete requires the Tokio runtime",
-                process.descriptor().manifest.name
-            ));
+            self.diagnostics
+                .push("warning: autocomplete requires the Tokio runtime");
             return false;
         };
         self.autocomplete_tasks.push(handle.spawn(async move {
-            let (update, diagnostic) = match tokio::time::timeout(
-                EXTENSION_AUTOCOMPLETE_DEADLINE,
-                process.request_autocomplete(request),
-            )
-            .await
-            {
+            // One deadline for the whole chain, not N deadlines for N peers.
+            let result = tokio::time::timeout(EXTENSION_AUTOCOMPLETE_DEADLINE, async {
+                let mut diagnostic = None;
+                for (provider, registration) in registrations {
+                    let process = registration.process;
+                    if !process.is_running()
+                        || process.health_snapshot().generation != registration.generation
+                    {
+                        continue;
+                    }
+                    match process.request_autocomplete(request.clone()).await {
+                        Ok(response)
+                            if process.is_running()
+                                && process.health_snapshot().generation == registration.generation
+                                && !response.items.is_empty() =>
+                        {
+                            return (Some((response, provider)), diagnostic);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            diagnostic = Some(format!("warning: extension autocomplete failed: {error}"));
+                        }
+                    }
+                }
+                (None, diagnostic)
+            })
+            .await;
+            let (response, diagnostic) = match result {
+                Ok(result) => result,
                 Err(_) => (
                     None,
                     Some(format!(
                         "warning: extension autocomplete exceeded {EXTENSION_AUTOCOMPLETE_DEADLINE:?}"
                     )),
                 ),
-                Ok(Err(error)) => (
-                    None,
-                    Some(format!("warning: extension autocomplete failed: {error}")),
-                ),
-                Ok(Ok(response)) => (
-                    Some(ExtensionAutocompleteUpdate {
-                        snapshot,
-                        prefix: response.prefix,
-                        items: response
-                            .items
-                            .into_iter()
-                            .map(|item| ShellAutocompleteItem {
-                                value: item.value,
-                                label: item.label,
-                                description: item.description,
-                            })
-                            .collect(),
-                    }),
-                    None,
-                ),
             };
+            // An unclaimed query must preserve normal path completion. The
+            // shell applies this empty response only to the exact saved draft,
+            // cursor, revision and focus, just like a positive extension menu.
+            let (prefix, items) = response.map_or_else(
+                || (String::new(), Vec::new()),
+                |(response, provider)| {
+                    fence.providers = vec![provider];
+                    (response.prefix, response.items)
+                },
+            );
+            let update = Some(ExtensionAutocompleteUpdate {
+                fence,
+                snapshot,
+                prefix,
+                items,
+            });
             let _ = sender
                 .send(ExtensionBackgroundUpdate::Autocomplete { update, diagnostic })
                 .await;
         }));
         true
+    }
+}
+
+/// The transport request owns its process and cancellation/accounting lifetime.
+/// `advance` borrows the fleet only until completion or a lifecycle handoff.
+/// No extension receives a mutable App or a recursive lifecycle dispatcher.
+pub(crate) struct OwnedExtensionCommand {
+    process: ExtensionProcess,
+    name: String,
+    extension_name: String,
+    generation: u64,
+    owner: Option<String>,
+    owner_replaced: bool,
+    events: broadcast::Receiver<ExtensionEvent>,
+    events_open: bool,
+    remote_ui_wake: Option<Arc<tokio::sync::Notify>>,
+    frontend_tick: tokio::time::Interval,
+    started: tokio::sync::oneshot::Receiver<ExtensionOperationToken>,
+    operation: Option<ExtensionOperationToken>,
+    cancellation_token: CancellationToken,
+    execution: Pin<Box<dyn Future<Output = Result<CommandOutput, ExtensionRuntimeError>> + Send>>,
+    progress_rx: mpsc::Receiver<ToolProgress>,
+    approval_budget: usize,
+    output: Option<Result<CommandOutput, ExtensionRuntimeError>>,
+}
+
+impl OwnedExtensionCommand {
+    pub(crate) async fn advance<H>(
+        &mut self,
+        extensions: &mut ExecutableExtensions,
+        confirmations: &mut H,
+        mutations: bool,
+        mut session_owner: Option<(&mut Agent, &SessionStore)>,
+    ) -> anyhow::Result<Option<ExtensionSessionLifecycleRequest>>
+    where
+        H: ExtensionConfirmationHandler + ?Sized,
+    {
+        if self.output.is_some() {
+            return Ok(None);
+        }
+        let Self {
+            process,
+            name,
+            extension_name,
+            events,
+            events_open,
+            remote_ui_wake,
+            frontend_tick,
+            started,
+            operation,
+            cancellation_token,
+            execution,
+            progress_rx,
+            approval_budget,
+            ..
+        } = self;
+        let legacy_uncorrelated = process.api_version() == EXTENSION_API_VERSION_0_1;
+        let result = loop {
+            if let Some(shell) = confirmations.command_shell() {
+                if !shell.is_agent_run_active() {
+                    if mutations {
+                        if let Some(request) = extensions.next_session_lifecycle_request() {
+                            return Ok(Some(request));
+                        }
+                    }
+                    if let Some(request) = extensions
+                        .session_lifecycle_receiver
+                        .as_mut()
+                        .and_then(ExtensionSessionLifecycleReceiver::try_next_idle_wait)
+                    {
+                        request.respond(extensions.session_id.clone().ok_or(
+                                octet_agent::extension_process::ExtensionSessionLifecycleError::Unavailable,
+                            ));
+                    }
+                }
+                for message in extensions.drain_events_for_shell(shell) {
+                    shell.notice(message);
+                }
+                // A synchronous Pi append blocks its factory thread until the
+                // real foreground Agent commits it. Draining only into the
+                // session-request queue would deadlock this live command. The
+                // caller lends the current Agent on each advance, including
+                // after session replacement; retained old contexts stay fenced.
+                if let Some((agent, sessions)) = session_owner.as_mut() {
+                    extensions.apply_session_host_requests(agent, sessions);
+                }
+                if extensions.sync_semantic_ui(shell) {
+                    shell.render();
+                }
+            }
+            // The cancellation future and confirmation UI borrow the same
+            // frontend. Keep the select in its own scope so cancellation
+            // is dropped before a confirmation prompt borrows it again.
+            let mut command_progress = None;
+            let mut command_input = None;
+            let event = {
+                let cancellation = confirmations.wait_for_command_event();
+                tokio::pin!(cancellation);
+                tokio::select! {
+                    result = &mut *execution => break result,
+                    started = &mut *started, if operation.is_none() => match started {
+                        Ok(started) => {
+                            *operation = Some(started);
+                            None
+                        }
+                        Err(_) => break execution.await,
+                    },
+                    progress = progress_rx.recv() => {
+                        command_progress = progress;
+                        None
+                    },
+                    event = events.recv(), if *events_open && operation.is_some() => Some(event),
+                    incoming = &mut cancellation => {
+                        command_input = Some(incoming.with_context(|| format!(
+                            "command input failed for extension {extension_name:?}"
+                        ))?);
+                        None
+                    }
+                    _ = remote_ui::notified(remote_ui_wake) => None,
+                    _ = frontend_tick.tick() => None,
+                }
+            };
+            if let Some(incoming) = command_input {
+                let cancelled = match incoming {
+                    None => true,
+                    Some(event) => {
+                        if confirmations.command_cancellation_event(&event) {
+                            true
+                        } else {
+                            let consumed = confirmations.command_shell().is_some_and(|shell| {
+                                extensions.route_remote_ui_event(shell, &event)
+                            });
+                            !consumed && confirmations.command_event(event)
+                        }
+                    }
+                };
+                if cancelled {
+                    cancellation_token.cancel();
+                    anyhow::bail!("extension command {name:?} cancelled");
+                }
+                continue;
+            }
+            if let Some(progress) = command_progress {
+                if let ToolProgress::Confirmation(request) = &progress {
+                    let approved = confirmations
+                        .confirm_effect(extension_name, request)
+                        .await?;
+                    request.respond(approved);
+                } else {
+                    confirmations.progress(extension_name, &progress);
+                }
+                continue;
+            }
+            let Some(event) = event else {
+                continue;
+            };
+            match event {
+                Ok(ExtensionEvent::ConfirmationRequested {
+                    request_id,
+                    generation,
+                    parent_request_id,
+                    request,
+                }) if parent_request_id.is_some_and(|parent| {
+                    operation.is_some_and(|operation| operation.owns(generation, parent))
+                }) || (legacy_uncorrelated
+                    && parent_request_id.is_none()
+                    && operation.is_some_and(|operation| operation.generation == generation)) =>
+                {
+                    if process.confirmation_answered(&request_id, generation) {
+                        continue;
+                    }
+                    let confirmed = if *approval_budget > 0 {
+                        *approval_budget -= 1;
+                        true
+                    } else {
+                        confirmations
+                            .confirm(extension_name, &request)
+                            .await
+                            .with_context(|| {
+                                format!("confirmation UI failed for extension {extension_name:?}")
+                            })?
+                    };
+                    process
+                        .respond_to_confirmation(
+                            request_id,
+                            generation,
+                            ConfirmationResponse { confirmed },
+                        )
+                        .await?;
+                }
+                Ok(ExtensionEvent::PolicyEvaluationRequested { .. }) => {}
+                Ok(ExtensionEvent::InputRequested {
+                    request_id,
+                    generation,
+                    parent_request_id,
+                    request,
+                }) if operation
+                    .is_some_and(|operation| operation.owns(generation, parent_request_id)) =>
+                {
+                    if process.input_answered(&request_id, generation) {
+                        continue;
+                    }
+                    let value = confirmations
+                        .input(extension_name, &request)
+                        .await
+                        .with_context(|| {
+                            format!("input UI failed for extension {extension_name:?}")
+                        })?;
+                    process
+                        .respond_to_input(request_id, generation, ExtensionInputResponse { value })
+                        .await?;
+                }
+                Ok(_) => {
+                    // The product's persistent receiver owns ordinary
+                    // notifications, status, context, and diagnostics.
+                }
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    extensions.diagnostics.push(format!(
+                        "warning: {extension_name}: confirmation listener lagged by {count} events"
+                    ));
+                }
+                Err(broadcast::error::RecvError::Closed) => *events_open = false,
+            }
+        };
+
+        self.output = Some(result);
+        Ok(None)
+    }
+
+    /// Keep the real command deadline and cancellation path polled while the
+    /// application performs a lifecycle operation. Never drop an in-progress
+    /// durable mutation just because its requesting command has settled.
+    pub(crate) async fn during_lifecycle<F: Future>(&mut self, operation: F) -> F::Output {
+        tokio::pin!(operation);
+        tokio::select! {
+            result = &mut self.execution, if self.output.is_none() => {
+                self.output = Some(result);
+                operation.await
+            }
+            result = &mut operation => result,
+        }
+    }
+
+    /// Reload can replace the owner while retaining its path-derived key.
+    pub(crate) fn session_replaced(&mut self) {
+        self.owner_replaced = true;
+    }
+
+    pub(crate) async fn finish<H>(
+        mut self,
+        extensions: &mut ExecutableExtensions,
+        confirmations: &mut H,
+        failure: Option<anyhow::Error>,
+    ) -> anyhow::Result<String>
+    where
+        H: ExtensionConfirmationHandler + ?Sized,
+    {
+        if self.output.is_none() {
+            self.cancellation_token.cancel();
+            // Drive native cancellation; its request guard retains permits
+            // through remote settlement or the bounded grace/kill boundary.
+            self.output = Some((&mut self.execution).await);
+        }
+        extensions.command_dialog_process = None;
+        if let Some(shell) = confirmations.command_shell() {
+            for message in extensions.drain_events_for_shell(shell) {
+                shell.notice(message);
+            }
+            extensions.sync_semantic_ui(shell);
+            shell.render();
+        }
+        confirmations.finish_progress(&self.extension_name);
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let output = self
+            .output
+            .take()
+            .expect("command settled before finalization")?;
+        // An old command may finish after switching the foreground session.
+        // Its text remains a command result; its prompt contributions must not
+        // enter the replacement owner, even after a same-path reload.
+        let current = !self.owner_replaced
+            && self.owner == extensions.resource_owner
+            && self.process.health_snapshot().generation == self.generation
+            && extensions.processes.iter().any(|process| {
+                process.extension_instance_id() == self.process.extension_instance_id()
+                    && process.health_snapshot().generation == self.generation
+            });
+        if current {
+            extensions.enqueue_contexts(&self.extension_name, output.context);
+        }
+        let mut blocks = Vec::new();
+        if !output.text.trim().is_empty() {
+            blocks.push(output.text);
+        }
+        blocks.extend(
+            output
+                .notifications
+                .iter()
+                .map(|notification| format_notification(&self.name, notification)),
+        );
+        if let Some(shell) = confirmations.command_shell() {
+            blocks.extend(extensions.drain_events_for_shell(shell));
+        } else {
+            blocks.extend(extensions.drain_events());
+        }
+        Ok(blocks.join("\n"))
+    }
+}
+
+impl Drop for OwnedExtensionCommand {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
     }
 }

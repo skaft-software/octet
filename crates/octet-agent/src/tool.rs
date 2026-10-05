@@ -55,10 +55,43 @@ pub trait Tool: Send + Sync {
     /// The definition's `name` must be unique across all registered tools.
     fn definition(&self) -> ToolDef;
 
+    /// Whether this registered tool initially belongs to the active loadout.
+    /// This controls presentation, never effect authority or tool policy.
+    fn default_active(&self) -> bool {
+        true
+    }
+
+    /// Negotiated resource-operation metadata from this exact catalog entry.
+    /// Ordinary tools return `None` and retain their existing projection rules.
+    fn operation(&self) -> Option<crate::extension_operations::OperationSnapshot> {
+        None
+    }
+
     /// Optional host-negotiated single-shot composition presentation.
     /// This is not an authority grant; nested effects require fresh admission.
     fn composition_config(&self) -> Option<crate::tool_composition::ToolCompositionConfig> {
         None
+    }
+
+    /// Whether this tool receives a request-scoped nested dispatch capability.
+    /// This does not change its declaration or authorize any nested effects.
+    fn nested_execution(&self) -> bool {
+        self.composition_config().is_some()
+    }
+
+    /// Whether raw provider arguments need preparation before schema validation.
+    fn prepares_arguments(&self) -> bool {
+        false
+    }
+
+    /// Prepare raw arguments without effect authority. Validation follows this call.
+    async fn prepare_arguments(
+        &self,
+        arguments: serde_json::Value,
+        _owner: &str,
+        _cancellation: CancellationToken,
+    ) -> Result<serde_json::Value, ToolError> {
+        Ok(arguments)
     }
 
     /// Machine-readable schema of the programmatic result, when available.
@@ -132,6 +165,16 @@ pub trait Tool: Send + Sync {
         &[]
     }
 
+    /// Explicit, owned prompt metadata from a negotiated extension catalog.
+    ///
+    /// Unlike the opt-in legacy built-in section, this contribution accompanies
+    /// this tool whenever it is model-visible. An empty snippet may carry only
+    /// guidelines. It is presentation, never authority. The default preserves
+    /// the existing behavior of native tools and hosts' legacy prompt sections.
+    fn prompt_metadata(&self) -> Option<ToolPromptContribution> {
+        None
+    }
+
     /// Executes the tool with the model-provided arguments (a JSON object
     /// matching the definition's schema).
     async fn execute(
@@ -158,8 +201,8 @@ pub struct ToolPromptContribution {
 
 /// Collects prompt contributions from `tools`, in iteration order.
 ///
-/// Tools that return [`Tool::prompt_snippet`]` == None` are skipped entirely,
-/// which is also the reason a host cannot use this list to enumerate tools: it
+/// Explicit [`Tool::prompt_metadata`] takes precedence. Otherwise tools without
+/// a [`Tool::prompt_snippet`] are skipped, so this list cannot enumerate tools: it
 /// reflects presentation intent only. Callers pass the same `&dyn Tool` values
 /// they registered, so the contribution always matches the code that will run.
 pub fn collect_tool_prompt_contributions<'a>(
@@ -168,6 +211,9 @@ pub fn collect_tool_prompt_contributions<'a>(
     tools
         .into_iter()
         .filter_map(|tool| {
+            if let Some(metadata) = tool.prompt_metadata() {
+                return Some(metadata);
+            }
             let snippet = tool.prompt_snippet()?;
             Some(ToolPromptContribution {
                 name: tool.definition().name,
@@ -453,6 +499,9 @@ pub enum ToolProgress {
     /// A bounded replaceable annotation for the currently running tool panel.
     /// This is frontend-only and is never persisted or placed in model context.
     Decoration(ToolProgressDecoration),
+    /// Verified, bounded partial tool result. Ephemeral only; never persisted or
+    /// added to provider context. Media follows the same authority as final output.
+    PartialResult(Arc<ToolOutput>),
     /// A typed yes/no request. Frontends that do not handle it deny by
     /// dropping the event; tools never receive implicit approval.
     Confirmation(ToolConfirmation),
@@ -486,6 +535,7 @@ impl std::fmt::Debug for ToolProgress {
                 .finish(),
             Self::Status(s) => f.debug_tuple("Status").field(s).finish(),
             Self::Decoration(decoration) => f.debug_tuple("Decoration").field(decoration).finish(),
+            Self::PartialResult(result) => f.debug_tuple("PartialResult").field(result).finish(),
             Self::Confirmation(request) => f.debug_tuple("Confirmation").field(request).finish(),
             Self::Input(request) => f.debug_tuple("Input").field(request).finish(),
             Self::Dropped { bytes, events } => f
@@ -527,6 +577,8 @@ pub struct ToolProgressSink {
     dropped_events: Arc<AtomicU64>,
     invocation: Option<crate::tools::durability::InvocationHandle>,
     composition: Option<Arc<dyn crate::tool_composition::ToolCompositionService>>,
+    tool_call_id: Option<String>,
+    parent_tool_call_id: Option<String>,
     programmatic: bool,
 }
 
@@ -541,6 +593,8 @@ impl ToolProgressSink {
             dropped_events: Arc::new(AtomicU64::new(0)),
             invocation: None,
             composition: None,
+            tool_call_id: None,
+            parent_tool_call_id: None,
             programmatic: false,
         }
     }
@@ -564,8 +618,23 @@ impl ToolProgressSink {
             dropped_events: Arc::new(AtomicU64::new(0)),
             invocation: None,
             composition: None,
+            tool_call_id: None,
+            parent_tool_call_id: None,
             programmatic: false,
         }
+    }
+
+    pub(crate) fn with_tool_call_identity(mut self, id: String, parent: Option<String>) -> Self {
+        self.tool_call_id = Some(id);
+        self.parent_tool_call_id = parent;
+        self
+    }
+
+    pub(crate) fn tool_call_identity(&self) -> (Option<&str>, Option<&str>) {
+        (
+            self.tool_call_id.as_deref(),
+            self.parent_tool_call_id.as_deref(),
+        )
     }
 
     pub(crate) fn with_invocation(
@@ -737,6 +806,7 @@ impl ToolProgressSink {
             ToolProgress::Output { bytes, .. } => (bytes.len() as u64, 0),
             ToolProgress::Status(s) => (s.len() as u64, 0),
             ToolProgress::Decoration(decoration) => (decoration.byte_len() as u64, 0),
+            ToolProgress::PartialResult(_) => (0, 1),
             ToolProgress::Confirmation(_) => (0, 1),
             ToolProgress::Input(_) => (0, 1),
             ToolProgress::Dropped { .. } => (0, 0),
@@ -912,7 +982,7 @@ impl ToolOutputMediaKind {
 /// Text remains the compact fallback for every provider. Image and audio
 /// parts reuse octet's canonical media types so built-in and executable tools
 /// cross the same persistence and provider-lowering boundary.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub enum ToolOutputContentPart {
     /// Plain model-visible text.
     Text(String),
@@ -1494,6 +1564,25 @@ impl ToolOutput {
         }
     }
 
+    /// Replaces the model-visible content, as a `tool_result` hook does. The
+    /// transient programmatic projection of the old content is dropped; error
+    /// state, details, usage and termination are kept.
+    pub fn with_content_parts(
+        self,
+        content_parts: impl IntoIterator<Item = ToolOutputContentPart>,
+    ) -> Self {
+        let replaced = Self::from_content_parts(content_parts);
+        Self {
+            text: replaced.text,
+            media: replaced.media,
+            media_kinds: replaced.media_kinds,
+            content_parts: replaced.content_parts,
+            programmatic_content: None,
+            presentation_images_omitted: false,
+            ..self
+        }
+    }
+
     /// Attaches provider-reported usage produced by this tool execution.
     ///
     /// Pi's `ToolResultMessage.usage` is explicitly *not* part of main LLM
@@ -1783,8 +1872,8 @@ impl ToolOutput {
     }
 }
 
-/// A failed tool execution. Returned to the model as an error tool result;
-/// it does not terminate the run.
+/// A failed tool execution. Its typed policy fact survives rich replacement
+/// content; an error may request unanimous batch termination.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct ToolError {
@@ -1793,6 +1882,7 @@ pub struct ToolError {
     /// Stable machine-readable policy reason, kept separate from model-facing
     /// error wording and never serialized into a tool result.
     policy_denial_code: Option<ToolPolicyDenialCode>,
+    output: Option<Box<ToolOutput>>,
 }
 
 impl ToolError {
@@ -1801,6 +1891,7 @@ impl ToolError {
         Self {
             message: message.into(),
             policy_denial_code: None,
+            output: None,
         }
     }
 
@@ -1810,7 +1901,20 @@ impl ToolError {
         Self {
             message: message.into(),
             policy_denial_code: Some(code),
+            output: None,
         }
+    }
+
+    /// Attaches a rich error result without weakening the host's error fact.
+    pub fn with_output(mut self, output: ToolOutput) -> Self {
+        self.message = output.text.clone();
+        self.output = Some(Box::new(output.with_is_error(true)));
+        self
+    }
+
+    /// Rich replacement content of this error, if a hook supplied it.
+    pub fn output(&self) -> Option<&ToolOutput> {
+        self.output.as_deref()
     }
 
     /// Stable policy code associated with this error, if it was denied at a

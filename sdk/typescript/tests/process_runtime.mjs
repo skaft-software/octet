@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
-import { Extension, UnsupportedFeatureError } from '../process/index.mjs';
+import { Extension } from '../process/index.mjs';
 import { schema, matches } from '../process/schema.mjs';
 import { harness, initialize, request, tool, context } from './harness.mjs';
 
@@ -27,7 +27,7 @@ test('real process: exact negotiation, split UTF-8 frames, tool, progress, comma
   assert.match(h.stderr(), /diagnostic from author/); assert.match(h.stderr(), /shutdown:shutdown/);
 });
 
-test('unoffered progress is explicit; unsupported hooks/structured/media features are not selected', bounded, async t => {
+test('unoffered progress is explicit; undeclared hooks are not dispatched', bounded, async t => {
   const h = harness(t);
   const p = initialize(); p.protocol.optional_features = [];
   await h.ready(p);
@@ -37,7 +37,8 @@ test('unoffered progress is explicit; unsupported hooks/structured/media feature
   h.send(request(4, 'hook/run', {hook: 'before_prompt', payload: {}, context}));
   assert.equal((await h.reply(4)).error.code, -32601);
   await h.stop();
-  assert.throws(() => new Extension().hook('before_prompt', () => {}), UnsupportedFeatureError);
+  assert.deepEqual(new Extension().hook('before_prompt', () => {}).contributions().hooks, ['before_prompt']);
+  assert.throws(() => new Extension().hook('unknown_hook', () => {}), TypeError);
 });
 
 test('expected tool failures are model-visible; unexpected exceptions, stdout writes and malformed results stay private', bounded, async t => {

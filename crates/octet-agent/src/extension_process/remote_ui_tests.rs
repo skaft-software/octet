@@ -240,6 +240,7 @@ async fn remote_ui_real_process_caches_frames_and_delivers_notifications() {
         key: "Enter".into(),
         kind: crate::ExtensionRemoteUiKeyKind::Press,
         modifiers: vec![],
+        editor_input: None,
     };
     process.notify_remote_ui_key(key).unwrap();
     remote_ui_wait_notice(&mut events, "key-ready").await;
@@ -475,6 +476,193 @@ hooks = {hooks}
             !lock_std_mutex(&read_std_lock(&process.inner.connection).issued_resource_owners)
                 .contains(&owner)
         );
+        assert!(process.shutdown().await);
+    }
+}
+
+#[test]
+fn remote_editor_checkpoint_wire_fields_and_bounds_are_strict() {
+    let wire = serde_json::json!({
+        "surface_id": "editor", "mount_id": "remote.1",
+        "input_revision": 0, "checkpoint_revision": 1,
+    });
+    let mut checkpoint: ExtensionEditorCheckpoint = serde_json::from_value(wire.clone()).unwrap();
+    checkpoint.validate().unwrap();
+    let max = crate::extension_remote_ui::MAX_EXTENSION_REMOTE_UI_REVISION;
+    checkpoint.input_revision = max;
+    checkpoint.checkpoint_revision = max;
+    checkpoint.validate().unwrap();
+    for (field, value) in [
+        ("checkpoint_revision", serde_json::json!(0)),
+        ("checkpoint_revision", serde_json::json!(max + 1)),
+        ("input_revision", serde_json::json!(max + 1)),
+        ("surface_id", serde_json::json!("")),
+        ("mount_id", serde_json::json!("x".repeat(65))),
+        ("mount_id", serde_json::json!("bad/id")),
+    ] {
+        let mut invalid = wire.clone();
+        invalid[field] = value;
+        assert!(serde_json::from_value::<ExtensionEditorCheckpoint>(invalid)
+            .unwrap()
+            .validate()
+            .is_err());
+    }
+    for field in [
+        "surface_id",
+        "mount_id",
+        "input_revision",
+        "checkpoint_revision",
+    ] {
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<ExtensionEditorCheckpoint>(missing).is_err());
+    }
+    for value in [
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!("1"),
+        serde_json::Value::Null,
+    ] {
+        let mut invalid = wire.clone();
+        invalid["input_revision"] = value;
+        assert!(serde_json::from_value::<ExtensionEditorCheckpoint>(invalid).is_err());
+    }
+    let mut extra = wire;
+    extra["resource_owner"] = serde_json::json!({});
+    assert!(serde_json::from_value::<ExtensionEditorCheckpoint>(extra).is_err());
+    let plain: ComposerTextRequest =
+        serde_json::from_value(serde_json::json!({"parent_request_id":1,"text":"plain"})).unwrap();
+    assert!(plain.editor_checkpoint.is_none());
+    assert!(serde_json::to_value(plain)
+        .unwrap()
+        .get("editor_checkpoint")
+        .is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_editor_checkpoint_process_gates_and_authoritative_owner() {
+    for (api, remote) in [("0.4", true), ("0.4", false), ("0.2", false)] {
+        let temp = TempDir::new().unwrap();
+        let script = r#"#!/usr/bin/env python3
+import json, sys
+api, remote = '__API__', __REMOTE__
+def receive(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(dict(jsonrpc='2.0', **value)), flush=True)
+init = receive()
+features = init['params']['protocol']['required_features'] + ['composer'] + (['remote_ui'] if remote else [])
+send(dict(id=init['id'], result=dict(api_version=api, tools=[], commands=[dict(name='probe',description='probe')],
+    protocol=dict(version=api, features=features, limits=dict(max_concurrent_requests=1)))))
+call = receive()
+parent, owner = call['id'], call['params']['context']['resource_owner']
+checkpoint = dict(surface_id='editor', mount_id='remote.1', input_revision=0, checkpoint_revision=1)
+def request(id, method, checkpoint, expected):
+    params = dict(parent_request_id=parent, text='draft', resource_owner=dict(owner, session_id='ignored-foreign-session'))
+    if checkpoint is not None: params['editor_checkpoint'] = checkpoint
+    send(dict(id=id, method=method, params=params))
+    answer = receive()
+    assert answer['id'] == id, answer
+    if expected: assert answer['error']['message'].startswith(expected), answer
+    else: assert 'result' in answer, answer
+request('insert', 'composer/insert', checkpoint, 'invalid_request')
+if remote:
+    request('future', 'composer/set', dict(checkpoint, input_revision=2**53), 'bounds_exceeded')
+    request('zero', 'composer/set', dict(checkpoint, checkpoint_revision=0), 'bounds_exceeded')
+    request('unknown', 'composer/set', dict(checkpoint, extra=1), 'invalid_request')
+    request('valid', 'composer/set', checkpoint, None)
+else:
+    request('unsupported', 'composer/set', checkpoint, 'unsupported_feature')
+request('plain', 'composer/set', None, None)
+send(dict(id=parent, result=dict(text='probe-ok')))
+shutdown = receive()
+assert shutdown['method'] == 'shutdown', shutdown
+send(dict(id=shutdown['id'], result={}))
+"#.replace("__API__", api).replace("__REMOTE__", if remote { "True" } else { "False" });
+        write_executable_script(&temp.path().join("extension.py"), &script);
+        let manifest = ExtensionManifest::parse(&format!(
+            r#"
+name = "editor-checkpoint-process"
+version = "0.1.0"
+api_version = "{api}"
+[entrypoint]
+command = "extension.py"
+[contributes]
+commands = ["probe"]
+"#
+        ))
+        .unwrap();
+        let mut config = ExtensionRuntimeConfig::new(temp.path());
+        config.remote_ui = remote.then(|| Arc::new(Notify::new()));
+        config.supervise = false;
+        config.request_timeout = Duration::from_secs(3);
+        let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), config)
+            .await
+            .unwrap();
+        let mut events = process.subscribe();
+        let context = process.current_context_for_resource_owner("session-owner");
+        let expected_owner = context.resource_owner.clone().unwrap();
+        let call = tokio::spawn({
+            let process = process.clone();
+            async move { process.execute_command("probe", vec![], context).await }
+        });
+        for expected_id in if remote {
+            vec!["valid", "plain"]
+        } else {
+            vec!["plain"]
+        } {
+            let (request_id, generation, event_owner, operation) =
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let ExtensionEvent::ComposerRequested {
+                            request_id,
+                            generation,
+                            owner,
+                            operation,
+                        } = events.recv().await.unwrap()
+                        {
+                            break (request_id, generation, owner, operation);
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(request_id, ExtensionRequestId::String(expected_id.into()));
+            assert_eq!(event_owner, Some(expected_owner.clone()));
+            let result = if expected_id == "valid" {
+                let ExtensionComposerOperation::Checkpoint {
+                    text,
+                    owner,
+                    checkpoint,
+                } = operation
+                else {
+                    panic!("expected checkpoint")
+                };
+                assert_eq!(owner, expected_owner);
+                assert_eq!(text, "draft");
+                assert_eq!(
+                    (checkpoint.input_revision, checkpoint.checkpoint_revision),
+                    (0, 1)
+                );
+                serde_json::json!({"input_revision":0,"checkpoint_revision":1})
+            } else {
+                assert_eq!(
+                    operation,
+                    ExtensionComposerOperation::Set {
+                        text: "draft".into()
+                    }
+                );
+                serde_json::json!({})
+            };
+            process
+                .respond_to_extension_request(
+                    request_id,
+                    generation,
+                    ExtensionRequestOutcome::Ok(result),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(call.await.unwrap().unwrap().text, "probe-ok");
         assert!(process.shutdown().await);
     }
 }

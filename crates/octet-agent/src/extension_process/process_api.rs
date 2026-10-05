@@ -211,16 +211,48 @@ impl ExtensionProcess {
     /// future reload initialization. Negotiated API 0.4 remote UI owners also
     /// receive a bounded `context/updated {resource_owner, host}` replacement.
     pub fn set_host_state(&self, state: ExtensionHostState) {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        self.set_host_state_on_connection(state, connection, false, false, None);
+    }
+
+    pub(super) fn set_host_state_on_connection(
+        &self,
+        state: ExtensionHostState,
+        connection: Arc<ProcessConnection>,
+        mirror_changed: bool,
+        mirror_refreshed: bool,
+        mut retired_owner: Option<String>,
+    ) {
         let replaced_session;
         {
             let mut current = write_std_lock(&self.inner.host_state);
-            if *current == state {
+            if *current == state && !mirror_changed {
                 return;
             }
-            replaced_session = current.session_id != state.session_id;
+            replaced_session = current.session_id != state.session_id || retired_owner.is_some();
+            if replaced_session && !mirror_refreshed {
+                if let Some(previous) = lock_std_mutex(&connection.session_leaf.mirror).take() {
+                    retired_owner = Some(previous.owner.session_id);
+                }
+            }
+            if replaced_session && retired_owner.is_none() {
+                retired_owner = current.session_id.clone();
+            }
             *current = state.clone();
         }
-        let connection = read_std_lock(&self.inner.connection);
+        if let Some(owner) = retired_owner {
+            // Retire on this pinned connection, without reacquiring the active
+            // connection lock held by native snapshot publication. Authority is
+            // the opaque resource owner, not the display session filename.
+            lock_std_mutex(&connection.resources).retire_owner(&owner);
+            lock_std_mutex(&connection.issued_resource_owners)
+                .retain(|issued| issued.session_id != owner);
+            connection.pending_changed.notify_waiters();
+            if let Some(service) = read_std_lock(&self.inner.delegation_service).clone() {
+                service.shutdown_owner(&owner);
+            }
+            connection.resource_cleanup_changed.notify_one();
+        }
         let protocol = read_std_lock(&connection.protocol);
         if protocol.version != EXTENSION_API_VERSION_0_4
             || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
@@ -243,10 +275,32 @@ impl ExtensionProcess {
         // The bounded surface map supplies at most sixteen distinct owners.
         for owner in connection.remote_ui.owners() {
             if lock_std_mutex(&connection.issued_resource_owners).contains(&owner) {
-                let _ = connection.queue_notification(
+                let mut host = serde_json::to_value(&state).expect("host state serializes");
+                if let Err(error) =
+                    session_leaf::attach_session_mirror(&connection, &owner, &mut host, true)
+                {
+                    let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                        message: format!("context update refused: {error}"),
+                    });
+                    // Even a mismatched owner must not keep a previously
+                    // published mirror alive after replacement was refused.
+                    connection.begin_drain();
+                    connection.kill_process_group();
+                    break;
+                }
+                if !connection.queue_notification(
                     methods::CONTEXT_UPDATED,
-                    serde_json::json!({"resource_owner": owner, "host": state}),
-                );
+                    serde_json::json!({"resource_owner": owner, "host": host}),
+                ) {
+                    // A retained mirror must not remain usable after losing a
+                    // replacement. Retire the generation rather than present
+                    // an old complete snapshot as the current session.
+                    if lock_std_mutex(&connection.session_leaf.mirror).is_some() {
+                        connection.begin_drain();
+                        connection.kill_process_group();
+                    }
+                    break;
+                }
             }
         }
     }
@@ -342,6 +396,7 @@ impl ExtensionProcess {
                 return Ok(());
             }
             let binding = ActiveSessionHookBinding {
+                start_outcome: Arc::new(SessionHookStartOutcome::default()),
                 session_id: session_id.clone(),
                 started_at: Instant::now(),
                 endpoint: LifecycleEndpoint {
@@ -430,6 +485,7 @@ impl ExtensionProcess {
             .into_iter()
             .map(|binding| {
                 let replacement = ActiveSessionHookBinding {
+                    start_outcome: Arc::new(SessionHookStartOutcome::default()),
                     session_id: binding.session_id,
                     started_at: Instant::now(),
                     endpoint: endpoint.clone(),
@@ -444,21 +500,27 @@ impl ExtensionProcess {
         &self,
         binding: &ActiveSessionHookBinding,
     ) -> Result<(), ExtensionRuntimeError> {
-        if !self
-            .inner
-            .contributions
-            .hooks
-            .contains(&ExtensionHook::SessionStart)
-        {
-            return Ok(());
+        let attempt = SessionHookStartAttempt(binding.start_outcome.clone());
+        let result = async {
+            if !self
+                .inner
+                .contributions
+                .hooks
+                .contains(&ExtensionHook::SessionStart)
+            {
+                return Ok(());
+            }
+            let params = api_v03::SessionHookParams::SessionStart {
+                payload: api_v03::SessionStart {
+                    binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
+                },
+            };
+            self.dispatch_session_hook(&binding.endpoint, &binding.session_id, params)
+                .await
         }
-        let params = api_v03::SessionHookParams::SessionStart {
-            payload: api_v03::SessionStart {
-                binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
-            },
-        };
-        self.dispatch_session_hook(&binding.endpoint, &binding.session_id, params)
-            .await
+        .await;
+        attempt.finish(result.is_ok());
+        result
     }
 
     pub(super) async fn dispatch_session_hook_end(
@@ -523,6 +585,11 @@ impl ExtensionProcess {
             context.resource_owner = Some(resource_owner.clone());
             params["context"] = serde_json::to_value(context)
                 .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+            session_leaf::attach_request_session_mirror(
+                &endpoint.connection,
+                Some(&resource_owner),
+                &mut params,
+            )?;
         }
         let result = endpoint
             .connection
@@ -579,9 +646,6 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        let artifact_owner = resource_owner
-            .as_ref()
-            .map(|owner| owner.session_id.clone());
         let params = if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
             let params = api_v03::ToolCallParams {
                 name,
@@ -602,15 +666,19 @@ impl ExtensionProcess {
         .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         drop(_catalog);
         let _artifact_lease = connection.acquire_artifact_lease();
-        let result = connection
-            .request_with_resource_owner(
-                methods::TOOL_CALL,
+        let policy = lock_std_mutex(&self.inner.dynamic_tool_registration).clone();
+        connection
+            .request_tool(
+                definition,
                 params,
                 self.inner.config.request_timeout,
                 resource_owner,
+                None,
+                None,
+                None,
+                policy,
             )
-            .await?;
-        decode_tool_call_output(&connection, &definition, artifact_owner.as_deref(), result)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -635,9 +703,6 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        let artifact_owner = resource_owner
-            .as_ref()
-            .map(|owner| owner.session_id.clone());
         let params = if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
             let params = api_v03::ToolCallParams {
                 name: definition.name.clone(),
@@ -657,18 +722,19 @@ impl ExtensionProcess {
         }
         .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let _artifact_lease = connection.acquire_artifact_lease();
-        let result = connection
-            .request_with_cancellation(
-                methods::TOOL_CALL,
+        let policy = lock_std_mutex(&self.inner.dynamic_tool_registration).clone();
+        connection
+            .request_tool(
+                definition,
                 params,
                 self.inner.config.request_timeout,
-                cancellation,
-                progress,
                 resource_owner,
-                request_started,
+                Some(cancellation),
+                Some(progress),
+                Some(request_started),
+                policy,
             )
-            .await?;
-        decode_tool_call_output(&connection, &definition, artifact_owner.as_deref(), result)
+            .await
     }
 
     /// Invokes a manifest-declared slash command.
@@ -933,6 +999,19 @@ impl ExtensionProcess {
         payload: serde_json::Value,
         context: ExtensionExecutionContext,
     ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
+        if hook.is_provider_pipeline()
+            || hook.is_session_operation()
+            || hook == ExtensionHook::ProviderContext
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "this hook requires its owning provider or session driver".into(),
+            ));
+        }
+        if hook == ExtensionHook::ResourcesDiscover {
+            return Err(ExtensionRuntimeError::Protocol(
+                "resources_discover is host-owned; use discover_resource_paths".into(),
+            ));
+        }
         if hook.is_session_hook() {
             return Err(ExtensionRuntimeError::Protocol(
                 "session_start and session_end are host-owned API 0.3/0.4 lifecycle hooks".into(),
@@ -1166,11 +1245,13 @@ impl ExtensionProcess {
                 "extension did not negotiate autocomplete".into(),
             ));
         }
+        let edit_v1 =
+            read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1);
         let response: ExtensionAutocompleteResponse = self
             .request_typed_on_connection(connection, methods::AUTOCOMPLETE_COMPLETE, &request, None)
             .await?;
         response
-            .validate()
+            .validate_for_request(&request, edit_v1)
             .map_err(ExtensionRuntimeError::Protocol)?;
         Ok(response)
     }
@@ -1233,6 +1314,36 @@ impl ExtensionProcess {
             && owner.process_generation == connection.generation
             && owner.extension_instance_id == self.inner.instance_id
             && connection.remote_ui.contains(owner, surface_id)
+    }
+
+    /// Atomically admits one editor draft mutation and its exact checkpoint ACK
+    /// against parent/child cancellation, surface retirement and generation
+    /// replacement. Writer capacity is reserved before `commit` can run.
+    ///
+    /// `commit` must synchronously validate and mutate only local frontend state;
+    /// it must not call process/mailbox APIs, await, or perform IO. On failure it
+    /// must leave the draft unchanged. Success already admits the response: do
+    /// not also call `respond_to_extension_request` for this checkpoint.
+    pub fn commit_editor_checkpoint(
+        &self,
+        request_id: &ExtensionRequestId,
+        generation: u64,
+        owner: &ExtensionResourceOwner,
+        checkpoint: &ExtensionEditorCheckpoint,
+        commit: impl FnOnce() -> Result<(), (ExtensionRequestFailure, String)>,
+    ) -> Result<(), (ExtensionRequestFailure, String)> {
+        let connection = read_std_lock(&self.inner.connection);
+        if generation != connection.generation
+            || owner.process_generation != generation
+            || owner.extension_instance_id != self.inner.instance_id
+            || !connection_is_usable(&connection)
+        {
+            return Err((
+                ExtensionRequestFailure::NotForegroundOwner,
+                "editor checkpoint process generation is no longer current".into(),
+            ));
+        }
+        connection.commit_editor_checkpoint(request_id, owner, checkpoint, commit)
     }
 
     /// Queues focused input without waiting for extension rendering or stdin IO.
@@ -1396,6 +1507,70 @@ impl ExtensionProcess {
 
     /// Answers one admitted owner-scoped request only while its generation is
     /// current. This is the resource-owner fence for the request surface.
+    /// Return the real parent frontend progress sink and negotiated frame bound.
+    /// No extension-supplied confirmation channel is ever accepted.
+    pub fn exec_request_frontend_context(
+        &self,
+        id: &ExtensionRequestId,
+        generation: u64,
+    ) -> (Option<ToolProgressSink>, usize) {
+        let connection = read_std_lock(&self.inner.connection);
+        let capacity = connection.max_message_bytes();
+        if generation != connection.generation
+            || !connection_is_usable(&connection)
+            || connection.draining.load(Ordering::Acquire)
+        {
+            return (None, capacity);
+        }
+        let parent = {
+            let children = lock_std_mutex(&connection.child_requests);
+            children
+                .get(id)
+                .filter(|child| child.response_state.state.load(Ordering::Acquire) == CHILD_ACTIVE)
+                .map(|child| child.parent_request_id)
+        };
+        let progress = parent.and_then(|parent| {
+            lock_std_mutex(&connection.pending)
+                .get(&parent)
+                .and_then(|pending| {
+                    pending
+                        .progress
+                        .clone()
+                        .or_else(|| pending.child_interaction_progress.clone())
+                })
+        });
+        (progress, capacity)
+    }
+
+    /// Whether a host-issued resource owner remains valid on this exact
+    /// connection. Used by native cleanup, never by extension-supplied facts.
+    pub fn resource_owner_is_live(&self, owner: &ExtensionResourceOwner) -> bool {
+        let connection = read_std_lock(&self.inner.connection);
+        let issued = lock_std_mutex(&connection.issued_resource_owners).contains(owner);
+        connection_is_usable(&connection)
+            && !connection.draining.load(Ordering::Acquire)
+            && owner.extension_instance_id == self.inner.instance_id
+            && owner.process_generation == connection.generation
+            && issued
+    }
+
+    /// Whether an admitted exec was cancelled, settled, or replaced.
+    pub fn exec_request_is_cancelled(&self, id: &ExtensionRequestId, generation: u64) -> bool {
+        let connection = read_std_lock(&self.inner.connection);
+        if connection.generation != generation
+            || !connection_is_usable(&connection)
+            || connection.draining.load(Ordering::Acquire)
+        {
+            return true;
+        }
+        let children = lock_std_mutex(&connection.child_requests);
+        children.get(id).is_none_or(|child| {
+            child.exec_cancelled
+                || child.response_state.state.load(Ordering::Acquire) != CHILD_ACTIVE
+        })
+    }
+
+    /// Answer a generation-fenced host request.
     pub async fn respond_to_extension_request(
         &self,
         request_id: ExtensionRequestId,
@@ -1464,6 +1639,29 @@ impl ExtensionProcess {
         Ok(())
     }
 
+    /// Emit an actual committed custom message without changing the assistant coalescer.
+    pub fn notify_custom_message_committed(
+        &self,
+        entry_id: &crate::session::EntryId,
+        message: &crate::session::CustomMessage,
+        timestamp_unix_ms: u64,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let payload = ExtensionMessageLifecycle {
+            message_id: Some(entry_id.0.clone()),
+            message: Some(message.lifecycle_value(timestamp_unix_ms)),
+        };
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MESSAGE_STARTED,
+            &payload,
+        )?;
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MESSAGE_SETTLED,
+            &payload,
+        )
+    }
+
     /// Opens one observable assistant message boundary.
     pub fn notify_message_started(&self, message_id: &str) -> Result<(), ExtensionRuntimeError> {
         let message_id =
@@ -1474,6 +1672,7 @@ impl ExtensionProcess {
             EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
             methods::MESSAGE_STARTED,
             &ExtensionMessageLifecycle {
+                message: None,
                 message_id: Some(message_id),
             },
         )
@@ -1490,6 +1689,7 @@ impl ExtensionProcess {
             EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
             methods::MESSAGE_SETTLED,
             &ExtensionMessageLifecycle {
+                message: None,
                 message_id: Some(message_id),
             },
         )
@@ -2463,6 +2663,14 @@ impl ExtensionProcess {
                     previous.generation,
                 );
             }
+            // This is a host-owned observation, not a retained append grant.
+            // Rebind only at accepted cutover, after old callbacks settled;
+            // failed candidates never receive or alter the active mirror.
+            let mut mirror = lock_std_mutex(&previous.session_leaf.mirror).clone();
+            if let Some(mirror) = &mut mirror {
+                mirror.rebind_generation(generation);
+            }
+            *lock_std_mutex(&replacement.session_leaf.mirror) = mirror;
             *active = Arc::clone(&replacement);
             replacement.activate_post_initialize();
             self.inner.generation.store(generation, Ordering::Release);
@@ -2585,6 +2793,7 @@ impl ExtensionProcess {
             workspace: self.inner.config.workspace.clone(),
             execution_scope: None,
             resource_owner: None,
+            mcp_registration_owner: None,
             host: read_std_lock(&self.inner.host_state).clone(),
         }
     }

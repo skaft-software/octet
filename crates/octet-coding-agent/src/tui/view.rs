@@ -1183,7 +1183,7 @@ pub struct ShellExtensionUiLine {
     pub priority: i32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShellExtensionWorking {
     pub message: Option<String>,
     pub visible: Option<bool>,
@@ -1199,12 +1199,8 @@ pub struct ShellEditorSnapshot {
     pub focused: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShellAutocompleteItem {
-    pub value: String,
-    pub label: String,
-    pub description: Option<String>,
-}
+/// Preserve core-validated edit fields across the native UI boundary.
+pub type ShellAutocompleteItem = octet_agent::extension_process::ExtensionAutocompleteItem;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ShellAutocompleteOverlay {
@@ -1213,6 +1209,18 @@ struct ShellAutocompleteOverlay {
     revision: u64,
     prefix: String,
     items: Vec<ShellAutocompleteItem>,
+}
+
+/// An extension message delivered the way Pi's `sendMessage` and
+/// `sendUserMessage` deliver it.
+pub(crate) struct PendingExtensionMessage {
+    pub(crate) input: ComposedInput,
+    /// Delivery while a run is active.
+    pub(crate) delivery: octet_agent::extension_process::ExtensionMessageDelivery,
+    /// Whether an idle session starts a run for it.
+    pub(crate) wake: bool,
+    /// Context-only custom messages append at the end of a turn without continuation.
+    pub(crate) context_only: bool,
 }
 
 #[derive(Default)]
@@ -1310,6 +1318,10 @@ pub(crate) struct ShellState {
     /// Shared admission order across steering and follow-ups, independent of text.
     next_pending_sequence: u64,
     follow_up_ready: bool,
+    /// Extension messages waiting for the run or idle loop to deliver them.
+    extension_messages: std::collections::VecDeque<PendingExtensionMessage>,
+    /// Pi `nextTurn` messages, sent after the next user prompt.
+    next_turn_messages: Vec<ComposedInput>,
     /// Local drafts stay with their session across /new, /resume and extension switches.
     follow_up_session: Option<PathBuf>,
     parked_follow_ups:
@@ -1559,6 +1571,28 @@ fn invalidate_editor_autocomplete(state: &mut ShellState) {
     state.extension_autocomplete = None;
     state.extension_autocomplete_selection = None;
     state.path_selection = 0;
+}
+
+fn autocomplete_edit_candidate(
+    editor: &TextEditor,
+    prefix_bytes: usize,
+    item: &ShellAutocompleteItem,
+) -> Option<TextEditor> {
+    let start = editor.cursor() - prefix_bytes;
+    let end = editor.cursor() + item.replace_after_bytes.unwrap_or(0) as usize;
+    let cursor = start
+        + item
+            .cursor_offset_bytes
+            .map_or(item.value.len(), |value| value as usize);
+    // Preview through checked editor APIs. Native editors additionally require
+    // grapheme boundaries: refuse rather than silently clamp a wire cursor or
+    // rebuild arbitrary editor text to bypass that invariant.
+    let mut candidate = editor.clone();
+    if !candidate.replace_range(start..end, &item.value) {
+        return None;
+    }
+    candidate.set_cursor(cursor);
+    (candidate.cursor() == cursor).then_some(candidate)
 }
 
 fn normal_editor_focused(state: &ShellState) -> bool {
@@ -1929,6 +1963,10 @@ impl ShellState {
     }
 
     fn push_block(&mut self, mut block: TranscriptBlock) -> usize {
+        if let TranscriptBlock::Reasoning(reasoning) = &mut block {
+            reasoning.extension_working = self.extension_ui.working.clone();
+            reasoning.hidden_thinking_label = self.extension_ui.hidden_thinking_label.clone();
+        }
         if let TranscriptBlock::Tool(panel) = &mut block {
             panel.image_rendering = self.image_rendering;
         }
@@ -3512,6 +3550,11 @@ impl InteractiveShell {
         }
     }
 
+    /// Whether the foreground driver still owns an active agent run.
+    pub(crate) fn is_agent_run_active(&self) -> bool {
+        self.state.borrow().run.is_active()
+    }
+
     /// Observe authoritative shell settlement while a driver owns `&mut Self`.
     #[cfg(all(test, unix))]
     pub(crate) fn test_run_active_probe(&self) -> impl Fn() -> bool {
@@ -4151,6 +4194,9 @@ impl InteractiveShell {
                 let delivered = messages.len().min(state.steering_queue.len());
                 Arc::make_mut(&mut state.steering_queue).drain(..delivered);
                 for display in steering_displays.expect("steering event projected above") {
+                    if display.is_empty() {
+                        continue;
+                    }
                     state.push_block(TranscriptBlock::User {
                         text: display,
                         model_lab,
@@ -4165,6 +4211,9 @@ impl InteractiveShell {
                 let model_lab = state.executing_model_lab();
                 let prompt_color = state.executing_prompt_color();
                 for message in messages {
+                    if message.is_empty() {
+                        continue;
+                    }
                     state.push_block(TranscriptBlock::User {
                         text: message.clone(),
                         model_lab,
@@ -4285,6 +4334,7 @@ impl InteractiveShell {
                     ToolProgress::Output { .. }
                         | ToolProgress::Status(_)
                         | ToolProgress::Decoration(_)
+                        | ToolProgress::PartialResult(_)
                         | ToolProgress::Dropped { .. }
                 );
                 if let Some(panel) = state.tool_output_mut(id) {
@@ -4297,6 +4347,11 @@ impl InteractiveShell {
                         }
                         ToolProgress::Decoration(decoration) => {
                             panel.progress_decoration = Some(decoration.clone());
+                        }
+                        ToolProgress::PartialResult(result) => {
+                            panel.output.clear();
+                            bounded_live_append(&mut panel.output, &result.text);
+                            panel.display.mark_media_read(result.media_kinds());
                         }
                         ToolProgress::Confirmation(request) => {
                             bounded_live_append(
@@ -4497,7 +4552,7 @@ impl InteractiveShell {
                 state.run_cost_available = true;
             }
             // Applied before the acceptance gate: see `on_run_event`.
-            AgentEvent::DelegationUpdated { .. } => {}
+            AgentEvent::CustomMessageCommitted { .. } | AgentEvent::DelegationUpdated { .. } => {}
             AgentEvent::RunFinished { .. } => {
                 state.close_streaming_blocks();
                 state.seal_activity_group();
@@ -4602,8 +4657,16 @@ impl InteractiveShell {
             }
             state.prompt_history_navigation = None;
         }
-        let prompt_color = self.state.borrow().prompt_color.clone();
-        self.push_local_submission(&composed.transcript_text, prompt_color);
+        if composed.parts.is_empty() && !composed.custom_messages.is_empty() {
+            for custom in &composed.custom_messages {
+                if custom.display {
+                    self.notice(format!("[{}]\n{}", custom.custom_type, custom.text()));
+                }
+            }
+        } else {
+            let prompt_color = self.state.borrow().prompt_color.clone();
+            self.push_local_submission(&composed.transcript_text, prompt_color);
+        }
     }
 
     /// Add a local shell escape without implying that any model received it.
@@ -4666,6 +4729,29 @@ impl InteractiveShell {
             state.next_pending_sequence += 1;
             Arc::make_mut(&mut state.follow_up_queue)
                 .push_back(Arc::new(QueuedFollowUp { sequence, composed }));
+        }
+    }
+
+    /// Queue an extension message for the run or idle loop to deliver.
+    pub fn queue_extension_message(&mut self, message: PendingExtensionMessage) {
+        self.state
+            .borrow_mut()
+            .extension_messages
+            .push_back(message);
+    }
+
+    pub fn take_extension_messages(&mut self) -> Vec<PendingExtensionMessage> {
+        std::mem::take(&mut self.state.borrow_mut().extension_messages).into()
+    }
+
+    pub fn queue_next_turn(&mut self, input: ComposedInput) {
+        self.state.borrow_mut().next_turn_messages.push(input);
+    }
+
+    /// Append pending `nextTurn` messages after the user's prompt, as Pi does.
+    pub fn attach_next_turn(&mut self, composed: &mut ComposedInput) {
+        for message in std::mem::take(&mut self.state.borrow_mut().next_turn_messages) {
+            composed.custom_messages.extend(message.custom_messages);
         }
     }
 
@@ -5434,10 +5520,15 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         ui.remote = state.extension_ui.remote.clone();
         ui.remote_fullscreen_overlay = state.extension_ui.remote_fullscreen_overlay;
+        if let Some(chrome) = &ui.remote.chrome {
+            ui.working = Some(chrome.working.clone());
+            ui.hidden_thinking_label = chrome.hidden_thinking_label.clone();
+        }
         if state.extension_ui == ui {
             return false;
         }
         state.extension_ui = ui;
+        state.sync_extension_reasoning();
         true
     }
 
@@ -5461,7 +5552,12 @@ impl InteractiveShell {
             != projection.mount(Placement::Header)
             || (projection.mount(Placement::Header).is_some()
                 && state.extension_ui.remote.components != projection.components);
+        let chrome = projection.chrome.as_ref();
+        state.extension_ui.working = chrome.map(|chrome| chrome.working.clone());
+        state.extension_ui.hidden_thinking_label =
+            chrome.and_then(|chrome| chrome.hidden_thinking_label.clone());
         state.extension_ui.remote = projection;
+        state.sync_extension_reasoning();
         let fullscreen = state.extension_ui.remote.mount(Placement::Fullscreen);
         let has_fullscreen = fullscreen.is_some();
         let capture = fullscreen.is_some_and(|mount| mount.mouse_capture);
@@ -5568,35 +5664,67 @@ impl InteractiveShell {
         self.extension_editor_snapshot()
     }
 
-    /// Install a bounded autocomplete response only if the exact host snapshot
-    /// that originated it is still current. This is the frontend half of the
-    /// revision fence and rejects late/reordered extension replies.
+    /// Retire both the displayed menu and its native selection.
+    pub(crate) fn clear_extension_autocomplete(&mut self) -> bool {
+        let mut state = self.state.borrow_mut();
+        let changed = state.extension_autocomplete.is_some();
+        invalidate_editor_autocomplete(&mut state);
+        changed
+    }
+
+    /// Install a response only against the exact originating editor snapshot.
+    /// Unclaimed results use native path completion under the same fence.
     pub fn set_extension_autocomplete(
         &mut self,
         snapshot: &ShellEditorSnapshot,
         prefix: String,
         items: Vec<ShellAutocompleteItem>,
     ) -> bool {
+        let response =
+            octet_agent::extension_process::ExtensionAutocompleteResponse { prefix, items };
+        let request = octet_agent::extension_process::ExtensionAutocompleteRequest {
+            text: snapshot.text.clone(),
+            cursor: snapshot.cursor,
+            revision: snapshot.revision,
+        };
+        // Negotiation is enforced by the originating process. Revalidate the
+        // complete wire range and result budget at the native boundary.
+        if response.validate_for_request(&request, true).is_err() {
+            return false;
+        }
         let mut state = self.state.borrow_mut();
         let current = {
             let editor = &state.editor;
-            normal_editor_focused(&state)
+            snapshot.focused
+                && normal_editor_focused(&state)
+                && state
+                    .extension_ui
+                    .remote
+                    .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+                    .is_none()
                 && editor.revision() == snapshot.revision
                 && editor.text() == snapshot.text.as_str()
                 && editor.cursor() == snapshot.cursor
-                && snapshot.cursor >= prefix.len()
-                && editor.text()[..snapshot.cursor].ends_with(&prefix)
+                && response.items.iter().all(|item| {
+                    autocomplete_edit_candidate(editor, response.prefix.len(), item).is_some()
+                })
         };
-        if !current || items.is_empty() {
+        if !current {
             return false;
+        }
+        if response.items.is_empty() {
+            invalidate_editor_autocomplete(&mut state);
+            drop(state);
+            self.complete_path();
+            return true;
         }
         state.extension_autocomplete_selection = None;
         state.extension_autocomplete = Some(ShellAutocompleteOverlay {
             text: snapshot.text.clone(),
             cursor: snapshot.cursor,
             revision: snapshot.revision,
-            prefix,
-            items,
+            prefix: response.prefix,
+            items: response.items,
         });
         true
     }
@@ -5611,6 +5739,11 @@ impl InteractiveShell {
         let current = {
             let editor = &state.editor;
             normal_editor_focused(&state)
+                && state
+                    .extension_ui
+                    .remote
+                    .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+                    .is_none()
                 && editor.revision() == overlay.revision
                 && editor.text() == overlay.text.as_str()
                 && editor.cursor() == overlay.cursor
@@ -5629,14 +5762,26 @@ impl InteractiveShell {
             state.extension_autocomplete = None;
             return false;
         };
-        let start = overlay.cursor - overlay.prefix.len();
-        if !state
-            .editor
-            .replace_range(start..overlay.cursor, &item.value)
-        {
-            state.extension_autocomplete = None;
+        let request = octet_agent::extension_process::ExtensionAutocompleteRequest {
+            text: overlay.text.clone(),
+            cursor: overlay.cursor,
+            revision: overlay.revision,
+        };
+        let response = octet_agent::extension_process::ExtensionAutocompleteResponse {
+            prefix: overlay.prefix.clone(),
+            items: vec![item.clone()],
+        };
+        if response.validate_for_request(&request, true).is_err() {
+            invalidate_editor_autocomplete(&mut state);
             return false;
         }
+        let Some(candidate) =
+            autocomplete_edit_candidate(&state.editor, overlay.prefix.len(), item)
+        else {
+            invalidate_editor_autocomplete(&mut state);
+            return false;
+        };
+        state.editor = candidate;
         invalidate_editor_autocomplete(&mut state);
         true
     }
@@ -8007,6 +8152,8 @@ mod extension_handoff_tests {
                 value: "file".into(),
                 label: "file".into(),
                 description: None,
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
             }],
         ));
 
@@ -8022,6 +8169,8 @@ mod extension_handoff_tests {
                 value: "stale".into(),
                 label: "stale".into(),
                 description: None,
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
             }],
         ));
         assert!(shell.set_extension_autocomplete(
@@ -8031,6 +8180,8 @@ mod extension_handoff_tests {
                 value: "file".into(),
                 label: "file".into(),
                 description: None,
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
             }],
         ));
         assert!(shell.accept_extension_autocomplete());

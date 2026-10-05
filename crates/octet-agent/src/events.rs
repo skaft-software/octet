@@ -193,6 +193,15 @@ pub enum ProviderOperation {
 /// messages and tool results are.
 #[derive(Debug)]
 pub enum AgentEvent {
+    /// A custom message has been durably committed, including native image preparation.
+    CustomMessageCommitted {
+        /// Actual session entry identity.
+        entry_id: EntryId,
+        /// Prepared persisted custom content and inert metadata.
+        message: crate::session::CustomMessage,
+        /// Actual durable entry timestamp.
+        timestamp_unix_ms: u64,
+    },
     /// A text or reasoning delta from the model. Raw tool-argument deltas are
     /// never exposed; assembled arguments arrive in [`AgentEvent::ToolStarted`].
     OutputDelta {

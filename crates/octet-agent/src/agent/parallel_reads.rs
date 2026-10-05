@@ -13,6 +13,17 @@ pub(super) struct ParallelReadWaveExecution {
     pub(super) after: Option<DeferredParallelAfterToolCall>,
 }
 
+impl ParallelReadWaveExecution {
+    fn with_after(mut self: Box<Self>, name: &str, arguments: &serde_json::Value) -> Box<Self> {
+        self.after = Some(DeferredParallelAfterToolCall {
+            name: name.to_owned(),
+            arguments: arguments.clone(),
+            progress_sink: self.execution.progress_sink.clone(),
+        });
+        self
+    }
+}
+
 pub(super) struct AdmittedParallelReadCall {
     pub(super) tool: Arc<dyn Tool>,
     pub(super) name: String,
@@ -120,7 +131,9 @@ pub(super) async fn prepare_parallel_read_call(
 ) -> ParallelReadPreparation {
     let start = std::time::Instant::now();
     let (progress_tx, progress_rx) = mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
-    let progress_sink = ToolProgressSink::live(progress_tx).with_invocation(invocation);
+    let progress_sink = ToolProgressSink::live(progress_tx)
+        .with_invocation(invocation)
+        .with_tool_call_identity(request_id.0.clone(), None);
     let tool_ctx = ToolContext {
         workspace: &sandbox.workspace,
         sandbox,
@@ -132,6 +145,34 @@ pub(super) async fn prepare_parallel_read_call(
         cancellation: cancellation.clone(),
     };
 
+    let arguments =
+        match transform_tool_arguments(hooks, tool.as_ref(), name, arguments.clone(), &tool_ctx)
+            .await
+        {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                let cancellation_won = cancellation.is_cancelled();
+                let (result, decision) = if cancellation_won {
+                    (Err(cancelled_tool_error()), None)
+                } else {
+                    (
+                        Err(error),
+                        Some(secondary_hook_denial(sandbox, broker, None).1),
+                    )
+                };
+                return ParallelReadPreparation::Completed(
+                    completed_parallel_read_execution(
+                        result,
+                        decision,
+                        progress_rx,
+                        progress_sink,
+                        start,
+                        cancellation_won,
+                    )
+                    .with_after(name, &arguments),
+                );
+            }
+        };
     let admission = reserve_tool_effect(
         broker,
         tool.as_ref(),
@@ -158,14 +199,17 @@ pub(super) async fn prepare_parallel_read_call(
             } else {
                 Err(error)
             };
-            return ParallelReadPreparation::Completed(completed_parallel_read_execution(
-                result,
-                Some(decision),
-                progress_rx,
-                progress_sink,
-                start,
-                cancellation_won,
-            ));
+            return ParallelReadPreparation::Completed(
+                completed_parallel_read_execution(
+                    result,
+                    Some(decision),
+                    progress_rx,
+                    progress_sink,
+                    start,
+                    cancellation_won,
+                )
+                .with_after(name, &arguments),
+            );
         }
     };
 
@@ -204,14 +248,17 @@ pub(super) async fn prepare_parallel_read_call(
     }
     if hook_denial.is_some() {
         let (error, decision) = secondary_hook_denial(sandbox, broker, Some(effect));
-        return ParallelReadPreparation::Completed(completed_parallel_read_execution(
-            Err(error),
-            Some(decision),
-            progress_rx,
-            progress_sink,
-            start,
-            false,
-        ));
+        return ParallelReadPreparation::Completed(
+            completed_parallel_read_execution(
+                Err(error),
+                Some(decision),
+                progress_rx,
+                progress_sink,
+                start,
+                false,
+            )
+            .with_after(name, &arguments),
+        );
     }
     if cancellation.is_cancelled() {
         return ParallelReadPreparation::Completed(completed_parallel_read_execution(
@@ -232,14 +279,17 @@ pub(super) async fn prepare_parallel_read_call(
         Err(error) => {
             let (error, decision) =
                 effect_reservation_commit_denial(sandbox, broker, effect, &error);
-            return ParallelReadPreparation::Completed(completed_parallel_read_execution(
-                Err(error),
-                Some(decision),
-                progress_rx,
-                progress_sink,
-                start,
-                false,
-            ));
+            return ParallelReadPreparation::Completed(
+                completed_parallel_read_execution(
+                    Err(error),
+                    Some(decision),
+                    progress_rx,
+                    progress_sink,
+                    start,
+                    false,
+                )
+                .with_after(name, &arguments),
+            );
         }
     };
     let policy_decision = policy_decision(
@@ -424,23 +474,19 @@ pub(super) async fn execute_parallel_read_wave(
 pub(super) async fn run_parallel_after_tool_hooks(
     after: DeferredParallelAfterToolCall,
     hooks: &[Arc<dyn ToolCallHook>],
-    result: &Result<ToolOutput, ToolError>,
+    result: Result<ToolOutput, ToolError>,
     sandbox: &SandboxConfig,
     tool_scope: &str,
     resource_owner: &str,
     active_skills: &[crate::session::SkillActivatedSnapshot],
     registered_tools: &[String],
     cancellation: CancellationToken,
-) {
+) -> Result<ToolOutput, ToolError> {
     let DeferredParallelAfterToolCall {
         name,
         arguments,
         progress_sink,
     } = after;
-    let (output, is_error) = match result {
-        Ok(output) => (output.text.as_str(), output.is_error()),
-        Err(error) => (error.message.as_str(), true),
-    };
     let tool_ctx = ToolContext {
         workspace: &sandbox.workspace,
         sandbox,
@@ -451,8 +497,5 @@ pub(super) async fn run_parallel_after_tool_hooks(
         progress: progress_sink,
         cancellation,
     };
-    for hook in hooks {
-        hook.after_tool_call(&name, &arguments, output, is_error, &tool_ctx)
-            .await;
-    }
+    settle_tool_result_hooks(hooks, &name, &arguments, result, &tool_ctx).await
 }

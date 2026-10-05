@@ -2,6 +2,111 @@
 
 use super::*;
 
+/// Only portable Pi thinking levels cross this facade. Native On/Ultra and
+/// arbitrary token budgets are not given invented Pi equivalents.
+pub(crate) fn pi_thinking_level(model: &Model, reasoning: &ReasoningConfig) -> Option<String> {
+    let level = crate::app::level_from_reasoning(reasoning, model).ok()?;
+    match level {
+        crate::config::ThinkingLevel::On | crate::config::ThinkingLevel::Ultra => None,
+        _ => Some(level.label().to_owned()),
+    }
+}
+
+impl ExecutableExtensions {
+    /// Snapshot the real credential-scoped catalog and invocation scope. This
+    /// catalog is not Pi's full unauthenticated inventory: do not expose it as
+    /// getAll/find, or assert OAuth state from an endpoint name.
+    pub(crate) fn refresh_pi_model_catalog(
+        &mut self,
+        catalog: &ModelCatalog,
+        scope: Option<&[crate::cli::parity::ScopedModel]>,
+    ) {
+        let mut available = Vec::new();
+        let mut available_representable = true;
+        for spec in catalog.models() {
+            let model = match catalog.resolve(&spec.id) {
+                Ok(model) => model,
+                Err(_) => {
+                    available_representable = false;
+                    break;
+                }
+            };
+            if !model.endpoint.auth.is_configured() {
+                continue;
+            }
+            let Some(view) = self.provider_runtime.pi_model_view(&model) else {
+                available_representable = false;
+                break;
+            };
+            available.push(view);
+        }
+        let mut scoped = Vec::new();
+        let mut representable = true;
+        for entry in scope.into_iter().flatten() {
+            let model = match catalog.resolve(&entry.id) {
+                Ok(model) => model,
+                Err(_) => {
+                    representable = false;
+                    break;
+                }
+            };
+            let Some(view) = self.provider_runtime.pi_model_view(&model) else {
+                representable = false;
+                break;
+            };
+            let thinking = match entry.reasoning.as_deref() {
+                None => None,
+                Some(value) => match crate::config::parse_reasoning(value)
+                    .ok()
+                    .and_then(|reasoning| pi_thinking_level(&model, &reasoning))
+                {
+                    Some(level) => Some(level),
+                    None => {
+                        representable = false;
+                        break;
+                    }
+                },
+            };
+            let mut value = serde_json::json!({"model": view});
+            if let Some(thinking) = thinking {
+                value["thinkingLevel"] = Value::String(thinking);
+            }
+            scoped.push(value);
+        }
+        let mut snapshot = serde_json::json!({});
+        if available_representable {
+            snapshot["available_models"] = serde_json::json!(available);
+        }
+        if representable {
+            snapshot["scoped_models"] = serde_json::json!(scoped);
+        }
+        // Preserve the existing bounded JSON-RPC transport; refuse the whole
+        // snapshot rather than claim a silently truncated available catalog.
+        let snapshot = serde_json::to_vec(&snapshot)
+            .ok()
+            .filter(|bytes| bytes.len() <= 256 * 1024)
+            .map(|_| snapshot);
+        let mut state = self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if state.pi_models == snapshot {
+            return;
+        }
+        state.pi_models = snapshot;
+        for process in &self.processes {
+            if process.descriptor().manifest.runtime.sharing == ExtensionRuntimeSharing::Isolated {
+                process.set_host_state(state.clone());
+            }
+        }
+        *self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+    }
+}
+
 /// Product-owned authorization boundary for API 0.3 extension providers.
 ///
 /// The coding agent does not currently expose a credential or OAuth setup
@@ -79,6 +184,25 @@ impl Default for ExtensionProviderRuntime {
 }
 
 impl ExtensionProviderRuntime {
+    /// Project explicit custom-stream facts only while the native route is
+    /// owned by its current live declaration. Built-in endpoints stay withheld.
+    pub(super) fn pi_model_view(
+        &self,
+        model: &Model,
+    ) -> Option<octet_agent::extension_process::ExtensionModelView> {
+        let mut view = extension_model_view(model)?;
+        if let Some((provider, id)) = model.spec.id.0.split_once('/') {
+            if let Some(route) = self.registry.resolve(provider, id) {
+                if extension_provider_endpoint_id(&route.owner, provider, id) == model.endpoint.id {
+                    if let Some(metadata) = &route.model_metadata {
+                        view.base_url = Some(metadata.base_url.clone());
+                    }
+                }
+            }
+        }
+        Some(view)
+    }
+
     pub(super) fn registry(&self) -> Arc<ExtensionProviderRegistry> {
         Arc::clone(&self.registry)
     }
@@ -285,18 +409,32 @@ impl ExtensionProviderRuntime {
                 }
                 let _ =
                     catalog.set_endpoint_label(endpoint_id.clone(), entry.provider.label.clone());
+                let mut capabilities =
+                    extension_provider_capabilities(&provider_model.capabilities);
+                if route
+                    .model_metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.input.iter().any(|input| input == "image"))
+                {
+                    capabilities.input_modalities = capabilities
+                        .input_modalities
+                        .with(octet_ai::Modality::Image);
+                }
                 let specification = ModelSpec {
                     id: model_id.clone(),
                     endpoint: endpoint_id.clone(),
                     api_name: provider_model.api_name.clone(),
                     display_name: provider_model.display_name.clone(),
                     protocol,
-                    capabilities: extension_provider_capabilities(&provider_model.capabilities),
+                    capabilities,
                     limits: ModelLimits {
                         context_window,
                         max_output_tokens,
                     },
-                    pricing: None,
+                    pricing: route
+                        .model_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.pricing.clone()),
                     // API 0.3 provider declarations carry no model presets or
                     // HTTP headers; never infer unnegotiated transport authority.
                     preset: Default::default(),

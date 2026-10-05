@@ -47,6 +47,8 @@ impl ExecutableExtensions {
             host,
             runtime_manager,
             ExtensionProviderRuntime::default(),
+            crate::app::resource_paths::ResourceConsumerCapability::Disabled,
+            None,
         )
     }
 
@@ -64,6 +66,8 @@ impl ExecutableExtensions {
         host: &mut ExtensionHost,
         runtime_manager: Option<ExtensionRuntimeManager>,
         provider_runtime: ExtensionProviderRuntime,
+        resource_consumer: crate::app::resource_paths::ResourceConsumerCapability,
+        remote_ui_consumer: Option<&crate::tui::view::InteractiveShell>,
     ) -> Self {
         let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
         let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
@@ -199,16 +203,27 @@ impl ExecutableExtensions {
             .cloned()
             .collect::<Vec<_>>();
 
-        // One wake/consumer binding for the complete interactive fleet. Plain,
-        // print, RPC, and native hosts never advertise remote UI success.
-        let remote_ui_wake = (matches!(&config.mode, Mode::Interactive)
-            && crate::tui::terminal::TerminalCapabilities::detect(config.color, config.plain)
-                .interactive)
-            .then(|| {
-                INTERACTIVE_REMOTE_UI_WAKE
-                    .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
-                    .clone()
-            });
+        // Bind before initialize. An already constructed native shell is the
+        // consumer even when the calling process's stdout is not a TTY (an
+        // embedded frontend or the real-shell acceptance fixture). Without a
+        // supplied shell, ordinary terminal bootstrap keeps its existing gate.
+        // A supplied inactive shell cannot fall back to an unrelated stdout.
+        let remote_ui_wake = if matches!(&config.mode, Mode::Interactive) {
+            match remote_ui_consumer {
+                Some(shell) => shell.extension_remote_ui_binding(),
+                None => {
+                    crate::tui::terminal::TerminalCapabilities::detect(config.color, config.plain)
+                        .interactive
+                        .then(|| {
+                            INTERACTIVE_REMOTE_UI_WAKE
+                                .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
+                                .clone()
+                        })
+                }
+            }
+        } else {
+            None
+        };
         let event_bus = Arc::new(ExtensionEventBus::default());
         let (session_lifecycle_service, session_lifecycle_receiver) =
             if active_session_lifecycle_enabled(config)
@@ -217,7 +232,10 @@ impl ExecutableExtensions {
                 let (service, receiver) =
                     ExtensionSessionLifecycleService::channel(SESSION_LIFECYCLE_QUEUE_CAPACITY)
                         .expect("fixed session lifecycle queue capacity is bounded");
-                (Some(service), Some(receiver))
+                (
+                    Some(service.with_compaction().with_model_control()),
+                    Some(receiver),
+                )
             } else {
                 (None, None)
             };
@@ -271,6 +289,15 @@ impl ExecutableExtensions {
                 }
             }
             if let Some(manager) = managed_runtime.clone() {
+                let bulk_storage = match manager.bulk_storage() {
+                    Ok(storage) => Some(storage),
+                    Err(error) => {
+                        diagnostics.push(format!(
+                            "warning: extension bulk storage unavailable: {error}"
+                        ));
+                        None
+                    }
+                };
                 let workspace = config.workspace.clone();
                 let state = host_state.clone();
                 let session_lifecycle_service = session_lifecycle_service.clone();
@@ -298,12 +325,17 @@ impl ExecutableExtensions {
                     let starts = binding
                         .activate_eager(startable_names, |entry| {
                             let mut runtime = ExtensionRuntimeConfig::new(workspace.clone());
+                            // Admission is supplied by the actual App consumer constructor,
+                            // never inferred from Mode, an enabled factory or a manifest.
+                            runtime.resource_paths = resource_consumer == crate::app::resource_paths::ResourceConsumerCapability::AppFrontend;
+                            runtime.provider_pipeline = true;
                             runtime.host_state = state.clone();
                             runtime.remote_ui = remote_ui_wake.clone();
                             // Generic request-scoped composition is offered to
                             // API 0.4 extensions. Authority is attached later,
                             // only to live model-tool contexts, never commands.
                             runtime.tool_composition = true;
+                            runtime.bulk_store = bulk_storage.clone();
                             runtime.flag_values = extension_flag_values
                                 .get(&entry.descriptor.manifest.name)
                                 .cloned()
@@ -487,6 +519,7 @@ impl ExecutableExtensions {
 
         let mut extensions = Self::default();
         extensions.processes = processes;
+        extensions.bind_tool_host(host);
         extensions.provider_runtime = provider_runtime;
         extensions.runtime_manager = managed_runtime;
         extensions.runtime_binding = runtime_binding;
@@ -506,8 +539,17 @@ impl ExecutableExtensions {
         extensions.rescan_global_config = crate::cli::global_config_path();
         extensions.effect_policy = config.effect_policy;
         extensions.start_policy_supervisors();
+        // Install actual native history before either immediate or deferred
+        // session_start callbacks. Initialize's coarse model/skill projection
+        // deliberately does not expose a namespace-independent session mirror.
+        extensions.refresh_host_state(session, model, reasoning, sessions);
         extensions.start_session_lifecycle();
         extensions
+    }
+
+    /// Bind the final host-policed catalog after static tools and policy are assembled.
+    pub fn bind_tool_host(&mut self, host: &octet_agent::ExtensionHost) {
+        self.tool_host = Some(host.clone());
     }
 
     /// Returns the durable process-fleet owner, if discovery created one.
@@ -668,13 +710,23 @@ impl ExecutableExtensions {
             }
         }
         if let Some(resource_owner) = self.resource_owner.clone() {
-            let (ui_processes, processes): (Vec<_>, Vec<_>) =
+            let (deferred_processes, processes): (Vec<_>, Vec<_>) =
                 self.processes.iter().cloned().partition(|process| {
-                    self.remote_ui_wake.is_some()
-                        && process.supports_feature(EXTENSION_FEATURE_REMOTE_UI)
+                    // Resource startup must run under the frontend's event pump,
+                    // even without remote UI. It can await durable session work
+                    // (or a real headless refusal) before discovery is admitted.
+                    (process.supports_feature(
+                        octet_agent::extension_process::EXTENSION_FEATURE_RESOURCE_PATHS,
+                    ) && process
+                        .contributions()
+                        .hooks
+                        .contains(&ExtensionHook::ResourcesDiscover))
+                        || process.supports_feature("mcp_registration_v1")
+                        || (self.remote_ui_wake.is_some()
+                            && process.supports_feature(EXTENSION_FEATURE_REMOTE_UI))
                 });
             self.pending_session_hook_starts.extend(
-                ui_processes
+                deferred_processes
                     .into_iter()
                     .filter(|process| process.declares_session_hooks())
                     .map(|process| (process, resource_owner.clone())),
@@ -812,6 +864,17 @@ impl ExecutableExtensions {
         }
     }
 
+    pub(super) fn retire_active_resources(&self) {
+        self.resource_paths_live
+            .store(false, std::sync::atomic::Ordering::Release);
+        // Authority ends before fallible observational hooks or native cleanup.
+        if let Some(owner) = &self.resource_owner {
+            for process in &self.processes {
+                process.retire_resource_owner(owner);
+            }
+        }
+    }
+
     /// Releases this App/session's attachment to the durable process fleet.
     ///
     /// Isolated profiles are stopped. Explicitly shared workspace services are
@@ -819,6 +882,8 @@ impl ExecutableExtensions {
     /// App can bind them without a stop/restart gap. Interactive callers must
     /// revoke the terminal grant with their shell before releasing this owner.
     pub async fn release_binding(&mut self) {
+        self.retire_active_resources();
+        self.clear_pi_mcp_registrations().await;
         // A replacement App must not inherit work queued against the old
         // owner. Isolated lifecycle processes are stopped below; shared and
         // legacy processes never receive this service.
@@ -879,41 +944,68 @@ impl ExecutableExtensions {
         self.reload_report().await.into_notices()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub(crate) async fn reload_report(&mut self) -> ExtensionReloadReport {
+        let results = self.prepare_resource_process_reload().await;
+        self.finish_resource_process_reload(results).await
+    }
+
+    /// Borrow-free replacement: the existing terminal owner must pump reverse
+    /// UI while the new generation's session_start is awaited inside reload.
+    pub(crate) fn prepare_resource_process_reload(
+        &mut self,
+    ) -> impl Future<
+        Output = Vec<(
+            String,
+            Result<octet_agent::extension_process::ExtensionReloadReport, String>,
+        )>,
+    > + Send
+           + 'static {
+        self.resource_paths_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.cancel_background_work();
-        // Both runtime ownership modes settle through the same notification
-        // boundary. In particular, the product's manager-backed path must not
-        // skip PostMutation delivery after a successful generation replacement.
-        let results = if let Some(manager) = self.runtime_manager.clone() {
-            let names = self
-                .processes
-                .iter()
-                .map(|process| process.descriptor().manifest.name.clone())
-                .collect::<BTreeSet<_>>();
-            futures_util::future::join_all(names.into_iter().map(|name| {
-                let manager = manager.clone();
-                async move { (name.clone(), manager.reload(&name).await) }
-            }))
-            .await
-            .into_iter()
-            .flat_map(|(name, results)| {
-                results
-                    .into_iter()
-                    .map(move |result| (name.clone(), result.map_err(|error| error.to_string())))
-            })
-            .collect::<Vec<_>>()
-        } else {
-            let reloads = self.processes.iter().cloned().map(|process| async move {
-                let name = process.descriptor().manifest.name.clone();
-                (
-                    name,
-                    process.reload().await.map_err(|error| error.to_string()),
-                )
-            });
-            // Concurrent polling preserves input order without serializing
-            // unrelated extension reloads behind a hung child.
-            futures_util::future::join_all(reloads).await
-        };
+        let manager = self.runtime_manager.clone();
+        let processes = self.processes.clone();
+        async move {
+            if let Some(manager) = manager {
+                let names = processes
+                    .iter()
+                    .map(|process| process.descriptor().manifest.name.clone())
+                    .collect::<BTreeSet<_>>();
+                futures_util::future::join_all(names.into_iter().map(|name| {
+                    let manager = manager.clone();
+                    async move { (name.clone(), manager.reload(&name).await) }
+                }))
+                .await
+                .into_iter()
+                .flat_map(|(name, results)| {
+                    results.into_iter().map(move |result| {
+                        (name.clone(), result.map_err(|error| error.to_string()))
+                    })
+                })
+                .collect::<Vec<_>>()
+            } else {
+                let reloads = processes.into_iter().map(|process| async move {
+                    let name = process.descriptor().manifest.name.clone();
+                    (
+                        name,
+                        process.reload().await.map_err(|error| error.to_string()),
+                    )
+                });
+                // Concurrent polling preserves input order without serializing
+                // unrelated extension reloads behind a hung child.
+                futures_util::future::join_all(reloads).await
+            }
+        }
+    }
+
+    pub(crate) async fn finish_resource_process_reload(
+        &mut self,
+        results: Vec<(
+            String,
+            Result<octet_agent::extension_process::ExtensionReloadReport, String>,
+        )>,
+    ) -> ExtensionReloadReport {
         let mut output = ExtensionReloadReport::default();
         let mut reloaded = BTreeSet::new();
         let mut completed_mutations = Vec::new();

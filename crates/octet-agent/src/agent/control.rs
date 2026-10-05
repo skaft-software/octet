@@ -155,6 +155,7 @@ pub(super) enum Control {
     SetReasoning(ReasoningConfig),
     Steer(ReservedInput),
     FollowUp(ReservedInput),
+    AppendCustom(ReservedInput),
     FinishNow(ReservedInput),
     SetSteeringMode(QueueDeliveryMode),
     SetFollowUpMode(QueueDeliveryMode),
@@ -164,41 +165,55 @@ pub(super) enum Control {
 /// Logical retained payload bytes, including part slots, media, references and
 /// transcripts. Count inline data directly rather than allocating base64 JSON.
 pub(super) fn control_input_bytes(input: &UserInput) -> usize {
-    input.parts.iter().fold(
-        input
-            .parts
-            .len()
-            .saturating_mul(std::mem::size_of::<InputPart>()),
-        |total, part| {
-            let bytes = match part {
-                InputPart::Text(text) => text.len(),
-                InputPart::Media(Media::Image(image)) => {
-                    let source = match &image.source {
-                        ImageSource::Inline(data) => data.len(),
-                        ImageSource::Url(url) => url.as_str().len(),
-                        ImageSource::ProviderRef(reference) => reference.id.len(),
-                    };
-                    source.saturating_add(
-                        image
-                            .media_type
-                            .as_ref()
-                            .map_or(0, |mime| mime.as_ref().len()),
-                    )
-                }
-                InputPart::Media(Media::Audio(audio)) => {
-                    let source = match &audio.payload {
-                        AudioPayload::Inline(data) => data.len(),
-                        AudioPayload::ProviderRef(reference) => reference.id.len(),
-                        AudioPayload::InlineWithProviderRef { data, reference } => {
-                            data.len().saturating_add(reference.id.len())
-                        }
-                    };
-                    source.saturating_add(audio.transcript.as_ref().map_or(0, String::len))
-                }
-            };
-            total.saturating_add(bytes)
-        },
-    )
+    input
+        .parts
+        .iter()
+        .fold(
+            input
+                .parts
+                .len()
+                .saturating_mul(std::mem::size_of::<InputPart>()),
+            |total, part| {
+                let bytes = match part {
+                    InputPart::Text(text) => text.len(),
+                    InputPart::Media(Media::Image(image)) => {
+                        let source = match &image.source {
+                            ImageSource::Inline(data) => data.len(),
+                            ImageSource::Url(url) => url.as_str().len(),
+                            ImageSource::ProviderRef(reference) => reference.id.len(),
+                        };
+                        source.saturating_add(
+                            image
+                                .media_type
+                                .as_ref()
+                                .map_or(0, |mime| mime.as_ref().len()),
+                        )
+                    }
+                    InputPart::Media(Media::Audio(audio)) => {
+                        let source = match &audio.payload {
+                            AudioPayload::Inline(data) => data.len(),
+                            AudioPayload::ProviderRef(reference) => reference.id.len(),
+                            AudioPayload::InlineWithProviderRef { data, reference } => {
+                                data.len().saturating_add(reference.id.len())
+                            }
+                        };
+                        source.saturating_add(audio.transcript.as_ref().map_or(0, String::len))
+                    }
+                };
+                total.saturating_add(bytes)
+            },
+        )
+        .saturating_add(
+            input
+                .custom_messages
+                .iter()
+                .map(|message| {
+                    serde_json::to_vec(message)
+                        .expect("custom message JSON")
+                        .len()
+                })
+                .sum::<usize>(),
+        )
 }
 
 /// Clonable control handle for an active [`Run`].
@@ -355,6 +370,28 @@ impl RunControl {
         Ok(())
     }
 
+    /// Queue a context-only custom message for the safe end-of-turn boundary.
+    /// This admission never requests another model call.
+    pub fn try_append_custom(
+        &self,
+        message: crate::session::CustomMessage,
+    ) -> Result<(), AgentError> {
+        let input = self.reserve_input(UserInput::from_custom(message))?;
+        let permit = self.tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => AgentError::ControlQueueFull,
+            mpsc::error::TrySendError::Closed(_) => AgentError::RunEnded,
+        })?;
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admission {
+            return Err(AgentError::RunEnded);
+        }
+        permit.send(Control::AppendCustom(input));
+        Ok(())
+    }
+
     pub(super) fn try_send(&self, control: UnreservedControl) -> Result<(), AgentError> {
         let control = self.reserve_control(control)?;
         let permit = self.tx.try_reserve().map_err(|error| match error {
@@ -486,7 +523,7 @@ impl RunControl {
 
     /// Attempts to enqueue a follow-up without allowing a producer to wait
     /// behind the run's bounded control queue.
-    pub(crate) fn try_follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
+    pub fn try_follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
         self.try_send(UnreservedControl::FollowUp(input.into()))
     }
 
@@ -542,6 +579,21 @@ impl AbortFlag {
             }
         }
     }
+}
+
+pub(super) async fn append_context_inputs(
+    pending: &mut Vec<ReservedInput>,
+    session: &mut Session,
+    model: &Model,
+) -> Result<(), AgentError> {
+    for queued in std::mem::take(pending) {
+        if let Some(ReservedPayload { input, reservation }) = queued.claim() {
+            let input = prepare_user_images(input, model, None).await?;
+            input.append_to(session, None)?;
+            drop(reservation);
+        }
+    }
+    Ok(())
 }
 
 /// Which queue a batch of control inputs came from; only the announced event
@@ -639,7 +691,8 @@ pub(super) async fn deliver_control_inputs(
         if let Some(evidence) = terminal_gate_evidence {
             evidence.record_request(&summary);
         }
-        if let Err(e) = session.append_with_metadata(user_message(input), Some(metadata.clone())) {
+        let display = input.display_summary();
+        if let Err(e) = input.append_to(session, Some(metadata.clone())) {
             let event = (!delivered.is_empty())
                 .then(|| kind.delivered_event(std::mem::take(&mut delivered)));
             let _ = observation.observe(session);
@@ -648,7 +701,7 @@ pub(super) async fn deliver_control_inputs(
                 finish: FinishReason::Failed(e.into()),
             };
         }
-        delivered.push(summary);
+        delivered.push(display);
         // Never free admission capacity merely because ingress was drained.
         // Both permits remain live through the successful durable append.
         drop(reservation);
@@ -665,4 +718,26 @@ pub(super) async fn deliver_control_inputs(
         };
     }
     ControlDelivery::Completed { event: None }
+}
+
+/// Observe only newly committed entries; resume/history never emits fresh message events.
+pub(super) fn committed_custom_message_events(
+    session: &Session,
+    cursor: &mut usize,
+) -> Vec<AgentEvent> {
+    let events = session.entries()[*cursor..]
+        .iter()
+        .filter_map(|entry| {
+            let message = entry.metadata.as_ref()?.custom_message.as_ref()?;
+            Some(AgentEvent::CustomMessageCommitted {
+                entry_id: entry.id.clone(),
+                message: message.clone(),
+                timestamp_unix_ms: entry
+                    .timestamp_unix_ms
+                    .expect("fresh durable entry timestamp"),
+            })
+        })
+        .collect();
+    *cursor = session.entries().len();
+    events
 }

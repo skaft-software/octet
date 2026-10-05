@@ -2,30 +2,47 @@ import { readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { bounded, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
 import { theme } from './theme.mjs';
+import { exec } from './exec.mjs';
+import { mcpAPI } from './mcp.mjs';
+import { chromeAPI, dialogAPI, editorAPI } from './ui-api.mjs';
+import { currentModel, thinkingLevel, scopedModels, modelRegistry, registerProvider, unregisterProvider } from './providers.mjs';
+import { setModel, setThinkingLevel } from './model-control.mjs';
+import { registerTool, toolSnapshot, getAllTools, setActiveTools } from './tools.mjs';
 import { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
+import { translateSessionEntries } from './session-mirror.mjs';
+import { compactionCallbackStore, requestCompaction } from './compaction.mjs';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
+import { contextFacts, getSettings } from './context-api.mjs';
+import { sessionMethods, sessionHeader } from './session-methods.mjs';
+import { customMessageParams, userMessageParams } from './custom-messages.mjs';
 
 export const hookEvents = {
+  session_before_switch: 'session_before_switch', session_before_fork: 'session_before_fork',
   session_start: 'session_start', session_end: 'session_end', session_shutdown: 'session_end',
   tool_call: 'before_tool_call', tool_result: 'after_tool_call', input: 'before_prompt',
-  before_agent_start: 'before_prompt', after_response: 'after_response',
+  before_agent_start: 'before_prompt', after_response: 'after_response', resources_discover: 'resources_discover',
+  context: 'provider_context', context_with_system: 'provider_context', turn_start: 'model_turn_start', turn_end: 'model_turn_end',
+  before_provider_request: 'before_provider_request', before_provider_headers: 'before_provider_headers', after_provider_response: 'after_provider_response',
+  session_before_compact: 'session_before_compact', session_compact: 'session_compact', session_before_tree: 'session_before_tree', session_tree: 'session_tree',
 };
 export const notificationEvents = {
   'turn/started': 'agent_start', 'turn/settled': 'agent_end',
   'tool/started': 'tool_execution_start', 'tool/settled': 'tool_execution_end',
   'message/started': 'message_start', 'message/updated': 'message_update', 'message/settled': 'message_end',
-  'compaction/started': 'session_before_compact', 'compaction/settled': 'session_compact', 'compaction/failed': 'session_compact_failed',
+  'compaction/failed': 'session_compact_failed',
   'session/info_changed': 'session_info_changed', 'dialog/started': 'ui_prompt_start', 'dialog/settled': 'ui_prompt_end',
   'model/selected': 'model_select', 'reasoning/selected': 'thinking_level_select', 'bash/user': 'user_bash',
 };
+// Pi events dispatched after another notification's event: the owning run settles once, after agent_end.
+export const followingEvents = { 'turn/settled': 'agent_settled' };
 function name(value, label) {
   bounded(value, label, 128);
   if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(value)) invalid(label);
   return value;
 }
 function register(runtime, map, key, definition, factory) {
-  if (runtime.loaded) unsupported('runtime registration', 'regenerate the reviewed static manifest and reload');
-  if (map.has(key)) invalid(`duplicate registration ${key}`);
+  if (runtime.loaded && !map.has(key)) unsupported('new runtime registration', 'this native catalog has no dynamic registration protocol');
+  if (!runtime.loaded && map.has(key)) invalid(`duplicate registration ${key}`);
   map.set(key, { definition, factory });
 }
 function gitBranch(cwd) {
@@ -48,18 +65,15 @@ export function createAPI(runtime, factory) {
   const store = () => runtime.current(factory);
   const op = (method, params, feature) => { runtime.require(feature); const s = store(); return runtime.track(runtime.hostCall(method, params, s), s); };
   return strict({
-    registerTool(tool) {
-      fields(tool, ['name', 'label', 'description', 'parameters', 'execute', 'renderCall', 'renderResult', 'output_schema'], 'tool');
-      name(tool.name, 'tool name'); bounded(tool.description, 'tool description', 4096);
-      if (!tool.description || !tool.parameters || typeof tool.parameters !== 'object' || typeof tool.execute !== 'function') invalid('tool definition');
-      if (tool.label !== undefined) bounded(tool.label, 'tool label', 128);
-      for (const key of ['renderCall', 'renderResult']) if (tool[key] !== undefined && typeof tool[key] !== 'function') invalid(`tool.${key}`);
-      register(runtime, runtime.tools, tool.name, tool, factory);
-    },
+    ...mcpAPI(runtime, factory),
+    registerTool(tool) { registerTool(runtime, factory, tool); },
+    ...runtime.transcript.api(factory),
+    registerProvider(name, config) { registerProvider(runtime, factory, name, config); },
+    unregisterProvider(name) { unregisterProvider(runtime, factory, name); },
     registerCommand(key, definition) {
       name(key, 'command name'); fields(definition, ['description', 'handler', 'usage', 'getArgumentCompletions'], 'command');
       if (typeof definition.handler !== 'function') invalid('command handler');
-      if (definition.getArgumentCompletions) unsupported('command.getArgumentCompletions', 'host wire has no completion callback');
+      if (definition.getArgumentCompletions !== undefined && typeof definition.getArgumentCompletions !== 'function') invalid('command.getArgumentCompletions must be a function');
       if (definition.description !== undefined) bounded(definition.description, 'command description', 4096);
       register(runtime, runtime.commands, key, definition, factory);
     },
@@ -81,13 +95,15 @@ export function createAPI(runtime, factory) {
       return runtime.flagValues.has(key) ? runtime.flagValues.get(key) : runtime.flags.get(key).definition.default;
     },
     on(event, handler) {
-      if (runtime.loaded) unsupported('runtime hook registration', 'regenerate the static manifest');
-      if (!hookEvents[event] && !Object.values(notificationEvents).includes(event)) unsupported(`event ${event}`, 'no corresponding host event');
+      if (runtime.loaded && hookEvents[event] && !runtime.metadata().hooks.includes(hookEvents[event])) unsupported(`event ${event}`, 'native hook was not subscribed; configure again');
+      if (event !== 'mcp_servers_change' && !hookEvents[event] && !Object.values(notificationEvents).includes(event) && !Object.values(followingEvents).includes(event)) unsupported(`event ${event}`, 'no corresponding host event');
       if (typeof handler !== 'function') invalid('event handler');
       const list = runtime.events.get(event) || []; const entry = { handler, factory }; list.push(entry); runtime.events.set(event, list);
       return () => { const at = list.indexOf(entry); if (at >= 0) list.splice(at, 1); };
     },
     events: runtime.bus.facade(factory),
+    exec: (command, args, options) => exec(runtime, store(), command, args, options),
+    getSettings() { return getSettings(runtime, store()); },
     getSessionName() { return store().state.host.session_name ?? undefined; },
     setSessionName(value) {
       runtime.require('session_entries'); bounded(value, 'session name', 4096); const s = store(); s.controller.signal.throwIfAborted();
@@ -96,44 +112,16 @@ export function createAPI(runtime, factory) {
       result.catch(() => { if (s.state.host.session_name === next) s.state.host.session_name = old; });
       return result;
     },
-    appendEntry(type, data) {
-      runtime.require('session_entries'); bounded(type, 'entry type', 128); const clean = plainJSON(data, 'entry data');
-      const s = store(); s.controller.signal.throwIfAborted(); const entries = s.state.host.session_entries;
-      const pending = { type: 'custom', customType: type, data: clean };
-      if (Array.isArray(entries)) entries.push(pending);
-      const promise = runtime.hostCall('session/append_entry', { entry_type: type, data: clean }, s).then(result => { pending.id = result.entry_id; return result.entry_id; });
-      promise.catch(() => { if (entries?.includes(pending)) entries.splice(entries.indexOf(pending), 1); });
-      return runtime.track(promise, s);
-    },
+    appendEntry(type, data) { return runtime.appendEntry(type, data, store()); },
     setLabel(entryId, label) { bounded(entryId, 'entry id', 256); bounded(label, 'label', 4096); return op('session/set_label', { entry_id: entryId, label }, 'session_entries'); },
-    sendUserMessage(text, options) {
-      if (options !== undefined) unsupported('sendUserMessage options', 'delivery mode is owned by the host');
-      return op('session/send_user_message', { text: bounded(text, 'user message', 262144) }, 'message_injection');
-    },
-    sendMessage(message, options = {}) {
-      fields(options, ['triggerTurn'], 'sendMessage options');
-      fields(message, ['role', 'content', 'customType', 'display', 'details'], 'message');
-      const text = typeof message.content === 'string' ? message.content : textOnly(message.content).map(x => x.text).join('\n');
-      if (message.role === 'user') {
-        if (message.customType !== undefined || message.details !== undefined || message.display !== undefined || options.triggerTurn === false) unsupported('sendMessage user options');
-        return op('session/send_user_message', { text: bounded(text, 'message', 262144) }, 'message_injection');
-      }
-      if (message.role || !message.customType) unsupported('sendMessage', 'no extension-authored assistant/system provider turns');
-      if (message.display) unsupported('sendMessage display', 'host does not project custom entries into the transcript');
-      const s = store(); runtime.require('session_entries');
-      const promise = runtime.hostCall('session/append_entry', { entry_type: bounded(message.customType, 'customType', 128), data: plainJSON(message, 'custom message') }, s).then(() => {
-        if (options.triggerTurn) { runtime.require('message_injection'); return runtime.hostCall('session/send_user_message', { text }, s); }
-      });
-      return runtime.track(promise, s);
-    },
-    getActiveTools() { return [...snapshot(store().state.host, 'active_tools', 'pi.getActiveTools')]; },
-    getAllTools() { return [...snapshot(store().state.host, 'all_tools', 'pi.getAllTools')]; },
-    setActiveTools(names) {
-      if (!Array.isArray(names) || names.length > 256) invalid('active tools'); names.forEach(n => name(n, 'tool name'));
-      runtime.require('active_tools'); const s = store(); s.controller.signal.throwIfAborted(); const old = s.state.host.active_tools, next = [...names]; s.state.host.active_tools = next;
-      const promise = op('tools/set_active', { names }, 'active_tools'); promise.catch(() => { if (s.state.host.active_tools === next) s.state.host.active_tools = old; }); return promise;
-    },
-    getThinkingLevel() { const value = store().state.host.reasoning; return typeof value === 'string' ? value : value?.effort ?? (value?.type === 'off' ? 'off' : undefined); },
+    sendUserMessage: (content, options) => op('session/send_user_message', userMessageParams(content, options), 'message_injection'),
+    sendMessage: (message, options) => op('session/send_message', customMessageParams(message, options), 'message_injection'),
+    getActiveTools() { return [...toolSnapshot(runtime, factory).active_tools]; },
+    getAllTools() { return getAllTools(runtime, factory); },
+    setActiveTools(names) { setActiveTools(runtime, factory, names); },
+    getThinkingLevel() { return thinkingLevel(store().state.host); },
+    setModel(model) { return setModel(runtime, store(), model); },
+    setThinkingLevel(level) { setThinkingLevel(runtime, store(), level); },
     getCommands() { return [...runtime.commands].map(([name, d]) => ({ name, description: d.definition.description || name, source: 'extension' })); },
   }, 'pi');
 }
@@ -147,9 +135,10 @@ export function textOnly(content) {
   });
 }
 
-export function createContext(runtime, store) {
+export function createContext(runtime, store, replaced = false) {
   const current = () => { runtime.assertOwner(store); return store.state; };
   const operation = (method, params, feature) => { runtime.require(feature); return runtime.track(runtime.hostCall(method, params, store), store); };
+
   const footerData = strict({
     getGitBranch: () => current().host.git_branch ?? gitBranch(current().workspace),
     getExtensionStatuses: () => new Map(current().statuses),
@@ -166,20 +155,20 @@ export function createContext(runtime, store) {
       const make = Array.isArray(factory) ? () => ({ render: () => factory, invalidate() {} }) : factory;
       return runtime.ui.mount(store, placement, slot, slot === 'footer' ? (tui, t) => make(tui, t, footerData) : make, { slot, ...options });
     };
-    const key = `${store.factory}:${slot}`, prev = store.state.uiQueues.get(key) || Promise.resolve();
+    const key = slot, prev = store.state.uiQueues.get(key) || Promise.resolve();
     const promise = prev.then(action); store.state.uiQueues.set(key, promise.catch(() => {}));
     return runtime.track(promise, store);
   };
   const custom = (factory, options = {}) => {
     runtime.require('remote_ui'); current(); fields(options, ['overlay', 'overlayOptions', 'onHandle'], 'ui.custom options');
     if (typeof factory !== 'function') invalid('ui.custom factory');
-    if (!options.overlay && (options.overlayOptions || options.onHandle)) invalid('overlay options require overlay=true');
-    if (options.onHandle) unsupported('ui.custom.onHandle', 'use the TUI overlay handle supplied by showOverlay');
-    let finish;
-    const result = new Promise(resolve => { finish = resolve; });
-    const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, overlayOptions: options.overlay ? (options.overlayOptions || {}) : undefined });
+    if (options.overlay !== undefined && typeof options.overlay !== 'boolean') invalid('ui.custom overlay');
+    if (options.onHandle !== undefined && typeof options.onHandle !== 'function') invalid('ui.custom onHandle');
+    let finish, reject;
+    const result = new Promise((resolve, fail) => { finish = resolve; reject = fail; });
+    const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, reject, overlayOptions: options.overlay ? (options.overlayOptions ?? (() => undefined)) : undefined, onHandle: options.onHandle });
     runtime.track(mounting, store);
-    return mounting.then(() => result);
+    return Promise.all([mounting, result]).then(([, value]) => value);
   };
   const ui = strict({
     theme,
@@ -187,32 +176,16 @@ export function createContext(runtime, store) {
       if (!['info', 'success', 'warning', 'error'].includes(type)) invalid('notification type');
       return runtime.track(runtime.transport.notify('notification', { level: type, message: bounded(message, 'notification', 16384) }), store);
     },
-    async confirm(title, message, options) {
-      if (options !== undefined) unsupported('ui.confirm options');
-      return (await runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store)).confirmed;
-    },
-    async input(title, placeholder, options) {
-      if (placeholder !== undefined || options !== undefined) unsupported('ui.input placeholder/options', 'host input wire has no placeholder/timeout');
-      return (await runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store)).value ?? undefined;
-    },
+    ...dialogAPI(custom, {
+      async confirm(title, message) {
+        return (await runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store)).confirmed;
+      },
+      async input(title) {
+        return (await runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store)).value ?? undefined;
+      },
+    }),
     custom,
-    async select(title, choices, options) {
-      if (options !== undefined) unsupported('ui.select options');
-      bounded(title, 'select title', 128);
-      if (!Array.isArray(choices) || !choices.length || choices.length > 256) invalid('select choices');
-      choices.forEach(value => bounded(value, 'select choice', 4096));
-      return custom((tui, t, _keys, done) => {
-        let index = 0;
-        return { render: () => [t.bold(title), ...choices.map((value, i) => i === index ? t.fg('accent', `> ${value}`) : `  ${value}`)], invalidate() {},
-          handleInput(data) {
-            if (matchesKey(data, 'escape')) done(undefined);
-            else if (matchesKey(data, 'enter')) done(choices[index]);
-            else if (matchesKey(data, 'up')) { index = (index + choices.length - 1) % choices.length; tui.requestRender(); }
-            else if (matchesKey(data, 'down')) { index = (index + 1) % choices.length; tui.requestRender(); }
-          },
-        };
-      });
-    },
+
     async editor(title, prefill = '') {
       bounded(title, 'editor title', 128); bounded(prefill, 'editor prefill', 262144);
       return custom((tui, t, _keys, done) => {
@@ -231,7 +204,8 @@ export function createContext(runtime, store) {
       if (!placement) invalid('widget placement');
       return setSlot(`widget:${key}`, placement, value);
     },
-    setEditorComponent: factory => setSlot('editor', 'editor', factory),
+    ...editorAPI(runtime, store, setSlot),
+    ...chromeAPI(runtime, store),
     setStatus(key, text) {
       bounded(key, 'status key', 64); const state = current();
       if (text === undefined) state.statuses.delete(`${store.factory}:${key}`); else state.statuses.set(`${store.factory}:${key}`, bounded(text, 'status', 4096, { controls: true }));
@@ -240,48 +214,46 @@ export function createContext(runtime, store) {
     getEditorText: () => snapshot(current().host, 'composer_text', 'ctx.ui.getEditorText'),
     setEditorText(text) {
       runtime.require('composer'); store.controller.signal.throwIfAborted();
-      bounded(text, 'composer text', 262144); const state = current(), old = state.host.composer_text; state.host.composer_text = text;
+      bounded(text, 'composer text', 262144); const state = current();
+      const checkpoint = runtime.ui.mutateEditor(store, text);
+      if (checkpoint) return runtime.track(checkpoint, store);
+      const old = state.host.composer_text; state.host.composer_text = text;
       const promise = operation('composer/set', { text }, 'composer');
       promise.catch(() => { if (state.host.composer_text === text) state.host.composer_text = old; }); return promise;
     },
     pasteToEditor(text) {
+      runtime.require('composer'); store.controller.signal.throwIfAborted(); current();
       bounded(text, 'composer insert', 262144);
-      // Cursor position is host-owned, so do not invent a local insertion result.
+      const checkpoint = runtime.ui.mutateEditor(store, text, true);
+      if (checkpoint) return runtime.track(checkpoint, store);
+      // Without a custom component the cursor is host-owned; do not invent it.
       return operation('composer/insert', { text }, 'composer');
     },
   }, 'ctx.ui');
+  // Lazy translation: a UI/resource-only factory must not fail merely because
+  // an unrelated native history contains media this Pi message profile cannot map.
+  const sessionEntries = key => translateSessionEntries(snapshot(current().host, key, `ctx.sessionManager.${key}`), runtime.namespace);
   const sessionManager = strict({
     getSessionId: () => current().host.session_id ?? undefined,
+    getHeader: () => sessionHeader(current().host),
     getSessionName: () => current().host.session_name ?? undefined,
-    getEntries: () => [...snapshot(current().host, 'session_entries', 'ctx.sessionManager.getEntries')],
-    getBranch: () => [...snapshot(current().host, 'session_branch', 'ctx.sessionManager.getBranch')],
+    getEntries: () => sessionEntries('session_entries'),
+    getBranch: () => sessionEntries('session_branch'),
     getLeafId: () => snapshot(current().host, 'session_leaf_id', 'ctx.sessionManager.getLeafId'),
     getSessionFile: () => snapshot(current().host, 'session_file', 'ctx.sessionManager.getSessionFile'),
-    getEntry: id => snapshot(current().host, 'session_entries', 'ctx.sessionManager.getEntry').find(entry => entry.id === id),
+    getEntry: id => sessionEntries('session_entries').find(entry => entry.id === id),
   }, 'ctx.sessionManager');
   return strict({
     get cwd() { return current().workspace; },
+    get mode() { return contextFacts(runtime, store).mode; },
+    isProjectTrusted() { return contextFacts(runtime, store).isProjectTrusted(); },
+    getSystemPromptOptions() { return contextFacts(runtime, store).getSystemPromptOptions(); },
     get hasUI() { return runtime.features.has('remote_ui') && current().alive; },
-    get model() {
-      const host = current().host;
-      if (host.model_view) {
-        const v = host.model_view;
-        return { id: v.id, ...(v.name ? { name: v.name } : {}), api: v.api, provider: v.provider, reasoning: v.reasoning, input: v.input,
-          contextWindow: v.context_window, maxTokens: v.max_tokens,
-          ...(v.cost ? { cost: { input: v.cost.input / 1e6, output: v.cost.output / 1e6, cacheRead: v.cost.cache_read / 1e6, cacheWrite: v.cost.cache_write / 1e6 } } : {}),
-        };
-      }
-      if (host.model_info) return host.model_info;
-      return typeof host.model === 'object' ? host.model : host.model ? { id: host.model, name: host.model } : undefined;
-    },
+    get model() { return currentModel(current().host); },
+    get thinkingLevel() { return thinkingLevel(current().host, true); },
+    get scopedModels() { return scopedModels(current().host); },
     ui, sessionManager,
-    modelRegistry: strict({
-      isUsingOAuth() { return snapshot(current().host, 'using_oauth', 'ctx.modelRegistry.isUsingOAuth'); },
-      getAvailable: () => [...snapshot(current().host, 'available_models', 'ctx.modelRegistry.getAvailable')],
-      getAll: () => [...snapshot(current().host, 'all_models', 'ctx.modelRegistry.getAll')],
-      find: (provider, id) => snapshot(current().host, 'all_models', 'ctx.modelRegistry.find').find(m => m.provider === provider && m.id === id),
-      getApiKey() { unsupported('ctx.modelRegistry.getApiKey', 'provider credentials never cross the extension boundary'); },
-    }, 'ctx.modelRegistry'),
+    modelRegistry: modelRegistry(() => current().host),
     getContextUsage() {
       const host = current().host;
       if (host.context_usage !== undefined) return host.context_usage;
@@ -293,7 +265,20 @@ export function createContext(runtime, store) {
     isIdle: () => snapshot(current().host, 'is_idle', 'ctx.isIdle'),
     hasPendingMessages: () => snapshot(current().host, 'has_pending_messages', 'ctx.hasPendingMessages'),
     getSystemPrompt: () => snapshot(current().host, 'system_prompt', 'ctx.getSystemPrompt'),
-    get signal() { return store.controller.signal; },
+    get signal() { return compactionCallbackStore(runtime, store).controller.signal; },
+    waitForIdle() {
+      if (store.method !== 'command/execute') unsupported('ctx.waitForIdle', 'requires a live command, never a hook waiting on its own run');
+      return operation('session/wait_for_idle', { resource_owner: current().owner }, 'session_control_v1').then(result => {
+        fields(result, ['session_id'], 'idle receipt'); bounded(result.session_id, 'idle session id', 256);
+        if (result.session_id !== current().host.session_id) invalid('idle receipt session changed');
+      });
+    },
+    compact: options => requestCompaction(runtime, store, options),
     abort() { unsupported('ctx.abort', 'host wire has no root-run abort contract'); },
+    ...sessionMethods(runtime, store, createContext),
+    ...(replaced ? {
+      sendMessage: (message, options) => operation('session/send_message', customMessageParams(message, options), 'message_injection'),
+      sendUserMessage: (content, options) => operation('session/send_user_message', userMessageParams(content, options), 'message_injection'),
+    } : {}),
   }, 'ctx');
 }

@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync, existsSync } from
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { hookEvents } from './lib/api.mjs';
 
 // Importing a factory executes arbitrary user code. Never perform implicit
 // discovery or change host trust/enablement. The caller must explicitly review
@@ -23,10 +24,20 @@ export function configure({ output, extensions, reviewed, overwrite = false }) {
   const frames = captured.stdout.trim().split('\n').map(line => JSON.parse(line));
   if (frames.length !== 1 || !frames[0].result) throw new Error('registration capture must return one bounded RPC metadata frame');
   const registrations = frames[0].result;
+  // Reviewed factories may subscribe later. Reserve the real mapped hook
+  // channels up front; callbacks remain local and initially inert. Provider
+  // wire hooks are the exception: while subscribed, the host refuses
+  // extension-registered (host stream transport) providers, so they are
+  // reserved only when a factory registered them at capture time.
+  const providerWire = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']);
+  const subscribed_hooks = [...new Set(Object.values(hookEvents))]
+    .filter(hook => !providerWire.has(hook) || registrations.hooks.includes(hook)).sort();
+  registrations.hooks = subscribed_hooks;
   const entrypoint_sha256 = Object.fromEntries(extensions.map(entry => [entry, createHash('sha256').update(readFileSync(entry)).digest('hex')]));
-  const config = { extensions, entrypoint_sha256, registrations };
+  const config = { extensions, entrypoint_sha256, registrations, subscribed_hooks };
   const quoted = value => JSON.stringify(value);
   const list = values => `[${values.map(quoted).join(', ')}]`;
+  const shortcuts = registrations.shortcuts.map(shortcut => `{ name = ${quoted(shortcut.name)}, key = ${quoted(shortcut.key)}, description = ${quoted(shortcut.description)} }`);
   const flags = registrations.flags.map(flag => `{ name = ${quoted(flag.name)}, type = ${quoted(flag.type)}, default = ${quoted(flag.default)}${flag.description ? `, description = ${quoted(flag.description)}` : ''} }`);
   const manifest = [
     'name = "octet-pi-compat"', 'version = "0.1.0"', 'api_version = "0.4"',
@@ -34,11 +45,13 @@ export function configure({ output, extensions, reviewed, overwrite = false }) {
     '[entrypoint]', `command = ${quoted(realpathSync(process.execPath))}`,
     `args = ${list([runner, '--config', join(output, 'bridge.json')])}`, '',
     '# Trusted factories retain normal OS authority. Declarations are consent metadata, not a sandbox.',
-    '[capabilities]', 'filesystem = "unrestricted"', 'process = true', 'network = true', '',
+    '[capabilities]', 'filesystem = "unrestricted"', 'process = true', 'network = true',
+    'system_prompt = true', '',
     '[contributes]', `tools = ${list(registrations.tools.map(t => t.name))}`,
     `commands = ${list(registrations.commands.map(c => c.name))}`, `hooks = ${list(registrations.hooks)}`,
     `tool_renderers = ${list(registrations.tool_renderers)}`,
-    'notifications = true', 'confirmations = true',
+    ...(shortcuts.length ? [`shortcuts = [\n  ${shortcuts.join(',\n  ')},\n]`] : []),
+    'notifications = true', 'confirmations = true', 'providers = true',
     ...(flags.length ? [`flags = [\n  ${flags.join(',\n  ')},\n]`] : []), '',
   ].join('\n');
   mkdirSync(output, { recursive: true, mode: 0o700 });

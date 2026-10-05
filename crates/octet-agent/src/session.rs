@@ -61,6 +61,7 @@ use crate::tools::durability::{
     DurableInvocationStore, InvocationHandle, InvocationRecord, InvocationScope,
 };
 
+use base64::Engine as _;
 use fs2::FileExt;
 use octet_ai::{
     Cost, EndpointId, Message, ModelId, StopReason, Usage, UserMessage, UserPart,
@@ -448,6 +449,197 @@ fn valid_extension_metadata_value(
     }
 }
 
+/// Pi custom-message content, retained without joining distinct text blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CustomMessageContent {
+    /// A single string.
+    Text(String),
+    /// Ordered text and inline image blocks.
+    Parts(Vec<CustomMessagePart>),
+}
+
+/// A model-visible text block in a Pi custom message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CustomMessagePart {
+    /// Text content.
+    Text {
+        /// Model-visible text.
+        text: String,
+    },
+    /// Inline image content in Pi's persisted shape.
+    Image {
+        /// Canonical base64 encoded native image bytes.
+        data: String,
+        /// Native PNG/JPEG/GIF/WebP MIME type.
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
+}
+
+impl CustomMessagePart {
+    /// Decode a bounded inline image without fetching remote media.
+    pub fn image(&self) -> Result<Option<octet_ai::ImageMedia>, SessionError> {
+        let Self::Image { data, mime_type } = self else {
+            return Ok(None);
+        };
+        if data.len() > 4 * octet_ai::MAX_USER_IMAGE_BYTES.div_ceil(3)
+            || !matches!(
+                mime_type.as_str(),
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            )
+        {
+            return Err(SessionError::Limit(
+                "custom image exceeds bounds or has unsupported MIME".into(),
+            ));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| SessionError::Limit("custom image must be canonical base64".into()))?;
+        if bytes.len() > octet_ai::MAX_USER_IMAGE_BYTES
+            || base64::engine::general_purpose::STANDARD.encode(&bytes) != *data
+        {
+            return Err(SessionError::Limit(
+                "custom image exceeds bounds or has invalid base64".into(),
+            ));
+        }
+        Ok(Some(octet_ai::ImageMedia {
+            source: octet_ai::ImageSource::Inline(bytes.into()),
+            media_type: Some(mime_type.parse().expect("validated image MIME")),
+            detail: None,
+        }))
+    }
+}
+
+impl CustomMessageContent {
+    /// Validate the complete text/media batch at message ingestion.
+    pub fn validate(&self) -> Result<(), SessionError> {
+        let text = self.text();
+        if text.len() > 256 * 1024
+            || text
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        {
+            return Err(SessionError::Limit(
+                "message text exceeds bounds or contains controls".into(),
+            ));
+        }
+        if let Self::Parts(parts) = self {
+            if parts.len() > 256 {
+                return Err(SessionError::Limit("too many message parts".into()));
+            }
+            let (mut count, mut bytes) = (0usize, 0usize);
+            for part in parts {
+                if let Some(image) = part.image()? {
+                    count += 1;
+                    if let octet_ai::ImageSource::Inline(data) = image.source {
+                        bytes += data.len();
+                    }
+                }
+            }
+            if count > 8 || bytes > 20 * 1024 * 1024 {
+                return Err(SessionError::Limit(
+                    "message image batch exceeds bounds".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Native input projection, preserving ordered text and image parts.
+    pub fn input_parts(&self) -> Vec<crate::InputPart> {
+        match self {
+            Self::Text(text) => vec![crate::InputPart::Text(text.clone())],
+            Self::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    CustomMessagePart::Text { text } => crate::InputPart::Text(text.clone()),
+                    CustomMessagePart::Image { .. } => {
+                        crate::InputPart::Media(octet_ai::Media::Image(
+                            part.image()
+                                .expect("validated custom image")
+                                .expect("image variant"),
+                        ))
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// Payload-free display summary.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    CustomMessagePart::Text { text } => text.as_str(),
+                    CustomMessagePart::Image { .. } => "[image]",
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+/// Typed durable Pi custom-message data. The canonical body is user content;
+/// these fields remain outside provider context, including `details`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomMessage {
+    /// Extension-defined message type.
+    pub custom_type: String,
+    /// Original string or ordered content blocks.
+    pub content: CustomMessageContent,
+    /// Whether this message appears in the transcript.
+    pub display: bool,
+    /// Inert extension data, never sent to the model. Explicit null is retained.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_custom_message_details",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub details: Option<serde_json::Value>,
+}
+
+pub(crate) fn deserialize_custom_message_details<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+impl CustomMessage {
+    /// Validate bounded inert message data at the host ingestion boundary.
+    pub fn validate(&self) -> Result<(), SessionError> {
+        self.content.validate()?;
+        if self.custom_type.len() > 128
+            || self.custom_type.chars().any(char::is_control)
+            || self.details.as_ref().is_some_and(|value| {
+                serde_json::to_vec(value).map_or(true, |encoded| encoded.len() > 64 * 1024)
+            })
+        {
+            return Err(SessionError::Limit(
+                "custom message exceeds bounds or contains controls".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Canonical model projection; display and details have no effect on it.
+    pub fn user_parts(&self) -> Vec<UserPart> {
+        crate::UserInput::from(self.content.input_parts()).into_user_parts()
+    }
+
+    /// Human-readable content summary.
+    pub fn text(&self) -> String {
+        self.content.text()
+    }
+}
+
 /// Stable presentation metadata attached to a durable session entry.
 ///
 /// Values are inert data, never terminal escape sequences. In addition to the
@@ -456,6 +648,9 @@ fn valid_extension_metadata_value(
 /// visually immutable across model and theme changes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
+    /// Typed Pi custom-message entry alongside its canonical user projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_message: Option<CustomMessage>,
     /// Atomic provenance for a materialized native steering user message.
     /// The tuple is (operation identifier, prepared local submission id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -608,7 +803,8 @@ impl EntryMetadata {
             sanitized_extension_metadata.insert(namespace, entry_metadata);
         }
         self.extension_metadata = sanitized_extension_metadata;
-        (self.native_steering.is_some()
+        (self.custom_message.is_some()
+            || self.native_steering.is_some()
             || self.prompt_model.is_some()
             || self.prompt_model_source.is_some()
             || self.prompt_color.is_some()
@@ -835,10 +1031,28 @@ pub struct SkillResourceSnapshot {
     pub content: String,
 }
 
+/// Immutable identity/provenance of a newly initialized session.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionHeader {
+    /// Durable session identifier.
+    pub id: String,
+    /// Workspace at creation, not a later adapter claim.
+    pub cwd: PathBuf,
+    /// Actual creation boundary time.
+    pub timestamp_unix_ms: u64,
+    /// Optional Pi parent file reference; never implicitly opened.
+    pub parent_session: Option<String>,
+}
+
 /// One line of the session JSONL file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionRecord {
+    /// Immutable creation metadata; no context entry or branch mutation.
+    Header {
+        /// Immutable creation metadata.
+        header: SessionHeader,
+    },
     /// Replaceable auxiliary state for an unresolved tool call. Never context.
     ToolInvocation {
         /// Host-derived assistant entry and source position, not provider call ID.
@@ -1190,6 +1404,7 @@ struct ResponsesReplayCache {
 /// subsequent appends fork a new branch from there — earlier branches are
 /// preserved verbatim in the file.
 pub struct Session {
+    header: Option<SessionHeader>,
     path: PathBuf,
     file: File,
     // Shared only with host-issued invocation handles. Every append uses the
@@ -1275,3 +1490,15 @@ mod usage;
 
 #[cfg(test)]
 mod tests;
+
+impl CustomMessage {
+    /// Pi message projection for a real durable lifecycle boundary.
+    pub fn lifecycle_value(&self, timestamp_unix_ms: u64) -> serde_json::Value {
+        let mut value = serde_json::json!({"role":"custom", "customType":self.custom_type,
+            "content":self.content, "display":self.display, "timestamp":timestamp_unix_ms});
+        if let Some(details) = &self.details {
+            value["details"] = details.clone();
+        }
+        value
+    }
+}

@@ -71,6 +71,7 @@ impl ProviderContextHook for Rewrite {
             .push((request.clone(), context.clone()));
         Ok(Some(ProviderContextProjection {
             system: self.system.clone(),
+            tools: None,
             messages: vec![projected_user(&self.text)],
         }))
     }
@@ -512,6 +513,7 @@ impl ProviderContextHook for AppendHook {
         receipt.await.unwrap()?;
         Ok(Some(ProviderContextProjection {
             system: None,
+            tools: None,
             messages: vec![projected_user("effective checkpoint context")],
         }))
     }

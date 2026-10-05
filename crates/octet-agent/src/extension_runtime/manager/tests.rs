@@ -9,6 +9,9 @@
 //! otherwise sit in the middle of the lifecycle code it exercises.
 
 use super::*;
+#[cfg(unix)]
+#[path = "resource_tests.rs"]
+mod resources;
 // Every fixture in this module launches a POSIX shell script, so the
 // helpers and manifest types they build are Unix-only.
 #[cfg(unix)]

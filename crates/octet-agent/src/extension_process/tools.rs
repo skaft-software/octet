@@ -338,6 +338,15 @@ pub(super) struct ProcessTool {
 
 #[async_trait::async_trait]
 impl Tool for ProcessTool {
+    fn operation(&self) -> Option<crate::extension_operations::OperationSnapshot> {
+        Some(crate::extension_operations::OperationSnapshot {
+            descriptor: self.definition.operation.clone()?,
+            extension_instance_id: self.process.inner.instance_id.clone(),
+            generation: self.connection.generation,
+            catalog_revision: self.catalog_revision.load(Ordering::Acquire),
+        })
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             async_execution: false,
@@ -346,6 +355,18 @@ impl Tool for ProcessTool {
             description: self.definition.description.clone(),
             parameters: self.definition.parameters.clone(),
         }
+    }
+
+    fn prompt_metadata(&self) -> Option<crate::tool::ToolPromptContribution> {
+        if self.definition.prompt_snippet.is_none() && self.definition.prompt_guidelines.is_empty()
+        {
+            return None;
+        }
+        Some(crate::tool::ToolPromptContribution {
+            name: self.definition.name.clone(),
+            snippet: self.definition.prompt_snippet.clone().unwrap_or_default(),
+            guidelines: self.definition.prompt_guidelines.clone(),
+        })
     }
 
     fn composition_config(&self) -> Option<ToolCompositionConfig> {
@@ -358,6 +379,50 @@ impl Tool for ProcessTool {
 
     fn output_schema(&self) -> Option<serde_json::Value> {
         self.definition.output_schema.clone()
+    }
+
+    fn default_active(&self) -> bool {
+        self.definition.default_active.unwrap_or(true)
+    }
+
+    fn nested_execution(&self) -> bool {
+        self.definition.nested_execution
+            && read_std_lock(&self.connection.protocol).supports(EXTENSION_FEATURE_TOOL_COMPOSITION)
+            || self.composition_config().is_some()
+    }
+
+    fn prepares_arguments(&self) -> bool {
+        self.definition.prepare_arguments
+    }
+
+    async fn prepare_arguments(
+        &self,
+        arguments: serde_json::Value,
+        owner: &str,
+        cancellation: CancellationToken,
+    ) -> Result<serde_json::Value, ToolError> {
+        let mut context = self.process.execution_context();
+        let resource_owner = ExtensionResourceOwner {
+            session_id: owner.to_owned(),
+            extension_instance_id: self.process.inner.instance_id.clone(),
+            process_generation: self.connection.generation,
+        };
+        context.resource_owner = Some(resource_owner.clone());
+        let request = self.connection.request_with_resource_owner(
+            "tool/prepare_arguments",
+            serde_json::json!({"name":self.definition.name,"arguments":arguments,"context":context}),
+            self.process.inner.config.request_timeout,
+            Some(resource_owner),
+        );
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ToolError::new("tool argument preparation cancelled")),
+            result = request => result.map_err(|error|ToolError::new(error.to_string()))?,
+        };
+        result
+            .get("arguments")
+            .cloned()
+            .ok_or_else(|| ToolError::new("argument preparation returned no arguments"))
     }
 
     fn replay_safety(&self) -> ReplaySafety {
@@ -439,9 +504,10 @@ impl Tool for ProcessTool {
                             notification.message
                         ));
                     }
-                    Ok(ExtensionEvent::Diagnostic { message }) => {
-                        ctx.progress.status(format!("extension diagnostic: {message}"));
-                    }
+                    // Process-wide diagnostics have no request owner. Keep them
+                    // on the diagnostic channel rather than attributing them to
+                    // whichever tool happens to be awaiting its terminal reply.
+                    Ok(ExtensionEvent::Diagnostic { .. }) => {}
                     Ok(ExtensionEvent::StatusContributed { contribution }) => {
                         ctx.progress.status(contribution.text);
                     }
@@ -483,6 +549,8 @@ impl Tool for ProcessTool {
                         ));
                     }
                     Ok(ExtensionEvent::ComposerRequested { .. })
+                    | Ok(ExtensionEvent::ExecRequested { .. })
+                    | Ok(ExtensionEvent::McpRegistrationRequested { .. })
                     | Ok(ExtensionEvent::SessionEntryRequested { .. })
                     | Ok(ExtensionEvent::MessageInjectionRequested { .. })
                     | Ok(ExtensionEvent::ShortcutRequested { .. })

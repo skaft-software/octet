@@ -54,6 +54,7 @@ pub(super) struct HttpStreamRequest {
     pub(super) diagnostic_redactor: CredentialRedactor,
     /// Optional host hook observing the HTTP response before its body is read.
     pub(super) on_response: Option<Arc<dyn crate::runtime::ResponseHook>>,
+    pub(super) provider_hooks: Option<super::hooks::ProviderRequestAttempt>,
 }
 
 /// Falling back is replay-safe only when opening the WebSocket failed before
@@ -282,6 +283,7 @@ pub(super) async fn stream_http(
         buffer_ambiguous_compatibility_content,
         mut diagnostic_redactor,
         on_response,
+        provider_hooks,
     } = request;
     let lifecycle_feedback = parts.streaming
         && model.spec.protocol == Protocol::OpenAiChat
@@ -348,6 +350,9 @@ pub(super) async fn stream_http(
     let status = res.status();
     if let Some(hook) = on_response {
         hook.on_response(status, res.headers(), &HookModelContext::from_model(&model));
+    }
+    if let Some(hooks) = provider_hooks {
+        hooks.response(status, res.headers()).await?;
     }
 
     // 4. Handle non-2xx HTTP errors

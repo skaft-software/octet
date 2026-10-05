@@ -18,6 +18,24 @@ pub(super) struct ProviderContextPreparation<'a> {
     pub(super) replay_mode: AgentCompactionMode,
 }
 
+/// Bind once from the live run owner, then use the resulting client for every
+/// main/auxiliary attempt in that run. AI assigns a fresh operation ID per call.
+/// Do not store this owner-bound clone back into a shared catalog/client.
+pub(super) fn provider_request_client(
+    client: &octet_ai::AiClient,
+    factories: &[Arc<dyn crate::extension_provider::ProviderRequestHookFactory>],
+    resource_owner: &str,
+) -> Result<octet_ai::AiClient, AgentError> {
+    if factories.is_empty() {
+        return Ok(client.clone());
+    }
+    let hooks = factories
+        .iter()
+        .map(|factory| factory.bind_provider_request_hook(resource_owner))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(client.with_provider_request_hooks(hooks))
+}
+
 fn refused(reason: &'static str) -> AgentError {
     AgentError::ProviderContextPreparation(reason)
 }
@@ -221,6 +239,27 @@ pub(super) async fn project_provider_context(
         if let Some(projection) = projection {
             request.messages = projection.messages;
             request.system = projection.system;
+            if let Some(tools) = projection.tools {
+                let mut seen = HashSet::new();
+                for tool in &tools {
+                    let Some(original) = canonical
+                        .tools
+                        .iter()
+                        .find(|original| original.name == tool.name)
+                    else {
+                        return Err(refused("loadout introduced an unregistered tool"));
+                    };
+                    let mut unchanged = tool.clone();
+                    unchanged.description = original.description.clone();
+                    if !seen.insert(tool.name.clone())
+                        || serde_json::to_value(&unchanged).expect("canonical tool serializes")
+                            != serde_json::to_value(original).expect("canonical tool serializes")
+                    {
+                        return Err(refused("loadout changed tool authority"));
+                    }
+                }
+                request.tools = tools;
+            }
         }
         validate_size(&request)?;
         // Never accept a change that opaque replay would ignore, or discard

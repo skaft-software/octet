@@ -1,0 +1,15 @@
+name = "native-bulk-hello"
+version = "0.1.0"
+api_version = "0.4"
+requires_octet = "=0.8.2"
+
+[entrypoint]
+command = "build/bulk-hello"
+
+[capabilities]
+filesystem = "none"
+process = false
+network = false
+
+[contributes]
+tools = ["blob_save", "blob_size"]

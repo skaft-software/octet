@@ -102,6 +102,7 @@ confirmations = true
         session_name: Some("Wire contract".into()),
         model: Some("local/model".into()),
         model_view: None,
+        pi_models: None,
         reasoning: Some(json!({"effort": "high"})),
         active_skills: vec![ExtensionActiveSkill {
             id: "skill-1".into(),
@@ -381,6 +382,7 @@ hooks = ["before_prompt"]
         session_name: Some("Python SDK conformance".into()),
         model: Some("local/python-proof".into()),
         model_view: None,
+        pi_models: None,
         reasoning: None,
         active_skills: Vec::new(),
     };

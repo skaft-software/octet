@@ -69,7 +69,7 @@ class Peer:
         assert reply["id"] == 1, reply
         result = reply["result"]
         assert result["api_version"] == "0.4" and result["commands"] == [], result
-        assert result["protocol"] == {"version": "0.4", "features": ["request_cancellation", "content_parts"], "limits": {"max_concurrent_requests": 1}}, result
+        assert result["protocol"] == {"version": "0.4", "features": ["request_cancellation", "content_parts", "request_progress"], "limits": {"max_concurrent_requests": 1}}, result
         assert [t["name"] for t in result["tools"]] == [tool], result
         assert result["tools"][0]["parameters"]["type"] == "object"
         return result

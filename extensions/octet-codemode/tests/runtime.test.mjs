@@ -67,6 +67,21 @@ test("negotiates exact API 0.4, grammar, mode and host inline bound", () => {
   ]) assert.throws(() => negotiate(bad), /Invalid params/);
 });
 
+test("accepts native optional resource and bulk offers without selecting them", () => {
+  const init = offer();
+  init.protocol.optional_features.push("resource_refs_v1", "bulk_objects_v1");
+  init.protocol.limits.resource_refs_v1 = { max_records: 256, max_registrations_per_parent: 32 };
+  init.protocol.bulk_objects_v1 = { profile: "local-file.v1", transfer_directory: "/unused", limits: {} };
+  const selection = negotiate(init);
+  assert.equal(selection.maxConcurrent, 8);
+  assert(!selection.features.has("resource_refs_v1"));
+  assert(!selection.features.has("bulk_objects_v1"));
+  assert.deepEqual(selection.result.protocol.limits, { max_concurrent_requests: 8 });
+  assert.throws(() => negotiate({ ...init, protocol: { ...init.protocol, unknown: true } }), /Invalid params/);
+  assert.throws(() => negotiate({ ...init, protocol: { ...init.protocol,
+    limits: { ...init.protocol.limits, max_concurrent_requests: 3 } } }), /Invalid params/);
+});
+
 test("source and frozen context boundaries reject malformed input", () => {
   for (const bad of [{ code: "" }, { code: "return 1", extra: true }, { code: "x".repeat(65537) },
     { code: '// @options: {"timeout_ms":0}\nreturn 1' }, { code: '// @options: {"unknown":1}\nreturn 1' }]) {

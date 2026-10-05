@@ -1,5 +1,5 @@
 //! Feature-negotiated API 0.4 only. This is intentionally not canonical 0.3.
-use crate::{schema, CallContext, Error, Extension, Terminal, ToolResult, MAX_FRAME_BYTES};
+use crate::{bulk, resource, schema, CallContext, Error, Extension, Terminal, ToolResult, MAX_FRAME_BYTES};
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -16,7 +16,7 @@ const FEATURES: [&str; 2] = ["request_cancellation", "content_parts"];
 const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 static STDIO_USED: AtomicBool = AtomicBool::new(false);
-type Writer = Arc<Mutex<std::io::Stdout>>;
+pub(crate) type Writer = Arc<Mutex<std::io::Stdout>>;
 struct Active {
     id: Value,
     context: CallContext,
@@ -45,17 +45,25 @@ pub(crate) fn run(extension: Extension) -> Result<(), Error> {
         })
         .map_err(|_| Error::internal())?;
     let writer = Arc::new(Mutex::new(std::io::stdout()));
+    let resources = Arc::new(resource::Runtime::new(writer.clone()));
     let mut active = None;
     let mut shutdown_id = None;
     let result = serve(
         &extension,
         &receiver,
         &writer,
+        &resources,
         &mut active,
         &mut shutdown_id,
     );
     // Never return to a C/C++ author while a callback still borrows their data.
-    drain(&mut active)?;
+    let drain_result = drain(&mut active);
+    let remaining = resources.references();
+    if !remaining.is_empty() {
+        start_disposal(&mut active, &resources, &writer, Value::Null, remaining, false)?;
+        drain(&mut active)?;
+    }
+    drain_result?;
     result?;
     if let Some(id) = shutdown_id {
         send(&writer, success(id, json!({})))?;
@@ -67,14 +75,24 @@ fn serve(
     extension: &Extension,
     receiver: &mpsc::Receiver<Result<Option<Vec<u8>>, Error>>,
     writer: &Writer,
+    resources: &Arc<resource::Runtime>,
     active: &mut Option<Active>,
     shutdown_id: &mut Option<Value>,
 ) -> Result<(), Error> {
     let deadline = Instant::now() + INIT_TIMEOUT;
     let mut initialized = false;
+    let mut progress = false;
+    let mut resource_enabled = false;
+    let mut bulk_profile = None;
+    let mut pending_disposal: Option<(Value, Vec<resource::Reference>)> = None;
     let mut bad_frames = 0;
     loop {
         reap(active)?;
+        if active.is_none() {
+            if let Some((id, references)) = pending_disposal.take() {
+                start_disposal(active, resources, writer, id, references, true)?;
+            }
+        }
         if !initialized && Instant::now() >= deadline {
             return Err(Error::rpc(-32000, "initialization deadline exceeded"));
         }
@@ -99,12 +117,16 @@ fn serve(
             }
         };
         let object = request.as_object().unwrap();
+        if !object.contains_key("method") {
+            resources.reverse.response(&request);
+            continue;
+        }
         let id = object.get("id").cloned();
         let method = object["method"].as_str().unwrap();
         let params = &object["params"];
         // Completion may have happened while recv_timeout waited for this frame.
         reap(active)?;
-        if active.as_ref().is_some_and(|a| id.as_ref() == Some(&a.id)) {
+        if active.as_ref().is_some_and(|a| id.as_ref() == Some(&a.id)) || pending_disposal.as_ref().is_some_and(|(pending, _)| id.as_ref() == Some(pending)) {
             let error = Error::rpc(-32600, "duplicate active request id; stream closed");
             // An error on the duplicated ID would create two terminals for the
             // original call. Use null and close the stream instead.
@@ -117,6 +139,8 @@ fn serve(
                 Ok(target) if initialized => {
                     if let Some(call) = active.as_ref().filter(|a| &a.id == target) {
                         call.context.cancel();
+                    } else {
+                        resources.reverse.cancel(target);
                     }
                 }
                 Ok(_) => {
@@ -146,6 +170,11 @@ fn serve(
             }
             match initialize(extension, params) {
                 Ok(result) => {
+                    progress = result["protocol"]["features"].as_array().unwrap().iter().any(|f| f == "request_progress");
+                    resource_enabled = result["protocol"]["features"].as_array().unwrap().iter().any(|f| f == resource::FEATURES[0]);
+                    if result["protocol"]["features"].as_array().unwrap().iter().any(|f| f == bulk::FEATURE) {
+                        bulk_profile = Some(bulk::Profile::parse(&params["protocol"][bulk::FEATURE])?);
+                    }
                     send(writer, success(id, result))?;
                     initialized = true;
                 }
@@ -172,10 +201,23 @@ fn serve(
                     return Ok(());
                 }
             }
+            "resource/dispose" if resource_enabled => {
+                if pending_disposal.is_some() {
+                    send(writer, failure(id, &Error::rpc(-32000, "native disposal queue full")))?;
+                    continue;
+                }
+                match resource::disposal(params) {
+                    Ok(references) => {
+                        resources.retire(&references);
+                        pending_disposal = Some((id, references));
+                    }
+                    Err(error) => send(writer, failure(id, &error))?,
+                }
+            }
             "tool/call" => {
                 // A just-completed worker may still be between flush and return.
                 reap(active)?;
-                if active.is_some() {
+                if active.is_some() || pending_disposal.is_some() {
                     send(
                         writer,
                         failure(
@@ -192,9 +234,23 @@ fn serve(
                         continue;
                     }
                 };
+                let resource_call = if let Some(operation) = tool.definition.get("operation").filter(|operation| resource_enabled && (params["context"].get("resource_owner").is_some() || ["resource_inputs", "resource_outputs"].iter().any(|k| !operation[*k].as_array().unwrap().is_empty()))) {
+                    match resources.prepare(&id, &params["context"], operation, &params["arguments"]) {
+                        Ok(call) if resource_enabled => Some(call),
+                        Ok(_) => { send(writer, failure(id, &Error::rpc(-32601, "resources not negotiated")))?; continue; }
+                        Err(error) => { send(writer, failure(id, &error))?; continue; }
+                    }
+                } else { None };
+                let bulk_call = match bulk_profile.as_ref().map(|profile| bulk::Call::new(resources.clone(), profile.clone(), &id)).transpose() {
+                    Ok(call) => call,
+                    Err(error) => { send(writer, failure(id, &error))?; continue; }
+                };
                 let context = CallContext {
                     terminal: Arc::new(Mutex::new(Terminal::default())),
                     host_context: params["context"].clone(),
+                    progress: progress.then(|| (id.clone(), writer.clone())),
+                    resources: resource_call,
+                    bulk: bulk_call,
                 };
                 let worker_context = context.clone();
                 let arguments = params["arguments"].clone();
@@ -205,19 +261,29 @@ fn serve(
                     .spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             worker_context.check_cancelled()?;
+                            if let Some(call) = &worker_context.resources { call.enter(); }
+                            if let Some(call) = &worker_context.bulk { call.enter(); }
                             (tool.handler)(arguments, worker_context.clone())
                         }))
                         .unwrap_or_else(|_| Err(Error::internal()));
                         let result = match result {
+                            Ok(result) if result.structured_content.is_some() && tool.definition.get("output_schema").is_none() => Err(Error::internal()),
                             Ok(result) => result.wire(),
                             Err(error) if error.code == 0 => {
                                 ToolResult::error(error.message).wire()
                             }
                             Err(error) => Err(error),
                         };
+                        let result = result.and_then(|result| {
+                            if let Some(call) = &worker_context.resources { call.validate_output(&tool.definition["operation"], &result)?; }
+                            Ok(result)
+                        });
                         let message = {
                             let mut terminal = worker_context.terminal.lock().unwrap();
                             terminal.settled = true;
+                            if let Some(call) = &worker_context.resources {
+                                call.settle(if terminal.cancelled { None } else { result.as_ref().ok() }, &tool.definition["operation"]);
+                            }
                             if terminal.cancelled {
                                 failure(worker_id, &Error::cancelled())
                             } else {
@@ -248,6 +314,25 @@ fn serve(
             )?,
         }
     }
+}
+
+fn start_disposal(active: &mut Option<Active>, resources: &Arc<resource::Runtime>, writer: &Writer, id: Value, references: Vec<resource::Reference>, reply: bool) -> Result<(), Error> {
+    let context = CallContext { terminal: Default::default(), host_context: json!({}), progress: None, resources: None, bulk: None };
+    let worker_context = context.clone();
+    let runtime = resources.clone();
+    let writer = writer.clone();
+    let worker_id = id.clone();
+    let thread = std::thread::Builder::new().name("octet-native-dispose".into()).spawn(move || {
+        let result = runtime.dispose(references);
+        let message = {
+            let mut terminal = worker_context.terminal.lock().unwrap();
+            terminal.settled = true;
+            if terminal.cancelled { failure(worker_id, &Error::cancelled()) } else { success(worker_id, result) }
+        };
+        if reply { send(&writer, message) } else { Ok(()) }
+    }).map_err(|_| Error::internal())?;
+    *active = Some(Active { id, context, thread });
+    Ok(())
 }
 
 fn reap(active: &mut Option<Active>) -> Result<(), Error> {
@@ -352,10 +437,14 @@ fn initialize(extension: &Extension, params: &Value) -> Result<Value, Error> {
         return Err(Error::invalid("native SDK does not yet support CLI flags"));
     }
     let protocol = &params["protocol"];
+    let uses_bulk = extension.tools.values().any(|t| bulk::required(&t.definition));
+    let uses_operations = extension.tools.values().any(|t| t.definition.get("operation").is_some());
+    let uses_resources = extension.tools.values().filter_map(|t| t.definition.get("operation")).any(|o| ["resource_inputs", "resource_outputs"].iter().any(|k| !o[*k].as_array().unwrap().is_empty()));
     let required = names(&protocol["required_features"])?;
     let optional = names(&protocol["optional_features"])?;
     if !required.is_disjoint(&optional)
-        || required.iter().any(|s| !FEATURES.contains(s))
+        || (extension.progress_disabled && required.contains("request_progress"))
+        || required.iter().any(|s| !FEATURES.contains(s) && *s != "request_progress" && !(uses_resources && *s == resource::FEATURES[0]) && !(uses_operations && *s == resource::FEATURES[1]) && !(uses_bulk && *s == bulk::FEATURE))
         || FEATURES.iter().any(|s| !required.contains(s))
     {
         return Err(Error::rpc(
@@ -371,9 +460,32 @@ fn initialize(extension: &Extension, params: &Value) -> Result<Value, Error> {
             "host concurrency offer must be a positive integer",
         ));
     }
-    Ok(
-        json!({"api_version":"0.4","tools":extension.catalog(),"commands":[],"protocol":{"version":"0.4","features":FEATURES,"limits":{"max_concurrent_requests":1}}}),
-    )
+    let mut features = FEATURES.to_vec();
+    if !extension.progress_disabled && (required.contains("request_progress") || optional.contains("request_progress")) {
+        features.push("request_progress");
+    }
+    let mut limits = json!({"max_concurrent_requests":1});
+    if uses_bulk {
+        if !required.contains(bulk::FEATURE) && !optional.contains(bulk::FEATURE) {
+            return Err(Error::rpc(-32000, "bulk_objects_v1 was not offered"));
+        }
+        bulk::Profile::parse(&protocol[bulk::FEATURE])?;
+        features.push(bulk::FEATURE);
+    }
+    if uses_operations {
+        if !required.contains(resource::FEATURES[1]) && !optional.contains(resource::FEATURES[1]) {
+            return Err(Error::rpc(-32000, "operation_descriptors_v1 was not offered"));
+        }
+        features.push(resource::FEATURES[1]);
+    }
+    if uses_resources {
+        if (!required.contains(resource::FEATURES[0]) && !optional.contains(resource::FEATURES[0])) || protocol["limits"]["resource_refs_v1"] != resource::limits() {
+            return Err(Error::rpc(-32000, "resource operations require both features and exact v1 limits"));
+        }
+        features.push(resource::FEATURES[0]);
+        limits["resource_refs_v1"] = resource::limits();
+    }
+    Ok(json!({"api_version":"0.4","tools":extension.catalog(),"commands":[],"protocol":{"version":"0.4","features":features,"limits":limits}}))
 }
 fn names(value: &Value) -> Result<BTreeSet<&str>, Error> {
     let array = value
@@ -443,7 +555,7 @@ fn failure(id: Value, error: &Error) -> Value {
     };
     json!({"jsonrpc":"2.0","id":id,"error":{"code":error.code,"message":message}})
 }
-fn send(writer: &Writer, message: Value) -> Result<(), Error> {
+pub(crate) fn send(writer: &Writer, message: Value) -> Result<(), Error> {
     let mut frame = serde_json::to_vec(&message).map_err(|_| Error::internal())?;
     if frame.len() > MAX_FRAME_BYTES {
         return Err(Error::internal());
@@ -491,6 +603,18 @@ fn parse(frame: &[u8]) -> Result<Value, Error> {
     let object = value
         .as_object()
         .ok_or_else(|| Error::rpc(-32600, "Invalid Request"))?;
+    if !object.contains_key("method") {
+        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+            || !object.get("id").is_some_and(valid_id)
+            || object.contains_key("result") == object.contains_key("error")
+            || object.keys().any(|k| !["jsonrpc","id","result","error"].contains(&k.as_str()))
+            || object.get("error").is_some_and(|e| !e.as_object().is_some_and(|e| {
+                e.keys().all(|k| ["code","message","data"].contains(&k.as_str()))
+                    && e.get("code").and_then(Value::as_i64).is_some_and(|n| i32::try_from(n).is_ok())
+                    && e.get("message").and_then(Value::as_str).is_some_and(|s| s.len() <= 4096)
+            })) { return Err(Error::rpc(-32600, "Invalid Response")); }
+        return Ok(value);
+    }
     if object
         .keys()
         .any(|k| !["jsonrpc", "id", "method", "params"].contains(&k.as_str()))
@@ -504,6 +628,13 @@ fn parse(frame: &[u8]) -> Result<Value, Error> {
         return Err(Error::rpc(-32600, "Invalid Request"));
     }
     Ok(value)
+}
+pub(crate) fn bounded_value(value: &Value, max_bytes: usize) -> Result<(), Error> {
+    bounds(value, 0, &mut 16_384).map_err(|_| Error::internal())?;
+    if serde_json::to_vec(value).map_err(|_| Error::internal())?.len() > max_bytes {
+        return Err(Error::internal());
+    }
+    Ok(())
 }
 fn bounds(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), Error> {
     if depth > 32 || *nodes == 0 {
@@ -582,6 +713,20 @@ impl<'de> Visitor<'de> for UniqueVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_author_policy_respects_optional_and_required_offers() {
+        let mut offer = json!({"api_version":"0.4","workspace":"/fixture","octet_version":"0.8.2", "extension":{},"capabilities":{},"host":{},"contributes":{"tools":[]}, "protocol":{"version":"0.4","required_features":["request_cancellation","content_parts"],"optional_features":["request_progress"],"limits":{"max_concurrent_requests":1}}});
+        let mut extension = Extension::new();
+        assert!(initialize(&extension, &offer).unwrap()["protocol"]["features"].as_array().unwrap().contains(&json!("request_progress")));
+        extension.request_progress(false);
+        assert!(!initialize(&extension, &offer).unwrap()["protocol"]["features"].as_array().unwrap().contains(&json!("request_progress")));
+        offer["protocol"]["optional_features"] = json!([]);
+        offer["protocol"]["required_features"] = json!(["request_cancellation","content_parts","request_progress"]);
+        assert_eq!(initialize(&extension, &offer).unwrap_err().code, -32000);
+        extension.request_progress(true);
+        assert!(initialize(&extension, &offer).is_ok());
+    }
     #[test]
     fn framing_bounds_are_exact() {
         let exact = vec![b' '; MAX_FRAME_BYTES];
@@ -599,7 +744,11 @@ mod tests {
     #[test]
     fn envelopes_are_validated_not_canonicalized() {
         assert!(parse(br#" {"params":{},"method":"shutdown","jsonrpc":"2.0","id":"s"} "#).is_ok());
+        assert!(parse(br#"{"jsonrpc":"2.0","id":"child","result":{}}"#).is_ok());
+        assert!(parse(br#"{"jsonrpc":"2.0","id":"child","error":{"code":-32602,"message":"refused","data":{"code":"resource_busy"}}}"#).is_ok());
         for data in [
+            br#"{"jsonrpc":"2.0","id":"child","result":{},"error":{"code":-1,"message":"bad"}}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":"child","error":{"code":1.5,"message":"bad"}}"#,
             br#"{"jsonrpc":"2.0","method":"shutdown","params":{},"id":null}"#.as_slice(),
             br#"{"jsonrpc":"2.0","method":"shutdown","params":{},"id":true}"#,
             br#"{"jsonrpc":"2.0","jsonrpc":"2.0","method":"shutdown","params":{}}"#,

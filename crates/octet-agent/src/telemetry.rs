@@ -961,7 +961,8 @@ impl EventObserver for TelemetryObserver {
                     fields,
                 );
             }
-            AgentEvent::CacheWarmed { .. }
+            AgentEvent::CustomMessageCommitted { .. }
+            | AgentEvent::CacheWarmed { .. }
             | AgentEvent::RecoveredOutput { .. }
             | AgentEvent::ToolProgress { .. }
             | AgentEvent::OutputMedia { .. }
@@ -1058,6 +1059,7 @@ fn bounded_text(text: &str) -> String {
 
 fn event_label(event: &AgentEvent) -> &'static str {
     match event {
+        AgentEvent::CustomMessageCommitted { .. } => "custom_message_committed",
         AgentEvent::SteeringDelivered { .. } => "steering_delivered",
         AgentEvent::FollowUpDelivered { .. } => "follow_up_delivered",
         AgentEvent::CompactionStarted { .. } => "compaction_started",

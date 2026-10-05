@@ -12,6 +12,7 @@ pub mod serve;
 
 mod mutation_resources;
 pub(crate) mod remote_ui;
+pub(crate) mod resource_paths;
 
 use octet_agent::extension_remote_ui::{ExtensionRemoteUiOperation, EXTENSION_FEATURE_REMOTE_UI};
 
@@ -101,9 +102,14 @@ mod commands;
 mod composition;
 mod confirmation;
 mod event_drain;
+mod exec;
 mod headless;
 mod host_requests;
 mod lifecycle;
+mod mcp;
+#[cfg(all(test, unix))]
+mod mcp_native_tests;
+pub(crate) mod model_control;
 mod notifications;
 mod post_mutation;
 mod provider_runtime;
@@ -256,11 +262,13 @@ fn active_session_lifecycle_enabled(config: &Config) -> bool {
 }
 
 /// A lifecycle driver belongs to exactly one interactive session, so it may
-/// only be injected into an isolated API 0.3 process. Shared and legacy
+/// only be injected into an isolated API 0.3/0.4 process. Shared and legacy
 /// processes must never retain a binding-specific reverse service.
 fn extension_session_lifecycle_eligible(descriptor: &DiscoveredExtension) -> bool {
-    descriptor.manifest.api_version == EXTENSION_API_VERSION_0_3
-        && descriptor.manifest.runtime.sharing == ExtensionRuntimeSharing::Isolated
+    matches!(
+        descriptor.manifest.api_version.as_str(),
+        EXTENSION_API_VERSION_0_3 | octet_agent::extension_process::EXTENSION_API_VERSION_0_4
+    ) && descriptor.manifest.runtime.sharing == ExtensionRuntimeSharing::Isolated
 }
 
 #[derive(serde::Serialize)]
@@ -335,6 +343,8 @@ pub struct ExecutableExtensions {
     telemetry_rejected: u64,
     telemetry_error: Option<std::io::ErrorKind>,
     processes: Vec<ExtensionProcess>,
+    resource_paths_epoch: Arc<std::sync::atomic::AtomicU64>,
+    resource_paths_live: Arc<std::sync::atomic::AtomicBool>,
     provider_runtime: ExtensionProviderRuntime,
     runtime_manager: Option<ExtensionRuntimeManager>,
     runtime_binding: Option<ExtensionSessionBinding>,
@@ -346,14 +356,21 @@ pub struct ExecutableExtensions {
     presentations: BTreeMap<String, ExtensionPresentationView>,
     semantic_ui: BTreeMap<String, SemanticUiView>,
     autocomplete_registrations: BTreeMap<String, RegisteredAutocomplete>,
+    displayed_autocomplete: Option<AutocompleteFence>,
     last_editor_state: Option<EditorStateDelivery>,
     background_tx: mpsc::Sender<ExtensionBackgroundUpdate>,
     background_rx: mpsc::Receiver<ExtensionBackgroundUpdate>,
     renderer_tasks: Vec<JoinHandle<()>>,
+    // One session-owned overlay in the already admitted resident bridge.
+    pi_mcp_binding: Arc<tokio::sync::Mutex<Option<mcp::PiMcpBinding>>>,
     autocomplete_tasks: Vec<JoinHandle<()>>,
     pending_editor_requests: VecDeque<PendingEditorRequest>,
     pending_host_requests: VecDeque<PendingHostRequest>,
     pending_session_requests: VecDeque<PendingHostRequest>,
+    pending_session_setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
+    // The actual host registry handle, not an adapter-owned tool mirror. Its
+    // interior dynamic registry remains usable while the Agent is borrowed.
+    tool_host: Option<octet_agent::ExtensionHost>,
     /// The one foreground terminal grant the host can cede, or `None` while the
     /// host still owns its own raw terminal.
     terminal_arbiter: TerminalGrantArbiter,
@@ -416,6 +433,8 @@ impl Default for ExecutableExtensions {
             telemetry_rejected: 0,
             telemetry_error: None,
             processes: Vec::new(),
+            resource_paths_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            resource_paths_live: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             provider_runtime: ExtensionProviderRuntime::default(),
             runtime_manager: None,
             runtime_binding: None,
@@ -427,14 +446,18 @@ impl Default for ExecutableExtensions {
             presentations: BTreeMap::new(),
             semantic_ui: BTreeMap::new(),
             autocomplete_registrations: BTreeMap::new(),
+            displayed_autocomplete: None,
             last_editor_state: None,
             background_tx,
             background_rx,
             renderer_tasks: Vec::new(),
+            pi_mcp_binding: Arc::new(tokio::sync::Mutex::new(None)),
             autocomplete_tasks: Vec::new(),
             pending_editor_requests: VecDeque::new(),
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),
+            pending_session_setup: None,
+            tool_host: None,
             terminal_arbiter: TerminalGrantArbiter::default(),
             remote_ui: remote_ui::RemoteUi::default(),
             remote_ui_wake: None,
@@ -485,6 +508,8 @@ fn shutdown_telemetry_observer(observer: octet_agent::TelemetryObserver) {
 
 impl Drop for ExecutableExtensions {
     fn drop(&mut self) {
+        self.resource_paths_live
+            .store(false, std::sync::atomic::Ordering::Release);
         self.deactivate_session_lifecycle_driver();
         self.cancel_background_work();
         if !self.processes.is_empty() || self.telemetry.is_some() {

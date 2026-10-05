@@ -30,6 +30,7 @@ use crate::resource_resolver::{ResourceKind, ResourceResolver};
 use crate::tui::theme_schema::MAX_THEME_BYTES;
 
 pub(crate) fn is_reserved_theme_name(name: &str) -> bool {
+    let name = name.strip_suffix(".json").unwrap_or(name);
     is_builtin_theme_name(name) || TerminalThemeChoice::parse(name).is_some()
 }
 
@@ -43,7 +44,10 @@ pub(crate) fn is_compiled_file_theme_name(name: &str) -> bool {
 /// The canonical spelling of a compiled-in file theme selector, so a persisted
 /// `cards.toml` or `Cards` both resolve to the one built-in name.
 pub(crate) fn compiled_file_theme_name(name: &str) -> Option<&'static str> {
-    let stem = name.strip_suffix(".toml").unwrap_or(name);
+    let stem = name
+        .strip_suffix(".toml")
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or(name);
     COMPILED_FILE_THEMES
         .iter()
         .find(|(built_in, _)| stem.eq_ignore_ascii_case(built_in))
@@ -67,7 +71,10 @@ pub fn compiled_file_theme_names() -> impl Iterator<Item = &'static str> {
 /// compiled-in file theme. Returns `None` for the compiled default and for
 /// discovered-file selectors.
 pub(super) fn compiled_file_theme_for(name: &str) -> Option<CompiledFileTheme> {
-    let stem = name.strip_suffix(".toml").unwrap_or(name);
+    let stem = name
+        .strip_suffix(".toml")
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or(name);
     COMPILED_FILE_THEMES
         .iter()
         .find(|(built_in, _)| stem.eq_ignore_ascii_case(built_in))
@@ -120,7 +127,7 @@ pub(super) fn theme_file_name(name: &str) -> Option<String> {
     {
         return None;
     }
-    Some(if name.ends_with(".toml") {
+    Some(if name.ends_with(".toml") || name.ends_with(".json") {
         name.to_owned()
     } else {
         format!("{name}.toml")
@@ -147,7 +154,10 @@ pub(super) fn resolved_theme_resource(
 ) -> anyhow::Result<(ResourceResolver, crate::resource_resolver::ResolvedResource)> {
     let file_name =
         theme_file_name(name).ok_or_else(|| anyhow::anyhow!("invalid theme name {name:?}"))?;
-    let resource_name = file_name.strip_suffix(".toml").unwrap_or(&file_name);
+    let resource_name = file_name
+        .strip_suffix(".toml")
+        .or_else(|| file_name.strip_suffix(".json"))
+        .unwrap_or(&file_name);
     let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
     let snapshot = resolver.discover(ResourceKind::Theme, &config.theme_paths);
     let resource = snapshot

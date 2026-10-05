@@ -124,8 +124,9 @@ corrupt one.
 
 ## JSONL schema
 
-Session files are JSONL with five record types: `entry`, `head`, `checkpoint`,
-`usage` and `usage_uncertainty`. The schema is here for tools that read them.
+Session files are JSONL with `entry`, `head`, `checkpoint`, `usage` and
+`usage_uncertainty` records, plus optional creation metadata in a leading
+`header`. The schema is here for tools that read them.
 
 <details>
 <summary>Record types, entry and head examples, and rules</summary>
@@ -134,6 +135,7 @@ Each line is one JSON object with a `type`:
 
 | Record | Meaning |
 | --- | --- |
+| `header` | Optional immutable creation identity, workspace, timestamp and parent-session reference; not a conversation entry. |
 | `entry` | Immutable, parent-linked conversation or state. |
 | `head` | The active branch and cumulative cost. |
 | `checkpoint` | A completed prompt and its exact restorable head. |

@@ -10,11 +10,20 @@ pub struct ToolDefinition {
     pub name: String,
     /// Model-facing description.
     pub description: String,
+    /// Optional concise model-facing usage summary, subject to host negotiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_snippet: Option<String>,
+    /// Optional bounded model-facing usage guidelines, subject to host negotiation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_guidelines: Vec<String>,
     /// JSON Schema for tool arguments.
     pub parameters: serde_json::Value,
     /// Optional API `0.2` JSON Schema for `structured_content`.
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
+    /// Optional negotiated API 0.4 operation metadata; ordinary Pi tools omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<OperationDescriptor>,
     /// Optional API `0.4` request-scoped composition policy. Requires
     /// negotiated `tool_composition_v1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,6 +31,15 @@ pub struct ToolDefinition {
     /// Optional API `0.4` provider-side constrained-sampling request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constrained_sampling: Option<octet_ai::ConstrainedSampling>,
+    /// Whether a newly registered tool joins the model-visible active set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_active: Option<bool>,
+    /// Request-scoped nested dispatch without composition presentation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nested_execution: bool,
+    /// Prepare raw arguments before the exact advertised-schema validation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepare_arguments: bool,
 }
 
 /// API `0.2` request to add or replace extension-owned tools.
@@ -111,6 +129,9 @@ impl From<AgentSessionPolicy> for ExtensionAgentSessionPolicy {
 pub struct AgentSessionSpawnRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     /// Unique task label under the calling owner.
     pub task_name: String,
     /// Optional bounded presentation profile retained by the host for restart
@@ -135,6 +156,9 @@ pub struct AgentSessionSpawnRequest {
 pub struct AgentSessionMessageRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     /// Agent ID or path returned by `agent/spawn`.
     pub target: String,
     /// Message or follow-up task to deliver.
@@ -147,6 +171,9 @@ pub struct AgentSessionMessageRequest {
 pub struct AgentSessionTargetRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     /// Agent ID or path returned by `agent/spawn`.
     pub target: String,
 }
@@ -157,6 +184,9 @@ pub struct AgentSessionTargetRequest {
 pub struct AgentSessionListRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
 }
 
 /// Owner-bound, bounded configured-model discovery.
@@ -165,6 +195,9 @@ pub struct AgentSessionListRequest {
 pub struct AgentSessionModelsRequest {
     /// Active host request defining the resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     #[serde(default)]
     /// Optional case-insensitive search, at most 128 bytes.
     pub query: Option<String>,
@@ -179,9 +212,30 @@ pub struct AgentSessionModelsRequest {
 pub struct AgentSessionWaitRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+    /// Previously issued owner; requires API 0.4 agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
     /// Bounded wait duration. Defaults to 30 seconds and is capped at 60.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+}
+
+/// API 0.4 bounded, loss-detecting observation of one owned child session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionEventsRequest {
+    /// Active or originating host request for the issued owner.
+    pub parent_request_id: u64,
+    /// Previously issued owner; requires agent_session_lifetime_v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+    /// Agent ID or path returned by agent/spawn.
+    pub target: String,
+    /// Last delivered sequence; zero requests the retained beginning.
+    pub after_sequence: u64,
+    /// Maximum wait in milliseconds, 0 through 25000; default zero.
+    #[serde(default)]
+    pub timeout_ms: u64,
 }
 
 /// API `0.2` request for the current host composer snapshot.
@@ -204,9 +258,46 @@ pub struct ComposerTextRequest {
     /// Bounded UTF-8 text. `composer/set` replaces and `composer/insert`
     /// inserts it at the host composer cursor.
     pub text: String,
+    /// API 0.4 remote-editor checkpoint; permitted only on `composer/set`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_checkpoint: Option<ExtensionEditorCheckpoint>,
     /// Explicit owner for a caller that outlived its host request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// A bounded checkpoint for one host-issued editor mount, carried by composer/set.
+/// The frontend separately validates the admitted owner, live mount and clocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionEditorCheckpoint {
+    /// Extension-local surface identity.
+    pub surface_id: String,
+    /// Host-issued mount identity, changed on every replacement.
+    pub mount_id: String,
+    /// Highest completely handled host input revision; zero denotes the seed.
+    pub input_revision: u64,
+    /// Strictly increasing checkpoint revision, starting at one.
+    pub checkpoint_revision: u64,
+}
+
+impl ExtensionEditorCheckpoint {
+    /// Validates the wire bounds without granting authority to commit a draft.
+    pub fn validate(&self) -> Result<(), (ExtensionRequestFailure, String)> {
+        use crate::extension_remote_ui::{validate_surface_id, MAX_EXTENSION_REMOTE_UI_REVISION};
+        validate_surface_id(&self.surface_id)?;
+        validate_surface_id(&self.mount_id)?;
+        if self.input_revision > MAX_EXTENSION_REMOTE_UI_REVISION
+            || self.checkpoint_revision == 0
+            || self.checkpoint_revision > MAX_EXTENSION_REMOTE_UI_REVISION
+        {
+            return Err((
+                ExtensionRequestFailure::BoundsExceeded,
+                "editor checkpoint revisions exceed their portable bounds".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Result of one admitted composer snapshot request.
@@ -285,16 +376,32 @@ pub struct SessionSetLabelRequest {
     pub resource_owner: Option<ExtensionResourceOwner>,
 }
 
-/// API `0.2` request to inject one bounded assistant or system message.
+/// Pi `sendMessage`: one custom message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSendMessageRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
-    /// Exactly `assistant` or `system`. Any other role is refused.
-    pub role: String,
-    /// Bounded injected message text.
-    pub text: String,
+    /// Extension-defined message type.
+    pub custom_type: String,
+    /// Original string or ordered text blocks.
+    pub content: crate::session::CustomMessageContent,
+    /// Whether the transcript shows the message.
+    #[serde(default)]
+    pub display: bool,
+    /// Extension-defined data that the model never sees.
+    #[serde(
+        default,
+        deserialize_with = "crate::session::deserialize_custom_message_details",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub details: Option<serde_json::Value>,
+    /// Pi `deliverAs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver_as: Option<ExtensionMessageDelivery>,
+    /// Pi `triggerTurn`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_turn: Option<bool>,
     /// Explicit owner for a caller that outlived its host request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_owner: Option<ExtensionResourceOwner>,
@@ -306,8 +413,15 @@ pub struct SessionSendMessageRequest {
 pub struct SessionSendUserMessageRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
-    /// Bounded injected user message text.
+    /// Bounded injected user message text (legacy string form).
+    #[serde(default)]
     pub text: String,
+    /// Ordered text/image content, mutually exclusive with nonempty text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<crate::session::CustomMessageContent>,
+    /// Pi `deliverAs` while a run is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver_as: Option<ExtensionMessageDelivery>,
     /// Explicit owner for a caller that outlived its host request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_owner: Option<ExtensionResourceOwner>,
@@ -423,6 +537,9 @@ impl ExtensionModelView {
         }
         if let Some(name) = &self.name {
             validate_bounded_bytes("model name", name, MAX_EXTENSION_MODEL_FIELD_BYTES)?;
+        }
+        if let Some(url) = &self.base_url {
+            validate_bounded_bytes("provider base URL", url, 8192)?;
         }
         validate_bounded_bytes("model api", &self.api, MAX_EXTENSION_MODEL_API_BYTES)?;
         validate_bounded_bytes(
@@ -618,7 +735,10 @@ pub struct ExtensionHostState {
     /// Pi-shaped view of the current model, when the host resolved one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_view: Option<ExtensionModelView>,
-    /// Inspectably serialized reasoning configuration.
+    /// Bounded, secret-free Pi available/scoped model facts supplied by the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_models: Option<serde_json::Value>,
+    /// Portable Pi thinking level, absent for unrepresentable native controls.
     #[serde(default)]
     pub reasoning: Option<serde_json::Value>,
     /// Skills explicitly active at this boundary.
@@ -636,11 +756,14 @@ pub struct ExtensionHostState {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionModelView {
-    /// Canonical model identifier, as octet resolves it.
+    /// Provider model identifier (the route's API model name).
     pub id: String,
     /// Human-facing model name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Explicit credential-free URL declared by a custom-stream provider only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     /// Pi's wire API name for the model's protocol.
     pub api: String,
     /// Pi provider identity that owns the model's route.
@@ -715,6 +838,10 @@ pub struct ExtensionExecutionContext {
     /// Durable extension-resource owner. Frozen API `0.1` omits this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_owner: Option<ExtensionResourceOwner>,
+    /// Host-only marker for the resident MCP registration command. Ordinary
+    /// contexts omit it; no reverse request can supply this privilege marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_registration_owner: Option<ExtensionResourceOwner>,
     /// Current host state.
     pub host: ExtensionHostState,
 }

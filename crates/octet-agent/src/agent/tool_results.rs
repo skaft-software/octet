@@ -350,6 +350,19 @@ pub(super) fn lower_tool_result(
     bool,
     Option<ToolOutputDetails>,
 ) {
+    // Rich policy-error replacements lower like any canonical output, while
+    // their typed denial remains on the authoritative ToolError at the caller.
+    let rich_result;
+    let result = if let Err(error) = result {
+        if let Some(output) = error.output() {
+            rich_result = Ok(output.clone().with_is_error(true));
+            &rich_result
+        } else {
+            result
+        }
+    } else {
+        result
+    };
     let (raw_text, is_error) = match result {
         Ok(output) => (output.text.as_str(), output.is_error()),
         Err(error) => (error.message.as_str(), true),
