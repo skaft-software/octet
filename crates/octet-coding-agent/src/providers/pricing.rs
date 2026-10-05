@@ -60,16 +60,15 @@ fn openai_pricing(model_id: &str) -> Option<Pricing> {
             (5_000_000, 30_000_000, 500_000, 0),
             Some((10_000_000, 45_000_000, 1_000_000, 0)),
         ),
-        // GPT-5.6 Luna matches Pi 1.0.2 and the checked-in models.dev
-        // snapshot. Sol does not: both list 4/20/0.4/5 USD per million
-        // (input/output/cache read/cache write), below the rates held here.
+        // GPT-5.6 rates follow the checked-in models.dev snapshot and Pi
+        // 1.0.2; above 272K input tokens Pi 1.0.2's long-context tier applies.
         "gpt-5.6-luna" => (
             (200_000, 1_200_000, 20_000, 250_000),
             Some((400_000, 1_800_000, 40_000, 500_000)),
         ),
         "gpt-5.6-sol" => (
-            (5_000_000, 30_000_000, 500_000, 6_250_000),
-            Some((10_000_000, 45_000_000, 1_000_000, 12_500_000)),
+            (4_000_000, 20_000_000, 400_000, 5_000_000),
+            Some((8_000_000, 30_000_000, 800_000, 10_000_000)),
         ),
         "gpt-5.6-terra" => (
             (2_000_000, 12_000_000, 200_000, 2_500_000),
@@ -109,7 +108,7 @@ fn opencode_openai_pricing(model_id: &str) -> Option<Pricing> {
         "gpt-5.4-pro" | "gpt-5.5-pro" => (30_000_000, 180_000_000, 30_000_000, 0),
         "gpt-5.5" => (5_000_000, 30_000_000, 500_000, 0),
         "gpt-5.6-luna" => (200_000, 1_200_000, 20_000, 250_000),
-        "gpt-5.6-sol" => (5_000_000, 30_000_000, 500_000, 6_250_000),
+        "gpt-5.6-sol" => (4_000_000, 20_000_000, 400_000, 5_000_000),
         "gpt-5.6-terra" => (2_000_000, 12_000_000, 200_000, 2_500_000),
         _ => return None,
     };
@@ -286,8 +285,7 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
             0,
             Some((10_000_000, 45_000_000, 1_000_000, 0)),
         ),
-        // GPT-5.6 Luna matches Pi 1.0.2 and the checked-in models.dev
-        // snapshot; Sol is held above both (see the table above).
+        // GPT-5.6 rates follow the checked-in models.dev snapshot and Pi 1.0.2.
         "gpt-5.6-luna" => (
             200_000,
             1_200_000,
@@ -296,11 +294,11 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
             Some((400_000, 1_800_000, 40_000, 500_000)),
         ),
         "gpt-5.6-sol" => (
+            4_000_000,
+            20_000_000,
+            400_000,
             5_000_000,
-            30_000_000,
-            500_000,
-            6_250_000,
-            Some((10_000_000, 45_000_000, 1_000_000, 12_500_000)),
+            Some((8_000_000, 30_000_000, 800_000, 10_000_000)),
         ),
         "gpt-5.6-terra" => (
             2_000_000,
