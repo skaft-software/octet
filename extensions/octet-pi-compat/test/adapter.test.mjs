@@ -143,8 +143,8 @@ test('configure captures explicitly reviewed metadata only and never enables/tru
   assert.throws(() => configure({ output, extensions }), /--reviewed/);
   const result = configure({ output, extensions, reviewed: true }); assert.equal(result.registrations.tools[0].name, 'core');
   const { hookEvents } = await import('../lib/api.mjs');
-  // Provider wire hooks are reserved only when the factory registered them.
-  const captured = inspect(extensions).hooks, wire = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']);
+  // Provider wire and resource hooks are reserved only when captured.
+  const captured = inspect(extensions).hooks, wire = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response', 'resources_discover']);
   const subscribedHooks = [...new Set(Object.values(hookEvents))].filter(h => !wire.has(h) || captured.includes(h)).sort();
   assert.deepEqual(result.registrations.hooks, subscribedHooks);
   const manifest = await readFile(join(output, 'extension.toml'), 'utf8');

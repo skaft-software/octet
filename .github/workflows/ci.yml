@@ -192,6 +192,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: extensions/octet-codemode/.node-version
+      - name: Install reviewed Pi adapter test dependencies
+        run: npm ci --prefix extensions/octet-pi-compat --ignore-scripts --no-audit --no-fund
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
         timeout-minutes: 15

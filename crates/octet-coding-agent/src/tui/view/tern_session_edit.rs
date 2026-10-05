@@ -515,7 +515,9 @@ mod tests {
         shell.editor.set_cursor(3);
         let mut picker = PickerState::new(vec![row], None);
         assert!(begin(&mut picker));
-        shell.panel = Some(Panel::SessionPicker { picker });
+        shell.panel = Some(Panel::SessionPicker {
+            picker: Box::new(picker),
+        });
         shell
     }
 

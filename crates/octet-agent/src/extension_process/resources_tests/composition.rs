@@ -398,6 +398,8 @@ async fn r23_all_entrypoints_receiver_and_secondary_refusals_real_peers() {
         let reports = Arc::new(StdMutex::new(Vec::new()));
         let hooks = Arc::new(AtomicUsize::new(0));
         let mut host = ExtensionHost::new();
+        // Catalog publication seeds the loadout from already reserved host names.
+        host.reserve_tool_names(["r23_compose", "get_applicable_operations"]);
         fixture.process.register_dynamic_tool_catalog(&mut host);
         let schema = fixture
             .process
@@ -527,6 +529,8 @@ async fn r23_nested_frozen_schema_does_not_authorize_after_policy_revocation() {
         let owner = session.resource_owner_key();
         let primary = reference(&fixture.call(&owner, "create", json!({})).await.unwrap());
         let mut host = ExtensionHost::new();
+        // Catalog publication seeds the loadout from already reserved host names.
+        host.reserve_tool_names(["r23_compose", "get_applicable_operations"]);
         fixture.process.register_dynamic_tool_catalog(&mut host);
         let reports = Arc::new(StdMutex::new(Vec::new()));
         let hooks = Arc::new(AtomicUsize::new(0));

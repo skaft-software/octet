@@ -111,7 +111,9 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
         if (kind === 'Text' || kind === 'Media') content.push(contentToPi(part, 'context user part'));
         else if (kind === 'ToolResult') {
           flush(); record(value, ['tool_call_id', 'content', 'is_error', 'added_tool_names'], 'canonical tool result');
-          if (value.added_tool_names != null) unsupported('context tool registry metadata');
+          // Read-only observations report result content, not native registry changes.
+          // Context rewrites still cannot replay or discard that host-owned metadata.
+          if (!observation && value.added_tool_names != null) unsupported('context tool registry metadata');
           const id = name(value.tool_call_id), toolName = calls.get(id);
           if (!toolName) invalid('canonical tool result has no preceding call');
           if (typeof value.is_error !== 'boolean') invalid('tool result error flag');

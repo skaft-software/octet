@@ -48,11 +48,15 @@ test('mirror: typed durable custom messages have Pi custom_message identity, det
     type: 'custom_message', customType: 'job', content: [{ type: 'text', text: 'model body' }], display: false, details: { secret: 1 } }]);
 });
 
-async function command(t, body) {
+// Only reviewed test code belongs in body; variable values stay in the JSON sidecar.
+async function command(t, body, data = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'octet-messages-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'index.ts');
-  await writeFile(path, `export default pi => pi.registerCommand('probe', { handler: async () => { ${body} } });`);
+  await writeFile(join(dir, 'fixture.json'), JSON.stringify(data));
+  await writeFile(path, `import { readFileSync } from 'node:fs';
+const fixtureData = JSON.parse(readFileSync(new URL('./fixture.json', import.meta.url), 'utf8'));
+export default pi => pi.registerCommand('probe', { handler: async () => { ${body} } });`);
   const peer = launch(t, [path]);
   await peer.init();
   const reply = await peer.command('probe').response;
@@ -81,7 +85,7 @@ test('sendMessage: content blocks preserve identity and nextTurn passes through'
 
 test('sendMessage: ordered image blocks cross as typed native custom content', async t => {
   const content = [{ type: 'text', text: 'look' }, image, { type: 'text', text: 'after' }];
-  const peer = await command(t, `await pi.sendMessage({ customType: 'image', content: ${JSON.stringify(content)}, display: false, details: null });`);
+  const peer = await command(t, `await pi.sendMessage({ customType: 'image', content: fixtureData.content, display: false, details: null });`, { content });
   const params = peer.seen.find(f => f.method === 'session/send_message').params;
   assert.deepEqual(params.content, content);
   assert.equal(params.details, null);
@@ -91,13 +95,26 @@ test('sendMessage: ordered image blocks cross as typed native custom content', a
 
 test('sendUserMessage: ordered image blocks are not joined into substitute text', async t => {
   const content = [{ type: 'text', text: 'look' }, image];
-  const peer = await command(t, `await pi.sendUserMessage(${JSON.stringify(content)}, { deliverAs: 'steer' });`);
+  const peer = await command(t, `await pi.sendUserMessage(fixtureData.content, { deliverAs: 'steer' });`, { content });
   const params = peer.seen.find(f => f.method === 'session/send_user_message').params;
   assert.deepEqual(params.content, content);
   assert.equal(params.text, '');
   assert.equal(params.deliver_as, 'steer');
   await peer.close();
 });
+
+for (const method of ['sendMessage', 'sendUserMessage']) {
+  test(`${method}: fixture quotes, backslashes, newlines and code remain data`, async t => {
+    const content = [{ type: 'text', text: `"'\\\n\u2028\u2029"); throw new Error('fixture data executed'); //` }];
+    const body = method === 'sendMessage'
+      ? `await pi.sendMessage({ customType: 'literal', content: fixtureData.content });`
+      : `await pi.sendUserMessage(fixtureData.content);`;
+    const peer = await command(t, body, { content });
+    const wireMethod = method === 'sendMessage' ? 'session/send_message' : 'session/send_user_message';
+    assert.deepEqual(peer.seen.find(f => f.method === wireMethod).params.content, content);
+    await peer.close();
+  });
+}
 
 test('sendUserMessage: deliverAs steer is forwarded', async t => {
   const peer = await command(t, `await pi.sendUserMessage('go', { deliverAs: 'steer' });`);

@@ -155,6 +155,93 @@ class MetadataRefreshTests(unittest.TestCase):
                     refresh.Request(refresh.API_URL), None, 302, "Found", {}, url)
             caught.exception.close()
 
+    def prepare_check(self, root):
+        source = root / "api.json"
+        source.write_text(json.dumps(self.fixture()))
+        outputs = {flag: root / (flag[2:] + ".json") for flag in
+                   ["--output", "--names-output", "--capabilities-output", "--source-output"]}
+        argv = [str(SCRIPT)]
+        for flag, path in outputs.items():
+            argv.extend([flag, str(path)])
+        with patch.object(sys, "argv", argv + ["--source", str(source)]), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            refresh.main()
+        return source, outputs, argv
+
+    def run_live_check(self, argv, catalog):
+        with patch.object(sys, "argv", argv + ["--check"]), \
+             patch.object(refresh, "download_source", return_value=json.dumps(catalog).encode()), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            refresh.main()
+
+    def output_state(self, outputs):
+        return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in outputs.values()}
+
+    def test_live_unrelated_provider_change_passes_without_writing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, outputs, argv = self.prepare_check(Path(temporary))
+            catalog = self.fixture()
+            catalog["nano-gpt"] = {"models": {"new": {"name": "Unrelated"}}}
+            self.assertNotEqual(hashlib.sha256(source.read_bytes()).hexdigest(),
+                                hashlib.sha256(json.dumps(catalog).encode()).hexdigest())
+            before = self.output_state(outputs)
+            self.run_live_check(argv, catalog)
+            self.assertEqual(before, self.output_state(outputs))
+
+    def test_live_supported_projection_changes_fail_without_writing(self):
+        changes = [
+            ("--output", "cost", {"input": 2, "output": 3}),
+            ("--names-output", "name", "Renamed"),
+            ("--capabilities-output", "limit", {"context": 123, "output": 45}),
+        ]
+        for flag, field, value in changes:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                _, outputs, argv = self.prepare_check(Path(temporary))
+                catalog = self.fixture()
+                catalog["openai"]["models"]["example"][field] = value
+                before = self.output_state(outputs)
+                with self.assertRaisesRegex(SystemExit, str(outputs[flag])):
+                    self.run_live_check(argv, catalog)
+                self.assertEqual(before, self.output_state(outputs))
+
+    def test_live_invalid_receipt_schema_or_policy_fails_without_writing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, outputs, argv = self.prepare_check(Path(temporary))
+            path = outputs["--source-output"]
+            receipt = json.loads(path.read_text())
+            invalid = [
+                "{", "[]", "null",
+                json.dumps({**receipt, "sha256": "not-a-digest"}),
+                json.dumps({**receipt, "sha256": 123}),
+                json.dumps({**receipt, "url": "https://elsewhere.invalid/api.json"}),
+                json.dumps({**receipt, "unverified_pricing_providers": []}),
+                json.dumps({**receipt, "unverified_pricing_providers": ["deepseek", "openai"]}),
+                json.dumps({k: v for k, v in receipt.items() if k != "sha256"}),
+                json.dumps({**receipt, "extra": True}),
+            ]
+            for text in invalid:
+                with self.subTest(receipt=text):
+                    path.write_text(text)
+                    before = self.output_state(outputs)
+                    with self.assertRaisesRegex(SystemExit, "invalid models.dev source receipt"):
+                        self.run_live_check(argv, self.fixture())
+                    self.assertEqual(before, self.output_state(outputs))
+            path.unlink()
+            with self.assertRaisesRegex(SystemExit, "invalid models.dev source receipt"):
+                self.run_live_check(argv, self.fixture())
+            self.assertFalse(path.exists())
+
+    def test_saved_source_digest_mismatch_fails_even_when_projections_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, outputs, argv = self.prepare_check(Path(temporary))
+            source.write_bytes(source.read_bytes() + b"\n")
+            before = self.output_state(outputs)
+            with patch.object(sys, "argv", argv + ["--source", str(source), "--check"]), \
+                 patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaisesRegex(SystemExit, str(outputs["--source-output"])):
+                    refresh.main()
+            self.assertEqual(before, self.output_state(outputs))
+
     def test_refresh_and_check_are_deterministic_and_check_never_writes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

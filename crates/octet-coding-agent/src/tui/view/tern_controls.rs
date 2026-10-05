@@ -122,12 +122,14 @@ mod tests {
 
     #[test]
     fn remapped_confirm_is_the_hint_and_pointer_control_key() {
-        let mut shell = ShellState::default();
-        shell.native_keys = Some(KeybindingsManager::with_platform(
-            "linux",
-            false,
-            BTreeMap::from([("tui.select.confirm".into(), vec!["ctrl+y".into()])]),
-        ));
+        let shell = ShellState {
+            native_keys: Some(KeybindingsManager::with_platform(
+                "linux",
+                false,
+                BTreeMap::from([("tui.select.confirm".into(), vec!["ctrl+y".into()])]),
+            )),
+            ..ShellState::default()
+        };
         assert_eq!(
             hint(&shell, "tui.select.confirm", "submit"),
             "Ctrl+Y submit"
@@ -149,15 +151,17 @@ mod tests {
 
     #[test]
     fn unbound_cancel_and_session_actions_are_unavailable_not_clickable() {
-        let mut shell = ShellState::default();
-        shell.native_keys = Some(KeybindingsManager::with_platform(
-            "linux",
-            false,
-            BTreeMap::from([
-                ("tui.select.cancel".into(), Vec::new()),
-                ("app.session.rename".into(), Vec::new()),
-            ]),
-        ));
+        let shell = ShellState {
+            native_keys: Some(KeybindingsManager::with_platform(
+                "linux",
+                false,
+                BTreeMap::from([
+                    ("tui.select.cancel".into(), Vec::new()),
+                    ("app.session.rename".into(), Vec::new()),
+                ]),
+            )),
+            ..ShellState::default()
+        };
         let node = action(&shell, "panel.1", "cancel", "Close", "tui.select.cancel");
         let props = node.p.as_ref().unwrap().as_map();
         assert_eq!(props["title"], "Close unavailable");

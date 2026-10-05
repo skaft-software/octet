@@ -94,6 +94,18 @@ fn preparation_hook_requires_api_04_and_negotiated_existing_session_entries() {
     }
 }
 
+#[test]
+fn context_projection_accepts_tool_omissions_but_refuses_host_owned_request_fields() {
+    let projection = serde_json::json!({"messages": [], "system": null, "tools": []});
+    let parsed: ProviderContextProjection = serde_json::from_value(projection.clone()).unwrap();
+    assert!(parsed.tools.unwrap().is_empty());
+    for field in ["max_output_tokens", "tool_choice", "session_id"] {
+        let mut invalid = projection.clone();
+        invalid[field] = serde_json::json!(1);
+        assert!(serde_json::from_value::<ProviderContextProjection>(invalid).is_err());
+    }
+}
+
 struct Capture(Arc<StdMutex<Vec<Request>>>);
 #[async_trait::async_trait]
 impl HostStreamTransport for Capture {
@@ -180,7 +192,8 @@ while True:
     assert result["successor"]["grant_id"] != grant["grant_id"]
     assert result["successor"]["owner"] == grant["owner"]
     projection = {"messages":[{"User":{"content":[{"Text":"effective leaf context"}]}}],"system":None}
-    if $INVALID: projection["tools"] = []
+    # Tool omissions are supported; output caps remain exclusively host-owned.
+    if $INVALID: projection["max_output_tokens"] = 1
     send({"jsonrpc":"2.0","id":request["id"],"result":{"provider_context":projection}})
 "#.replace("$INVALID", if invalid { "True" } else { "False" });
     write_executable_script(&temp.path().join("extension.py"), &source);
@@ -236,10 +249,13 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
                 .unwrap();
         match case {
             "valid" => assert_eq!(result.unwrap().text, "answer"),
-            "invalid" => assert!(matches!(
-                result,
-                Err(crate::AgentError::ProviderContextPreparation(_))
-            )),
+            "invalid" => assert!(
+                matches!(
+                    result,
+                    Err(crate::AgentError::ProviderContextPreparation(_))
+                ),
+                "unexpected result for {case}: {result:?}"
+            ),
             _ => assert!(matches!(
                 result,
                 Err(crate::AgentError::InputLimitUnavailable)

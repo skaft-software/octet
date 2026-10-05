@@ -42,7 +42,7 @@ fn session_picker_panel_handles_scope_filter_and_selection_outbox() {
     first.name = Some("First name".into());
     let rows = vec![first, picker_session("two", "Second", 2, 2)];
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(rows.clone(), Some(rows[0].path.clone())),
+        picker: Box::new(PickerState::new(rows.clone(), Some(rows[0].path.clone()))),
     });
 
     shell.panel_input(&panel_key(crossterm::event::KeyCode::Down));
@@ -95,7 +95,7 @@ fn session_picker_rename_and_delete_emit_driver_requests() {
     let mut shell = InteractiveShell::test_shell();
     let row = picker_session("one", "First", 1, 1);
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(vec![row], None),
+        picker: Box::new(PickerState::new(vec![row], None)),
     });
 
     shell.panel_input(&panel_key_with_modifiers(
@@ -131,7 +131,7 @@ fn session_picker_trashes_by_portable_chord_with_a_named_confirmation() {
     named.name = Some("Release notes".into());
     let rows = vec![named, picker_session("two", "Second", 2, 2)];
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(rows.clone(), None),
+        picker: Box::new(PickerState::new(rows.clone(), None)),
     });
     let trash = panel_key_with_modifiers(
         crossterm::event::KeyCode::Char('x'),
@@ -175,7 +175,10 @@ fn session_picker_trashing_the_last_session_leaves_an_inert_empty_list() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(100, 24);
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(vec![picker_session("only", "Only", 1, 1)], None),
+        picker: Box::new(PickerState::new(
+            vec![picker_session("only", "Only", 1, 1)],
+            None,
+        )),
     });
     let trash = panel_key_with_modifiers(
         crossterm::event::KeyCode::Char('x'),
@@ -238,7 +241,7 @@ fn session_picker_render_shows_scope_markers_and_fork_metadata() {
     fork.pinned = true;
     fork.forked_from_session_id = Some("source".into());
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(vec![fork], None),
+        picker: Box::new(PickerState::new(vec![fork], None)),
     });
     let raw = render_panel(&shell.state.borrow(), 100);
     let plain = raw
@@ -292,7 +295,10 @@ fn model_and_resume_pickers_use_the_active_model_accent() {
 
     shell.close_panel();
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(vec![picker_session("one", "First session", 1, 1)], None),
+        picker: Box::new(PickerState::new(
+            vec![picker_session("one", "First session", 1, 1)],
+            None,
+        )),
     });
     let resume_rows = render_panel(&shell.state.borrow(), 100);
     let selected_session = resume_rows
@@ -320,7 +326,7 @@ fn wide_session_picker_gives_titles_and_metadata_separate_rows() {
     let mut readable = picker_session("readable", title, 12, 1);
     readable.modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(vec![readable, unreadable], None),
+        picker: Box::new(PickerState::new(vec![readable, unreadable], None)),
     });
 
     let lines = render_panel(&shell.state.borrow(), 100)
@@ -342,7 +348,10 @@ fn wide_session_picker_gives_titles_and_metadata_separate_rows() {
 fn session_picker_hides_advanced_filter_hints_until_used() {
     let mut shell = InteractiveShell::test_shell();
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(vec![picker_session("one", "First session", 1, 1)], None),
+        picker: Box::new(PickerState::new(
+            vec![picker_session("one", "First session", 1, 1)],
+            None,
+        )),
     });
     let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 100).join("\n"));
     assert!(plain.contains("^f transcripts"), "{plain:?}");
@@ -352,7 +361,9 @@ fn session_picker_hides_advanced_filter_hints_until_used() {
     let mut advanced = PickerState::new(vec![picker_session("one", "First session", 1, 1)], None);
     advanced.filter = "re:foo".into();
     shell.close_panel();
-    shell.open_panel(Panel::SessionPicker { picker: advanced });
+    shell.open_panel(Panel::SessionPicker {
+        picker: Box::new(advanced),
+    });
     let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 100).join("\n"));
     assert!(plain.contains("re:<pattern>"), "{plain:?}");
 }

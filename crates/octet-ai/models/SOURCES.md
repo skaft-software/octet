@@ -164,6 +164,44 @@ Seven offline metadata-tooling tests and 13 release-gate tests passed for this
 refresh; final live freshness must still be rerun when the release source is
 frozen.
 
+### 2026-10-05 bot-triage refresh
+
+The PR #480 CI freshness failure was reproduced and all four outputs refreshed
+from the public catalog together. The reviewed source SHA-256 is
+`1019cb8d207c2b6a5842ea6f1b6f9a5c02501f818eee0f178c4a04d47ef43d33`;
+the matching raw response is retained locally in
+`/tmp/octet-480-models-dev-api.json`, not bundled or published.
+
+Compared with the preceding finish-gate outputs, there are 914 priced routes,
+406 names and 937 capability routes. Two OpenRouter routes disappear
+(`qwen/qwen3.8-27b:free` and `stealth/space-bunny-alpha`); no routes or names
+are added. Eighteen OpenRouter price records and six capability records change.
+For example, Kimi K3 now quotes $1.39/$14/$0.46 per million
+input/output/cache-read tokens, and DeepSeek V4 Flash quotes $0.03/$1.28/$0.03.
+These remain exact aggregator quotes, not direct-provider tariffs.
+
+Five output limits change: DeepSeek V3.1 Terminus to 65,536; V4 Flash to
+943,718; Nemotron 3.5 Lightning to 32,768; Qwen3.6 27B to 262,140; and GLM-5.2
+to 131,072. Mistral Small 3.1's source structured-output flag becomes true;
+this still grants no runtime capability or override of endpoint assertions.
+Modalities, names, extraction exclusions and unverified direct DeepSeek pricing
+are unchanged. Saved-source reproduction, seven offline tooling tests and
+13 release-gate tests passed. The live source may change independently before
+CI runs; changed supported projections still require a reviewed refresh, not a waiver.
+
+A subsequent raw response changed only the unsupported `nano-gpt` provider;
+all three generated projections were identical. Live `--check` now compares
+pricing, names and capabilities byte-for-byte and validates the pinned receipt's
+schema, fixed source URL, SHA-256 format and unverified-pricing exclusion policy.
+It does not require today's whole-catalog digest to equal the reviewed digest:
+unsupported provider data is outside this freshness boundary. This establishes
+projection equality, not raw origin equality or a new provenance claim. The
+receipt continues to identify the retained reviewed response above, and
+`--source FILE --check` still requires exact digest and all-output equality for
+saved-source reproducibility. Neither check writes. Provider mappings, route
+exclusions, allowlists, corrections and unverified direct DeepSeek pricing are
+unchanged.
+
 The following historical closeout details apply only to the `404d33...` source.
 Relative to its preceding PR head, those outputs contain:
 
@@ -377,6 +415,9 @@ without credentials or environment proxies, rejects redirects and responses abov
 16 MiB, and uses a 30-second socket timeout. Automated callers must also impose a
 total command deadline. Failed source validation and `--check` do not write outputs.
 The pinned digest identifies reviewed evidence, not a live availability promise.
+Without `--source`, `--check` verifies exact live projection contents and pinned
+receipt schema/URL/exclusion policy, not whole-catalog digest equality. With
+`--source`, it verifies all four outputs, including the exact saved-source digest.
 
 A sparse direct DeepSeek `deepseek-flash` entry receives the display name
 **DeepSeek V4.1 Flash**, the snapshot's 1,000,000 context / 384,000 output,

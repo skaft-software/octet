@@ -26,12 +26,13 @@ export function configure({ output, extensions, reviewed, overwrite = false }) {
   const registrations = frames[0].result;
   // Reviewed factories may subscribe later. Reserve the real mapped hook
   // channels up front; callbacks remain local and initially inert. Provider
-  // wire hooks are the exception: while subscribed, the host refuses
-  // extension-registered (host stream transport) providers, so they are
-  // reserved only when a factory registered them at capture time.
-  const providerWire = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']);
+  // wire hooks are an exception: while subscribed, the host refuses
+  // extension-registered (host stream transport) providers. Resource discovery
+  // also requires a complete native consumer. Reserve these channels only when
+  // a factory registered them at capture time; late subscriptions must reconfigure.
+  const captureOnly = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response', 'resources_discover']);
   const subscribed_hooks = [...new Set(Object.values(hookEvents))]
-    .filter(hook => !providerWire.has(hook) || registrations.hooks.includes(hook)).sort();
+    .filter(hook => !captureOnly.has(hook) || registrations.hooks.includes(hook)).sort();
   registrations.hooks = subscribed_hooks;
   const entrypoint_sha256 = Object.fromEntries(extensions.map(entry => [entry, createHash('sha256').update(readFileSync(entry)).digest('hex')]));
   const config = { extensions, entrypoint_sha256, registrations, subscribed_hooks };

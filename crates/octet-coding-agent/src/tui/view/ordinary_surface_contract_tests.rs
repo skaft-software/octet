@@ -418,7 +418,7 @@ fn ordinary_surface_contract_fixture_matrix_preserves_grid_and_capabilities() {
 fn ordinary_surface_contract_migrates_resume_extensions_and_inline_completion() {
     let mut resume = shell_for(REGULAR);
     resume.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(Vec::new(), None),
+        picker: Box::new(PickerState::new(Vec::new(), None)),
     });
     let resume_text = rendered_panel(&resume, REGULAR.width);
     assert!(
@@ -755,7 +755,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
     let mut picker = PickerState::new(Vec::new(), None);
     picker.scope = PickerScope::All;
     picker.surface.lifecycle = OrdinarySurfaceLifecycle::loading("all workspaces");
-    loading.open_panel(Panel::SessionPicker { picker });
+    loading.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let loading_text = rendered_panel(&loading, NO_COLOR.width);
     assert!(
         loading_text.to_ascii_lowercase().contains("loading")
@@ -766,7 +768,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
     let mut narrow_loading = shell_for(NARROW);
     let mut picker = PickerState::new(Vec::new(), None);
     picker.surface.lifecycle = OrdinarySurfaceLifecycle::loading("all workspaces");
-    narrow_loading.open_panel(Panel::SessionPicker { picker });
+    narrow_loading.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let narrow_loading_text = rendered_panel(&narrow_loading, NARROW.width);
     assert!(
         narrow_loading_text.to_ascii_lowercase().contains("loading"),
@@ -779,7 +783,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
         "session renamed",
         Instant::now() + Duration::from_secs(60),
     );
-    completed.open_panel(Panel::SessionPicker { picker });
+    completed.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let completed_text = rendered_panel(&completed, NO_COLOR.width);
     assert!(
         completed_text.to_ascii_lowercase().contains("completed")
@@ -793,7 +799,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
         "to rename session: permission denied",
         Instant::now() + Duration::from_secs(60),
     );
-    failed.open_panel(Panel::SessionPicker { picker });
+    failed.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let failed_text = rendered_panel(&failed, NO_COLOR.width);
     assert!(
         failed_text.to_ascii_lowercase().contains("failed")
@@ -806,7 +814,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
     let mut picker = PickerState::new(Vec::new(), None);
     picker.surface.lifecycle =
         OrdinarySurfaceLifecycle::cancelled("rename", Instant::now() + Duration::from_secs(60));
-    cancelled.open_panel(Panel::SessionPicker { picker });
+    cancelled.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let cancelled_text = rendered_panel(&cancelled, NO_COLOR.width);
     assert!(
         cancelled_text.to_ascii_lowercase().contains("cancelled")

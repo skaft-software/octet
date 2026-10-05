@@ -665,7 +665,7 @@ pub async fn session_picker(
     let current_session_path = current_session_path.map(Path::to_owned);
     let mut all_rows = None;
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(rows.clone(), current_session_path.clone()),
+        picker: Box::new(PickerState::new(rows.clone(), current_session_path.clone())),
     });
     shell.render();
 

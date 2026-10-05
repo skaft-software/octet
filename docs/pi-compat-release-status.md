@@ -64,8 +64,9 @@ target/debug/deps/octet_sdk-<hash> <module>:: --test-threads=2
 | `mcp_native_tests` | 1/2: the resident `octet-mcp` catalog never settles in `pi_mcp_native_app_register_replace_call_remove_and_owner_cleanup` (deferred; no example uses MCP registration) |
 | `pi_original_clm_tests` | ignored |
 
-Adapter suite (`extensions/octet-pi-compat`, synthetic host): 428 tests, 408
-passed, 0 failed, 20 skipped. `octet-mcp` `tests/test_pi_registration.py`: 3
+Adapter suite (`extensions/octet-pi-compat`, synthetic host; #480 repair rerun):
+433 tests, 413 passed, 0 failed, 20 skipped. The native `octet-agent` library
+suite with all features passes 1,037 tests, with 2 ignored. `octet-mcp` `tests/test_pi_registration.py`: 3
 passed.
 
 ## Fixed in this change
@@ -79,7 +80,10 @@ passed.
 - `configure.mjs` reserved every mapped hook (`d7be74f4`), including the
   provider wire hooks; while those are subscribed the host refuses every
   extension-registered provider. They are now reserved only when a factory
-  registered them.
+  registered them. Resource discovery is likewise reserved only when captured:
+  ordinary factories no longer require `resource_paths_v1`, captured resource
+  factories still refuse a missing consumer, and uncaptured late subscriptions
+  require reconfiguration. No native host feature gate was relaxed.
 - Installed-Pi fallback: Pi's built-in tool factories come from installed Pi
   and win over the path A refusal shims; `pi-ai/compat` resolves to installed
   Pi; path A reports refused built-in factories and that subpath as
@@ -89,6 +93,15 @@ passed.
   the hook image test asserted durable media references the session format does
   not have (`ImageSource` is `Url | Inline | ProviderRef`) and now asserts the
   replacement image is persisted exactly once.
+
+The #480 repair also resolves the seven inherited native operation/composition
+failures: reserve host tools before catalog publication seeds the active loadout,
+capture resource hooks only when registered, and supply the actual selected model
+to the unchanged D11 factory. Read-only turn observations now expose discovery
+result content without replaying native registry metadata; context rewrites still
+refuse that metadata. D11 and both composition tests pass in the full native
+library suite. Bot-reported generated-source fixtures now parse variable values
+from JSON sidecars, with hostile-string regressions.
 
 ## Deferred to later releases
 
@@ -105,10 +118,6 @@ passed.
   `octet-subagents`), so Pi `createAgentSession` spawns native Octet agents.
 - Host features above: provider OAuth for extension providers,
   `provider_stream_event`, `project_trust`, virtual models.
-- Seven pre-existing `octet-agent` failures in `extension_operations` and
-  `resources_tests::composition` (operation-catalog tool counts, nested
-  revocation counts, D11 refused `resource_paths_v1`); they fail identically at
-  `d7be74f4`.
 - The three `pi_ui_contract_tests` failures, the resident MCP catalog test and
   the order-dependent model-setter flake above.
 - Native transcript renderer consumer (ledger row 25), remaining UI/editor

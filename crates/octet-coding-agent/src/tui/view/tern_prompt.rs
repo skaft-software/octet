@@ -242,15 +242,17 @@ mod tests {
     #[test]
     fn prompt_hints_resolve_bindings_and_unbound_cancel_has_no_pointer_action() {
         use crate::tui::keymap::keybindings::KeybindingsManager;
-        let mut shell = ShellState::default();
-        shell.native_keys = Some(KeybindingsManager::with_platform(
-            "linux",
-            false,
-            std::collections::BTreeMap::from([
-                ("tui.select.confirm".into(), vec!["ctrl+y".into()]),
-                ("tui.select.cancel".into(), Vec::new()),
-            ]),
-        ));
+        let mut shell = ShellState {
+            native_keys: Some(KeybindingsManager::with_platform(
+                "linux",
+                false,
+                std::collections::BTreeMap::from([
+                    ("tui.select.confirm".into(), vec!["ctrl+y".into()]),
+                    ("tui.select.cancel".into(), Vec::new()),
+                ]),
+            )),
+            ..ShellState::default()
+        };
         shell.begin_tool_input("Ordinary", false);
         let rendered = serde_json::to_string(&node(&shell).unwrap()).unwrap();
         assert!(rendered.contains("Ctrl+Y submits; cancels unavailable"));

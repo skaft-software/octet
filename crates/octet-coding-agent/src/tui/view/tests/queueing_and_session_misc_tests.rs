@@ -192,7 +192,7 @@ fn resume_sort_hotkey_reaches_relevance_and_threaded_parent_before_child() {
     child.forked_from_session_id = Some("parent".into());
     let mut shell = InteractiveShell::test_shell();
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(vec![child, parent], None),
+        picker: Box::new(PickerState::new(vec![child, parent], None)),
     });
     for expected in [
         PickerSort::Name,

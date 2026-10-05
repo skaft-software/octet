@@ -850,7 +850,7 @@ pub(crate) enum Panel {
         action: PanelAction,
     },
     /// Searchable session browser with lazy all-workspaces discovery.
-    SessionPicker { picker: PickerState },
+    SessionPicker { picker: Box<PickerState> },
     /// User-message boundary picker used by `/fork`.
     MessagePicker { picker: MessagePicker },
     /// Scrollable, read-only document used for delegated worker transcripts.

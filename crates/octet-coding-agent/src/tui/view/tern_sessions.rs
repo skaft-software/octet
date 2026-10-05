@@ -155,17 +155,19 @@ mod tests {
 
     #[test]
     fn session_footer_resolves_keys_and_strip_omits_unbound_controls() {
-        let mut shell = ShellState::default();
-        shell.native_keys = Some(KeybindingsManager::with_platform(
-            "linux",
-            false,
-            BTreeMap::from([
-                ("tui.select.confirm".into(), vec!["ctrl+y".into()]),
-                ("tui.select.cancel".into(), Vec::new()),
-                ("app.session.rename".into(), Vec::new()),
-                ("app.session.toggleSort".into(), Vec::new()),
-            ]),
-        ));
+        let shell = ShellState {
+            native_keys: Some(KeybindingsManager::with_platform(
+                "linux",
+                false,
+                BTreeMap::from([
+                    ("tui.select.confirm".into(), vec!["ctrl+y".into()]),
+                    ("tui.select.cancel".into(), Vec::new()),
+                    ("app.session.rename".into(), Vec::new()),
+                    ("app.session.toggleSort".into(), Vec::new()),
+                ]),
+            )),
+            ..ShellState::default()
+        };
         let picker = PickerState::new(Vec::new(), None);
         let (props, preview) = decorate(&shell, &picker, Props::new(), None);
         let props = props.as_map();

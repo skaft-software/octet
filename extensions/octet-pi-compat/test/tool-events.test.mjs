@@ -8,11 +8,15 @@ import { launch, owner } from './helper.mjs';
 import { modelTurn } from '../lib/model-turns.mjs';
 import { canonicalToPi } from '../lib/provider-context.mjs';
 
-async function fixture(t, source) {
+// Source is reviewed test code; variable values are parsed from a JSON sidecar.
+async function fixture(t, source, data = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'octet-tool-events-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'index.ts');
-  await writeFile(path, source);
+  await writeFile(join(dir, 'fixture.json'), JSON.stringify(data));
+  await writeFile(path, `import { readFileSync } from 'node:fs';
+const fixtureData = JSON.parse(readFileSync(new URL('./fixture.json', import.meta.url), 'utf8'));
+${source}`);
   return path;
 }
 async function beforeToolCall(t, source, args) {
@@ -52,8 +56,8 @@ test('tool_call: block stops later handlers and denies', async t => {
   assert.equal(reply.result.arguments, undefined);
 });
 
-async function afterToolCall(t, source, payload) {
-  const peer = launch(t, [await fixture(t, source)]);
+async function afterToolCall(t, source, payload, data = {}) {
+  const peer = launch(t, [await fixture(t, source, data)]);
   await peer.init();
   const reply = await peer.request('hook/run', { hook: 'after_tool_call', payload: { name: 'read', arguments: { path: 'p' }, output: 'private value', is_error: false, ...payload }, context: peer.context() }).response;
   await peer.close();
@@ -100,9 +104,9 @@ test('tool_call: terminate alone does not block or stop execution', async t => {
 const usage = {input:7,output:3,cacheRead:2,cacheWrite:1,totalTokens:13,cost:{input:.7,output:.3,cacheRead:.2,cacheWrite:.1,total:1.3}};
 test('tool_result: usage chains, costs remain exact, and existing metadata survives', async t => {
   const reply = await afterToolCall(t, `export default pi => {
-    pi.on('tool_result', () => ({usage:${JSON.stringify(usage)}}));
+    pi.on('tool_result', () => ({usage:fixtureData.usage}));
     pi.on('tool_result', e => ({details:{usage:e.usage,id:e.toolCallId,parent:e.parentToolCallId}}));
-  };`, {tool_call_id:'nested-1',parent_tool_call_id:'parent-1', metadata:{native:{keep:true}}});
+  };`, {tool_call_id:'nested-1',parent_tool_call_id:'parent-1', metadata:{native:{keep:true}}}, { usage });
   assert.deepEqual(reply.result.tool_result.metadata, {native:{keep:true},pi_usage:usage,pi_details:{usage,id:'nested-1',parent:'parent-1'}});
   assert.deepEqual(reply.result.tool_result.usage, {input_tokens:7,output_tokens:3,cache_read_tokens:2,cache_write_tokens:1,cache_write_1h_tokens:0,reasoning_tokens:0,total_tokens:13});
 });
@@ -153,7 +157,45 @@ test('background native settlement: observes the complete paired result without 
   assert.throws(() => canonicalToPi([{Assistant:assistant.value.Assistant}]), /scheduling/);
 });
 
+test('model turn discovery result: observes content without replaying native registry metadata', async () => {
+  const assistant = { id:'assistant', parent:null, timestamp_unix_ms:1000,
+    value:{type:'message',Assistant:{model:'scripted',protocol:'open_ai_responses',content:[
+      {ToolCall:{id:'discover-0',name:'get_applicable_operations',arguments_json:'{}',async:false}},
+    ]}} };
+  const result = { id:'result', parent:'assistant', timestamp_unix_ms:1100,
+    value:{type:'message',User:{content:[{ToolResult:{tool_call_id:'discover-0',
+      content:[{Text:'Discovered actual operations'}],is_error:false,added_tool_names:['actual_operation']}}]}} };
+  const catalog = [{ name:'actual_operation', parameters:{type:'object'} }];
+  const before = structuredClone({assistant,result,catalog}), observed = [];
+  const runtime = {
+    catalog,
+    require(feature) { assert.equal(feature, 'session_entries'); },
+    metadata: () => ({hooks:['model_turn_end']}),
+    bind(_params, store) { store.leaf = {grant:{}}; },
+    assertOwner() {}, queued: (_store, work) => work(),
+    runEvent: async (type, event) => { assert.equal(type,'turn_end'); observed.push(event); },
+    flush: async () => {},
+  };
+  const reply = await modelTurn(runtime, {hook:'model_turn_end',context:{resource_owner:owner},payload:{
+    kind:'model_turn_end',run_id:'actual-run',turn_index:1,timestamp_ms:1200,
+    assistant_entry:assistant,tool_result_entries:[result],
+  }}, {controller:new AbortController()});
+  assert.deepEqual(reply.session_operation, {action:'continue'});
+  assert.equal(observed.length, 1);
+  assert.deepEqual(observed[0].toolResults, [{role:'toolResult',toolCallId:'discover-0',toolName:'get_applicable_operations',
+    content:[{type:'text',text:'Discovered actual operations'}],isError:false,timestamp:1100}]);
+  assert.deepEqual({assistant,result,catalog:runtime.catalog}, before);
+  assert.throws(() => canonicalToPi([{Assistant:assistant.value.Assistant},{User:result.value.User}]), /context tool registry metadata/);
+});
+
+test('tool_result: fixture quotes, backslashes, newlines and code remain data', async t => {
+  const details = { text: `"'\\\n\u2028\u2029"); throw new Error('fixture data executed'); //` };
+  const reply = await afterToolCall(t, `export default pi => pi.on('tool_result', () => ({ details: fixtureData.details }));`, {}, { details });
+  assert.ok(!reply.error, JSON.stringify(reply.error));
+  assert.deepEqual(reply.result.tool_result.metadata.pi_details, details);
+});
+
 test('tool_result: invalid usage is rejected at the boundary', async t => {
-  const reply = await afterToolCall(t, `export default pi => pi.on('tool_result', () => ({usage:{...${JSON.stringify(usage)},input:-1}}));`, {});
+  const reply = await afterToolCall(t, `export default pi => pi.on('tool_result', () => ({usage:{...fixtureData.usage,input:-1}}));`, {}, { usage });
   assert.equal(reply.error.code, -32602);
 });

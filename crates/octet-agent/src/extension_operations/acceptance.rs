@@ -560,6 +560,40 @@ async fn d11_actual_agent_unchanged_pi_factory_coexists_with_lazy_operations() {
         .mount(&server)
         .await;
     let mut agent = agent(&directory, host, session, &server);
+    // The unchanged factory returns ctx.model in JSON details. Supply the actual
+    // selected model, as the frontend does, rather than an absent model fixture.
+    let spec = &agent.model().spec;
+    pi.set_host_state(crate::extension_process::ExtensionHostState {
+        model: Some(spec.id.0.clone()),
+        model_view: Some(crate::extension_process::ExtensionModelView {
+            id: spec.api_name.clone(),
+            name: spec.display_name.clone(),
+            base_url: None,
+            api: "anthropic-messages".into(),
+            provider: agent.model().endpoint.id.0.clone(),
+            reasoning: spec.capabilities.reasoning.is_some(),
+            input: if spec
+                .capabilities
+                .input_modalities
+                .contains(octet_ai::Modality::Image)
+            {
+                vec!["text".into(), "image".into()]
+            } else {
+                vec!["text".into()]
+            },
+            cost: spec.pricing.as_ref().map(|pricing| {
+                crate::extension_process::ExtensionModelCost {
+                    input: pricing.input.0,
+                    output: pricing.output.0,
+                    cache_read: pricing.cache_read.0,
+                    cache_write: pricing.cache_write_5m.0,
+                }
+            }),
+            context_window: spec.limits.context_window,
+            max_tokens: spec.limits.max_output_tokens,
+        }),
+        ..Default::default()
+    });
     assert_eq!(agent.registered_tool_names().len(), 105);
     agent
         .set_active_tool_names(Some(BTreeSet::from(["core".to_owned()])))
@@ -590,8 +624,16 @@ async fn d11_actual_agent_unchanged_pi_factory_coexists_with_lazy_operations() {
         assert_eq!(core["description"], ordinary.description);
     }
     let expected = format!("{}|false|default", directory.path().display());
-    assert!(requests[1]["messages"].to_string().contains(&expected));
-    assert!(requests[3]["messages"].to_string().contains(&expected));
+    assert!(
+        requests[1]["messages"].to_string().contains(&expected),
+        "expected {expected:?}: {}",
+        requests[1]["messages"]
+    );
+    assert!(
+        requests[3]["messages"].to_string().contains(&expected),
+        "expected {expected:?}: {}",
+        requests[3]["messages"]
+    );
     assert_eq!(agent.registered_tool_names().len(), 105);
     assert_eq!(agent.registered_tool_definitions().len(), 105);
     assert_eq!(

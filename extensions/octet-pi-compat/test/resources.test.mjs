@@ -250,8 +250,35 @@ test('resources: configure captures declarations without discovery, requires neg
   const undeclaredEntry = join(dir, 'none.ts'); await writeFile(undeclaredEntry, 'export default pi => {};\n');
   configure({ reviewed: true, output, extensions: [undeclaredEntry], overwrite: true });
   const undeclared = launch(t, [undeclaredEntry], { config });
-  undeclared.metadata.hooks = subscribedHooks; await undeclared.init(subscribedFeatures);
-  assert.deepEqual((await discover(undeclared).response).result, empty); await undeclared.close();
+  undeclared.metadata.hooks = subscribedHooks.filter(h => h !== 'resources_discover');
+  await undeclared.init(subscribedFeatures);
+  assert.match((await discover(undeclared).response).error.message, /unknown hook resources_discover/); await undeclared.close();
+});
+
+test('resources: configured core factory needs no resource consumer and uncaptured late subscriptions are refused', async t => {
+  const dir = await directory(t), output = join(dir, 'octet-pi-compat');
+  const entry = join(root, 'test/fixtures/core.ts');
+  const { registrations } = configure({ reviewed: true, output, extensions: [entry] });
+  assert.equal(registrations.hooks.includes('resources_discover'), false);
+  const peer = launch(t, [entry], { config: join(output, 'bridge.json') });
+  peer.metadata.hooks = registrations.hooks;
+  const initialized = await peer.init(['session_entries']);
+  assert.equal(initialized.protocol.features.includes('resource_paths_v1'), false);
+  assert.equal((await peer.call('ordinary').response).result.content[0].text, `${root}|false|host-value`);
+  await peer.close();
+
+  const lateEntry = join(dir, 'late.ts');
+  await writeFile(lateEntry, `export default pi => {
+    pi.registerCommand('late', { handler() { pi.on('resources_discover', () => ({ skillPaths: ['./skills'] })); } });
+  };\n`);
+  const lateCapture = configure({ reviewed: true, output, extensions: [lateEntry], overwrite: true });
+  const late = launch(t, [lateEntry], { config: join(output, 'bridge.json') });
+  late.metadata.hooks = lateCapture.registrations.hooks;
+  // Even an offered consumer cannot activate a hook absent from the reviewed capture.
+  await late.init(['resource_paths_v1', 'session_entries', 'pipeline_hooks_v1']);
+  assert.match((await late.command('late').response).error.message, /native hook was not subscribed; configure again/);
+  assert.match((await discover(late).response).error.message, /unknown hook resources_discover/);
+  await late.close();
 });
 
 const repo = process.env.PI_REFERENCE_REPO;

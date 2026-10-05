@@ -12391,7 +12391,7 @@
   "openrouter/deepseek/deepseek-v3.1-terminus": {
     "limit": {
       "context": 163840,
-      "output": 147456
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -12463,7 +12463,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -14760,7 +14760,7 @@
     },
     "name": "Mistral Small 3.1 24B",
     "reasoning": false,
-    "structured_output": false,
+    "structured_output": true,
     "tool_call": true
   },
   "openrouter/mistralai/mistral-small-3.2-24b-instruct": {
@@ -15374,7 +15374,7 @@
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "limit": {
       "context": 262144,
-      "output": 131072
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -18382,7 +18382,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 81920
+      "output": 262140
     },
     "modalities": {
       "input": [
@@ -18622,39 +18622,6 @@
       ]
     },
     "name": "Qwen3.8 27B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "xhigh"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3.8-27b:free": {
-    "limit": {
-      "context": 262144,
-      "output": 235929
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3.8 27B (free)",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -19039,38 +19006,6 @@
     "reasoning": false,
     "structured_output": true,
     "tool_call": false
-  },
-  "openrouter/stealth/space-bunny-alpha": {
-    "limit": {
-      "context": 1000000,
-      "output": 524288
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Space Bunny Alpha",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
   },
   "openrouter/stepfun/step-3.5-flash": {
     "limit": {
@@ -20225,7 +20160,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [

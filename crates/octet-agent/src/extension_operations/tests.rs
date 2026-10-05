@@ -54,6 +54,8 @@ tools = []
     config.request_timeout = Duration::from_secs(5);
     let process = ExtensionProcess::start(descriptor, config).await.unwrap();
     let mut host = ExtensionHost::new();
+    // Install host tools before the process catalog seeds the default loadout.
+    host.enable_operation_discovery();
     host.load(&process);
     host.finalize_tool_surface();
     (directory, process, host)

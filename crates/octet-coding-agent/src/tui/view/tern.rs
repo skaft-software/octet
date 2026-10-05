@@ -1154,8 +1154,7 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
         .and_then(|working| working.message.as_deref())
         .unwrap_or(&label);
     let age = run.elapsed_at(now).as_millis() as u64;
-    let mut node =
-        octet_tern::scene::working_row("work", &sanitize_for_terminal(&label), age, None);
+    let mut node = octet_tern::scene::working_row("work", &sanitize_for_terminal(label), age, None);
     node.p = Some(node.p.unwrap_or_default().role("omp.working"));
     if reduce_motion || !shell.theme.capabilities().animation {
         node.c.as_mut().expect("working row")[0] = Node::new(
@@ -1168,7 +1167,7 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             Kind::Text,
             Props::new().text(
                 "spans",
-                vec![Span::styled(sanitize_for_terminal(&label), "muted")],
+                vec![Span::styled(sanitize_for_terminal(label), "muted")],
             ),
         );
     }

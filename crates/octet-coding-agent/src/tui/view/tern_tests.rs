@@ -1589,7 +1589,9 @@ fn session_picker_keeps_preview_actions_loading_and_host_selection() {
     };
     let mut picker = PickerState::new(vec![session], Some(path));
     picker.surface.lifecycle = OrdinarySurfaceLifecycle::loading("all workspaces");
-    shell.open_panel(Panel::SessionPicker { picker });
+    shell.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     surface.flush(&shell.state).unwrap();
     assert_eq!(surface.sent.layer[0].k, Kind::Picker);
     let props = surface.sent.layer[0].p.as_ref().unwrap().as_map();

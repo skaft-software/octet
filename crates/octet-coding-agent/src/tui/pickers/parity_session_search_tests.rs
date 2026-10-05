@@ -37,7 +37,7 @@ fn resume_transcript_search_dispatch_uses_index_and_returns_original_session() {
     let expected = store.dir().join("two.jsonl");
     let mut shell = InteractiveShell::test_shell();
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(rows, None),
+        picker: Box::new(PickerState::new(rows, None)),
     });
     for character in "needle".chars() {
         shell.panel_input(&Event::Key(crossterm::event::KeyEvent::new(

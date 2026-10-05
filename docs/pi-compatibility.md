@@ -38,6 +38,11 @@ extension, change HOME, or download extension packages. It refuses existing
 configuration without `--overwrite`. Registrations must still match when the
 host starts it; changed entrypoints require fresh review and configuration.
 Transitive imports are not sandboxed or made immutable by an entrypoint hash.
+Resource discovery is reserved only if a reviewed factory registered
+`resources_discover` during capture. Ordinary factories do not require
+`resource_paths_v1`; captured resource factories still refuse hosts without that
+consumer. Late resource subscriptions require reconfiguration, not silent
+activation. Capture alone does not qualify native resource loading.
 
 In that workspace, inspect `octet extensions list`, then explicitly enable and
 trust the generated extension with the normal [extension
