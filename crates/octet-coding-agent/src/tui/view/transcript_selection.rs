@@ -54,7 +54,9 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
             } else {
                 &panel.display.active
             };
-            let text = if let Some(command) = &panel.display.shell_command {
+            let text = if let Some(source) = super::codemode_render::source(panel) {
+                format!("Codemode\n{source}")
+            } else if let Some(command) = &panel.display.shell_command {
                 format!("$ {command}")
             } else {
                 format!("{}  {summary}", panel.display.label)

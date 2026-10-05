@@ -76,6 +76,15 @@ can be called only if separately enabled and brokered; this chat-only host does
 not supply Pi's models helper. Guest code never receives API keys or host scratch
 paths as an authority-bearing API.
 
+## Interactive presentation
+
+The ANSI TUI highlights a multiline JavaScript preview; Ctrl+O expands the full
+script. Inside Tern, the full script is a wrapping native code rail. Both show a
+bounded literal output preview (five lines / 600 Unicode characters); Ctrl+O
+reveals the retained output. Preview elision does not discard captured data or
+change the model-visible result, tool approvals or execution. Native output has
+its own code surface rather than a raw generic tool-card dump.
+
 ## Persistence, output and limits
 
 - Code: at most 65,536 Unicode characters. VM heap: 256 MiB.

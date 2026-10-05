@@ -336,7 +336,15 @@ pub(super) fn render_block_planned_with_rainbow(
                 && !verbose_tools;
             let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")
                 && panel.display.shell_command.is_some();
-            let mut lines = if let Some(command) = panel.display.shell_command.as_deref() {
+            let mut lines = if let Some(source) = super::codemode_render::source(panel) {
+                super::codemode_render::render_source(
+                    &source,
+                    rich_renderer,
+                    theme,
+                    width,
+                    verbose_tools,
+                )
+            } else if let Some(command) = panel.display.shell_command.as_deref() {
                 render_bash_row(command, rich_renderer, theme, width, verbose_tools)
             } else {
                 let compact = width < 60 || quiet_summary;
@@ -425,6 +433,12 @@ pub(super) fn render_block_planned_with_rainbow(
 
             if !quiet_summary || panel.is_error {
                 match panel.name.as_str() {
+                    "codemode" => output_lines.extend(super::codemode_render::render_output(
+                        panel,
+                        theme,
+                        nested_width,
+                        verbose_tools,
+                    )),
                     "bash" | "exec" if compact_bash => output_lines.extend(
                         render_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
                     ),

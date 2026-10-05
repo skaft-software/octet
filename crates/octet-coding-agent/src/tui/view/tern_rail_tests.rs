@@ -350,6 +350,8 @@ fn export_native_renderer_fixtures() {
         "conversation",
         "commands-quiet",
         "commands-verbose",
+        "codemode-quiet",
+        "codemode-verbose",
         "consent",
         "ordinary",
         "secret",
@@ -380,6 +382,36 @@ fn export_native_renderer_fixtures() {
                 panel.duration = Some(Duration::from_millis(1200));
                 shell.state.borrow_mut().push_block(TranscriptBlock::Tool(Box::new(panel)));
                 shell.state.borrow_mut().verbose_tools = name == "commands-verbose";
+            }
+            "codemode-quiet" | "codemode-verbose" => {
+                shell.state.borrow_mut().workspace = Some("/tmp/native-fixture".into());
+                let read_args = json!({"path":"src/main.rs"});
+                let mut read = ToolPanel::new(
+                    ToolCallId("fixture-read".into()), "read".into(), read_args.to_string(),
+                    summarize_tool("read", &read_args), "File fixture — not read".into(),
+                    true, false, None, None,
+                );
+                read.duration = Some(Duration::from_millis(2));
+                shell.state.borrow_mut().push_block(TranscriptBlock::Tool(Box::new(read)));
+                let args = json!({"code":"const results = await Promise.allSettled([\n  tools.read({path: 'README.md'}),\n  tools.read({path: 'Cargo.toml'}),\n]);\nreturn results.map(r => r.status);"});
+                let mut panel = ToolPanel::new(
+                    ToolCallId("fixture-codemode".into()), "codemode".into(), args.to_string(),
+                    summarize_tool("codemode", &args),
+                    "Script completed\nWall time 0.1 seconds\nOutput:\n[\"fulfilled\", \"fulfilled\"]\n\nFixture only — no tools executed\nAdditional retained output".into(),
+                    true, false, None, None,
+                );
+                panel.duration = Some(Duration::from_millis(120));
+                shell.state.borrow_mut().push_block(TranscriptBlock::Tool(Box::new(panel)));
+                shell.state.borrow_mut().verbose_tools = name == "codemode-verbose";
+                let bash_args = json!({"command":"printf 'fixture only\\n'"});
+                let mut bash = ToolPanel::new(
+                    ToolCallId("fixture-bash".into()), "bash".into(), bash_args.to_string(),
+                    summarize_tool("bash", &bash_args), "Bash fixture — not executed".into(),
+                    true, false, None, None,
+                );
+                bash.duration = Some(Duration::from_millis(42));
+                shell.state.borrow_mut().push_block(TranscriptBlock::Tool(Box::new(bash)));
+                shell.queue_follow_up(super::super::super::ComposedInput::from_text("Review the two results\nthen continue".into()));
             }
             "consent" => choices(&mut shell),
             "ordinary" => shell.begin_tool_input("Fixture ordinary request\nComplete prompt remains visible", false),

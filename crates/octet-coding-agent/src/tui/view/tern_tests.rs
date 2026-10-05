@@ -816,11 +816,11 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
     let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
     let props = tool.p.as_ref().unwrap().as_map();
-    assert!(!props.contains_key("collapsed"));
-    assert!(!props.contains_key("collapsible"));
-    assert_eq!(tool.k, Kind::Row);
-    assert_eq!(props["role"], "octet.command");
-    assert!(props.get("target").is_none());
+    assert_eq!(props["collapsed"], false);
+    assert_eq!(props["collapsible"], false);
+    assert_eq!(tool.k, Kind::Tool);
+    assert_eq!(props["role"], "omp.tool.bash");
+    assert_eq!(props["target"], "");
     let command_leaf = find_node(&surface.sent.main, &id(identity, "command"))
         .unwrap()
         .clone();
@@ -832,15 +832,7 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     );
     assert_eq!(command_props["wrap"], true);
     assert_eq!(command_props["numbers"], false);
-    assert_eq!(
-        find_node(&surface.sent.main, &id(identity, "command.label"))
-            .unwrap()
-            .p
-            .as_ref()
-            .unwrap()
-            .as_map()["spans"][1]["t"],
-        " · running"
-    );
+    assert_eq!(props["status"], "running");
     assert!(!output.last_frame().to_string().contains("line1"));
     ack(&shell, 1);
     {
@@ -857,7 +849,7 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     // output child mounted — the completion must not paint one expanded
     // frame before the terminal hides it.
     let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
-    assert!(!tool.p.as_ref().unwrap().as_map().contains_key("collapsed"));
+    assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], false);
     assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
     let ops = output.last_frame()["ops"].clone();
     let ops = ops.as_array().unwrap();
@@ -865,10 +857,9 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
         !ops.iter().any(|op| op[1] == id(identity, "out")),
         "collapsed output must never have been mounted: {ops:?}"
     );
-    let label = find_node(&surface.sent.main, &id(identity, "command.label")).unwrap();
-    let spans = &label.p.as_ref().unwrap().as_map()["spans"];
-    assert_eq!(spans[1]["t"], " · done");
-    assert_eq!(spans[2]["t"], " · 1.2s");
+    let props = tool.p.as_ref().unwrap().as_map();
+    assert_eq!(props["status"], "done");
+    assert_eq!(props["meta"], json!(["1.2s"]));
     assert_eq!(
         find_node(&surface.sent.main, &id(identity, "command")).unwrap(),
         &command_leaf
@@ -973,13 +964,11 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
         }
         surface.flush(&shell.state).unwrap();
         let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
-        assert!(!tool.p.as_ref().unwrap().as_map().contains_key("collapsed"));
-        assert_eq!(tool.k, Kind::Row);
-        let label = find_node(&surface.sent.main, &id(identity, "command.label")).unwrap();
-        let spans = &label.p.as_ref().unwrap().as_map()["spans"];
-        assert_eq!(spans[1]["t"], " · error");
-        assert_eq!(spans[1]["s"], "error");
-        assert_eq!(spans[2]["t"], " · command failed");
+        assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], false);
+        assert_eq!(tool.k, Kind::Tool);
+        let props = tool.p.as_ref().unwrap().as_map();
+        assert_eq!(props["status"], "error");
+        assert_eq!(props["meta"], json!(["command failed"]));
         let leaf = find_node(&surface.sent.main, &id(identity, "out")).unwrap();
         assert_eq!(leaf.k, Kind::Text);
         assert_eq!(
@@ -996,13 +985,15 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
             .unwrap();
         surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
-        assert!(!find_node(&surface.sent.main, &id(identity, "tool"))
-            .unwrap()
-            .p
-            .as_ref()
-            .unwrap()
-            .as_map()
-            .contains_key("collapsed"));
+        assert_eq!(
+            find_node(&surface.sent.main, &id(identity, "tool"))
+                .unwrap()
+                .p
+                .as_ref()
+                .unwrap()
+                .as_map()["collapsed"],
+            false
+        );
         shell.state.borrow_mut().verbose_tools = false;
         surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
@@ -1042,31 +1033,30 @@ fn local_shell_is_summary_only_during_execution_and_after_success_or_failure() {
     let ids = shell.state.borrow().transcript_commit_ids.clone();
     // Neither running nor failed local shell output is mounted while collapsed.
     assert!(find_node(&surface.sent.main, &id(ids[running], "out")).is_none());
-    assert!(!find_node(&surface.sent.main, &id(ids[running], "shell"))
-        .unwrap()
-        .p
-        .as_ref()
-        .unwrap()
-        .as_map()
-        .contains_key("collapsed"));
-    // The failure's exit code stays visible in its summary.
-    assert!(!find_node(&surface.sent.main, &id(ids[done], "shell"))
-        .unwrap()
-        .p
-        .as_ref()
-        .unwrap()
-        .as_map()
-        .contains_key("collapsed"));
-    assert!(find_node(&surface.sent.main, &id(ids[done], "out")).is_none());
-    for index in [running, done] {
-        let rail = find_node(&surface.sent.main, &id(ids[index], "shell")).unwrap();
-        assert_eq!(rail.k, Kind::Row);
-        assert!(!rail
+    assert_eq!(
+        find_node(&surface.sent.main, &id(ids[running], "shell"))
+            .unwrap()
             .p
             .as_ref()
             .unwrap()
-            .as_map()
-            .contains_key("collapsible"));
+            .as_map()["collapsed"],
+        false
+    );
+    // The failure's exit code stays visible in its summary.
+    assert_eq!(
+        find_node(&surface.sent.main, &id(ids[done], "shell"))
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["collapsed"],
+        false
+    );
+    assert!(find_node(&surface.sent.main, &id(ids[done], "out")).is_none());
+    for index in [running, done] {
+        let rail = find_node(&surface.sent.main, &id(ids[index], "shell")).unwrap();
+        assert_eq!(rail.k, Kind::Tool);
+        assert_eq!(rail.p.as_ref().unwrap().as_map()["collapsible"], false);
         let command = find_node(&surface.sent.main, &id(ids[index], "command")).unwrap();
         assert_eq!(command.k, Kind::Code);
         let props = command.p.as_ref().unwrap().as_map();
@@ -1074,11 +1064,10 @@ fn local_shell_is_summary_only_during_execution_and_after_success_or_failure() {
         assert_eq!(props["wrap"], true);
         assert_eq!(props["numbers"], false);
     }
-    let failed = find_node(&surface.sent.main, &id(ids[done], "command.label")).unwrap();
-    let spans = &failed.p.as_ref().unwrap().as_map()["spans"];
-    assert_eq!(spans[1]["t"], " · error");
-    assert_eq!(spans[1]["s"], "error");
-    assert_eq!(spans[2]["t"], " · exit 1");
+    let failed = find_node(&surface.sent.main, &id(ids[done], "shell")).unwrap();
+    let props = failed.p.as_ref().unwrap().as_map();
+    assert_eq!(props["status"], "error");
+    assert_eq!(props["meta"], json!(["exit 1"]));
     shell.state.borrow_mut().verbose_tools = true;
     ack(&shell, 1);
     surface.flush(&shell.state).unwrap();
@@ -1820,3 +1809,6 @@ fn native_agents_keep_one_retained_transcript_with_authoritative_live_token_line
 
 #[path = "tern_rail_tests.rs"]
 mod rail;
+
+#[path = "tern_codemode_tests.rs"]
+mod codemode;
