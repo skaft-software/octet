@@ -543,6 +543,9 @@ pub enum ExtensionMessageInjection {
     User {
         /// Bounded message text.
         text: String,
+        /// Optional ordered text/image input, not custom-message metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<crate::session::CustomMessageContent>,
         /// Delivery while a run is active.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deliver_as: Option<ExtensionMessageDelivery>,
@@ -585,7 +588,13 @@ impl ExtensionMessageInjection {
     /// [`validate_extension_editor_text`]'s plain-text posture.
     pub fn validate(&self) -> Result<(), String> {
         let text = match self {
-            Self::User { text, .. } => text,
+            Self::User { text, content, .. } => {
+                if let Some(content) = content {
+                    if !text.is_empty() { return Err("ambiguous user message content".into()); }
+                    content.validate().map_err(|error| error.to_string())?;
+                }
+                text
+            },
             Self::Custom { custom_type, content, display, details, .. } => {
                 return crate::session::CustomMessage { custom_type: custom_type.clone(), content: content.clone(), display: *display, details: details.clone() }
                     .validate().map_err(|error| error.to_string());
@@ -706,6 +715,9 @@ impl ExtensionRequestOutcome {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionMessageLifecycle {
+    /// Full committed custom message; omitted on the existing assistant delta profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<serde_json::Value>,
     /// Host message identity within the active turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,

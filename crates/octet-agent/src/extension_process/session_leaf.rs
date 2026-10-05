@@ -508,6 +508,7 @@ fn session_snapshot(
     let snapshot = serde_json::json!({
         "session_entries":entries, "session_branch":branch,
         "session_leaf_id":session.head(), "session_file":session.path(),
+        "session_header":session.header(), "session_labels":session.entry_labels(),
     });
     validate_session_snapshot_size(&snapshot, limit)?;
     Ok(snapshot)

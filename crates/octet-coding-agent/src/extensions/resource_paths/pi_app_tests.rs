@@ -201,9 +201,17 @@ fn configured_pi(root: &Path, fail_start: bool) -> ConfiguredPi {
     let manifest = std::fs::read(output.join("extension.toml")).unwrap();
     let bridge = std::fs::read(output.join("bridge.json")).unwrap();
     let registrations: Value = serde_json::from_slice(&bridge).unwrap();
+    // configure reserves every Pi-mapped native hook (d7be74f4) so handlers
+    // registered after load still receive events, except provider wire hooks
+    // no factory registered (they would refuse host-stream providers).
     assert_eq!(
         registrations["registrations"]["hooks"],
-        json!(["resources_discover", "session_end", "session_start"])
+        json!([
+            "after_response", "after_tool_call", "before_prompt", "before_tool_call", "model_turn_end",
+            "model_turn_start", "provider_context", "resources_discover", "session_before_compact",
+            "session_before_fork", "session_before_switch", "session_before_tree", "session_compact",
+            "session_end", "session_start", "session_tree"
+        ])
     );
     assert_eq!(
         registrations["registrations"]["events"],

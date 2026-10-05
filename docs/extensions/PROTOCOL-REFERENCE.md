@@ -2323,6 +2323,30 @@ raw nested output. A tool with provisional delivery can acknowledge only after
 an exact private text receipt is synced, bounded by the smaller of the sandbox
 output cap and 1 MiB; oversized or failed persistence rolls it back.
 
+**Bounded complete outcomes (API `0.4`):** `composition/call` may add
+`full_outcome:true`, returning the native host-issued `tool_call`, canonical
+ordered `content`, `is_error`, and present metadata/structured-content/usage.
+Unknown tools, schema failures, hooks and policy failures become host-created
+error outcomes; transport revocation remains an RPC refusal. Raw JSON arguments
+are admitted only for complete outcomes, before preparation and schema checks;
+ordinary composition still requires object arguments. Absent structured content
+is not converted to null. Complete outcomes use the existing bounded value sidecar.
+
+`updates:true` additionally requests live `composition/update` notifications,
+with `{request_id,sequence,result}` bound to that exact reverse call. Only native
+partial-result snapshots are relayed. The channel holds at most 64 snapshots,
+is nonblocking, and may drop progress under pressure; result/effect settlement is
+not stalled by slow callbacks. Parent/call cancellation and settlement revoke
+updates. Updates never enter the transcript or model context, and remain subject
+to the existing 1 MiB frame bound (no progress sidecar).
+
+During active `tool/call`, negotiated `request_progress` + `content_parts` admit
+`$/progress` event `{type:"partial_result",result:{content,is_error?,metadata?,structured_content?}}`.
+Partial snapshots reuse final-result content-part limits, private detail budgets,
+and exact generation/session artifact resolution including MIME/aggregate-media
+checks, but do not need to satisfy the final output schema. Inactive or
+non-monotonic updates are ignored. This addition is not a Pi parity qualification.
+
 ### 2.26 Native resource lifecycle (API `0.4`)
 
 The optional `resource_refs_v1` and `operation_descriptors_v1` features add

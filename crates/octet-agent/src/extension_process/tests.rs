@@ -688,6 +688,7 @@ fn wave3_model_view_results_are_bounded_and_deny_unknown_fields() {
     let view = ExtensionModelView {
         id: "anthropic/claude-sonnet-4".into(),
         name: Some("Claude Sonnet 4".into()),
+        base_url: None,
         api: "anthropic-messages".into(),
         provider: "anthropic".into(),
         reasoning: true,
@@ -792,6 +793,7 @@ system_prompt = {system_prompt}
     }
 
     let no_services = OfferedHostServices {
+        provider_proxy: false,
         resource_paths: false,
         provider_pipeline: false,
         bulk_objects: false,
@@ -1198,6 +1200,7 @@ fn wave1_session_tools_and_injection_dispatch_stay_typed_and_bounded() {
         ExtensionEvent::MessageInjectionRequested { injection, .. } => assert_eq!(
             injection,
             ExtensionMessageInjection::User {
+                content: None,
                 text: "question".to_owned(),
                 deliver_as: None,
             }
@@ -1543,6 +1546,7 @@ fn wave1_request_structs_round_trip_and_deny_unknown_fields() {
         SessionSendUserMessageRequest {
             parent_request_id: 7,
             text: "hello".into(),
+            content: None,
             deliver_as: None,
             resource_owner: None,
         },

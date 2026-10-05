@@ -7,7 +7,35 @@ pub(super) fn pi_app(factory: &str) -> (tempfile::TempDir, App) {
 }
 
 pub(super) fn pi_app_policy(factory: &str, policy: octet_agent::EffectPolicy) -> (tempfile::TempDir, App) {
+    pi_app_policy_with_frontend(factory, policy, None)
+}
+
+/// Construct the real terminal consumer before process negotiation and retain
+/// that exact shell for command/input/frame acceptance. No synthetic UI peer.
+pub(super) fn pi_ui_app(factory: &str) -> (tempfile::TempDir, App, InteractiveShell) {
+    let shell = InteractiveShell::test_shell();
+    let (directory, app) = pi_app_policy_with_frontend(factory, octet_agent::EffectPolicy::UnsafeHost, Some(&shell));
+    assert!(app.executable_extensions.remote_ui_wake().is_some(), "live shell consumer must bind before initialize");
+    (directory, app, shell)
+}
+
+fn pi_app_policy_with_frontend(
+    factory: &str,
+    policy: octet_agent::EffectPolicy,
+    frontend: Option<&InteractiveShell>,
+) -> (tempfile::TempDir, App) {
     let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+    // Production session naming and lookup use the workspace SessionStore.
+    // The estimate fixture's transcript deliberately lives outside that store.
+    app.sessions.write_workspace_marker().unwrap();
+    let session_path = app.sessions.new_path("pi-contract");
+    app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::CreateNew(session_path)),
+    ).unwrap();
     let entry = directory.path().join("probe.ts");
     let trace = serde_json::to_string(&directory.path().join("trace.jsonl")).unwrap();
     std::fs::write(&entry, factory.replace("TRACE", &trace)).unwrap();
@@ -35,6 +63,7 @@ pub(super) fn pi_app_policy(factory: &str, policy: octet_agent::EffectPolicy) ->
         &app.config, app.agent.session(), &app.model, &app.reasoning, &app.sessions,
         &mut host, None, crate::extensions::ExtensionProviderRuntime::default(),
         crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
+        frontend,
     );
     assert!(extensions.summaries().iter().any(|s| s.name == "octet-pi-compat" && s.running),
         "{}", extensions.inspect_text());

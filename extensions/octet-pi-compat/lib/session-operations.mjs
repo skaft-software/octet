@@ -3,6 +3,7 @@ import { bounded, fields, invalid, ownerKey, strict, unsupported } from './error
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable } from './provider-context.mjs';
 import { translateSessionEntries } from './session-mirror.mjs';
+import { runCompactionCallback } from './compaction.mjs';
 export const sessionReplacementHooks = ['session_before_switch', 'session_before_fork'];
 export async function sessionReplacement(runtime, params, store) {
   const hook = params.hook, signal = store.controller.signal;
@@ -45,6 +46,9 @@ export async function sessionOperation(runtime, params, store) {
   if (!store.leaf?.grant) unsupported('session operation', 'actual native session_leaf consumer required');
   store.providerContext = true;
   const body = params.payload, signal = store.controller.signal;
+  if (hook === 'session_compact' && body?.kind === 'compaction_callback') {
+    return cancellable(runtime.queued(store, () => runCompactionCallback(runtime, store, body)), signal);
+  }
   const expected = { session_before_compact: 'before_compact', session_compact: 'compacted', session_before_tree: 'before_tree', session_tree: 'tree' }[hook];
   if (body?.kind !== expected) invalid('session operation kind');
   const live = () => { signal.throwIfAborted(); runtime.assertOwner(store); };

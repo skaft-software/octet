@@ -385,6 +385,12 @@ impl ExtensionNegotiatedProtocol {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionProgressEvent {
+    /// Complete ephemeral snapshot, validated through native result/artifact
+    /// admission without requiring the final output schema to be complete.
+    PartialResult {
+        /// Retained content-parts result shape (content, details, error).
+        result: serde_json::Value,
+    },
     /// Human-readable progress with optional determinate units.
     Status {
         /// Bounded status text.

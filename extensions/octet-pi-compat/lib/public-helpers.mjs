@@ -6,6 +6,8 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
+// Identifies the pinned Pi compatibility target, not the native Octet binary.
+export const VERSION = '1.0.2';
 export const CONFIG_DIR_NAME = '.pi';
 export function getAgentDir() {
   let path = process.env.PI_CODING_AGENT_DIR;

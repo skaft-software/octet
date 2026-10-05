@@ -109,6 +109,7 @@ async fn native_original_clm_restores_branch_settings_before_first_command() {
             None,
             crate::extensions::ExtensionProviderRuntime::default(),
             capability,
+            None,
         );
     assert!(
         extensions

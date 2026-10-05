@@ -1,6 +1,110 @@
 //! Bounded owner-scoped model controls on the existing foreground driver.
 use super::*;
 
+/// API 0.4-only, secret-free facts needed for a faithful Pi catalog projection.
+/// The API 0.3 canonical schema continues to reject this additive field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PiProviderModelMetadata {
+    /// Explicit credential-free URL passed only to the process-owned streamer.
+    pub base_url: String,
+    /// Declared input modalities (text, and optionally image).
+    pub input: Vec<String>,
+    /// Host-accounted immutable per-million-token rates, in microdollars.
+    pub pricing: octet_ai::Pricing,
+}
+impl PiProviderModelMetadata {
+    /// Validate this system boundary before recording or projecting a route.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.base_url.len() > 8192 {
+            return Err("provider URL exceeds bounds".into());
+        }
+        if !self.base_url.is_empty() {
+            let url = url::Url::parse(&self.base_url).map_err(|_| "invalid provider URL")?;
+            if !matches!(url.scheme(), "http" | "https")
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(
+                    "provider URL must be HTTP(S) without credentials, query or fragment".into(),
+                );
+            }
+        }
+        if !matches!(self.input.as_slice(), [text] if text == "text")
+            && !matches!(self.input.as_slice(), [text, image] if text == "text" && image == "image")
+            && !matches!(self.input.as_slice(), [image, text] if text == "text" && image == "image")
+        {
+            return Err("provider input must contain text and optionally image".into());
+        }
+        if !self.pricing.tiers.is_empty()
+            || self.pricing.cache_write_1h.is_some()
+            || self.pricing.reasoning.is_some()
+        {
+            return Err(
+                "provider pricing has unsupported tiers or separate reasoning/cache-write rates"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Reuse the canonical declaration validator, then validate the additive Pi
+/// facts separately. Credentials and functions never enter the registry.
+pub(super) fn parse_provider_proxy_registration(
+    mut value: serde_json::Value,
+) -> Result<
+    (
+        api_v03::ProviderRegisterParams,
+        BTreeMap<String, PiProviderModelMetadata>,
+    ),
+    ProviderHostResponseError,
+> {
+    let models = value
+        .get_mut("models")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(ProviderHostResponseError::Invalid)?;
+    let mut facts = Vec::with_capacity(models.len());
+    for model in models {
+        let fact = model
+            .as_object_mut()
+            .and_then(|model| model.remove("pi_metadata"))
+            .ok_or(ProviderHostResponseError::Invalid)?;
+        let fact: PiProviderModelMetadata =
+            serde_json::from_value(fact).map_err(|_| ProviderHostResponseError::Invalid)?;
+        fact.validate()
+            .map_err(|_| ProviderHostResponseError::Invalid)?;
+        facts.push(fact);
+    }
+    let request = api_v03::parse_provider_register_params(value)
+        .map_err(|_| ProviderHostResponseError::Invalid)?;
+    if request.provider.auth.kind != "none" {
+        // These routes execute an already trusted process's custom streamer;
+        // they do not obtain any host credential/OAuth authority.
+        return Err(ProviderHostResponseError::Invalid);
+    }
+    let facts = request
+        .models
+        .iter()
+        .zip(facts)
+        .map(|(model, metadata)| (model.id.clone(), metadata))
+        .collect();
+    Ok((request, facts))
+}
+
+pub(super) fn register_provider_proxy(
+    state: &ProtocolReadState,
+    value: serde_json::Value,
+    update: bool,
+) -> Result<api_v03::ProviderCatalogResult, ProviderHostResponseError> {
+    let (request, metadata) = parse_provider_proxy_registration(value)?;
+    provider_registry_for_request(state)?
+        .replace_pi_provider(state.provider_owner.clone(), request, metadata, update)
+        .map_err(provider_registry_response_error)
+}
+
 /// Secret-free request for an authoritative host selection.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -132,6 +236,8 @@ pub(super) fn dispatch_model_control(
         }
     };
     let authority = SessionCompactionAuthority {
+        parent_request_id: request.parent_request_id,
+        callback: false,
         owner: request.resource_owner,
         issued: Arc::clone(&state.issued_resource_owners),
         closed: Arc::clone(&state.closed),

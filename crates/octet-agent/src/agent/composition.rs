@@ -203,12 +203,24 @@ impl CompositionDispatcher {
             // the outer live-output panel or its durable checkpoint.
             ToolProgress::Output { .. }
             | ToolProgress::Decoration(_)
+            | ToolProgress::PartialResult(_)
             | ToolProgress::Dropped { .. } => {}
             ToolProgress::Status(status) => self.progress.status(status),
             progress => {
                 self.progress.forward_semantic(progress).await;
             }
         }
+    }
+
+    async fn relay_call_progress(&self, progress: ToolProgress, updates: Option<&mpsc::Sender<Value>>) {
+        if let (ToolProgress::PartialResult(output), Some(updates)) = (&progress, updates) {
+            if let Ok(value) = crate::tool_composition::native_result_value(output) {
+                // Match the existing nonblocking native progress channel. A slow
+                // callback cannot stall effect settlement or grow memory forever.
+                let _ = updates.try_send(value);
+            }
+        }
+        self.relay(progress).await;
     }
 
     async fn dispatch(
@@ -299,6 +311,7 @@ impl CompositionDispatcher {
         index: usize,
         cancellation: CancellationToken,
         full_outcome: bool,
+        updates: Option<&mpsc::Sender<Value>>,
     ) -> Result<Value, ToolError> {
         self.ensure_live()?;
         let tool = self
@@ -386,11 +399,11 @@ impl CompositionDispatcher {
         let (result, decision) = loop {
             tokio::select! {
                 outcome = &mut operation => break outcome,
-                progress = rx.recv() => if let Some(progress) = progress { self.relay(progress).await; },
+                progress = rx.recv() => if let Some(progress) = progress { self.relay_call_progress(progress, updates).await; },
             }
         };
         while let Ok(progress) = rx.try_recv() {
-            self.relay(progress).await;
+            self.relay_call_progress(progress, updates).await;
         }
         let delivery_limit = self.sandbox.max_output_bytes.min(1024 * 1024);
         let oversized_delivery = result.as_ref().ok().is_some_and(|output| {
@@ -425,17 +438,13 @@ impl CompositionDispatcher {
         if full_outcome {
             let is_error = tool_execution_failed(&result);
             let output = resolved_tool_output(&result);
-            let content = match output {
-                Some(output) => serde_json::to_value(output.content_parts()).map_err(|error| ToolError::new(error.to_string()))?,
-                None => serde_json::json!([{"Text": result.as_ref().err().expect("failed result has an error").message}]),
+            let mut outcome = match output {
+                Some(output) => crate::tool_composition::native_result_value(output)?,
+                None => serde_json::json!({"content":[{"Text":result.as_ref().err().expect("failed result has an error").message}]}),
             };
-            return Ok(serde_json::json!({
-                "tool_call": {"id":id.0,"name":name,"arguments":arguments},
-                "content":content,"is_error":is_error,
-                "metadata":output.and_then(|output|output.metadata()),
-                "structured_content":output.and_then(|output|output.structured_content()),
-                "usage":output.and_then(|output|output.usage()),
-            }));
+            outcome["tool_call"] = serde_json::json!({"id":id.0,"name":name,"arguments":arguments});
+            outcome["is_error"] = Value::Bool(is_error);
+            return Ok(outcome);
         }
         let output = result?;
         if output.is_error() {
@@ -490,11 +499,16 @@ impl ToolCompositionService for CompositionDispatcher {
             _ = self.stop.cancelled() => Err(cancelled_tool_error()),
             _ = cancellation.cancelled() => Err(cancelled_tool_error()),
             _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
-            result = self.execute_call(name, arguments, index, local.0.clone(), false) => result,
+            result = self.execute_call(name, arguments, index, local.0.clone(), false, None) => result,
         }
     }
 
     async fn call_outcome(&self, name: String, arguments: Value, cancellation: CancellationToken) -> Result<Value, ToolError> {
+        self.call_outcome_with_updates(name, arguments, cancellation, None).await
+    }
+
+    async fn call_outcome_with_updates(&self, name: String, arguments: Value, cancellation: CancellationToken,
+        updates: Option<mpsc::Sender<Value>>) -> Result<Value, ToolError> {
         let index = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
         let id = format!("{}/{index}", self.parent_id.0);
         let original_name = name.clone(); let original_arguments = arguments.clone();
@@ -506,12 +520,12 @@ impl ToolCompositionService for CompositionDispatcher {
             _ = self.stop.cancelled() => Err(cancelled_tool_error()),
             _ = cancellation.cancelled() => Err(cancelled_tool_error()),
             _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
-            result = self.execute_call(name, arguments, index, local.0.clone(), true) => result,
+            result = self.execute_call(name, arguments, index, local.0.clone(), true, updates.as_ref()) => result,
         }};
         match result {
             Ok(value) => Ok(value),
             Err(error) => Ok(serde_json::json!({"tool_call":{"id":id,"name":original_name,"arguments":original_arguments},
-                "content":[{"Text":error.message}],"is_error":true,"metadata":null,"structured_content":null,"usage":null})),
+                "content":[{"Text":error.message}],"is_error":true})),
         }
     }
     async fn store(&self, set: Map<String, Value>, delete: Vec<String>) -> Result<(), ToolError> {

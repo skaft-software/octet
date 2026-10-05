@@ -1,7 +1,7 @@
 import { Console } from 'node:console';
 import { Writable } from 'node:stream';
 import { Worker } from 'node:worker_threads';
-import { rpcError } from './errors.mjs';
+import { fields, invalid, rpcError } from './errors.mjs';
 
 export const MAX_FRAME = 1048576;
 const MAX_QUEUE = 128, MAX_QUEUE_BYTES = 4194304;
@@ -80,7 +80,7 @@ export class Transport {
           const message = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line));
           this.validate(message);
           if (!message.method) this.response(message);
-          else Promise.resolve(this.onMessage(message)).catch(error => this.fail(error));
+          else Promise.resolve(this.receive(message)).catch(error => this.fail(error));
         }
         if (this.buffer.length > MAX_FRAME) throw rpcError(-32602, 'bounds_exceeded partial input frame');
       } catch (error) { this.fail(error); }
@@ -145,7 +145,24 @@ export class Transport {
     } catch (error) { this.writing = false; this.currentFrame = undefined; frame.reject(error); this.fail(error); }
   }
   notify(method, params, key) { return this.send({ jsonrpc: '2.0', method, params }, key); }
-  request(method, params, { parent, signal, timeout = 30000 } = {}) {
+  receive(message) {
+    if (this.local || message.method !== 'composition/update') return this.onMessage(message);
+    if (message.id !== undefined) invalid('composition update must be a notification');
+    const p = message.params;
+    fields(p, ['request_id', 'sequence', 'result'], 'composition update');
+    if (!Number.isSafeInteger(p.sequence) || p.sequence < 1) invalid('composition update sequence');
+    const child = this.children.get(p.request_id);
+    if (!child) {
+      const match = typeof p.request_id === 'string' && /^pi:([1-9][0-9]*)$/.exec(p.request_id);
+      if (!match || Number(match[1]) > this.childId || this.syncIds.has(p.request_id)) invalid('composition update request id');
+      return; // Settled/cancelled requests cannot deliver late callbacks.
+    }
+    if (child.method !== 'composition/call' || !child.onUpdate) invalid('unsolicited composition update');
+    if (p.sequence <= child.sequence) return;
+    child.sequence = p.sequence;
+    try { child.onUpdate(p.result); } catch (error) { child.cancel(error); }
+  }
+  request(method, params, { parent, signal, timeout = 30000, onUpdate } = {}) {
     if (this.children.size >= 128 || this.childId >= 65536) throw rpcError(-32012, 'bounds_exceeded host request catalog');
     signal?.throwIfAborted();
     const id = `pi:${++this.childId}`;
@@ -158,7 +175,7 @@ export class Transport {
       };
       const abort = () => cancel(rpcError(-32800, 'request cancelled'));
       const timer = nativeTimeout(() => cancel(rpcError(-32002, `${method} timed out`)), timeout);
-      this.children.set(id, { parent, resolve, reject, timer, signal, abort, cancel });
+      this.children.set(id, { parent, method, onUpdate, sequence: 0, resolve, reject, timer, signal, abort, cancel });
       signal?.addEventListener('abort', abort, { once: true });
       this.send({ jsonrpc: '2.0', id, method, params }).catch(cancel);
     });
@@ -207,7 +224,7 @@ export class Transport {
         const m = packet.message;
         try {
           if (!m.method) this.response(m);
-          else Promise.resolve(this.onMessage(m)).catch(error => this.fail(error));
+          else Promise.resolve(this.receive(m)).catch(error => this.fail(error));
         } catch (error) { this.fail(error); }
       }
     });
@@ -226,7 +243,7 @@ export class Transport {
     });
   }
   requestSync(method, params, { parent, signal, onCancel, timeout = 30000 } = {}) {
-    if (!['session/append_entry', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select'].includes(method)) throw rpcError(-32601, 'unsupported_feature synchronous request');
+    if (!['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context'].includes(method)) throw rpcError(-32601, 'unsupported_feature synchronous request');
     if (!this.worker || this.closed) throw rpcError(-32002, 'synchronous transport is unavailable');
     if (this.children.size >= 128 || this.childId >= 65536) throw rpcError(-32012, 'bounds_exceeded host request catalog');
     signal?.throwIfAborted();

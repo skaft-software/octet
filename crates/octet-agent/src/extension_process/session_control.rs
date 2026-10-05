@@ -19,6 +19,8 @@ struct SessionCompactionRequest {
     resource_owner: ExtensionResourceOwner,
     #[serde(default)]
     custom_instructions: Option<String>,
+    #[serde(default)]
+    callback: bool,
 }
 
 pub(super) fn dispatch_session_compaction(
@@ -111,6 +113,8 @@ pub(super) fn dispatch_session_compaction(
         request_id,
         request.custom_instructions,
         request.resource_owner,
+        request.parent_request_id,
+        request.callback,
         registered.response_state,
     )
 }
@@ -129,6 +133,10 @@ struct SessionControlRequest {
     /// Pi `fork` `position`: `before` (default) or `at`.
     #[serde(default)]
     position: Option<String>,
+    #[serde(default)]
+    parent_session: Option<String>,
+    #[serde(default)]
+    setup: bool,
 }
 impl OwnerScopedHostRequest for SessionControlRequest {
     fn parent_request_id(&self) -> u64 {
@@ -145,6 +153,7 @@ pub(super) fn dispatch_session_control(
     method: &str,
     params: serde_json::Value,
 ) -> Result<(), String> {
+    if method == "session/setup" { return replacement::dispatch_setup(state, object, params); }
     let Some((request, admitted)) = admit_host_request::<SessionControlRequest>(
         state,
         object,
@@ -169,8 +178,18 @@ pub(super) fn dispatch_session_control(
             ),
         );
     }
+    if (request.parent_session.is_some() || request.setup) && method != "session/create" {
+        return refuse_admitted_request(state, &admitted, (ExtensionRequestFailure::InvalidRequest, "newSession options require session/create".into()));
+    }
+    if request.parent_session.as_ref().is_some_and(|path| path.len() > 4096 || path.chars().any(char::is_control)) {
+        return refuse_admitted_request(state, &admitted, (ExtensionRequestFailure::InvalidRequest, "invalid parent session reference".into()));
+    }
     let operation = match (method, request.session_id) {
         ("session/wait_for_idle", None) => ExtensionSessionLifecycleOperation::WaitForIdle,
+        ("session/create", None) if request.parent_session.is_some() || request.setup => ExtensionSessionLifecycleOperation::CreateWithOptions {
+            parent_session: request.parent_session,
+            setup_parent: request.setup.then(|| (request.parent_request_id, admitted.owner.clone())),
+        },
         ("session/create", None) => ExtensionSessionLifecycleOperation::Create,
         ("session/fork", None)
             if matches!(request.position.as_deref(), None | Some("before" | "at")) =>
@@ -207,7 +226,7 @@ pub(super) fn dispatch_session_control(
         };
         Arc::clone(&child.response_state)
     };
-    if matches!(operation, ExtensionSessionLifecycleOperation::Create
+    if matches!(operation, ExtensionSessionLifecycleOperation::Create | ExtensionSessionLifecycleOperation::CreateWithOptions { .. }
         | ExtensionSessionLifecycleOperation::Fork { .. }
         | ExtensionSessionLifecycleOperation::Switch { .. }) {
         replacement::queue_replacement(state, admitted, request.parent_request_id, operation, response_state)

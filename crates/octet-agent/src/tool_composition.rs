@@ -62,8 +62,27 @@ pub trait ToolCompositionService: Send + Sync {
         _cancellation: CancellationToken) -> Result<Value, ToolError> {
         Err(ToolError::new("complete nested outcomes are unavailable"))
     }
+    /// Complete outcomes with a bounded, request-local stream of partial results.
+    async fn call_outcome_with_updates(&self, name: String, arguments: Value,
+        cancellation: CancellationToken, updates: Option<tokio::sync::mpsc::Sender<Value>>) -> Result<Value, ToolError> {
+        if updates.is_some() { return Err(ToolError::new("nested result updates are unavailable")); }
+        self.call_outcome(name, arguments, cancellation).await
+    }
     /// Commits successful script writes to private, branch-scoped session state.
     async fn store(&self, set: Map<String, Value>, delete: Vec<String>) -> Result<(), ToolError>;
+}
+
+/// Lossless canonical result projection for private composition transport.
+/// In particular, absent structured content is not changed to explicit null.
+pub(crate) fn native_result_value(output: &crate::tool::ToolOutput) -> Result<Value, ToolError> {
+    let mut value = serde_json::json!({
+        "content": serde_json::to_value(output.content_parts()).map_err(|error| ToolError::new(error.to_string()))?,
+        "is_error": output.is_error(),
+    });
+    if let Some(metadata) = output.metadata() { value["metadata"] = metadata.clone(); }
+    if let Some(structured) = output.structured_content() { value["structured_content"] = structured.clone(); }
+    if let Some(usage) = output.usage() { value["usage"] = serde_json::to_value(usage).map_err(|error| ToolError::new(error.to_string()))?; }
+    Ok(value)
 }
 
 /// Private durable evidence for composition. Never provider-visible context.

@@ -561,9 +561,10 @@ impl AbortFlag {
     }
 }
 
-pub(super) fn append_context_inputs(pending: &mut Vec<ReservedInput>, session: &mut Session) -> Result<(), AgentError> {
+pub(super) async fn append_context_inputs(pending: &mut Vec<ReservedInput>, session: &mut Session, model: &Model) -> Result<(), AgentError> {
     for queued in std::mem::take(pending) {
         if let Some(ReservedPayload { input, reservation }) = queued.claim() {
+            let input = prepare_user_images(input, model, None).await?;
             input.append_to(session, None)?;
             drop(reservation);
         }
@@ -693,4 +694,17 @@ pub(super) async fn deliver_control_inputs(
         };
     }
     ControlDelivery::Completed { event: None }
+}
+
+/// Observe only newly committed entries; resume/history never emits fresh message events.
+pub(super) fn committed_custom_message_events(session: &Session, cursor: &mut usize) -> Vec<AgentEvent> {
+    let events = session.entries()[*cursor..].iter().filter_map(|entry| {
+        let message = entry.metadata.as_ref()?.custom_message.as_ref()?;
+        Some(AgentEvent::CustomMessageCommitted {
+            entry_id: entry.id.clone(), message: message.clone(),
+            timestamp_unix_ms: entry.timestamp_unix_ms.expect("fresh durable entry timestamp"),
+        })
+    }).collect();
+    *cursor = session.entries().len();
+    events
 }

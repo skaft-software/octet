@@ -19,6 +19,7 @@ Every line is a `type`-tagged object (`SessionRecord` in
 
 | `type` | Meaning |
 | --- | --- |
+| `header` | Optional immutable creation identity, workspace, timestamp and parent-session reference. Must be the first unique record; not model-visible context. |
 | `entry` | One appended conversation/config/skill entry (see below). |
 | `head` | Durable head update: current head `id` plus cumulative cost. |
 | `root_head` | Durable checkout before the first entry; later appends start a new root branch. |

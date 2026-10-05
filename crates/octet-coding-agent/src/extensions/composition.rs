@@ -494,6 +494,7 @@ pub(super) fn extension_model_view(
     Some(octet_agent::extension_process::ExtensionModelView {
         id: spec.api_name.clone(),
         name: Some(name),
+        base_url: None,
         api: pi_api_name(&spec.protocol).to_owned(),
         provider,
         reasoning: spec.capabilities.reasoning.is_some(),

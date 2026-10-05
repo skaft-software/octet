@@ -547,6 +547,7 @@ impl Tool for ProcessTool {
                     }
                     Ok(ExtensionEvent::ComposerRequested { .. })
                     | Ok(ExtensionEvent::ExecRequested { .. })
+                    | Ok(ExtensionEvent::McpRegistrationRequested { .. })
                     | Ok(ExtensionEvent::SessionEntryRequested { .. })
                     | Ok(ExtensionEvent::MessageInjectionRequested { .. })
                     | Ok(ExtensionEvent::ShortcutRequested { .. })

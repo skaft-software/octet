@@ -162,16 +162,31 @@ def session_records(directory):
     return records
 
 
+def text_content_matches(actual, expected):
+    # Native/OpenAI user projections can encode one string as a text block.
+    # Do not join blocks: their order/boundaries and exact text remain evidence.
+    def parts(value):
+        if isinstance(value, str):
+            return [{"type": "text", "text": value}]
+        if isinstance(value, list) and all(isinstance(part, dict)
+                and set(part) == {"type", "text"} and part["type"] == "text"
+                and isinstance(part["text"], str) for part in value):
+            return value
+        return None
+    actual_parts, expected_parts = parts(actual), parts(expected)
+    return actual_parts is not None and expected_parts is not None and actual_parts == expected_parts
+
+
 def custom_entries(directory, content):
-    # Accept native typed metadata or a typed entry; never accept a text-only
-    # user message as proof that customType/display/details were persisted.
+    # Require the canonical native typed metadata location. Neither ordinary
+    # user text nor a lookalike object nested in inert details proves persistence.
     result = []
     for path, record in session_records(directory):
         if record.get("type") != "entry":
             continue
-        for node in walk(record):
-            if node.get("custom_type", node.get("customType")) == "probe" and node.get("content") == content:
-                result.append((path, node))
+        node = (record.get("metadata") or {}).get("custom_message")
+        if isinstance(node, dict) and node.get("custom_type") == "probe" and text_content_matches(node.get("content"), content):
+            result.append((path, node))
     return result
 
 
@@ -309,7 +324,7 @@ class Checkpoint:
                     if m.get("role") == "user" and CUSTOM in json.dumps(m.get("content"))]
         self.check(3, "idle-wake-and-private-details", bool(messages) and len(requests) == 1
                    and requests[0]["body"]["messages"][-1].get("role") == "user"
-                   and requests[0]["body"]["messages"][-1].get("content") == CUSTOM
+                   and text_content_matches(requests[0]["body"]["messages"][-1].get("content"), CUSTOM)
                    and all(DETAILS not in json.dumps(r["body"]) for r in requests),
                    [r["body"]["messages"][-1] for r in requests])
         entries = custom_entries(self.sessions, CUSTOM)

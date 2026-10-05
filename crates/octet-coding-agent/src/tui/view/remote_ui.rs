@@ -184,6 +184,17 @@ pub(super) fn window_title(state: &ShellState) -> String {
 }
 
 impl super::InteractiveShell {
+    /// Host-owned wake binding for this live native UI consumer, not a claim
+    /// based on the extension's metadata or the test runner's stdout.
+    pub(crate) fn extension_remote_ui_binding(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        if self.terminal_ceded.load(std::sync::atomic::Ordering::Acquire)
+            || (self.tui.is_none() && self.render_thread.is_none())
+        {
+            return None;
+        }
+        Some(std::sync::Arc::new(tokio::sync::Notify::new()))
+    }
+
     pub(crate) fn extension_window_title(&self) -> String { window_title(&self.state.borrow()) }
 }
 

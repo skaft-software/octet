@@ -489,6 +489,9 @@ pub enum ToolProgress {
     /// A bounded replaceable annotation for the currently running tool panel.
     /// This is frontend-only and is never persisted or placed in model context.
     Decoration(ToolProgressDecoration),
+    /// Verified, bounded partial tool result. Ephemeral only; never persisted or
+    /// added to provider context. Media follows the same authority as final output.
+    PartialResult(Arc<ToolOutput>),
     /// A typed yes/no request. Frontends that do not handle it deny by
     /// dropping the event; tools never receive implicit approval.
     Confirmation(ToolConfirmation),
@@ -522,6 +525,7 @@ impl std::fmt::Debug for ToolProgress {
                 .finish(),
             Self::Status(s) => f.debug_tuple("Status").field(s).finish(),
             Self::Decoration(decoration) => f.debug_tuple("Decoration").field(decoration).finish(),
+            Self::PartialResult(result) => f.debug_tuple("PartialResult").field(result).finish(),
             Self::Confirmation(request) => f.debug_tuple("Confirmation").field(request).finish(),
             Self::Input(request) => f.debug_tuple("Input").field(request).finish(),
             Self::Dropped { bytes, events } => f
@@ -789,6 +793,7 @@ impl ToolProgressSink {
             ToolProgress::Output { bytes, .. } => (bytes.len() as u64, 0),
             ToolProgress::Status(s) => (s.len() as u64, 0),
             ToolProgress::Decoration(decoration) => (decoration.byte_len() as u64, 0),
+            ToolProgress::PartialResult(_) => (0, 1),
             ToolProgress::Confirmation(_) => (0, 1),
             ToolProgress::Input(_) => (0, 1),
             ToolProgress::Dropped { .. } => (0, 0),

@@ -162,6 +162,7 @@ pub(crate) async fn translate(
                 )
                 .await?;
         }
+        AgentEvent::CustomMessageCommitted { .. } => {}
         AgentEvent::FollowUpDelivered { messages } => {
             emitter
                 .emit(
@@ -418,6 +419,10 @@ fn progress_payload(progress: ToolProgress) -> serde_json::Value {
             "type": "decoration",
             "label": clip_text(decoration.label(), 256),
             "detail": decoration.detail().map(|detail| clip_text(detail, 4 * 1024)),
+        }),
+        ToolProgress::PartialResult(result) => serde_json::json!({
+            "type": "partial_result", "content":result.content_parts(),
+            "details":result.details(), "is_error":result.is_error(),
         }),
         ToolProgress::Confirmation(request) => {
             let payload = serde_json::json!({

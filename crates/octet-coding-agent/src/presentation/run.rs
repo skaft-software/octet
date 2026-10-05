@@ -542,7 +542,7 @@ impl RunTracker {
             // Policy diagnostics are emitted to telemetry and the host
             // protocol; they do not alter the interactive phase machine.
             AgentEvent::ToolPolicyDecision { .. } | AgentEvent::ToolProgress { .. } => {}
-            AgentEvent::DelegationUpdated { .. } | AgentEvent::RecoveredOutput { .. } => {}
+            AgentEvent::CustomMessageCommitted { .. } | AgentEvent::DelegationUpdated { .. } | AgentEvent::RecoveredOutput { .. } => {}
             AgentEvent::ToolFinished { id, result, .. } => {
                 run.pending_tools.remove(&id.0);
                 if let Some(tool) = run.tools.get(&id.0) {

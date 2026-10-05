@@ -126,6 +126,7 @@ pub(super) enum ProviderStreamWait {
     Event(Option<api_v03::ProviderStreamEvent>),
     Idle,
     Deadline,
+    RouteInvalidated,
 }
 
 pub(super) fn invalid_provider_stream_event() -> AiError {
@@ -310,8 +311,10 @@ pub(super) fn extension_provider_response_stream(
                 _ = tokio::time::sleep_until(deadline) => ProviderStreamWait::Deadline,
                 _ = tokio::time::sleep_until(idle_deadline) => ProviderStreamWait::Idle,
                 event = receiver.recv() => ProviderStreamWait::Event(event),
+                _ = route.0.route_invalidated(&route.1) => ProviderStreamWait::RouteInvalidated,
             };
             let event = match waiting {
+                ProviderStreamWait::RouteInvalidated => Err(provider_unavailable_error())?,
                 ProviderStreamWait::Deadline => Err(provider_transport_error(
                     TransportPhase::Body,
                     true,

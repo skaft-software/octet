@@ -289,6 +289,8 @@ pub(super) fn queue_session_compaction_operation(
     request_id: ExtensionRequestId,
     instructions: Option<String>,
     owner: ExtensionResourceOwner,
+    parent_request_id: u64,
+    callback: bool,
     response_state: Arc<ChildResponseState>,
 ) -> Result<(), String> {
     let worker = match state.child_work_slots.clone().try_acquire_owned() {
@@ -303,6 +305,8 @@ pub(super) fn queue_session_compaction_operation(
         }
     };
     let authority = SessionCompactionAuthority {
+        parent_request_id,
+        callback,
         owner,
         issued: Arc::clone(&state.issued_resource_owners),
         closed: Arc::clone(&state.closed),

@@ -4247,6 +4247,7 @@ impl InteractiveShell {
                     ToolProgress::Output { .. }
                         | ToolProgress::Status(_)
                         | ToolProgress::Decoration(_)
+                        | ToolProgress::PartialResult(_)
                         | ToolProgress::Dropped { .. }
                 );
                 if let Some(panel) = state.tool_output_mut(id) {
@@ -4259,6 +4260,11 @@ impl InteractiveShell {
                         }
                         ToolProgress::Decoration(decoration) => {
                             panel.progress_decoration = Some(decoration.clone());
+                        }
+                        ToolProgress::PartialResult(result) => {
+                            panel.output.clear();
+                            bounded_live_append(&mut panel.output, &result.text);
+                            panel.display.mark_media_read(result.media_kinds());
                         }
                         ToolProgress::Confirmation(request) => {
                             bounded_live_append(
@@ -4459,7 +4465,7 @@ impl InteractiveShell {
                 state.run_cost_available = true;
             }
             // Applied before the acceptance gate: see `on_run_event`.
-            AgentEvent::DelegationUpdated { .. } => {}
+            AgentEvent::CustomMessageCommitted { .. } | AgentEvent::DelegationUpdated { .. } => {}
             AgentEvent::RunFinished { .. } => {
                 state.close_streaming_blocks();
                 state.seal_activity_group();

@@ -63,7 +63,7 @@ test('module: images are published with exact digest and ownership through the e
   rt.hostCall = async (method, params, store) => {
     assert.equal(method, 'artifact/publish'); assert.equal(store, rt.store);
     assert.equal(params.size, 7); assert.equal(params.sha256, createHash('sha256').update('fixture').digest('hex'));
-    assert.equal(params.data.data, data); return { id: 'verified-artifact' };
+    assert.equal(params.data.data, data); return { artifact_id: 'verified-artifact' };
   };
   assert.deepEqual(await toolContent(rt, [{ type: 'image', data, mimeType: 'image/png' }], rt.store),
     [{ type: 'image', artifact_id: 'verified-artifact', mime_type: 'image/png' }]);
@@ -162,4 +162,98 @@ test('adapter: late registration uses the native dynamic catalog protocol rather
   assert.ok((await command.response).result);
   const call = await peer.request('tool/call', { name: 'late', arguments: {}, context: peer.context() }).response;
   assert.equal(call.result.content[0].text, 'late executed'); await peer.close();
+});
+
+test('adapter: text/image partial snapshots retain details, explicit null, order and callback-time values', async t => {
+  const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0wAAAABJRU5ErkJggg==';
+  const entry = await fixture(t, `export default pi => pi.registerTool({name:'probe',label:'Probe',description:'Probe',parameters:{type:'object'},
+    async execute(id,args,signal,update){
+      const first={content:[{type:'image',mimeType:'image/png',data:'${data}'}],details:{step:1},structuredContent:null};
+      update(first); first.details.step=999;
+      update({content:[{type:'text',text:'second'}],details:{step:2}});
+      return {content:[{type:'text',text:'final'}],details:undefined};
+    }});`);
+  const peer = launch(t, [entry], { auto: false }); await peer.init(['request_progress', 'artifacts']);
+  const call = peer.request('tool/call', { name: 'probe', arguments: {}, context: peer.context() });
+  const artifact = await peer.wait(frame => frame.method === 'artifact/publish');
+  assert.equal(artifact.params.parent_request_id, call.id);
+  assert.equal(artifact.params.sha256, createHash('sha256').update(Buffer.from(data, 'base64')).digest('hex'));
+  peer.send({ jsonrpc: '2.0', id: artifact.id, result: { artifact_id: 'host-verified-image' } });
+  const first = await peer.wait(frame => frame.method === '$/progress');
+  const second = await peer.wait(frame => frame.method === '$/progress');
+  assert.equal(first.params.sequence, 1); assert.equal(second.params.sequence, 2);
+  assert.equal(first.params.event.type, 'partial_result');
+  assert.equal(first.params.event.result.content[0].artifact_id, 'host-verified-image');
+  assert.deepEqual(first.params.event.result.metadata.pi_details, { step: 1 });
+  assert.equal(first.params.event.result.structured_content, null);
+  assert.deepEqual(second.params.event.result.metadata.pi_details, { step: 2 });
+  assert.equal(second.params.event.result.content[0].text, 'second');
+  assert.equal((await call.response).result.content[0].text, 'final'); await peer.close();
+});
+
+test('adapter: actual transport worker admits synchronous frozen catalog and nested live callbacks', async t => {
+  const entry = await fixture(t, `export default pi => pi.registerTool({name:'probe',label:'Probe',description:'Probe',parameters:{type:'object'},
+    async execute(id,args,signal,update,ctx){
+      const tools=ctx.tools;
+      if(tools.length!==1||tools[0].name!=='read')throw Error('wrong frozen catalog');
+      const updates=[];
+      const outcome=await ctx.executeTool('read',{path:'actual'}, {onUpdate:result=>updates.push(result)});
+      if(updates.length!==1||updates[0].details.step!==1||updates[0].content[0].data!=='iVBORw==')throw Error('partial callback lost');
+      if(outcome.toolCall.id!=='host-outer/1'||outcome.result.details.answer!==42)throw Error('native outcome lost');
+      return {content:[{type:'text',text:JSON.stringify(outcome)}],details:{updates}};
+    }});`);
+  const peer = launch(t, [entry], { auto: false }); await peer.init(['tool_composition_v1', 'request_progress']);
+  const call = peer.request('tool/call', { name: 'probe', arguments: {}, context: peer.context() });
+  const catalog = await peer.wait(frame => frame.method === 'composition/context');
+  assert.equal(catalog.params.parent_request_id, call.id);
+  peer.send({ jsonrpc: '2.0', id: catalog.id, result: { tools: [{ name: 'read', description: 'Native read', parameters: { type: 'object' } }] } });
+  const nested = await peer.wait(frame => frame.method === 'composition/call');
+  assert.equal(nested.params.full_outcome, true); assert.equal(nested.params.updates, true);
+  const progress = { request_id: nested.id, sequence: 1, result: { content: [{ Media: { Image: { source: { Inline: 'iVBORw==' }, media_type: 'image/png' } } }], metadata: { pi_details: { step: 1 } }, is_error: false } };
+  peer.notify('composition/update', progress);
+  peer.notify('composition/update', progress); // Non-monotonic progress is ignored.
+  peer.send({ jsonrpc: '2.0', id: nested.id, result: { value: { tool_call: { id: 'host-outer/1', name: 'read', arguments: { path: 'actual' } },
+    content: [{ Text: 'actual read' }], metadata: { pi_details: { answer: 42 } }, is_error: false } } });
+  const response = await call.response; assert.ok(response.result, JSON.stringify(response));
+  assert.equal(response.result.metadata.pi_details.updates.length, 1);
+  const outcome = JSON.parse(response.result.content[0].text);
+  assert.equal(Object.hasOwn(outcome.result, 'structuredContent'), false);
+  peer.notify('composition/update', { ...progress, sequence: 2 }); // Settled reverse calls cannot invoke a callback.
+  await peer.close();
+});
+
+test('adapter: synchronous frozen catalog sidecars are verified and unlinked', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'octet-tool-context-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bytes = Buffer.from(JSON.stringify({ tools: [{ name: 'read', description: 'Verified native catalog', parameters: { type: 'object' } }] }));
+  await writeFile(join(dir, 'composition-catalog.json'), bytes);
+  const entry = await fixture(t, `export default pi => pi.registerTool({name:'probe',label:'Probe',description:'Probe',parameters:{type:'object'},
+    async execute(id,args,signal,update,ctx){return {content:[{type:'text',text:ctx.tools[0].description}],details:undefined}}});`);
+  const peer = launch(t, [entry], { auto: false, env: { OCTET_EXTENSION_SCRATCH: dir } }); await peer.init(['tool_composition_v1']);
+  const call = peer.request('tool/call', { name: 'probe', arguments: {}, context: peer.context() });
+  const catalog = await peer.wait(frame => frame.method === 'composition/context');
+  peer.send({ jsonrpc: '2.0', id: catalog.id, result: { context_file: { path: 'composition-catalog.json', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } } });
+  assert.equal((await call.response).result.content[0].text, 'Verified native catalog');
+  const { access } = await import('node:fs/promises'); await assert.rejects(access(join(dir, 'composition-catalog.json')), { code: 'ENOENT' });
+  await peer.close();
+});
+
+test('adapter: cancelled nested calls ignore late partial results without inventing outcomes', async t => {
+  const entry = await fixture(t, `export default pi => pi.registerTool({name:'probe',label:'Probe',description:'Probe',parameters:{type:'object'},
+    async execute(id,args,signal,update,ctx){
+      const controller=new AbortController(); let called=false;
+      const pending=ctx.executeTool('read',{}, {signal:controller.signal,onUpdate:()=>{called=true}});
+      controller.abort();
+      try {await pending;throw Error('cancel should reject')}catch(error){if(error.code!==-32800)throw error}
+      await new Promise(resolve=>setTimeout(resolve,30));
+      if(called)throw Error('late callback ran');
+      return {content:[],details:undefined};
+    }});`);
+  const peer = launch(t, [entry], { auto: false }); await peer.init(['tool_composition_v1']);
+  const call = peer.request('tool/call', { name: 'probe', arguments: {}, context: peer.context() });
+  const nested = await peer.wait(frame => frame.method === 'composition/call');
+  await peer.wait(frame => frame.method === '$/cancelRequest' && frame.params.id === nested.id);
+  peer.notify('composition/update', { request_id: nested.id, sequence: 1, result: { content: [{ Text: 'late' }], is_error: false } });
+  peer.send({ jsonrpc: '2.0', id: nested.id, result: { value: { tool_call: { id: 'native/1', name: 'read', arguments: {} }, content: [], is_error: false } } });
+  const response = await call.response; assert.ok(response.result, JSON.stringify(response)); await peer.close();
 });

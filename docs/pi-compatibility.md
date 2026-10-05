@@ -66,6 +66,31 @@ only allowlisted mouse-mode escape writes as capture intent, which the host can
 refuse. Do not use unrelated Pi terminal patches, private session internals, or
 session-file writers as compatibility assumptions.
 
+## Installed-Pi fallback (experimental, opt-in)
+
+If a reviewed factory imports a Pi export that Octet's shims lack, or one of Pi's
+built-in tool factories (`createBashTool`, `createReadToolDefinition`, …), the
+adapter refuses to start it and reports `pi_compat_fallback_eligible` with the
+names it found. You can then load that bridge against the Pi packages from your
+managed Pi install (`~/.pi/agent`, Pi 1.0.x only) with `--pi-runtime installed`
+or `"pi_runtime": "installed"` in `bridge.json`. No Octet prompt offers this
+yet; a permission prompt is planned.
+
+This runs unpinned code from your installed `@earendil-works/pi-coding-agent`,
+`pi-ai` and `pi-tui` inside the extension process:
+
+- Pi's built-in tool factories run commands and file reads/writes in that
+  process, outside Octet's per-command tool policy, other extensions'
+  `tool_call` hooks, output spill and process-group supervision.
+- Importing Pi installs process-wide signal handlers, an HTTP dispatcher and
+  `fs` patches in that process.
+- Octet still owns the `pi` API object, sessions, model calls, settings and the
+  terminal. Pi functions that would start Pi sessions or agents, call models,
+  read credentials, write Pi config or trust, start MCP servers, or own the
+  terminal or clipboard are refused, as are names Octet has not classified.
+- A missing Pi install, or one outside 1.0.x, fails loudly; nothing falls back
+  silently.
+
 ## Qualification and reproduction
 
 The automated adapter suite uses a synthetic host. A run with all four original

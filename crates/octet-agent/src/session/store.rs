@@ -63,6 +63,7 @@ impl Session {
         let invocations = Arc::new(DurableInvocationStore::with_journal(Arc::clone(&writer)));
         let deferred_runs = Arc::new(DeferredRunStore::with_journal(Arc::clone(&writer)));
         Ok(Self {
+            header: None,
             path: path.into(),
             file,
             writer,
@@ -217,6 +218,7 @@ impl Session {
         reader.seek(std::io::SeekFrom::Start(0))?;
         let mut reader = BufReader::with_capacity(1024 * 1024, reader);
 
+        let mut header: Option<SessionHeader> = None;
         let mut entries: Vec<Entry> = Vec::new();
         let mut index: HashMap<EntryId, usize> = HashMap::new();
         let mut head: Option<EntryId> = None;
@@ -305,6 +307,12 @@ impl Session {
             final_record_had_newline = has_newline;
             persisted_records += 1;
             match record {
+                SessionRecord::Header { header: value } => {
+                    if header.is_some() || !entries.is_empty() || line_no != 1 {
+                        return Err(SessionError::Corrupt { line: line_no, message: "session header is not the first unique record".into() });
+                    }
+                    header = Some(value);
+                }
                 SessionRecord::ToolInvocation { scope, record } => {
                     restored_invocations
                         .restore(scope, record)
@@ -625,6 +633,7 @@ impl Session {
         let invocations = Arc::new(restored_invocations.attach_journal(Arc::clone(&writer)));
         let deferred_runs = Arc::new(restored_deferred_runs.attach_journal(Arc::clone(&writer)));
         Ok(Self {
+            header,
             path,
             file,
             writer,
@@ -649,6 +658,28 @@ impl Session {
             entry_labels,
         })
     }
+
+    /// Initialize the actual new file before any entries are appended.
+    pub fn initialize_header(&mut self, cwd: &Path, parent_session: Option<String>) -> Result<(), SessionError> {
+        if self.header.is_some() || !self.entries.is_empty() || self.file.metadata()?.len() != 0 {
+            return Err(SessionError::Limit("session header requires a new empty session".into()));
+        }
+        if parent_session.as_ref().is_some_and(|path| path.len() > 4096 || path.chars().any(char::is_control)) {
+            return Err(SessionError::Limit("invalid parent session reference".into()));
+        }
+        let header = SessionHeader {
+            id: self.path.file_stem().and_then(|name| name.to_str()).ok_or_else(|| SessionError::Limit("session has no identifier".into()))?.to_owned(),
+            cwd: cwd.to_owned(), timestamp_unix_ms: now_unix_millis(), parent_session,
+        };
+        let mut bytes = Vec::new();
+        write_json_line(&mut bytes, &SessionRecord::Header { header: header.clone() })?;
+        self.persist(&bytes)?;
+        self.header = Some(header);
+        Ok(())
+    }
+
+    /// Durable creation metadata, absent on historical sessions without it.
+    pub fn header(&self) -> Option<&SessionHeader> { self.header.as_ref() }
 
     /// The path of the underlying JSONL file.
     pub fn path(&self) -> &std::path::Path {

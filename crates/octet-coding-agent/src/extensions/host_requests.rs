@@ -352,9 +352,15 @@ impl ExecutableExtensions {
                 HostRequestOperation::MessageInjection(injection) => {
                     use octet_agent::extension_process::ExtensionMessageDelivery as Delivery;
                     let message = match injection {
-                        ExtensionMessageInjection::User { text, deliver_as } => {
+                        ExtensionMessageInjection::User { text, content, deliver_as } => {
+                            let mut input = ComposedInput::from_text(text);
+                            if let Some(content) = content {
+                                input.parts = content.input_parts();
+                                input.display_text = content.text();
+                                input.transcript_text = input.display_text.clone();
+                            }
                             crate::tui::view::PendingExtensionMessage {
-                                input: ComposedInput::from_text(text),
+                                input,
                                 delivery: deliver_as.unwrap_or(Delivery::FollowUp),
                                 wake: true,
                                 context_only: false,

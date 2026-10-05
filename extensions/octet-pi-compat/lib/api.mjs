@@ -3,8 +3,9 @@ import { join, resolve } from 'node:path';
 import { bounded, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
 import { theme } from './theme.mjs';
 import { exec } from './exec.mjs';
+import { mcpAPI } from './mcp.mjs';
 import { chromeAPI, dialogAPI, editorAPI } from './ui-api.mjs';
-import { currentModel, thinkingLevel, scopedModels, modelRegistry } from './providers.mjs';
+import { currentModel, thinkingLevel, scopedModels, modelRegistry, registerProvider, unregisterProvider } from './providers.mjs';
 import { setModel, setThinkingLevel } from './model-control.mjs';
 import { registerTool, toolSnapshot, getAllTools, setActiveTools } from './tools.mjs';
 import { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
@@ -12,7 +13,7 @@ import { translateSessionEntries } from './session-mirror.mjs';
 import { compactionCallbackStore, requestCompaction } from './compaction.mjs';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 import { contextFacts, getSettings } from './context-api.mjs';
-import { sessionMethods } from './session-methods.mjs';
+import { sessionMethods, sessionHeader } from './session-methods.mjs';
 import { customMessageParams, userMessageParams } from './custom-messages.mjs';
 
 export const hookEvents = {
@@ -32,6 +33,8 @@ export const notificationEvents = {
   'session/info_changed': 'session_info_changed', 'dialog/started': 'ui_prompt_start', 'dialog/settled': 'ui_prompt_end',
   'model/selected': 'model_select', 'reasoning/selected': 'thinking_level_select', 'bash/user': 'user_bash',
 };
+// Pi events dispatched after another notification's event: the owning run settles once, after agent_end.
+export const followingEvents = { 'turn/settled': 'agent_settled' };
 function name(value, label) {
   bounded(value, label, 128);
   if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(value)) invalid(label);
@@ -62,7 +65,11 @@ export function createAPI(runtime, factory) {
   const store = () => runtime.current(factory);
   const op = (method, params, feature) => { runtime.require(feature); const s = store(); return runtime.track(runtime.hostCall(method, params, s), s); };
   return strict({
+    ...mcpAPI(runtime, factory),
     registerTool(tool) { registerTool(runtime, factory, tool); },
+    ...runtime.transcript.api(factory),
+    registerProvider(name, config) { registerProvider(runtime, factory, name, config); },
+    unregisterProvider(name) { unregisterProvider(runtime, factory, name); },
     registerCommand(key, definition) {
       name(key, 'command name'); fields(definition, ['description', 'handler', 'usage', 'getArgumentCompletions'], 'command');
       if (typeof definition.handler !== 'function') invalid('command handler');
@@ -89,7 +96,7 @@ export function createAPI(runtime, factory) {
     },
     on(event, handler) {
       if (runtime.loaded && hookEvents[event] && !runtime.metadata().hooks.includes(hookEvents[event])) unsupported(`event ${event}`, 'native hook was not subscribed; configure again');
-      if (!hookEvents[event] && !Object.values(notificationEvents).includes(event)) unsupported(`event ${event}`, 'no corresponding host event');
+      if (event !== 'mcp_servers_change' && !hookEvents[event] && !Object.values(notificationEvents).includes(event) && !Object.values(followingEvents).includes(event)) unsupported(`event ${event}`, 'no corresponding host event');
       if (typeof handler !== 'function') invalid('event handler');
       const list = runtime.events.get(event) || []; const entry = { handler, factory }; list.push(entry); runtime.events.set(event, list);
       return () => { const at = list.indexOf(entry); if (at >= 0) list.splice(at, 1); };
@@ -228,6 +235,7 @@ export function createContext(runtime, store, replaced = false) {
   const sessionEntries = key => translateSessionEntries(snapshot(current().host, key, `ctx.sessionManager.${key}`), runtime.namespace);
   const sessionManager = strict({
     getSessionId: () => current().host.session_id ?? undefined,
+    getHeader: () => sessionHeader(current().host),
     getSessionName: () => current().host.session_name ?? undefined,
     getEntries: () => sessionEntries('session_entries'),
     getBranch: () => sessionEntries('session_branch'),

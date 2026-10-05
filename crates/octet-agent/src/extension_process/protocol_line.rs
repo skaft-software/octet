@@ -185,7 +185,8 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             methods::SESSION_COMPACT => {
                 dispatch_session_compaction(state, object, params)?;
             }
-            "session/wait_for_idle"
+            "session/setup"
+            | "session/wait_for_idle"
             | "session/create"
             | "session/fork"
             | "session/reload"
@@ -563,28 +564,36 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 require_declared(state.declared.providers, "provider catalogs")?;
                 let id = parse_child_request_id(object, methods::PROVIDERS_REGISTER)?;
                 insert_child_request(state, id.clone(), None, None)?;
-                let result = api_v03::parse_provider_register_params(params)
-                    .map_err(|_| ProviderHostResponseError::Invalid)
-                    .and_then(|request| {
-                        provider_registry_for_request(state)?
-                            .register(state.provider_owner.clone(), request)
-                            .map_err(provider_registry_response_error)
-                    })
-                    .and_then(provider_catalog_response_value);
+                let result = (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
+                    model_control::register_provider_proxy(state, params, false)
+                } else {
+                    api_v03::parse_provider_register_params(params)
+                        .map_err(|_| ProviderHostResponseError::Invalid)
+                        .and_then(|request| {
+                            provider_registry_for_request(state)?
+                                .register(state.provider_owner.clone(), request)
+                                .map_err(provider_registry_response_error)
+                        })
+                })
+                .and_then(provider_catalog_response_value);
                 queue_provider_host_response(state, &id, result)?;
             }
             methods::PROVIDERS_UPDATE => {
                 require_declared(state.declared.providers, "provider catalogs")?;
                 let id = parse_child_request_id(object, methods::PROVIDERS_UPDATE)?;
                 insert_child_request(state, id.clone(), None, None)?;
-                let result = api_v03::parse_provider_update_params(params)
-                    .map_err(|_| ProviderHostResponseError::Invalid)
-                    .and_then(|request| {
-                        provider_registry_for_request(state)?
-                            .update(state.provider_owner.clone(), request)
-                            .map_err(provider_registry_response_error)
-                    })
-                    .and_then(provider_catalog_response_value);
+                let result = (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
+                    model_control::register_provider_proxy(state, params, true)
+                } else {
+                    api_v03::parse_provider_update_params(params)
+                        .map_err(|_| ProviderHostResponseError::Invalid)
+                        .and_then(|request| {
+                            provider_registry_for_request(state)?
+                                .update(state.provider_owner.clone(), request)
+                                .map_err(provider_registry_response_error)
+                        })
+                })
+                .and_then(provider_catalog_response_value);
                 queue_provider_host_response(state, &id, result)?;
             }
             methods::PROVIDERS_UNREGISTER => {
@@ -633,6 +642,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     .map_err(|_| "invalid API 0.3 provider stream event".to_owned())?;
                 dispatch_provider_stream_event(state, event)?;
             }
+            "mcp/replace" => mcp::dispatch_mcp_registration(state, object, params)?,
             "process/exec" => {
                 let Some((request, admitted)) = admit_host_request::<ExtensionExecRequest>(
                     state, object, method, "process_exec_v1", params)? else { return Ok(()); };
@@ -1311,6 +1321,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 }
                 let injection = ExtensionMessageInjection::User {
                     text: request.text,
+                    content: request.content,
                     deliver_as: request.deliver_as,
                 };
                 if let Err(detail) = injection.validate() {

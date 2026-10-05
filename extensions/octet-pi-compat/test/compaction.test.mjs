@@ -35,6 +35,8 @@ async function setup(t, { offered = features, hold = () => false } = {}) {
     transport.fail(new Error('test transport closed'));
   });
   await runtime.load();
+  // configure.mjs reserves all public hooks for real-host factory activation.
+  runtime.events.set('session_compact', []);
   const metadata = runtime.metadata();
   await runtime.receive({ jsonrpc: '2.0', id: next++, method: 'initialize', params: {
     api_version: '0.4', workspace: '/host/workspace', host, extension: { name: 'test' },
@@ -47,6 +49,19 @@ async function setup(t, { offered = features, hold = () => false } = {}) {
     events[topic] = [];
     runtime.bus.facade(0).on(`compact:${topic}`, value => events[topic].push({ value, store: runtime.scope.getStore() }));
   }
+  let callbackId = 1000;
+  async function terminal(frame, response) {
+    if (frame.method === 'session/compact' && frame.params.callback && transport.children.has(frame.id)) {
+      const id = callbackId++;
+      const outcome = response.error ? { error: response.error.message } : { result: response.result };
+      await runtime.receive({ id, method: 'hook/run', params: {
+        hook: 'session_compact', context: context(frame.params.resource_owner),
+        session_leaf: { grant_id: 'a'.repeat(64), activation_epoch: id, operation_id: `callback:${id}`, owner: frame.params.resource_owner, expected_head: 'actual-compaction' },
+        payload: { kind: 'compaction_callback', parent_request_id: frame.params.parent_request_id, ...outcome },
+      } });
+    }
+    transport.response({ id: frame.id, ...response });
+  }
   function command(mode = '', binding = owner, id = next++) {
     const done = runtime.receive({ jsonrpc: '2.0', id, method: 'command/execute', params: { name: 'compact_test', arguments: [mode], context: context(binding) } });
     return { id, done };
@@ -54,8 +69,8 @@ async function setup(t, { offered = features, hold = () => false } = {}) {
   return { runtime, transport, frames, timeline, held, diagnostics, losses, events, command,
     compacts: () => frames.filter(frame => frame.method === 'session/compact'),
     reply: id => frames.find(frame => frame.id === id && !frame.method),
-    ack: (frame, result = committed) => transport.response({ id: frame.id, result }),
-    refuse: (frame, message = 'native compaction failed') => transport.response({ id: frame.id, error: { code: -32002, message } }),
+    ack: (frame, result = committed) => terminal(frame, { result }),
+    refuse: (frame, message = 'native compaction failed') => terminal(frame, { error: { code: -32002, message } }),
   };
 }
 
@@ -73,14 +88,15 @@ test('synchronous undefined; send only after successful physical origin reply AN
   const settled = h.timeline.findIndex(([kind, id]) => kind === 'settle' && id === command.id);
   const submitted = h.timeline.findIndex(([kind, frame]) => kind === 'write' && frame === call);
   assert.ok(written < settled && settled < submitted);
-  assert.deepEqual(call.params, { parent_request_id: command.id, resource_owner: owner, custom_instructions: 'Keep the actual decisions.\n\tDo not invent metrics.' });
+  assert.deepEqual(call.params, { parent_request_id: command.id, resource_owner: owner, custom_instructions: 'Keep the actual decisions.\n\tDo not invent metrics.', callback: true });
   assert.equal(h.transport.children.get(call.id).parent, undefined);
   assert.equal(h.events.complete.length, 0, 'submission is not a durable completion receipt');
   h.ack(call); await tick();
   assert.equal(h.events.complete.length, 1); assert.equal(h.events.error.length, 0);
   assert.deepEqual(h.events.complete[0].value, { summary: committed.summary, firstKeptEntryId: committed.first_kept });
   for (const key of ['tokensBefore', 'details', 'entryId']) assert.throws(() => h.events.complete[0].value[key], /unsupported_feature/);
-  assert.equal(h.events.complete[0].store.id, command.id);
+  assert.notEqual(h.events.complete[0].store.id, command.id);
+  assert.equal(h.events.complete[0].store.compactionOriginId, command.id);
   assert.notEqual(h.events.complete[0].store.pending, origin.pending);
   assert.equal(origin.pending.size, 0);
   assert.equal(h.diagnostics.length, 0);
@@ -136,7 +152,7 @@ test('valid retained context submits immediately with its original id/owner, not
   const call = h.compacts()[0]; assert.equal(call.params.parent_request_id, origin.id);
   assert.deepEqual(call.params.resource_owner, owner);
   assert.ok(h.frames.indexOf(call) < h.frames.indexOf(h.reply(caller.id)));
-  h.ack(call); await tick(); assert.equal(h.events.complete[0].store.id, origin.id);
+  h.ack(call); await tick(); assert.equal(h.events.complete[0].store.compactionOriginId, origin.id);
 });
 
 for (const when of ['queued', 'request']) test(`owner retirement cancels ${when} work; stale callbacks never retarget a replacement`, async t => {
@@ -202,8 +218,8 @@ test('callback pi APIs AND captured ctx setters own a separate retained pending 
   const writes = h.frames.filter(frame => ['session/set_name', 'composer/set'].includes(frame.method));
   assert.equal(writes.length, 2);
   for (const call of writes) {
-    assert.equal(call.params.parent_request_id, command.id); assert.deepEqual(call.params.resource_owner, owner);
-    assert.equal(h.transport.children.get(call.id).parent, undefined);
+    assert.equal(call.params.parent_request_id, callbackStore.id); assert.deepEqual(call.params.resource_owner, owner);
+    assert.equal(h.transport.children.get(call.id).parent, callbackStore.id);
     assert.equal(h.transport.children.get(call.id).signal, callbackStore.controller.signal);
   }
   assert.throws(() => h.events.return[0].value.ctx.compact(), /outstanding compaction for owner/);
@@ -340,4 +356,37 @@ test('one outstanding owner slot and eight global slots, including queued live o
     settleCompactions(h.runtime, store, rpcError(-32800, 'cancelled test origin'));
   }
   await tick(); assert.equal(h.compacts().length, 0);
+});
+
+test('completion appends use a new live numeric host request and one-use native leaf successors', async t => {
+  const h = await setup(t);
+  await h.command('capture').done;
+  const ctx = h.events.captured[0].value;
+  const pi = createAPI(h.runtime, 0), calls = [];
+  let saved;
+  // requestSync consumes the local grant before dispatch. Echo only authenticated
+  // host correlation fields and its known durable successor, never queue admission.
+  t.mock.method(h.transport, 'requestSync', (method, params) => {
+    calls.push({ method, params });
+    const store = h.runtime.scope.getStore(); saved = store;
+    assert.equal(h.runtime.active.get(store.id).controller, store.controller);
+    assert.equal(params.parent_request_id, store.id);
+    assert.notEqual(store.id, 2);
+    const entry_id = `committed-callback-${calls.length}`;
+    return { entry_id, head: entry_id, successor: {
+      ...params.session_leaf, owner, grant_id: (calls.length === 1 ? 'b' : 'c').repeat(64), expected_head: entry_id,
+    } };
+  });
+  ctx.compact({ onComplete: result => {
+    assert.equal(ctx.signal, h.runtime.scope.getStore().controller.signal);
+    pi.appendEntry('callback-one', { summary: result.summary });
+    pi.appendEntry('callback-two', { kept: result.firstKeptEntryId });
+  } });
+  const call = h.compacts()[0];
+  await h.ack(call); await tick();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].params.session_leaf.grant_id, 'a'.repeat(64));
+  assert.equal(calls[1].params.session_leaf.grant_id, 'b'.repeat(64));
+  assert.equal(h.diagnostics.length, 0);
+  assert.throws(() => h.runtime.scope.run(saved, () => pi.appendEntry('late', {})), /active numeric parent_request_id/);
 });

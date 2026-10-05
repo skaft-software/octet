@@ -16,6 +16,21 @@ pub struct ExtensionLifecycleSnapshot {
 }
 
 impl ExecutableExtensions {
+    /// Resolve the live issuing process for a requested compaction callback.
+    pub fn compaction_callback_process(&self, owner: &octet_agent::extension_process::ExtensionResourceOwner) -> Option<ExtensionProcess> {
+        self.processes.iter().find(|process|
+            process.extension_instance_id() == owner.extension_instance_id
+                && process.health_snapshot().generation == owner.process_generation
+        ).cloned()
+    }
+
+    /// Real foreground mirror of the admitted setup process.
+    pub fn session_setup_context(&self, owner: &octet_agent::extension_process::ExtensionResourceOwner) -> anyhow::Result<serde_json::Value> {
+        let process = self.processes.iter().find(|process| process.extension_instance_id() == owner.extension_instance_id && process.health_snapshot().generation == owner.process_generation)
+            .ok_or_else(|| anyhow::anyhow!("session setup process retired"))?;
+        Ok(process.replacement_context(owner)?)
+    }
+
     /// Capture the current process handles for one frontend-owned broadcast.
     pub fn lifecycle_snapshot(&self) -> ExtensionLifecycleSnapshot {
         ExtensionLifecycleSnapshot {

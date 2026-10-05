@@ -100,6 +100,9 @@ use crate::tui::view::{
 mod admission;
 mod commands;
 mod exec;
+mod mcp;
+#[cfg(all(test, unix))]
+mod mcp_native_tests;
 mod composition;
 mod confirmation;
 mod event_drain;
@@ -358,10 +361,13 @@ pub struct ExecutableExtensions {
     background_tx: mpsc::Sender<ExtensionBackgroundUpdate>,
     background_rx: mpsc::Receiver<ExtensionBackgroundUpdate>,
     renderer_tasks: Vec<JoinHandle<()>>,
+    // One session-owned overlay in the already admitted resident bridge.
+    pi_mcp_binding: Arc<tokio::sync::Mutex<Option<mcp::PiMcpBinding>>>,
     autocomplete_tasks: Vec<JoinHandle<()>>,
     pending_editor_requests: VecDeque<PendingEditorRequest>,
     pending_host_requests: VecDeque<PendingHostRequest>,
     pending_session_requests: VecDeque<PendingHostRequest>,
+    pending_session_setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
     // The actual host registry handle, not an adapter-owned tool mirror. Its
     // interior dynamic registry remains usable while the Agent is borrowed.
     tool_host: Option<octet_agent::ExtensionHost>,
@@ -445,10 +451,12 @@ impl Default for ExecutableExtensions {
             background_tx,
             background_rx,
             renderer_tasks: Vec::new(),
+            pi_mcp_binding: Arc::new(tokio::sync::Mutex::new(None)),
             autocomplete_tasks: Vec::new(),
             pending_editor_requests: VecDeque::new(),
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),
+            pending_session_setup: None,
             tool_host: None,
             terminal_arbiter: TerminalGrantArbiter::default(),
             remote_ui: remote_ui::RemoteUi::default(),

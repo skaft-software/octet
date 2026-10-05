@@ -9,7 +9,7 @@ function messageEntry(entry, calls) {
   bounded(entry.id, 'model turn entry id', 256);
   if (entry.parent !== null) bounded(entry.parent, 'model turn parent id', 256);
   const { type, ...canonical } = entry.value;
-  const messages = canonicalToPi([canonical], calls);
+  const messages = canonicalToPi([canonical], calls, { observation: true });
   const metadata = entry.metadata?.tool_output?.metadata;
   if (metadata && Object.hasOwn(metadata, 'pi_details')) {
     if (messages.length !== 1 || messages[0].role !== 'toolResult') unsupported('model turn batched Pi details', 'native entry does not identify which result owns these details');

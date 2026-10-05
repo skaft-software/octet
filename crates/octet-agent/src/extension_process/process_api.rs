@@ -1525,6 +1525,18 @@ impl ExtensionProcess {
         (progress, capacity)
     }
 
+    /// Whether a host-issued resource owner remains valid on this exact
+    /// connection. Used by native cleanup, never by extension-supplied facts.
+    pub fn resource_owner_is_live(&self, owner: &ExtensionResourceOwner) -> bool {
+        let connection = read_std_lock(&self.inner.connection);
+        let issued = lock_std_mutex(&connection.issued_resource_owners).contains(owner);
+        connection_is_usable(&connection)
+            && !connection.draining.load(Ordering::Acquire)
+            && owner.extension_instance_id == self.inner.instance_id
+            && owner.process_generation == connection.generation
+            && issued
+    }
+
     /// Whether an admitted exec was cancelled, settled, or replaced.
     pub fn exec_request_is_cancelled(&self, id: &ExtensionRequestId, generation: u64) -> bool {
         let connection = read_std_lock(&self.inner.connection);
@@ -1602,6 +1614,21 @@ impl ExtensionProcess {
         Ok(())
     }
 
+    /// Emit an actual committed custom message without changing the assistant coalescer.
+    pub fn notify_custom_message_committed(
+        &self, entry_id: &crate::session::EntryId, message: &crate::session::CustomMessage,
+        timestamp_unix_ms: u64,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let payload = ExtensionMessageLifecycle {
+            message_id: Some(entry_id.0.clone()),
+            message: Some(message.lifecycle_value(timestamp_unix_ms)),
+        };
+        self.queue_lifecycle_notification(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MESSAGE_STARTED, &payload)?;
+        self.queue_lifecycle_notification(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MESSAGE_SETTLED, &payload)
+    }
+
     /// Opens one observable assistant message boundary.
     pub fn notify_message_started(&self, message_id: &str) -> Result<(), ExtensionRuntimeError> {
         let message_id =
@@ -1612,6 +1639,7 @@ impl ExtensionProcess {
             EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
             methods::MESSAGE_STARTED,
             &ExtensionMessageLifecycle {
+                message: None,
                 message_id: Some(message_id),
             },
         )
@@ -1628,6 +1656,7 @@ impl ExtensionProcess {
             EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
             methods::MESSAGE_SETTLED,
             &ExtensionMessageLifecycle {
+                message: None,
                 message_id: Some(message_id),
             },
         )
@@ -2731,6 +2760,7 @@ impl ExtensionProcess {
             workspace: self.inner.config.workspace.clone(),
             execution_scope: None,
             resource_owner: None,
+            mcp_registration_owner: None,
             host: read_std_lock(&self.inner.host_state).clone(),
         }
     }

@@ -1005,6 +1005,9 @@ class BridgeManager:
         arguments: Mapping[str, Any],
         context: Mapping[str, Any],
     ) -> dict[str, Any]:
+        registration_owner = self._server(binding.server_id).config.registration_owner
+        if registration_owner is not None and ResourceOwner.from_context(context) != registration_owner:
+            return self._error_result(binding, "Transient MCP call denied: host resource owner mismatch.")
         if self._server(binding.server_id).config.transport == "streamable-http":
             owner = ResourceOwner.from_context(context)
             if owner is None or owner != self._remote_owner or owner != client.resource_owner:

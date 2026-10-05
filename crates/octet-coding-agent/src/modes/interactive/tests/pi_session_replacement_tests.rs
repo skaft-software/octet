@@ -53,6 +53,7 @@ fn pi_app(factory: &str) -> (tempfile::TempDir, App) {
             None,
             crate::extensions::ExtensionProviderRuntime::default(),
             crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
+            None,
         );
     assert!(
         extensions
@@ -275,6 +276,122 @@ async fn pi_switch_session_runs_with_session_on_the_saved_target_and_completes_c
     assert_eq!(markers.len(), 1, "{markers:#?}\n{observed}");
     assert!(markers[0].to_string().contains(&target_id), "{markers:#?}\n{observed}");
     assert_eq!(std::fs::read(old_path).unwrap(), old_bytes, "{observed}");
+}
+
+const SETUP_SESSION: &str = r#"
+import { appendFileSync } from 'node:fs';
+const trace = value => appendFileSync(TRACE, JSON.stringify(value) + '\n');
+export default pi => {
+  pi.on('session_before_switch', (event, ctx) => trace({ step: 'before-options', event, id: ctx.sessionManager.getSessionId() }));
+  pi.on('session_start', (_event, ctx) => trace({ step: 'start-options', id: ctx.sessionManager.getSessionId(), entries: ctx.sessionManager.getEntries() }));
+  pi.registerCommand('probe', { handler: async (parentSession, ctx) => {
+    const before = ctx.sessionManager.getSessionId();
+    let captured;
+    const result = await ctx.newSession({ parentSession, setup: async sm => {
+      captured = sm;
+      trace({ step: 'setup', id: sm.getSessionId(), file: sm.getSessionFile(), header: sm.getHeader(), leaf: sm.getLeafId() });
+      const user = sm.appendMessage({ role: 'user', content: 'setup-user-body', timestamp: 123 });
+      const custom = sm.appendCustomEntry('setup-private', { kept: true });
+      const thinking = sm.appendThinkingLevelChange('high');
+      const model = sm.appendModelChange('setup-provider', 'setup-model');
+      const title = sm.appendSessionInfo('  Setup\n session  ');
+      const label = sm.appendLabelChange(user, 'seed');
+      if (sm.getEntry(user).message.content !== 'setup-user-body' || sm.getLabel(user) !== 'seed' || sm.getSessionName() !== 'Setup  session') throw new Error('setup did not read its actual writes');
+      sm.branch(user);
+      const child = sm.appendCustomEntry('setup-branch', { user });
+      sm.resetLeaf();
+      if (sm.getLeafId() !== null || sm.getBranch().length !== 0) throw new Error('real root checkout failed');
+      sm.branch(child);
+      const message = sm.appendCustomMessageEntry('setup-visible', 'setup-custom-body', false, { kept: true });
+      await new Promise(resolve => setTimeout(resolve, 5));
+      trace({ step: 'setup-written', ids: { user, custom, thinking, model, title, label, child, message }, entries: sm.getEntries(), branch: sm.getBranch(), leaf: sm.getLeafId() });
+    }, withSession: fresh => {
+      let oldRetired = false, setupClosed = false;
+      try { ctx.sessionManager.getSessionId(); } catch { oldRetired = true; }
+      try { captured.appendCustomEntry('late-setup', {}); } catch { setupClosed = true; }
+      if (!oldRetired || !setupClosed) throw new Error('replacement authority escaped its lifetime');
+      trace({ step: 'with-options', id: fresh.sessionManager.getSessionId(), header: fresh.sessionManager.getHeader(), branch: fresh.sessionManager.getBranch(), oldRetired, setupClosed });
+      pi.appendEntry('setup-complete', { before, id: fresh.sessionManager.getSessionId() });
+      fresh.ui.notify('setup ready ' + fresh.sessionManager.getSessionId());
+    } });
+    trace({ step: 'after-options', result });
+  } });
+};
+"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_new_session_parent_and_writable_setup_commit_to_the_real_replacement() {
+    let (directory, mut app) = pi_app(SETUP_SESSION);
+    let old_path = app.agent.session().path().to_owned();
+    let old_id = session_id(app.agent.session());
+    let old_bytes = std::fs::read(&old_path).unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    let output = probe_with_arguments(&mut app, &mut shell, vec![old_path.to_str().unwrap().into()]).await;
+    let new_path = app.agent.session().path().to_owned();
+    let new_id = session_id(app.agent.session());
+    app.executable_extensions.shutdown().await;
+    let trace = trace(&directory);
+    let observed = format!("{output:?}\n{trace:#?}\n{}", shell.debug_snapshot());
+    let output = output.unwrap_or_else(|error| panic!("{error:#}\n{observed}"));
+    assert_ne!(new_id, old_id, "{observed}");
+    assert_eq!(step(&trace, "before-options")["id"], old_id, "{observed}");
+    assert_eq!(step(&trace, "before-options")["event"], serde_json::json!({"type":"session_before_switch","reason":"new"}), "{observed}");
+    let setup = step(&trace, "setup");
+    assert_eq!(setup["id"], new_id, "{observed}");
+    assert_eq!(setup["file"], serde_json::json!(new_path), "{observed}");
+    assert!(setup["leaf"].is_null(), "{observed}");
+    let saved = Session::open_read_only(&new_path).unwrap();
+    let header = saved.header().expect("a real durable creation header");
+    assert_eq!(header.id, new_id);
+    assert_eq!(header.cwd, app.config.workspace);
+    assert_eq!(header.parent_session.as_deref(), old_path.to_str());
+    assert_eq!(setup["header"]["id"], header.id);
+    assert_eq!(setup["header"]["parentSession"], serde_json::json!(old_path));
+    assert_eq!(step(&trace, "with-options")["header"], setup["header"], "{observed}");
+    assert_eq!(step(&trace, "after-options")["result"], serde_json::json!({"cancelled":false}), "{observed}");
+    let written = step(&trace, "setup-written");
+    let ids = written["ids"].as_object().unwrap();
+    assert_eq!(written["entries"].as_array().unwrap().len(), ids.len(), "{observed}");
+    for id in ids.values() {
+        assert!(saved.entry(&octet_agent::EntryId(id.as_str().unwrap().into())).is_some(), "{observed}");
+    }
+    let user = octet_agent::EntryId(ids["user"].as_str().unwrap().into());
+    assert_eq!(saved.entry_label(&user), Some("seed"));
+    assert_eq!(saved.entries().len(), ids.len() + 1, "{observed}");
+    let branch_ids: Vec<_> = written["branch"].as_array().unwrap().iter().map(|entry| entry["id"].clone()).collect();
+    assert_eq!(branch_ids, vec![ids["user"].clone(), ids["child"].clone(), ids["message"].clone()], "{observed}");
+    assert_eq!(step(&trace, "with-options")["branch"], written["branch"], "{observed}");
+    let start = trace.iter().position(|entry| entry["step"] == "start-options" && entry["id"] == new_id).unwrap();
+    let end_setup = trace.iter().position(|entry| entry["step"] == "setup-written").unwrap();
+    let with = trace.iter().position(|entry| entry["step"] == "with-options").unwrap();
+    assert!(end_setup < start && start < with, "{observed}");
+    assert_eq!(trace[start]["entries"], written["entries"], "{observed}");
+    let context = serde_json::to_value(saved.context().unwrap()).unwrap().to_string();
+    assert!(context.contains("setup-user-body") && context.contains("setup-custom-body"), "{context}");
+    assert!(!context.contains("setup-private") && !context.contains("kept") && !context.contains("setup-complete"), "{context}");
+    assert_eq!(entries_naming(&new_path, "setup-complete").len(), 1, "{observed}");
+    assert_eq!(entries_naming(&new_path, "late-setup").len(), 0, "{observed}");
+    assert!(output.contains(&format!("setup ready {new_id}")) || shell.debug_snapshot().contains(&format!("setup ready {new_id}")), "{observed}");
+    assert_eq!(std::fs::read(old_path).unwrap(), old_bytes, "{observed}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_before_switch_cancels_parent_and_setup_before_new_file_creation() {
+    let factory = CANCEL_NEW.replace("ctx.newSession({ withSession:", "ctx.newSession({ parentSession: '/not-created.jsonl', setup: () => { throw new Error('cancelled setup ran'); }, withSession:");
+    let (directory, mut app) = pi_app(&factory);
+    let old_path = app.agent.session().path().to_owned();
+    let old_bytes = std::fs::read(&old_path).unwrap();
+    let files = || std::fs::read_dir(app.sessions.dir()).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect::<std::collections::BTreeSet<_>>();
+    let before_files = files();
+    let mut shell = InteractiveShell::test_shell();
+    probe(&mut app, &mut shell).await.unwrap();
+    let after_files = std::fs::read_dir(app.sessions.dir()).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect::<std::collections::BTreeSet<_>>();
+    app.executable_extensions.shutdown().await;
+    let trace = trace(&directory);
+    assert_eq!(step(&trace, "after")["result"], serde_json::json!({"cancelled":true}), "{trace:#?}");
+    assert_eq!(app.agent.session().path(), old_path);
+    assert_eq!(std::fs::read(old_path).unwrap(), old_bytes);
+    assert_eq!(after_files, before_files);
 }
 
 const CANCEL_NEW: &str = r#"

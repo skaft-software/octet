@@ -48,6 +48,7 @@ impl ExecutableExtensions {
             runtime_manager,
             ExtensionProviderRuntime::default(),
             crate::app::resource_paths::ResourceConsumerCapability::Disabled,
+            None,
         )
     }
 
@@ -66,6 +67,7 @@ impl ExecutableExtensions {
         runtime_manager: Option<ExtensionRuntimeManager>,
         provider_runtime: ExtensionProviderRuntime,
         resource_consumer: crate::app::resource_paths::ResourceConsumerCapability,
+        remote_ui_consumer: Option<&crate::tui::view::InteractiveShell>,
     ) -> Self {
         let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
         let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
@@ -201,16 +203,24 @@ impl ExecutableExtensions {
             .cloned()
             .collect::<Vec<_>>();
 
-        // One wake/consumer binding for the complete interactive fleet. Plain,
-        // print, RPC, and native hosts never advertise remote UI success.
-        let remote_ui_wake = (matches!(&config.mode, Mode::Interactive)
-            && crate::tui::terminal::TerminalCapabilities::detect(config.color, config.plain)
-                .interactive)
-            .then(|| {
-                INTERACTIVE_REMOTE_UI_WAKE
-                    .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
-                    .clone()
-            });
+        // Bind before initialize. An already constructed native shell is the
+        // consumer even when the calling process's stdout is not a TTY (an
+        // embedded frontend or the real-shell acceptance fixture). Without a
+        // supplied shell, ordinary terminal bootstrap keeps its existing gate.
+        // A supplied inactive shell cannot fall back to an unrelated stdout.
+        let remote_ui_wake = if matches!(&config.mode, Mode::Interactive) {
+            match remote_ui_consumer {
+                Some(shell) => shell.extension_remote_ui_binding(),
+                None => crate::tui::terminal::TerminalCapabilities::detect(config.color, config.plain)
+                    .interactive.then(|| {
+                        INTERACTIVE_REMOTE_UI_WAKE
+                            .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
+                            .clone()
+                    }),
+            }
+        } else {
+            None
+        };
         let event_bus = Arc::new(ExtensionEventBus::default());
         let (session_lifecycle_service, session_lifecycle_receiver) =
             if active_session_lifecycle_enabled(config)
@@ -705,6 +715,7 @@ impl ExecutableExtensions {
                         .contributions()
                         .hooks
                         .contains(&ExtensionHook::ResourcesDiscover))
+                        || process.supports_feature("mcp_registration_v1")
                         || (self.remote_ui_wake.is_some()
                             && process.supports_feature(EXTENSION_FEATURE_REMOTE_UI))
                 });
@@ -866,6 +877,7 @@ impl ExecutableExtensions {
     /// revoke the terminal grant with their shell before releasing this owner.
     pub async fn release_binding(&mut self) {
         self.retire_active_resources();
+        self.clear_pi_mcp_registrations().await;
         // A replacement App must not inherit work queued against the old
         // owner. Isolated lifecycle processes are stopped below; shared and
         // legacy processes never receive this service.

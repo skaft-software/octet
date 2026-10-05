@@ -38,6 +38,7 @@ async function callback(runtime, job, handler, value) {
   // This work belongs to the retained callback, never to origin.pending. Track
   // diagnoses its failures; waiting here only bounds the callback's owner slot.
   while (store.pending.size) await Promise.allSettled([...store.pending]);
+  for (const error of new Set(store.errors)) runtime.backgroundError(error);
 }
 function finish(runtime, job, error, value) {
   if (job.phase === 'callback' || job.phase === 'done') return;
@@ -60,10 +61,38 @@ async function submit(runtime, job) {
   job.phase = 'request';
   try {
     available(runtime, job.store);
-    const result = await runtime.hostCall('session/compact', job.options.customInstructions === undefined ? {} : { custom_instructions: job.options.customInstructions }, job.store);
+    const result = await runtime.hostCall('session/compact', {
+      ...(job.options.customInstructions === undefined ? {} : { custom_instructions: job.options.customInstructions }),
+      ...((job.options.onComplete || job.options.onError) ? { callback: true } : {}),
+    }, job.store);
     available(runtime, job.store);
-    finish(runtime, job, undefined, receipt(result));
-  } catch (error) { finish(runtime, job, error); }
+    const value = receipt(result);
+    if (job.nativeCallback) { job.phase = 'done'; release(runtime, job); }
+    else if (job.options.onComplete) throw rpcError(-32002, 'awaited native compaction callback missing');
+    else finish(runtime, job, undefined, value);
+  } catch (error) {
+    if (job.nativeCallback) { job.phase = 'done'; release(runtime, job); }
+    else finish(runtime, job, error);
+  }
+}
+
+export async function runCompactionCallback(runtime, store, body) {
+  fields(body, ['kind', 'parent_request_id', 'result', 'error'], 'compaction callback');
+  if (!Number.isSafeInteger(body.parent_request_id) || body.parent_request_id < 0 ||
+      (body.result === undefined) === (body.error === undefined)) invalid('compaction callback correlation/outcome');
+  const job = [...domain(runtime).jobs].find(job => job.phase === 'request' &&
+    job.origin.id === body.parent_request_id && job.store.state === store.state);
+  if (!job || job.nativeCallback) throw rpcError(-32002, 'compaction callback is stale or already consumed');
+  available(runtime, job.store); available(runtime, store);
+  const error = body.error === undefined ? undefined : rpcError(-32002, bounded(body.error, 'compaction failure', 16384, { controls: true }));
+  const value = error === undefined ? receipt(body.result) : undefined;
+  job.nativeCallback = true;
+  const callbackStore = { ...store, factory: job.origin.factory, pending: new CallbackWork(), errors: [],
+    compactionOrigin: job.origin.controller, compactionOriginId: job.origin.id };
+  job.store = callbackStore;
+  await callback(runtime, job, error === undefined ? job.options.onComplete : job.options.onError, error ?? value);
+  if (error !== undefined && !job.options.onError) runtime.backgroundError(error);
+  return { disposition: { action: 'continue' }, context: [], notifications: [] };
 }
 
 export function requestCompaction(runtime, store, options = {}) {
@@ -97,7 +126,7 @@ export function requestCompaction(runtime, store, options = {}) {
 // retained store; preserve factory provenance and never redirect another owner.
 export function compactionCallbackStore(runtime, store) {
   const callback = runtime.scope.getStore();
-  return callback?.compactionOrigin && callback.compactionOrigin === store?.controller && callback.state === store.state && callback.id === store.id
+  return callback?.compactionOrigin && callback.compactionOrigin === store?.controller && callback.state === store.state && (callback.compactionOriginId ?? callback.id) === store.id
     ? { ...callback, factory: store.factory } : store;
 }
 

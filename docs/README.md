@@ -52,6 +52,7 @@ source builds from planned publication channels.
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
 - [Optional Pi extension adapter (source preview)](pi-compatibility.md)
+- [Pi extension compatibility: release status and merge notes](pi-compat-release-status.md)
 - [Serve](experimental/octet-serve/README.md)
 
 ## Development

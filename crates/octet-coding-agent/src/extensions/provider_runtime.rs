@@ -34,7 +34,7 @@ impl ExecutableExtensions {
             if !model.endpoint.auth.is_configured() {
                 continue;
             }
-            let Some(view) = extension_model_view(&model) else {
+            let Some(view) = self.provider_runtime.pi_model_view(&model) else {
                 available_representable = false;
                 break;
             };
@@ -50,7 +50,7 @@ impl ExecutableExtensions {
                     break;
                 }
             };
-            let Some(view) = extension_model_view(&model) else {
+            let Some(view) = self.provider_runtime.pi_model_view(&model) else {
                 representable = false;
                 break;
             };
@@ -184,6 +184,25 @@ impl Default for ExtensionProviderRuntime {
 }
 
 impl ExtensionProviderRuntime {
+    /// Project explicit custom-stream facts only while the native route is
+    /// owned by its current live declaration. Built-in endpoints stay withheld.
+    pub(super) fn pi_model_view(
+        &self,
+        model: &Model,
+    ) -> Option<octet_agent::extension_process::ExtensionModelView> {
+        let mut view = extension_model_view(model)?;
+        if let Some((provider, id)) = model.spec.id.0.split_once('/') {
+            if let Some(route) = self.registry.resolve(provider, id) {
+                if extension_provider_endpoint_id(&route.owner, provider, id) == model.endpoint.id {
+                    if let Some(metadata) = &route.model_metadata {
+                        view.base_url = Some(metadata.base_url.clone());
+                    }
+                }
+            }
+        }
+        Some(view)
+    }
+
     pub(super) fn registry(&self) -> Arc<ExtensionProviderRegistry> {
         Arc::clone(&self.registry)
     }
@@ -390,18 +409,32 @@ impl ExtensionProviderRuntime {
                 }
                 let _ =
                     catalog.set_endpoint_label(endpoint_id.clone(), entry.provider.label.clone());
+                let mut capabilities =
+                    extension_provider_capabilities(&provider_model.capabilities);
+                if route
+                    .model_metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.input.iter().any(|input| input == "image"))
+                {
+                    capabilities.input_modalities = capabilities
+                        .input_modalities
+                        .with(octet_ai::Modality::Image);
+                }
                 let specification = ModelSpec {
                     id: model_id.clone(),
                     endpoint: endpoint_id.clone(),
                     api_name: provider_model.api_name.clone(),
                     display_name: provider_model.display_name.clone(),
                     protocol,
-                    capabilities: extension_provider_capabilities(&provider_model.capabilities),
+                    capabilities,
                     limits: ModelLimits {
                         context_window,
                         max_output_tokens,
                     },
-                    pricing: None,
+                    pricing: route
+                        .model_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.pricing.clone()),
                     // API 0.3 provider declarations carry no model presets or
                     // HTTP headers; never infer unnegotiated transport authority.
                     preset: Default::default(),

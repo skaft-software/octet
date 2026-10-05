@@ -98,6 +98,8 @@ mod contributions;
 mod host_requests;
 mod exec;
 pub use self::exec::ExtensionExecRequest;
+mod mcp;
+pub use self::mcp::ExtensionMcpRequest;
 mod lifecycle_events;
 mod manifest;
 mod negotiation;
@@ -114,7 +116,7 @@ mod reader;
 mod resource_paths;
 mod session_control;
 mod model_control;
-pub use self::model_control::ExtensionModelControl;
+pub use self::model_control::{ExtensionModelControl, PiProviderModelMetadata};
 use self::model_control::dispatch_model_control;
 pub use resource_paths::{
     ExtensionResourceDiscoveryReason, ExtensionResourcePaths, EXTENSION_FEATURE_RESOURCE_PATHS,
@@ -658,6 +660,7 @@ impl_owner_scoped_host_request!(TerminalAcquireRequest);
 impl_owner_scoped_host_request!(TerminalReleaseRequest);
 impl_owner_scoped_host_request!(ContextSnapshotRequest);
 impl_owner_scoped_host_request!(ExtensionExecRequest);
+impl_owner_scoped_host_request!(ExtensionMcpRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiOpenRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiCloseRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiChromeRequest);

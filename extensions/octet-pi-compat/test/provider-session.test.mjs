@@ -51,6 +51,9 @@ test('real tree callback carries its live leaf and append waits for a known nati
   peer.send({ jsonrpc: '2.0', id: call.id, result: { entry_id: 'durable-tree-state', head: 'durable-tree-state', successor: null } });
   assert.equal((await request.response).result.session_operation.action, 'continue'); await peer.close();
 });
+test('session mirrors without an extension namespace retain canonical messages', () => {
+  assert.equal(translateSessionEntries([entry])[0].message.content[0].text, 'kept text');
+});
 test('native mirrors preserve actual IDs/parents/time and only the initialized namespace private entry', () => {
   const own = { id: 'private', parent: 'kept', timestamp_unix_ms: 1235, value: { type: 'config', model: null, reasoning: null }, metadata: { extension_metadata: {
     actual: { provenance: { extension: 'actual' }, value: { entry_type: 'checkpoint', data: { version: 1 } } },

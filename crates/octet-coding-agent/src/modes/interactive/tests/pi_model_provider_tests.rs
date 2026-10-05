@@ -1,8 +1,176 @@
 //! Real App + adapter acceptance for model facts and in-place idle setters.
-//! Active request-boundary selection and providers remain separately gated.
+//! Active request-boundary selection and broader provider forms remain gated.
 #![cfg(unix)]
 use super::pi_contract_support::{command, pi_app};
 use super::*;
+
+const CUSTOM_PROVIDER: &str = r#"
+import { appendFileSync } from 'node:fs';
+export default pi => {
+  const config = text => ({baseUrl:'http://127.0.0.1:9/local/', api:'openai-completions', apiKey:'explicit-local-dummy',
+    models:[{id:'virtual-model',name:'Local Virtual',reasoning:false,input:['text','image'],cost:{input:1,output:2,cacheRead:0.1,cacheWrite:0.2},contextWindow:8192,maxTokens:1024}],
+    streamSimple: (model, context, options) => (async function* () {
+      // The logical native selection reaches exactly this process-owned
+      // streamer; its physical dispatch choice stays local to the extension.
+      appendFileSync(TRACE,JSON.stringify({kind:'dispatch',id:model.id,provider:model.provider,baseUrl:model.baseUrl,
+        explicitKey:options.apiKey==='explicit-local-dummy',system:context.systemPrompt,messages:context.messages})+'\n');
+      const partial={role:'assistant',model:'local-physical',api:'openai-completions',provider:'physical-local',content:[]};
+      yield {type:'start',partial};
+      if(context.systemPrompt==='cancel-native') {
+        await new Promise(resolve=>options.signal.addEventListener('abort',resolve,{once:true}));
+        appendFileSync(TRACE,JSON.stringify({kind:'cancelled',aborted:options.signal.aborted})+'\n');
+        return;
+      }
+      partial.content.push({type:'text',text:''});
+      yield {type:'text_start',contentIndex:0,partial};
+      partial.content[0].text=text; yield {type:'text_delta',contentIndex:0,delta:text,partial};
+      yield {type:'text_end',contentIndex:0,content:text,partial};
+      yield {type:'done',reason:'stop',message:{...partial,usage:{input:1,output:2,cacheRead:0,cacheWrite:0,totalTokens:3}}};
+    })()
+  });
+  pi.registerProvider('pi-local-provider',config('first-local-output'));
+  pi.registerCommand('select', {handler:async (_,ctx)=>{
+    const target=ctx.modelRegistry.getAvailable().find(m=>m.provider==='pi-local-provider'&&m.id==='virtual-model');
+    if(!target||!await pi.setModel(target)) throw new Error('native provider route not selectable');
+    appendFileSync(TRACE,JSON.stringify({kind:'selected',model:ctx.model})+'\n');
+  }});
+  pi.registerCommand('replace',{handler:()=>pi.registerProvider('pi-local-provider',config('replacement-local-output'))});
+  pi.registerCommand('remove',{handler:()=>pi.unregisterProvider('pi-local-provider')});
+};
+"#;
+
+fn pi_custom_provider_request() -> octet_ai::Request {
+    octet_ai::Request {
+        system: Some("local native request".into()),
+        messages: vec![octet_ai::Message::User(octet_ai::UserMessage {
+            content: vec![octet_ai::UserPart::Text("local fixture input".into())],
+        })],
+        tools: Vec::new(),
+        tool_choice: Default::default(),
+        max_output_tokens: Some(64),
+        temperature: None,
+        stop: Vec::new(),
+        reasoning: Default::default(),
+        reasoning_mode: Default::default(),
+        responses: None,
+        output_format: Default::default(),
+        output_modalities: Default::default(),
+        compatibility: Default::default(),
+        cache_retention: Default::default(),
+        session_id: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_custom_provider_registration_selection_replacement_and_stream_are_native() {
+    use futures_util::StreamExt;
+    use octet_ai::{AssistantPart, Modality};
+    eprintln!("Pi custom provider: starting real App/adapter");
+    let (directory, mut app) = pi_app(CUSTOM_PROVIDER);
+    eprintln!("Pi custom provider: initialized");
+    let mut shell = InteractiveShell::test_shell();
+    app.synchronize_extension_provider_catalog();
+    eprintln!("Pi custom provider: catalog synchronized");
+    request_extension_ui(&mut shell, &mut app);
+    let owner = app.agent.session().resource_owner_key();
+    command(&mut app, &mut shell, "select").await.unwrap();
+    eprintln!("Pi custom provider: selected");
+    assert_eq!(app.model.spec.api_name, "virtual-model");
+    assert_eq!(app.agent.model().spec.id, app.model.spec.id);
+    assert_eq!(app.agent.session().resource_owner_key(), owner);
+    assert!(app
+        .model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(Modality::Image));
+    assert_eq!(app.model.spec.pricing.as_ref().unwrap().input.0, 1_000_000);
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.client
+            .complete(&app.model, pi_custom_provider_request()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(&response.message.content[..], [AssistantPart::Text(text)] if text == "first-local-output")
+    );
+    assert_eq!(response.usage.total_tokens, 3);
+    eprintln!("Pi custom provider: first stream completed");
+    command(&mut app, &mut shell, "replace").await.unwrap();
+    app.synchronize_extension_provider_catalog();
+    command(&mut app, &mut shell, "select").await.unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.client
+            .complete(&app.model, pi_custom_provider_request()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(&response.message.content[..], [AssistantPart::Text(text)] if text == "replacement-local-output")
+    );
+    eprintln!("Pi custom provider: replacement stream completed");
+    let mut cancellation_request = pi_custom_provider_request();
+    cancellation_request.system = Some("cancel-native".into());
+    let mut active = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.client.stream(&app.model, cancellation_request),
+    )
+    .await
+    .expect("native provider stream admission timed out")
+    .unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(10), active.next())
+        .await
+        .expect("native provider start event timed out")
+        .unwrap()
+        .is_ok());
+    command(&mut app, &mut shell, "remove").await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), active.next())
+            .await
+            .expect("removed native route did not settle")
+            .unwrap()
+            .is_err(),
+        "removed native route cannot keep streaming"
+    );
+    app.synchronize_extension_provider_catalog();
+    assert!(!app
+        .catalog
+        .models()
+        .any(|model| model.api_name == "virtual-model"));
+    eprintln!("Pi custom provider: removal cancelled stream");
+    app.executable_extensions.shutdown().await;
+    eprintln!("Pi custom provider: shutdown complete");
+    let trace = std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap();
+    let values = trace
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let selected = values
+        .iter()
+        .find(|value| value["kind"] == "selected")
+        .unwrap();
+    assert_eq!(selected["model"]["provider"], "pi-local-provider");
+    assert_eq!(selected["model"]["baseUrl"], "http://127.0.0.1:9/local/");
+    assert_eq!(selected["model"]["cost"]["input"], 1);
+    assert!(!selected.to_string().contains("explicit-local-dummy"));
+    let dispatch = values
+        .iter()
+        .find(|value| value["kind"] == "dispatch")
+        .unwrap();
+    assert_eq!(dispatch["id"], "virtual-model");
+    assert_eq!(dispatch["explicitKey"], true);
+    assert_eq!(dispatch["system"], "local native request");
+    assert!(values.iter().any(|value| value["kind"] == "cancelled" && value["aborted"] == true),
+        "native removal must abort the existing custom callback, not just withdraw its catalog entry");
+    assert_eq!(
+        dispatch["messages"][0]["content"][0]["text"],
+        "local fixture input"
+    );
+}
 
 const FACTS: &str = r#"
 import { appendFileSync } from 'node:fs';

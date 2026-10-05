@@ -79,10 +79,17 @@ under its [MIT license](LICENSE.pi); no Pi session store or agent runtime is imp
   below. Registration capture never invokes resource discovery.
 - A shared in-process `pi.events.on/once/off/emit` bus preserving synchronous
   order, object/function identity and retained owner contexts across factories.
-- Text tool results, `details` retained in `metadata.pi_details`, explicit error
-  results, declared structured outputs, cancellation signals and text progress.
-  Raw Pi image/audio results and progress `details` cannot be represented and
-  are refused; they are never silently discarded.
+- Text/image tool results, `details` retained in `metadata.pi_details`, explicit
+  error results, structured outputs and cancellation signals. Images are published
+  through the verified native artifact service, never caller-selected host paths.
+  `onUpdate` snapshots preserve text/images/details/structured content in a bounded
+  native ephemeral result channel; late callbacks are ignored. Nested callbacks
+  use the same bounded request-local channel and never publish into the transcript.
+  Synchronous `ctx.tools` reads the actual frozen native composition catalog;
+  `ctx.executeTool` requests host-issued full outcomes through normal admission.
+  Nested recursion, aggregate usage conversion, parallel/exposure behavior, and
+  complete Pi execution-event parity remain unqualified; adapter tests alone do
+  not qualify this native integration.
 - Owner-bound `cwd`, `model` (truthful `model_view` conversion, including exact
   rate units), session name/ID, and optional host-supplied context usage, entries,
   branch/model/auth-status snapshots. Missing snapshots throw explicit
@@ -209,8 +216,12 @@ pending work, including callbacks. Instructions are at most 16 KiB UTF-8, with
 only newline/tab controls. Compaction hooks cannot request recursive compaction.
 
 The completion callback follows the real durable checkpoint and its after-hooks;
-it receives actual `summary` and `firstKeptEntryId`. Unavailable Pi metrics/details
-fail explicitly when read. A post-commit failure preserves the checkpoint and
+it receives actual `summary` and `firstKeptEntryId`. A requested completion/error
+callback runs in a fresh awaited host `hook/run` with the original owner, a new
+numeric request ID and a one-use native session-leaf grant. The settled origin ID
+is correlation only and is never append authority. The idle consumer commits
+callback appends before returning the terminal `session/compact` receipt.
+Unavailable Pi metrics/details fail explicitly when read. A post-commit failure preserves the checkpoint and
 must not be retried; cancellation is not rollback. Owner retirement, cancellation,
 transport loss and shutdown revoke pending work without retargeting another owner.
 The existing 30-second reverse deadline is unchanged. Headless/Serve and Native
@@ -232,6 +243,48 @@ The latest compaction service and model-turn Rust changes have not been compiled
 or tested while performance owns the heavy-build slot. Actual App/Agent captures
 remain required; `resource_paths/pi_app_tests.rs` supplies two ordinary nonempty factory
 integration tests without replacing the Agent or using a handwritten protocol peer.
+
+## Transient MCP registrations (source integration)
+
+`registerMcpServer`, `unregisterMcpServer` and `getMcpServers` are synchronous
+Pi 1.0.2 registry operations: validated cloned configs, factory ownership,
+replacement order, namespace collision checks and session-only state. Late
+changes deliver complete `mcp_servers_change` snapshots. Load-time registrations
+are read on `session_start`, without a fabricated change event. A registered Pi
+MCP event consumer takes over connection handling; no parallel native connection
+is made in that case.
+
+Without a custom consumer, negotiated API 0.4 `mcp_registration_v1` routes
+`mcp/replace {parent_request_id, resource_owner, servers}` to the **already
+enabled** resident `octet-mcp` BridgeManager. It does not enable/discover/install a
+server, write `mcp.json`, or use a JS transport. File-configured namespaces win.
+The native manager retains exact argv, sanitized environment, catalog epochs,
+policy checks and supervised cleanup. Transient calls require the matching
+host-issued bridge owner; originating owner retirement/crash/reload removes the
+overlay. Registration acknowledgement is not connection success: catalog
+publication and health still belong to the resident bridge.
+
+The current native connection profile is **explicit `exposure: "direct"` stdio**,
+with literal environment values, session-relative cwd and add/replace/remove.
+Configs outside that profile remain visible to Pi getters/custom consumers and
+produce redacted extension diagnostics rather than silently changing meaning.
+Remaining gaps: default codemode/deferred/hidden and per-tool exposure, server
+prompt descriptions, HTTP/OAuth/provider credentials, `${NAME}`/`!command` and
+home expansion, Pi tool namespace spelling (native stable hashed names remain),
+and progress-reset timeout semantics. Native package limits still apply (32
+adapter registrations; the manager's configured-server, argv, env and timeout
+ceilings). No real Rust App acceptance is claimed by adapter or local Python
+tests; ledger row 21 remains partial until the native path qualifies.
+The offline real-App acceptance module is `extensions/mcp_native_tests.rs` in
+the coding-agent crate (reviewed configure, native discovery, real Agent tools,
+policy, durable results, replacement/removal and owner cleanup). Run it after
+integrating the source patch with:
+
+```sh
+cargo test -p octet-coding-agent --lib --locked --offline pi_mcp_native -- --nocapture
+```
+
+No Cargo acceptance was run during this bounded adapter handoff.
 
 ## Resource discovery boundary
 

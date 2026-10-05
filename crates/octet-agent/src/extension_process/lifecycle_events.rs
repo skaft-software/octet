@@ -7,6 +7,17 @@ use super::*;
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum ExtensionEvent {
+    /// Transient registration update routed to the admitted resident MCP bridge.
+    McpRegistrationRequested {
+        /// Reverse request identity.
+        request_id: ExtensionRequestId,
+        /// Originating native process generation.
+        generation: u64,
+        /// Host-issued owner; never trusted from a registry descriptor.
+        owner: ExtensionResourceOwner,
+        /// Bounded sensitive snapshot; must not be logged.
+        request: ExtensionMcpRequest,
+    },
     /// Owner-fenced direct process request for the native frontend executor.
     ExecRequested {
         /// Reverse request ID.
@@ -249,6 +260,24 @@ pub enum ExtensionSessionLifecycleOperation {
     WaitForIdle,
     /// Pi `newSession`: create a durable session and switch to it.
     Create,
+    /// Pi newSession options; setup authority is minted at admission.
+    CreateWithOptions {
+        /// Optional inert parent-session file reference.
+        parent_session: Option<String>,
+        /// Original live request and owner that authorize setup.
+        setup_parent: Option<(u64, ExtensionResourceOwner)>,
+    },
+    /// One synchronous mutation or completion of the real new-session setup.
+    Setup {
+        /// Original request authorizing this setup continuation.
+        parent_request_id: u64,
+        /// Host-issued foreground process/session identity.
+        owner: ExtensionResourceOwner,
+        /// Admitted extension metadata namespace.
+        namespace: String,
+        /// Bounded journal mutation or setup completion.
+        mutation: serde_json::Value,
+    },
     /// Pi `fork`: fork the active session at an entry and switch to the fork.
     Fork {
         /// Entry to fork at; the active head when absent.
@@ -331,6 +360,7 @@ pub struct ExtensionSessionLifecycleRequest {
 }
 
 enum SessionLifecycleResponse {
+    Setup(oneshot::Sender<Result<serde_json::Value, String>>),
     SessionId(oneshot::Sender<Result<String, ExtensionSessionLifecycleError>>),
     Compaction(oneshot::Sender<Result<ExtensionSessionCompactionResult, String>>),
     ModelControl(oneshot::Sender<Result<serde_json::Value, String>>),
@@ -339,6 +369,7 @@ enum SessionLifecycleResponse {
 impl SessionLifecycleResponse {
     fn is_closed(&self) -> bool {
         match self {
+            Self::Setup(response) => response.is_closed(),
             Self::SessionId(response) => response.is_closed(),
             Self::Compaction(response) => response.is_closed(),
             Self::ModelControl(response) => response.is_closed(),
@@ -350,6 +381,7 @@ impl SessionLifecycleResponse {
             Self::SessionId(response) => {
                 let _ = response.send(Err(ExtensionSessionLifecycleError::Unavailable));
             }
+            Self::Setup(response) => { let _ = response.send(Err("session setup owner retired".into())); }
             Self::ModelControl(response) => {
                 let _ = response.send(Err("model selection owner retired".into()));
             }
@@ -364,6 +396,8 @@ impl SessionLifecycleResponse {
 
 #[derive(Clone)]
 pub(super) struct SessionCompactionAuthority {
+    pub(super) parent_request_id: u64,
+    pub(super) callback: bool,
     pub(super) owner: ExtensionResourceOwner,
     pub(super) issued: IssuedResourceOwners,
     pub(super) closed: Arc<AtomicBool>,
@@ -478,6 +512,12 @@ impl ExtensionSessionLifecycleService {
             CancellationToken::default(),
             None,
         )?;
+        Ok(receiver)
+    }
+
+    pub(super) fn try_submit_setup(&self, operation: ExtensionSessionLifecycleOperation) -> Result<oneshot::Receiver<Result<serde_json::Value, String>>, SessionLifecycleSubmitError> {
+        let (response, receiver) = oneshot::channel();
+        self.try_submit_request(operation, SessionLifecycleResponse::Setup(response), CancellationToken::default(), None)?;
         Ok(receiver)
     }
 
@@ -608,12 +648,36 @@ impl ExtensionSessionLifecycleRequest {
         self.authority.as_ref().map(|authority| &authority.owner)
     }
 
+    /// Original numeric request correlation, never append authority. The callback
+    /// receives a fresh host request and a separately issued native leaf grant.
+    pub fn compaction_callback_parent(&self) -> Option<u64> {
+        self.authority.as_ref().filter(|authority| authority.callback)
+            .map(|authority| authority.parent_request_id)
+    }
+
     /// Settle only after the durable, in-place model selection has succeeded.
     pub fn respond_model_control(self, result: Result<serde_json::Value, String>) {
         let SessionLifecycleResponse::ModelControl(response) = self.response else {
             unreachable!("model selections use their own response type")
         };
         let _ = response.send(result);
+    }
+
+    /// Settle a setup operation only after the actual native mutation.
+    pub fn respond_setup(self, result: Result<serde_json::Value, String>) {
+        let SessionLifecycleResponse::Setup(response) = self.response else { unreachable!("setup uses its own response type") };
+        let _ = response.send(result);
+    }
+
+    /// Deliver replacement cancellation/errors to either receipt shape.
+    pub fn respond_replacement(self, result: Result<String, ExtensionSessionLifecycleError>) {
+        if matches!(&self.response, SessionLifecycleResponse::Setup(_)) {
+            self.respond_setup(match result {
+                Ok(id) => Ok(serde_json::json!({"session_id":id})),
+                Err(ExtensionSessionLifecycleError::Cancelled) => Ok(serde_json::json!({"cancelled":true})),
+                Err(error) => Err(format!("session replacement failed: {error:?}")),
+            });
+        } else { self.respond(result); }
     }
 
     /// Delivers exactly one ordinary lifecycle outcome to the extension process.

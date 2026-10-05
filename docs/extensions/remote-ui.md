@@ -16,7 +16,11 @@ transport; it never starts Pi's agent or terminal runtime.
 Select API `0.4` and negotiate `remote_ui` only when offered in
 `initialize.params.protocol.optional_features`. APIs `0.1`–`0.3` do not acquire
 it. The host must configure the frontend wake/consumer binding before advertising
-it; unavailable or noninteractive frontends do not invent UI success. Existing
+it. A host with an already constructed native `InteractiveShell` supplies that
+consumer before process initialization; it need not infer the embedded terminal
+from its own stdout. Ordinary terminal bootstrap retains its detected-terminal
+gate. Supplying an inactive shell never falls back to another terminal, and
+noninteractive modes do not advertise this feature. Existing
 extension enablement, trust, and effect-policy gates still apply.
 
 Open/close requests carry a numeric `parent_request_id` and may carry a previously

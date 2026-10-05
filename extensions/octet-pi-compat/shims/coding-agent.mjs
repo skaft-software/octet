@@ -1,6 +1,6 @@
 // Host facades and pure utilities only; never import the Pi coding-agent runtime.
 export { calculateContextTokens, estimateTokens, buildSessionContext } from '../lib/context.mjs';
-export { CONFIG_DIR_NAME, getAgentDir, isToolCallEventType, isBashToolResult, isPowerShellToolResult, isReadToolResult, isEditToolResult,
+export { VERSION, CONFIG_DIR_NAME, getAgentDir, isToolCallEventType, isBashToolResult, isPowerShellToolResult, isReadToolResult, isEditToolResult,
   isWriteToolResult, isGrepToolResult, isFindToolResult, isLsToolResult, parseFrontmatter, stripFrontmatter,
   withFileMutationQueue, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES, formatSize, truncateHead, truncateTail,
   truncateLine, convertToLlm, serializeConversation } from '../lib/public-helpers.mjs';

@@ -542,7 +542,8 @@ async fn run_prompt(
                             }
                         }
                     }
-                    AgentEvent::RecoveredOutput { .. }
+                    AgentEvent::CustomMessageCommitted { .. }
+                    | AgentEvent::RecoveredOutput { .. }
                     | AgentEvent::SteeringDelivered { .. }
                     | AgentEvent::FollowUpDelivered { .. }
                     | AgentEvent::DelegationUpdated { .. }

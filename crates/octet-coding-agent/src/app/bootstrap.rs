@@ -7758,6 +7758,7 @@ fn configured_extensions_with_runtime_manager(
         runtime_manager,
         provider_runtime,
         resource_consumer,
+        None,
     );
     executable_extensions.set_telemetry(telemetry);
     startup_phase("extensions.activate");

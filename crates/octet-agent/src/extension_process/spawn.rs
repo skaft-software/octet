@@ -362,6 +362,7 @@ pub(super) async fn spawn_connection(
     ));
     artifact_guard.disarm();
     let offered_host_services = OfferedHostServices {
+        provider_proxy: config.provider_registry.is_some() && descriptor.manifest.contributes.providers && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         remote_ui: config.remote_ui.is_some(),
         provider_pipeline: config.provider_pipeline
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
@@ -393,6 +394,9 @@ pub(super) async fn spawn_connection(
         .iter()
         .map(|feature| (*feature).to_owned())
         .collect::<Vec<_>>();
+    if offered_host_services.provider_proxy {
+        optional_features.push("provider_proxy_v1".to_owned());
+    }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
         && descriptor
             .manifest
@@ -446,7 +450,10 @@ pub(super) async fn spawn_connection(
         && offered_host_services.session_lifecycle
     {
         optional_features.push(EXTENSION_FEATURE_SESSION_CONTROL_V1.to_owned());
-        if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 { optional_features.push("process_exec_v1".to_owned()); }
+        if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+            optional_features.push("process_exec_v1".to_owned());
+            optional_features.push("mcp_registration_v1".to_owned());
+        }
         if offered_host_services.session_compaction {
             optional_features.push(EXTENSION_FEATURE_SESSION_COMPACTION_V1.to_owned());
         }

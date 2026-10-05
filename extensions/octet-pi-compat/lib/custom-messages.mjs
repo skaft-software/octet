@@ -21,17 +21,29 @@ export function customMessageParams(message, options = {}) {
 export function userMessageParams(content, options = {}) {
   fields(options, ['deliverAs'], 'sendUserMessage options');
   const value = messageContent(content);
-  const text = typeof value === 'string' ? value : value.map(part => part.text).join('\n');
-  return { text: bounded(text, 'user message', 262144), ...delivery(options.deliverAs, ['steer', 'followUp']) };
+  return { ...(typeof value === 'string' ? { text: value } : { text: '', content: value }),
+    ...delivery(options.deliverAs, ['steer', 'followUp']) };
 }
 
 function messageContent(content) {
   if (typeof content === 'string') return bounded(content, 'message', 262144);
   if (!Array.isArray(content) || content.length > 256) invalid('message content must be a string or array');
-  let bytes = 0;
+  let bytes = 0, images = 0, imageBytes = 0;
   return content.map(part => {
+    if (part?.type === 'image') {
+      fields(part, ['type', 'data', 'mimeType'], 'message image part');
+      // The existing inline protocol frame remains the tighter transport bound.
+      const data = bounded(part.data, 'message image data', 786432);
+      if (!data || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
+          || Buffer.from(data, 'base64').toString('base64') !== data) invalid('message image must be canonical base64');
+      const mimeType = bounded(part.mimeType, 'message image MIME type', 256);
+      if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)) unsupported(`message image ${mimeType}`);
+      imageBytes += Buffer.from(data, 'base64').length;
+      if (++images > 8 || imageBytes > 20 * 1024 * 1024) invalid('message image batch exceeds bounds');
+      return { type: 'image', data, mimeType };
+    }
     fields(part, ['type', 'text'], 'message content part');
-    if (part.type !== 'text') unsupported(`message content ${part.type}`, 'image message content is not yet implemented');
+    if (part.type !== 'text') unsupported(`message content ${part.type}`);
     const text = bounded(part.text, 'message content text', 262144);
     bytes += Buffer.byteLength(text);
     if (bytes > 262144) invalid('message content exceeds bounds');

@@ -119,6 +119,23 @@ impl ExecutableExtensions {
             while receiver_budget > 0 {
                 let event = self.receivers[index].try_recv();
                 match event {
+                    Ok(ExtensionEvent::McpRegistrationRequested { request_id, generation, owner, request }) => {
+                        if let Some(process) = process.clone() {
+                            if host_request_owner_is_foreground(Some(&owner), self.resource_owner.as_deref())
+                                && process.is_running()
+                                && process.health_snapshot().generation == generation
+                                && owner.extension_instance_id == process.extension_instance_id()
+                                && owner.process_generation == generation
+                                && process.supports_feature("mcp_registration_v1")
+                            {
+                                self.start_mcp_request(process, request_id, generation, owner, request);
+                            } else {
+                                self.queue_host_request_response(process, request_id, generation,
+                                    ExtensionRequestOutcome::Failed(ExtensionRequestFailure::NotForegroundOwner,
+                                        "MCP registration owner is no longer foreground".into()));
+                            }
+                        }
+                    }
                     Ok(ExtensionEvent::ExecRequested { request_id, generation, owner, request }) => {
                         if let Some(process) = process.clone() {
                             if host_request_owner_is_foreground(Some(&owner), self.resource_owner.as_deref()) && process.is_running() && process.health_snapshot().generation == generation && owner.extension_instance_id == process.extension_instance_id() && owner.process_generation == generation && process.supports_feature("process_exec_v1") {

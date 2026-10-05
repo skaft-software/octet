@@ -277,6 +277,9 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 allowed.insert("input_transform_v1");
             }
+            if offered_host_services.provider_proxy {
+                allowed.insert("provider_proxy_v1");
+            }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
                 && offered_host_services.provider_pipeline
                 && manifest
@@ -304,6 +307,7 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 allowed.insert(EXTENSION_FEATURE_SESSION_CONTROL_V1);
                 allowed.insert("process_exec_v1");
+                allowed.insert("mcp_registration_v1");
                 if offered_host_services.session_compaction {
                     allowed.insert(EXTENSION_FEATURE_SESSION_COMPACTION_V1);
                 }
@@ -592,7 +596,7 @@ pub(super) fn negotiate_contributions_with_host_services(
             confirmations: manifest.contributes.confirmations,
             presentation: manifest.contributes.presentation,
             menu: manifest.contributes.menu,
-            providers: false,
+            providers: manifest.contributes.providers && protocol.supports("provider_proxy_v1"),
         },
         protocol,
     ))

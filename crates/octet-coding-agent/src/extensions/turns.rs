@@ -142,6 +142,15 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
+        self.transition_active_session_with_setup(session, model, reasoning, sessions, None);
+    }
+
+    pub fn transition_active_session_with_setup(
+        &mut self, session: &Session, model: &Model, reasoning: &ReasoningConfig,
+        sessions: &SessionStore,
+        setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
+    ) {
+        self.pending_session_setup = setup;
         self.retire_active_resources();
         self.cancel_session_hook_starts();
         if self.session_lifecycle_started {
@@ -191,10 +200,24 @@ impl ExecutableExtensions {
             view.resource_owner.is_none() || view.resource_owner.as_deref() == active_owner
         });
         self.refresh_host_state(session, model, reasoning, sessions);
-        self.start_session_lifecycle();
+        if self.pending_session_setup.is_none() { self.start_session_lifecycle(); }
         // The session changed in place, so requests admitted against the old
         // snapshot must not run against this replacement.
         self.activate_session_lifecycle_driver();
+    }
+
+    /// Validate every setup mutation against its original parent and live owner.
+    pub fn session_setup_is_current(&self, parent: u64, owner: &octet_agent::extension_process::ExtensionResourceOwner) -> bool {
+        self.resource_owner.as_deref() == Some(owner.session_id.as_str()) && self.pending_session_setup.as_ref().is_some_and(|(id, admitted)|
+            *id == parent && admitted.extension_instance_id == owner.extension_instance_id && admitted.process_generation == owner.process_generation)
+    }
+
+    /// Start only after setup writes are complete; return the exact process
+    /// handles whose deferred session_start callbacks the caller must await.
+    pub fn complete_session_setup(&mut self) -> Vec<(ExtensionProcess, String)> {
+        self.pending_session_setup = None;
+        self.start_session_lifecycle();
+        std::mem::take(&mut self.pending_session_hook_starts)
     }
 
     /// The launch already projected skills and session metadata for initialize.

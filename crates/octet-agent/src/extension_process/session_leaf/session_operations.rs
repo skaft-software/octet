@@ -99,6 +99,62 @@ impl SessionOperationInvocation for ProcessSessionOperation {
     }
 }
 
+impl ExtensionProcess {
+    /// Await the requested completion/error callback after compaction and its
+    /// after-hooks, with an invocation-local native append consumer.
+    pub async fn run_compaction_callback(
+        &self,
+        session: &mut Session,
+        owner: &ExtensionResourceOwner,
+        parent_request_id: u64,
+        result: &Result<ExtensionSessionCompactionResult, String>,
+        cancellation: CancellationToken,
+    ) -> Result<(), String> {
+        if self.current_context_for_resource_owner(session.resource_owner_key()).resource_owner.as_ref() != Some(owner) {
+            return Err("compaction callback owner retired".into());
+        }
+        let epoch = NEXT_SESSION_OPERATION.fetch_add(1, Ordering::Relaxed);
+        let binding = SessionLeafBinding {
+            activation_epoch: epoch,
+            owner: owner.clone(),
+            namespace: self.descriptor().manifest.name.clone(),
+            operation_id: format!("compaction-callback:{epoch}"),
+        };
+        let (consumer, producer, grant) = SessionLeafConsumer::new(session, binding.clone())
+            .map_err(|_| "compaction callback consumer refused")?;
+        let lease = self.bind_session_leaf(producer, consumer.revoker(), grant)
+            .and_then(|lease| lease.with_session_snapshot(session))
+            .map_err(|_| "compaction callback binding refused")?;
+        let payload = match result {
+            Ok(result) => serde_json::json!({"kind":"compaction_callback", "parent_request_id":parent_request_id, "result":result}),
+            Err(error) => serde_json::json!({"kind":"compaction_callback", "parent_request_id":parent_request_id, "error":error}),
+        };
+        let mut invocation = ProcessSessionOperation {
+            process: self.clone(), consumer, binding, hook: ExtensionHook::SessionCompact,
+            payload, lease: Some(lease),
+        };
+        let mut future = invocation.take_future();
+        loop {
+            invocation.validate_current(session)?;
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err("compaction callback cancelled".into()),
+                ready = invocation.ready() => {
+                    if !ready { return Err("compaction callback consumer retired".into()); }
+                    invocation.consume_next(session)?;
+                }
+                result = &mut future => {
+                    let decision = result?;
+                    if decision != SessionOperationDecision::Continue {
+                        return Err("compaction callback cannot replace committed work".into());
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
 impl SessionOperationHook for ExtensionProcess {
     fn begin(
         &self,

@@ -710,6 +710,38 @@ pub(super) fn decode_tool_call_output(
             native_output: Some(native),
         });
     }
+    decode_retained_tool_output(
+        &read_std_lock(&connection.protocol).clone(), &connection.artifact_store,
+        connection.generation, definition, artifact_owner, value,
+    )
+}
+
+/// Partial results share final-result artifact authority and detail budgets, but
+/// deliberately do not require a completed output matching the final schema.
+pub(super) fn decode_progress_output(
+    state: &ProtocolReadState,
+    artifact_owner: Option<&str>,
+    value: serde_json::Value,
+) -> Result<ToolOutput, ExtensionRuntimeError> {
+    let definition: ToolDefinition = serde_json::from_value(serde_json::json!({
+        "name":"partial_result", "description":"Partial result", "parameters":{}
+    })).expect("internal partial-result definition is valid");
+    let output = decode_retained_tool_output(
+        &read_std_lock(&state.protocol).clone(), &state.artifact_store,
+        state.generation, &definition, artifact_owner, value,
+    )?;
+    let is_error = output.is_error;
+    Ok(output.into_native()?.with_is_error(is_error))
+}
+
+fn decode_retained_tool_output(
+    protocol: &ExtensionNegotiatedProtocol,
+    artifact_store: &ArtifactStore,
+    generation: u64,
+    definition: &ToolDefinition,
+    artifact_owner: Option<&str>,
+    value: serde_json::Value,
+) -> Result<ToolCallOutput, ExtensionRuntimeError> {
     let wire: ToolCallOutputWire = serde_json::from_value(value).map_err(|error| {
         ExtensionRuntimeError::Protocol(format!(
             "invalid `{}` response for tool `{}`: {error}",
@@ -718,7 +750,6 @@ pub(super) fn decode_tool_call_output(
         ))
     })?;
     let structured_content = wire.structured_content.into_option();
-    let protocol = read_std_lock(&connection.protocol).clone();
     if protocol.version == EXTENSION_API_VERSION_0_1 {
         if structured_content
             .as_ref()
@@ -803,9 +834,8 @@ pub(super) fn decode_tool_call_output(
                         definition.name
                     ))
                 })?;
-                let resolved = connection
-                    .artifact_store
-                    .resolve_artifact_for_owner(connection.generation, artifact_owner, &artifact_id)
+                let resolved = artifact_store
+                    .resolve_artifact_for_owner(generation, artifact_owner, &artifact_id)
                     .map_err(|error| {
                         ExtensionRuntimeError::Protocol(format!(
                             "tool `{}` returned unavailable artifact: {error}",
@@ -861,9 +891,8 @@ pub(super) fn decode_tool_call_output(
                         definition.name
                     ))
                 })?;
-                let mut resolved = connection
-                    .artifact_store
-                    .resolve_artifact_for_owner(connection.generation, artifact_owner, &artifact_id)
+                let mut resolved = artifact_store
+                    .resolve_artifact_for_owner(generation, artifact_owner, &artifact_id)
                     .map_err(|error| {
                         ExtensionRuntimeError::Protocol(format!(
                             "tool `{}` returned unavailable artifact: {error}",

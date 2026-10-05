@@ -130,8 +130,9 @@ export async function toolContent(runtime, content, store) {
         mime_type: part.mimeType, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
         data: { encoding: 'base64', data: part.data },
       }, store);
-      if (typeof artifact?.id !== 'string') invalid('artifact publication acknowledgement');
-      parts.push({ type: 'image', artifact_id: artifact.id, mime_type: part.mimeType });
+      // The host acknowledges with { artifact_id } (PROTOCOL-REFERENCE: artifact/publish).
+      if (typeof artifact?.artifact_id !== 'string') invalid('artifact publication acknowledgement');
+      parts.push({ type: 'image', artifact_id: artifact.artifact_id, mime_type: part.mimeType });
     } else unsupported('tool content type', 'Pi supports text and image content');
   }
   return parts;
@@ -147,17 +148,25 @@ export function prepareRegisteredArguments(runtime, params, store) {
 
 function nativePart(part) {
   if (typeof part.Text === 'string') return { type: 'text', text: part.Text };
-  const image = part.Media?.Image;
-  if (!image || typeof image.source?.Inline !== 'string' || typeof image.media_type !== 'string') unsupported('nested tool media', 'Pi requires inline image data and MIME type');
-  return { type: 'image', data: image.source.Inline, mimeType: image.media_type };
+  // Native ImageSource::Inline serializes as standard base64 (octet-ai base64_bytes).
+  const image = part.Media?.Image, data = image?.source?.Inline;
+  if (!image || typeof data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || typeof image.media_type !== 'string') unsupported('nested tool media', 'Pi requires verified inline image bytes and MIME type');
+  return { type: 'image', data, mimeType: image.media_type };
+}
+function nativeResult(value) {
+  fields(value, ['content', 'is_error', 'metadata', 'structured_content', 'usage'], 'nested tool result');
+  if (!Array.isArray(value.content) || typeof value.is_error !== 'boolean') invalid('nested tool result');
+  if (value.usage != null) unsupported('nested tool usage', 'native aggregate usage has no lossless Pi tool-usage binding');
+  return { content: value.content.map(nativePart), details: value.metadata?.pi_details,
+    ...(value.structured_content === undefined ? {} : { structuredContent: value.structured_content }), isError: value.is_error };
 }
 function nativeOutcome(value) {
   fields(value, ['tool_call', 'content', 'is_error', 'metadata', 'structured_content', 'usage'], 'nested tool outcome');
-  if (!value.tool_call || !Array.isArray(value.content) || typeof value.is_error !== 'boolean') invalid('nested tool outcome');
-  if (value.usage != null) unsupported('nested tool usage', 'native aggregate usage has no lossless Pi tool-usage binding');
-  const result = { content: value.content.map(nativePart), details: value.metadata?.pi_details,
-    ...(value.structured_content === undefined ? {} : { structuredContent: value.structured_content }), isError: value.is_error };
-  return { toolCall: value.tool_call, result, isError: value.is_error };
+  fields(value.tool_call, ['id', 'name', 'arguments'], 'nested tool call');
+  bounded(value.tool_call.id, 'nested tool call id', 256);
+  bounded(value.tool_call.name, 'nested tool call name', 128);
+  const { tool_call, ...result } = value;
+  return { toolCall: tool_call, result: nativeResult(result), isError: value.is_error };
 }
 
 // Reuse the existing native composition sidecar contract, validating identity,
@@ -187,12 +196,14 @@ export async function createToolContext(runtime, params, store, context) {
   if (!runtime.features.has('tool_composition_v1')) return context;
   const executeTool = async (name, args, options = {}) => {
     bounded(name, 'nested tool name', 128); fields(options, ['signal', 'onUpdate'], 'executeTool options');
-    if (options.onUpdate !== undefined) unsupported('executeTool onUpdate', 'nested partial-result callbacks are not bound');
+    if (options.onUpdate !== undefined && typeof options.onUpdate !== 'function') invalid('executeTool onUpdate');
     const controller = new AbortController(), signals = [store.controller.signal, options.signal].filter(Boolean);
     const abort = event => controller.abort(event.target.reason);
     for (const signal of signals) { if (!(signal instanceof AbortSignal)) invalid('executeTool signal'); if (signal.aborted) controller.abort(signal.reason); else signal.addEventListener('abort', abort, { once: true }); }
     try {
-      const reply = await runtime.transport.request('composition/call', { parent_request_id: store.id, name, arguments: plainJSON(args, 'nested arguments', 131072), full_outcome: true }, { parent: store.id, signal: controller.signal });
+      const reply = await runtime.transport.request('composition/call', { parent_request_id: store.id, name, arguments: plainJSON(args, 'nested arguments', 131072), full_outcome: true,
+        ...(options.onUpdate === undefined ? {} : { updates: true }) }, { parent: store.id, signal: controller.signal,
+        ...(options.onUpdate === undefined ? {} : { onUpdate: value => runtime.scope.run(store, () => options.onUpdate(nativeResult(value))) }) });
       return nativeOutcome(await compositionReply(runtime, reply, 'value'));
     } finally { for (const signal of signals) signal.removeEventListener('abort', abort); }
   };
@@ -263,18 +274,27 @@ export function prepareToolLoadout(runtime, store, declared) {
 
 export async function executeRegisteredTool(runtime, params, store, context) {
   const tool = runtime.tools.get(params.name); if (!tool) invalid(`unknown tool ${params.name}`);
-  store.factory = tool.factory; let sequence = 0, settled = false;
+  store.factory = tool.factory; let sequence = 0, settled = false, queued = 0, tail = Promise.resolve();
   const update = runtime.features.has('request_progress') ? result => {
     if (settled) return; // Pi ignores callbacks made after execute settles.
     fields(result, ['content', 'details', 'structuredContent', 'isError'], 'tool update');
     store.controller.signal.throwIfAborted();
-    if (result.details !== undefined) unsupported('tool update details', 'the native progress sink has no partial-result details channel');
-    if (result.structuredContent !== undefined) unsupported('tool update structuredContent', 'the native progress sink has no partial-result structured channel');
-    const pending = toolContent(runtime, result.content, store).then(parts => {
-      if (parts.some(part => part.type !== 'text')) unsupported('tool update image', 'the native progress sink has no media channel');
+    if (queued >= 64) invalid('tool update queue exceeds 64 pending results');
+    // Snapshot immediately, then serialize artifact publication and delivery so
+    // a slower image update cannot overtake a later text/details update.
+    const snapshot = plainJSON(Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined)), 'tool update', 1048576);
+    if (snapshot.isError !== undefined && typeof snapshot.isError !== 'boolean') invalid('tool update isError must be boolean');
+    queued++;
+    const pending = tail.then(async () => {
+      store.controller.signal.throwIfAborted();
+      const content = await toolContent(runtime, snapshot.content, store);
       return runtime.transport.notify('$/progress', { request_id: store.id, sequence: ++sequence,
-        event: { type: 'status', message: parts.map(part => part.text).join('\n') } });
+        event: { type: 'partial_result', result: { content, is_error: snapshot.isError ?? false,
+          ...(snapshot.details === undefined ? {} : { metadata: { pi_details: plainJSON(snapshot.details, 'tool update details') } }),
+          ...(snapshot.structuredContent === undefined ? {} : { structured_content: plainJSON(snapshot.structuredContent, 'tool update structured content', 262144) }) } } });
     });
+    tail = pending;
+    pending.then(() => { queued--; }, () => { queued--; });
     runtime.track(pending, store);
   } : undefined;
   let result;

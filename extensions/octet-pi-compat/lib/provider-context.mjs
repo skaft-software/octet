@@ -62,7 +62,7 @@ function contentToPi(part, label) {
 // one-message conversion; they cannot claim the original native boundary.
 const projectionOrigins = new WeakMap();
 
-export function canonicalToPi(messages, calls = new Map()) {
+export function canonicalToPi(messages, calls = new Map(), { observation = false } = {}) {
   const output = [];
   for (const message of array(messages, 'canonical messages')) {
     const start = output.length;
@@ -75,7 +75,9 @@ export function canonicalToPi(messages, calls = new Map()) {
         if (kind === 'Text') return { type: 'text', text: text(value) };
         if (kind === 'ToolCall') {
           record(value, ['id', 'name', 'arguments_json', 'async', 'argument_error'], 'canonical tool call');
-          if (value.async || value.argument_error != null) unsupported('context tool call scheduling/argument metadata');
+          // Read-only lifecycle observations do not control native scheduling.
+          // Context rewrites still require its lossless replay provenance.
+          if ((!observation && value.async) || value.argument_error != null) unsupported('context tool call scheduling/argument metadata');
           const id = name(value.id), tool = name(value.name), args = JSON.parse(value.arguments_json);
           if (!args || typeof args !== 'object' || Array.isArray(args)) invalid('tool arguments object');
           calls.set(id, tool); return { type: 'toolCall', id, name: tool, arguments: args };

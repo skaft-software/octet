@@ -100,7 +100,7 @@ parentPort.on('message', packet => {
       forwarded.delete(packet.token); bytes -= size; return;
     }
     if (packet.kind === 'sync') {
-      if (sync || !['session/append_entry', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
+      if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
       sync = { id: packet.message.id, parent: packet.parent };
       sync.timer = setTimeout(cancelSync, packet.timeout);
       sync.watchdog = setTimeout(() => transport.fail(rpcError(-32002, 'session append outcome unknown: reply deadline')), packet.timeout + 29000);

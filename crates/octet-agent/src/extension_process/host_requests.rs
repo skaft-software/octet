@@ -409,8 +409,12 @@ pub struct SessionSendMessageRequest {
 pub struct SessionSendUserMessageRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
-    /// Bounded injected user message text.
+    /// Bounded injected user message text (legacy string form).
+    #[serde(default)]
     pub text: String,
+    /// Ordered text/image content, mutually exclusive with nonempty text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<crate::session::CustomMessageContent>,
     /// Pi `deliverAs` while a run is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliver_as: Option<ExtensionMessageDelivery>,
@@ -529,6 +533,9 @@ impl ExtensionModelView {
         }
         if let Some(name) = &self.name {
             validate_bounded_bytes("model name", name, MAX_EXTENSION_MODEL_FIELD_BYTES)?;
+        }
+        if let Some(url) = &self.base_url {
+            validate_bounded_bytes("provider base URL", url, 8192)?;
         }
         validate_bounded_bytes("model api", &self.api, MAX_EXTENSION_MODEL_API_BYTES)?;
         validate_bounded_bytes(
@@ -750,6 +757,9 @@ pub struct ExtensionModelView {
     /// Human-facing model name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Explicit credential-free URL declared by a custom-stream provider only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     /// Pi's wire API name for the model's protocol.
     pub api: String,
     /// Pi provider identity that owns the model's route.
@@ -824,6 +834,10 @@ pub struct ExtensionExecutionContext {
     /// Durable extension-resource owner. Frozen API `0.1` omits this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_owner: Option<ExtensionResourceOwner>,
+    /// Host-only marker for the resident MCP registration command. Ordinary
+    /// contexts omit it; no reverse request can supply this privilege marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_registration_owner: Option<ExtensionResourceOwner>,
     /// Current host state.
     pub host: ExtensionHostState,
 }

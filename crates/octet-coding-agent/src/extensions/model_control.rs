@@ -7,6 +7,9 @@ pub(crate) fn apply_idle_model_control(
     app: &mut App,
     operation: &ExtensionModelControl,
 ) -> Result<Value, String> {
+    // Dynamic declarations are acknowledged by the same native registry before
+    // this request. Reconcile them before resolving the selected route.
+    app.synchronize_extension_provider_catalog();
     let (model, level) = match operation {
         ExtensionModelControl::Model { provider, id } => {
             let model = app.catalog.models().find_map(|spec| {
@@ -37,7 +40,10 @@ pub(crate) fn apply_idle_model_control(
     let portable = pi_thinking_level(&model, &reasoning).ok_or_else(|| {
         "unsupported_feature: selected reasoning has no Pi thinking level".to_owned()
     })?;
-    let view = extension_model_view(&model)
+    let view = app
+        .executable_extensions
+        .provider_runtime
+        .pi_model_view(&model)
         .ok_or_else(|| "unsupported_feature: selected model has no bounded Pi view".to_owned())?;
     app.agent
         .select_model_at_idle(

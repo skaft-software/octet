@@ -21,3 +21,4 @@ hooks = []
 tool_renderers = []
 notifications = true
 confirmations = true
+providers = true

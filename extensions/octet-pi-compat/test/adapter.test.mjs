@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { mkdtemp, writeFile, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { launch, root, owner, host } from './helper.mjs';
+import { inspect, launch, root, owner, host } from './helper.mjs';
 import { RemoteTUI, safeLines } from '../lib/remote-ui.mjs';
 import { keyData, mouseData } from '../lib/keys.mjs';
 import { isKeyRelease, isKeyRepeat, matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
@@ -143,7 +143,9 @@ test('configure captures explicitly reviewed metadata only and never enables/tru
   assert.throws(() => configure({ output, extensions }), /--reviewed/);
   const result = configure({ output, extensions, reviewed: true }); assert.equal(result.registrations.tools[0].name, 'core');
   const { hookEvents } = await import('../lib/api.mjs');
-  const subscribedHooks = [...new Set(Object.values(hookEvents))].sort();
+  // Provider wire hooks are reserved only when the factory registered them.
+  const captured = inspect(extensions).hooks, wire = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']);
+  const subscribedHooks = [...new Set(Object.values(hookEvents))].filter(h => !wire.has(h) || captured.includes(h)).sort();
   assert.deepEqual(result.registrations.hooks, subscribedHooks);
   const manifest = await readFile(join(output, 'extension.toml'), 'utf8');
   assert.deepEqual(JSON.parse(manifest.match(/^hooks = (\[.*\])$/m)[1]), subscribedHooks);

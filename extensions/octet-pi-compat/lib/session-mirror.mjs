@@ -15,6 +15,11 @@ export function translateSessionEntries(entries, namespace) {
       if (!Number.isSafeInteger(entry.timestamp_unix_ms) || entry.timestamp_unix_ms < 0) invalid('session timestamp');
       base.timestamp = new Date(entry.timestamp_unix_ms).toISOString();
     }
+    const setup = namespace && entry.metadata?.extension_metadata?.[namespace];
+    if (setup && setup.provenance?.extension === namespace && setup.value?.pi_session_entry) {
+      const recorded = plainJSON(setup.value.pi_session_entry, 'setup session entry', 16384);
+      return { ...recorded, ...base };
+    }
     const custom = entry.metadata?.custom_message;
     if (custom) {
       return { ...base, type: 'custom_message', customType: bounded(custom.custom_type, 'customType', 128),

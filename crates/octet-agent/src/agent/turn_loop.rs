@@ -186,6 +186,7 @@ impl Agent {
         if self.model.responses_features().reasoning_effort_updates {
             persist_reasoning_selection(&mut self.session, &self.model, &self.reasoning)?;
         }
+        let custom_message_cursor = self.session.entries().len();
         let first_entry = input.append_to(&mut self.session, Some(prompt_metadata.clone()))?;
         if let Some(input) = observer_input.as_ref() {
             for observer in &self.extensions.observers {
@@ -315,6 +316,10 @@ impl Agent {
             let session = &mut *session_guard.session;
             let cache_warmer = &mut *session_guard.cache_warmer;
             let mut context_capacity = initial_capacity;
+            let mut custom_message_cursor = custom_message_cursor;
+            for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                notify_observers(&observers, &event); yield event;
+            }
             // Parity 1e.2 durability half: republish the partial assistant
             // turn a killed stream left behind. The frame journal is consumed
             // exactly once and only its user-visible text/reasoning progress is
@@ -422,6 +427,9 @@ impl Agent {
             let mut turn_attempt_succeeded = false;
 
             let mut reason: FinishReason = 'run: loop {
+                for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                    notify_observers(&observers, &event); yield event;
+                }
                 // Row 3.5: an iteration is one turn boundary. The previous
                 // turn is settled here (a `continue 'run` continuation is a
                 // completed turn, not an error) and the current one begins.
@@ -617,8 +625,11 @@ impl Agent {
                 }
 
                 if background_tools.is_empty() && !native.has_pending() {
-                    if let Err(error) = append_context_inputs(&mut pending_context, session) {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
                         break 'run FinishReason::Failed(error);
+                    }
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
                     }
                     context_capacity.invalidate();
                 }
@@ -667,12 +678,18 @@ impl Agent {
                         Some(&abort),
                     ).await {
                         ControlDelivery::Completed { event } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                             if let Some(ev) = event {
                                 notify_observers(&observers, &ev);
                                 yield ev;
                             }
                         }
                         ControlDelivery::Interrupted { event, finish } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                             if let Some(ev) = event {
                                 notify_observers(&observers, &ev);
                                 yield ev;
@@ -1264,7 +1281,12 @@ impl Agent {
                         }
                     }
                     match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
-                        Ok(Some(event)) => { notify_observers(&observers, &event); yield event; },
+                        Ok(Some(event)) => {
+                        for custom in committed_custom_message_events(session, &mut custom_message_cursor) {
+                            notify_observers(&observers, &custom); yield custom;
+                        }
+                        notify_observers(&observers, &event); yield event;
+                    },
                         Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
                     }
                     let Some(next) = next else { continue; };
@@ -1731,7 +1753,12 @@ impl Agent {
                 if let Err(error) = native.settle_successor(session, &model, assistant_entry) { break 'run FinishReason::Failed(error); }
                 native.completed_prefix();
                 match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
-                    Ok(Some(event)) => { notify_observers(&observers, &event); yield event; },
+                    Ok(Some(event)) => {
+                        for custom in committed_custom_message_events(session, &mut custom_message_cursor) {
+                            notify_observers(&observers, &custom); yield custom;
+                        }
+                        notify_observers(&observers, &event); yield event;
+                    },
                     Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
                 }
                 context_capacity.observe_assistant_response(session, &model, &turn_usage);
@@ -1855,8 +1882,11 @@ impl Agent {
                 }
 
                 if background_tools.is_empty() && calls.is_empty() && !native.has_pending() {
-                    if let Err(error) = append_context_inputs(&mut pending_context, session) {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
                         break 'run FinishReason::Failed(error);
+                    }
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
                     }
                     context_capacity.invalidate();
                 }
@@ -1969,12 +1999,18 @@ impl Agent {
                             Some(&abort),
                         ).await {
                             ControlDelivery::Completed { event } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                 if let Some(ev) = event {
                                     notify_observers(&observers, &ev);
                                     yield ev;
                                 }
                             }
                             ControlDelivery::Interrupted { event, finish } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                 if let Some(ev) = event {
                                     notify_observers(&observers, &ev);
                                     yield ev;
@@ -2148,12 +2184,18 @@ impl Agent {
                                     Some(&abort),
                                 ).await {
                                     ControlDelivery::Completed { event } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                         if let Some(ev) = event {
                                             notify_observers(&observers, &ev);
                                             yield ev;
                                         }
                                     }
                                     ControlDelivery::Interrupted { event, finish } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                         if let Some(ev) = event {
                                             notify_observers(&observers, &ev);
                                             yield ev;
@@ -2413,7 +2455,7 @@ impl Agent {
                             for (guard, entry) in
                                 wave_tool_guards.into_iter().zip(completed.iter())
                             {
-                                if let Ok(output) = &entry.execution.result {
+                                if let Some(output) = resolved_tool_output(&entry.execution.result) {
                                     if let Some(usage) = output.usage() {
                                         CompletionAttributes::usage(usage).record(&guard.span);
                                     }
@@ -2597,9 +2639,10 @@ impl Agent {
                                     resource_owner: &resource_owner,
                                     active_skills: &active_skills,
                                     registered_tools: &registered_tools,
-                                    progress: tool_progress,
+                                    progress: tool_progress.with_tool_call_identity(call.id.0.clone(), None),
                                     cancellation: abort.cancellation.clone(),
                                 };
+                                let original_hook_arguments = args.clone();
                                 let args = match transform_tool_arguments(
                                     &tool_call_hooks,
                                     tool.as_ref(),
@@ -2621,7 +2664,10 @@ impl Agent {
                                             .lock()
                                             .expect("policy decision slot is not poisoned") =
                                             Some(decision);
-                                        break 'dispatch Err(error);
+                                        break 'dispatch settle_tool_result_hooks(
+                                            &tool_call_hooks, &call.name, &original_hook_arguments,
+                                            Err(error), &tool_ctx,
+                                        ).await;
                                     }
                                 };
                                 let hook_arguments = args.clone();
@@ -2941,13 +2987,9 @@ impl Agent {
                     // nested calls. Persist their aggregate before another
                     // script is admitted; checkpoints alone are not the hard
                     // session-limit ledger.
-                    let usage_commit = if composition_tools.iter().any(|tool| {
-                        tool.definition().name == call.name && tool.nested_execution()
-                    }) {
-                        if let Some(usage) = result.as_ref().ok().and_then(|output| output.usage()).copied() {
-                            run_cost.add(None);
-                            session.record_tool_composition_usage(call.id.0.clone(), usage)
-                        } else { Ok(()) }
+                    let usage_commit = if let Some(usage) = resolved_tool_output(&result).and_then(ToolOutput::usage).copied() {
+                        run_cost.add(None);
+                        session.record_tool_composition_usage(call.id.0.clone(), usage)
                     } else { Ok(()) };
 
                     // Emit policy metadata before the durable result commit: a
@@ -2995,7 +3037,7 @@ impl Agent {
                     // that was not actually placed. A failed call has no
                     // result and never requests termination.
                     termination_requests
-                        .push(result.as_ref().map(ToolOutput::terminates_run).unwrap_or(false));
+                        .push(tool_result_terminates_run(&result));
                     let (message, accepted_media, text, is_error, details) = lower_tool_result(
                         call.id.clone(),
                         &result,
@@ -3085,10 +3127,7 @@ impl Agent {
                     // Pi's per-tool-result usage is billed turn accounting, not
                     // model context: it is added to the run's cumulative totals
                     // below and never to `turn_usage` or a context estimate.
-                    let tool_usage = result
-                        .as_ref()
-                        .ok()
-                        .and_then(|output| output.usage().copied());
+                    let tool_usage = resolved_tool_output(&result).and_then(ToolOutput::usage).copied();
                     let tool_failed = tool_execution_failed(&result);
                     let mut ev = AgentEvent::ToolFinished {
                         id: call.id.clone(),
@@ -3128,8 +3167,11 @@ impl Agent {
                 }
 
                 if background_tools.is_empty() && !native.has_pending() {
-                    if let Err(error) = append_context_inputs(&mut pending_context, session) {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
                         break 'run FinishReason::Failed(error);
+                    }
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
                     }
                     context_capacity.invalidate();
                 }
@@ -3198,9 +3240,15 @@ impl Agent {
                         match deliver_control_inputs(queued, ControlDeliveryKind::FollowUp, session,
                             &control_prompt_metadata, &mut terminal_gate_evidence, &observation, Some(&abort)).await {
                             ControlDelivery::Completed { event } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                 if let Some(ev) = event { notify_observers(&observers, &ev); yield ev; }
                             }
                             ControlDelivery::Interrupted { event, finish } => {
+                    for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                        notify_observers(&observers, &event); yield event;
+                    }
                                 if let Some(ev) = event { notify_observers(&observers, &ev); yield ev; }
                                 break 'run finish;
                             }
@@ -3257,8 +3305,11 @@ impl Agent {
                 if let Control::AppendCustom(input) = control { input.push_pending(&mut pending_context); }
             }
             // No terminal path silently drops an admitted context-only message.
-            if let Err(error) = append_context_inputs(&mut pending_context, session) {
+            if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
                 reason = FinishReason::Failed(error);
+            }
+            for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                notify_observers(&observers, &event); yield event;
             }
             pending_steer.clear();
             followups.clear();

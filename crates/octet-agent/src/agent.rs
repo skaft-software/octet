@@ -669,6 +669,13 @@ impl Agent {
         })
     }
 
+    /// Registers a passive event observer for subsequently driven runs.
+    /// It observes the same host-owned facts as ExtensionHost observers and
+    /// cannot mutate tool admission or results.
+    pub fn observe(&mut self, observer: impl EventObserver + 'static) {
+        self.extensions.observe(observer);
+    }
+
     /// Installs the explicit span observer used by runs of this agent.
     ///
     /// The context is inert by default. Spans observe boundaries only: they

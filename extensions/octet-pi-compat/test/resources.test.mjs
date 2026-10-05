@@ -223,7 +223,8 @@ test('resources: configure captures declarations without discovery, requires neg
   await writeFile(entry, `export default pi => { pi.on('resources_discover', () => { throw new Error('capture must not invoke discovery'); }); };\n`);
   const { registrations } = configure({ reviewed: true, output, extensions: [entry] });
   const { hookEvents } = await import('../lib/api.mjs');
-  const subscribedHooks = [...new Set(Object.values(hookEvents))].sort();
+  const wire = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']); // reserved only when a factory registered them
+  const subscribedHooks = [...new Set(Object.values(hookEvents))].filter(h => !wire.has(h)).sort();
   const subscribedFeatures = ['resource_paths_v1', 'session_entries', 'pipeline_hooks_v1'];
   assert.deepEqual(registrations.hooks, subscribedHooks); assert.deepEqual(registrations.events, ['resources_discover']);
   const manifest = await readFile(join(output, 'extension.toml'), 'utf8');

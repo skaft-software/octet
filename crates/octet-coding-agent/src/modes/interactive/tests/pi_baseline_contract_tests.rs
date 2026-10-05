@@ -88,7 +88,7 @@ export default pi => {
     let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
     assert_eq!(private_entries(&reopened, "shortcut-fired").len(), 1);
     assert_eq!(data["session"], private_entries(&reopened, "shortcut-prime")[0].1["session"]);
-    assert_eq!(data["cwd"], app.config.workspace.to_string_lossy().as_ref());
+    assert_eq!(data["cwd"], app.config.workspace.canonicalize().unwrap().to_string_lossy().as_ref());
     assert!(reopened.usage_records().is_empty());
 }
 
@@ -149,6 +149,12 @@ export default pi => {
   }});
 };
 "#);
+    // The estimate fixture's original JSONL lives outside SessionStore. Use
+    // the ordinary managed-session creation path so setSessionName exercises
+    // durable native metadata, rather than renaming an untracked test file.
+    let path = app.sessions.new_path("20261004-baseline");
+    app = rebuild_app(app, None, None, None, Some(SessionSelection::CreateNew(path))).unwrap();
+    app.executable_extensions.activate_session_lifecycle_driver();
     let mut shell = InteractiveShell::test_shell();
     command(&mut app, &mut shell, "write").await.unwrap();
     command(&mut app, &mut shell, "inspect").await.unwrap();
@@ -206,6 +212,9 @@ export default pi => {
     app.catalog.register_model((*model.spec).clone()).unwrap();
     app.config.compaction.keep_recent_tokens = 1;
     app = rebuild_app(app, Some(model), None, None, None).unwrap();
+    // Rebuild intentionally leaves lifecycle work inactive until the real
+    // interactive idle consumer takes ownership of the replacement App.
+    app.executable_extensions.activate_session_lifecycle_driver();
     seed_compaction_session(&mut app.agent);
     app.agent.set_compaction_token_mode(AgentCompactionMode::Local, 0.8, 1).unwrap();
     let target = app.agent.session().entries().iter().find(|entry|

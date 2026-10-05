@@ -338,9 +338,15 @@ pub(super) fn validate_host_request(
             }
         },
         HostRequestOperation::MessageInjection(injection) => match injection {
-            ExtensionMessageInjection::User { text, .. } => bounded_host_request_text(
+            ExtensionMessageInjection::User { text, content, .. } => {
+                if let Some(content) = content {
+                    if !text.is_empty() { return Err((ExtensionRequestFailure::InvalidRequest, "ambiguous user message content".into())); }
+                    content.validate().map_err(|error| (ExtensionRequestFailure::InvalidRequest, error.to_string()))?;
+                }
+                bounded_host_request_text(
                 "injected message text", text, MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
-            ),
+            )
+            },
             ExtensionMessageInjection::Custom { custom_type, content, display, details, .. } => {
                 octet_agent::session::CustomMessage { custom_type: custom_type.clone(), content: content.clone(), display: *display, details: details.clone() }
                     .validate().map_err(|error| (ExtensionRequestFailure::InvalidRequest, error.to_string()))

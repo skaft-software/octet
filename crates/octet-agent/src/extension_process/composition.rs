@@ -42,6 +42,8 @@ struct CompositionCallRequest {
     arguments: serde_json::Value,
     #[serde(default)]
     full_outcome: bool,
+    #[serde(default)]
+    updates: bool,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +60,7 @@ enum CompositionOperation {
         name: String,
         arguments: serde_json::Value,
         full_outcome: bool,
+        updates: bool,
     },
     Store {
         set: serde_json::Map<String, serde_json::Value>,
@@ -87,7 +90,13 @@ fn parse_composition_operation(
             if request.name.is_empty() || request.name.len() > 128 {
                 return Err("composition tool name must be 1..=128 UTF-8 bytes".into());
             }
+            if request.updates && !request.full_outcome {
+                return Err("composition updates require full_outcome".into());
+            }
             let arguments = request.arguments;
+            if !request.full_outcome && !arguments.is_object() {
+                return Err("composition arguments must be an object".into());
+            }
             validate_composition_json(&arguments, MAX_COMPOSITION_ARGUMENT_BYTES)?;
             Ok((
                 request.parent_request_id,
@@ -95,6 +104,7 @@ fn parse_composition_operation(
                     name: request.name,
                     arguments,
                     full_outcome: request.full_outcome,
+                    updates: request.updates,
                 },
             ))
         }
@@ -400,13 +410,15 @@ pub(super) fn dispatch_composition_request(
             children: Arc::clone(&children),
             id: id.clone(),
         };
+        let wants_updates = matches!(&operation, CompositionOperation::Call { updates: true, .. });
+        let (update_tx, mut update_rx) = mpsc::channel(64);
         let execute = async {
             match operation {
                 CompositionOperation::Context => {
                     service.context().await.map(CompositionResult::Context)
                 }
-                CompositionOperation::Call { name, arguments, full_outcome } => {
-                    if full_outcome { service.call_outcome(name, arguments, cancellation.clone()).await }
+                CompositionOperation::Call { name, arguments, full_outcome, updates: _ } => {
+                    if full_outcome { service.call_outcome_with_updates(name, arguments, cancellation.clone(), wants_updates.then_some(update_tx)).await }
                     else { service.call(name, arguments, cancellation.clone()).await }
                 }.map(CompositionResult::Call),
                 CompositionOperation::Store { set, delete } => service
@@ -430,13 +442,41 @@ pub(super) fn dispatch_composition_request(
             }
             execute.as_mut().poll(cx).map(Some)
         });
-        let result = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => { cancellation.cancel(); return; },
-            _ = child_response_settled(Arc::clone(&response_state)) => { cancellation.cancel(); return; },
-            _ = parent.settled() => { cancellation.cancel(); return; },
-            result = fenced => match result { Some(result) => result, None => return },
+        tokio::pin!(fenced);
+        let mut sequence = 0;
+        let result = loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => { cancellation.cancel(); return; },
+                _ = child_response_settled(Arc::clone(&response_state)) => { cancellation.cancel(); return; },
+                _ = parent.settled() => { cancellation.cancel(); return; },
+                result = &mut fenced => break match result { Some(result) => result, None => return },
+                Some(update) = update_rx.recv(), if wants_updates => {
+                    if !parent.is_live() || response_state.state.load(Ordering::Acquire) != CHILD_ACTIVE { return; }
+                    sequence += 1;
+                    if let Err(message) = queue_composition_update(&writer, max_message_bytes, &id, sequence, update) {
+                        // Report the bounded transport refusal on the actual reverse call;
+                        // dropping its scope cancels execution, not an invented tool result.
+                        let delivery = try_queue_child_response(&children, &id, &writer,
+                            max_message_bytes, composition_error(&id, -32602, message));
+                        if delivery.is_err() { settle_child_request(&children, &id); }
+                        return;
+                    }
+                },
+            }
         };
+        while let Ok(update) = update_rx.try_recv() {
+            if !parent.is_live() || cancellation.is_cancelled() || response_state.state.load(Ordering::Acquire) != CHILD_ACTIVE { return; }
+            sequence += 1;
+            if let Err(message) = queue_composition_update(&writer, max_message_bytes, &id, sequence, update) {
+                // Report the bounded transport refusal on the actual reverse call;
+                // dropping its scope cancels execution, not an invented tool result.
+                let delivery = try_queue_child_response(&children, &id, &writer,
+                    max_message_bytes, composition_error(&id, -32602, message));
+                if delivery.is_err() { settle_child_request(&children, &id); }
+                return;
+            }
+        }
         let encoded = match result {
             Ok(result) => {
                 let store = store.clone();
@@ -493,6 +533,14 @@ pub(super) fn dispatch_composition_request(
         }
     });
     Ok(())
+}
+
+fn queue_composition_update(writer: &mpsc::Sender<WriterFrame>, max_message_bytes: usize,
+    id: &ExtensionRequestId, sequence: u64, result: serde_json::Value) -> Result<(), String> {
+    let value = serde_json::json!({"jsonrpc":"2.0","method":"composition/update",
+        "params":{"request_id":id,"sequence":sequence,"result":result}});
+    let line = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+    queue_writer_line(writer, max_message_bytes, line)
 }
 
 /// File count and cleanup belong to one pending model-tool, not the process or

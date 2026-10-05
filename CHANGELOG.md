@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- Pi extension compatibility fixes. Pi tool images now work on the real host:
+  the adapter read the `artifact/publish` acknowledgement as `id`, but the host
+  returns `artifact_id`, so every published image (tool results, partial
+  updates, `tool_result` hook replacements) failed. Nested `ctx.executeTool`
+  results now decode inline images, which the host sends as base64. Adds Pi's
+  `agent_settled` event, fired once after `agent_end` when the owning run
+  settles. `configure.mjs` no longer reserves the provider wire hooks
+  (`before_provider_request`, `before_provider_headers`,
+  `after_provider_response`) unless a factory registered them: while
+  subscribed, the host refused every extension-registered provider.
+  67 of Pi 1.0.2's 79 example extensions now load and register
+  (63 before); see `docs/pi-extension-api.md` for the failures and deferrals.
+- Experimental, opt-in installed-Pi fallback for `octet-pi-compat`
+  (`--pi-runtime installed` or bridge `"pi_runtime": "installed"`). Imports the
+  shims lack resolve to the user's managed Pi 1.0.x install; Pi's built-in tool
+  factories run inside the extension process, outside Octet's per-command tool
+  policy. Side-effecting Pi runtimes (sessions, provider calls, credentials,
+  config writes, MCP) stay refused. Path A failures that need it report
+  `pi_compat_fallback_eligible`. No host prompt offers it yet.
 - Pi 1.0.2 extension API semantics (see `docs/pi-extension-api.md`): `tool_call`
   handlers run before policy admission and may replace arguments, which the
   host then authorizes and executes; `tool_result` handlers may replace the
