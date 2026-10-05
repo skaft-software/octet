@@ -1,10 +1,11 @@
 # Executable extensions
 
-Extensions add tools and bounded, host-shaped integrations to octet's fast,
-small coding host. They aren't a promise to run unchanged Pi extensions or to
-replace every host subsystem. Browse, MCP, web search and host-owned subagents
-stay supported integrations with their package-specific limits, and Serve stays
-a separate application.
+Extensions run as subprocesses over JSON-RPC. The optional Pi adapter replicates
+**Pi 1.0.2's public extension API** under this protocol; Pi defines its semantics.
+The [27-row ledger](pi-extension-api.md) records implementation and real Rust-host
+acceptance separately. Third-party package internals, the Pi CLI and child SDK
+are not compatibility targets. Rust owns agent execution, sessions, policy,
+persistence and the terminal; domain integrations remain optional.
 
 Write new process extensions against **API `0.4`**, the current working-tree
 version. It uses the feature-negotiated JSON-RPC wire retained from API `0.2`.

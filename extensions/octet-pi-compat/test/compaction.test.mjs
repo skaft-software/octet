@@ -38,7 +38,7 @@ async function setup(t, { offered = features, hold = () => false } = {}) {
   const metadata = runtime.metadata();
   await runtime.receive({ jsonrpc: '2.0', id: next++, method: 'initialize', params: {
     api_version: '0.4', workspace: '/host/workspace', host, extension: { name: 'test' },
-    contributes: { commands: metadata.commands.map(command => command.name), tools: [], hooks: [], tool_renderers: [] },
+    contributes: { commands: metadata.commands.map(command => command.name), tools: [], hooks: metadata.hooks, tool_renderers: [] },
     protocol: { version: '0.4', required_features: ['request_cancellation', 'content_parts'], optional_features: offered, limits: { max_concurrent_requests: 8 } },
   } });
   assert.ok(frames[0].result, JSON.stringify(frames[0]));

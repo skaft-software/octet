@@ -1181,7 +1181,7 @@ pub struct ShellExtensionUiLine {
     pub priority: i32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShellExtensionWorking {
     pub message: Option<String>,
     pub visible: Option<bool>,
@@ -1207,6 +1207,18 @@ struct ShellAutocompleteOverlay {
     revision: u64,
     prefix: String,
     items: Vec<ShellAutocompleteItem>,
+}
+
+/// An extension message delivered the way Pi's `sendMessage` and
+/// `sendUserMessage` deliver it.
+pub(crate) struct PendingExtensionMessage {
+    pub(crate) input: ComposedInput,
+    /// Delivery while a run is active.
+    pub(crate) delivery: octet_agent::extension_process::ExtensionMessageDelivery,
+    /// Whether an idle session starts a run for it.
+    pub(crate) wake: bool,
+    /// Context-only custom messages append at the end of a turn without continuation.
+    pub(crate) context_only: bool,
 }
 
 #[derive(Default)]
@@ -1300,6 +1312,10 @@ pub(crate) struct ShellState {
     /// Shared admission order across steering and follow-ups, independent of text.
     next_pending_sequence: u64,
     follow_up_ready: bool,
+    /// Extension messages waiting for the run or idle loop to deliver them.
+    extension_messages: std::collections::VecDeque<PendingExtensionMessage>,
+    /// Pi `nextTurn` messages, sent after the next user prompt.
+    next_turn_messages: Vec<ComposedInput>,
     /// Local drafts stay with their session across /new, /resume and extension switches.
     follow_up_session: Option<PathBuf>,
     parked_follow_ups:
@@ -1872,6 +1888,10 @@ impl ShellState {
     }
 
     fn push_block(&mut self, mut block: TranscriptBlock) -> usize {
+        if let TranscriptBlock::Reasoning(reasoning) = &mut block {
+            reasoning.extension_working = self.extension_ui.working.clone();
+            reasoning.hidden_thinking_label = self.extension_ui.hidden_thinking_label.clone();
+        }
         if let TranscriptBlock::Tool(panel) = &mut block {
             panel.image_rendering = self.image_rendering;
         }
@@ -4091,6 +4111,7 @@ impl InteractiveShell {
                 let delivered = messages.len().min(state.steering_queue.len());
                 Arc::make_mut(&mut state.steering_queue).drain(..delivered);
                 for display in steering_displays.expect("steering event projected above") {
+                    if display.is_empty() { continue; }
                     state.push_block(TranscriptBlock::User {
                         text: display,
                         model_lab,
@@ -4105,6 +4126,7 @@ impl InteractiveShell {
                 let model_lab = state.executing_model_lab();
                 let prompt_color = state.executing_prompt_color();
                 for message in messages {
+                    if message.is_empty() { continue; }
                     state.push_block(TranscriptBlock::User {
                         text: message.clone(),
                         model_lab,
@@ -4542,8 +4564,14 @@ impl InteractiveShell {
             }
             state.prompt_history_navigation = None;
         }
-        let prompt_color = self.state.borrow().prompt_color.clone();
-        self.push_local_submission(&composed.transcript_text, prompt_color);
+        if composed.parts.is_empty() && !composed.custom_messages.is_empty() {
+            for custom in &composed.custom_messages {
+                if custom.display { self.notice(format!("[{}]\n{}", custom.custom_type, custom.text())); }
+            }
+        } else {
+            let prompt_color = self.state.borrow().prompt_color.clone();
+            self.push_local_submission(&composed.transcript_text, prompt_color);
+        }
     }
 
     /// Add a local shell escape without implying that any model received it.
@@ -4606,6 +4634,26 @@ impl InteractiveShell {
             state.next_pending_sequence += 1;
             Arc::make_mut(&mut state.follow_up_queue)
                 .push_back(Arc::new(QueuedFollowUp { sequence, composed }));
+        }
+    }
+
+    /// Queue an extension message for the run or idle loop to deliver.
+    pub fn queue_extension_message(&mut self, message: PendingExtensionMessage) {
+        self.state.borrow_mut().extension_messages.push_back(message);
+    }
+
+    pub fn take_extension_messages(&mut self) -> Vec<PendingExtensionMessage> {
+        std::mem::take(&mut self.state.borrow_mut().extension_messages).into()
+    }
+
+    pub fn queue_next_turn(&mut self, input: ComposedInput) {
+        self.state.borrow_mut().next_turn_messages.push(input);
+    }
+
+    /// Append pending `nextTurn` messages after the user's prompt, as Pi does.
+    pub fn attach_next_turn(&mut self, composed: &mut ComposedInput) {
+        for message in std::mem::take(&mut self.state.borrow_mut().next_turn_messages) {
+            composed.custom_messages.extend(message.custom_messages);
         }
     }
 
@@ -5374,10 +5422,15 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         ui.remote = state.extension_ui.remote.clone();
         ui.remote_fullscreen_overlay = state.extension_ui.remote_fullscreen_overlay;
+        if let Some(chrome) = &ui.remote.chrome {
+            ui.working = Some(chrome.working.clone());
+            ui.hidden_thinking_label = chrome.hidden_thinking_label.clone();
+        }
         if state.extension_ui == ui {
             return false;
         }
         state.extension_ui = ui;
+        state.sync_extension_reasoning();
         true
     }
 
@@ -5401,7 +5454,11 @@ impl InteractiveShell {
             != projection.mount(Placement::Header)
             || (projection.mount(Placement::Header).is_some()
                 && state.extension_ui.remote.components != projection.components);
+        let chrome = projection.chrome.as_ref();
+        state.extension_ui.working = chrome.map(|chrome| chrome.working.clone());
+        state.extension_ui.hidden_thinking_label = chrome.and_then(|chrome| chrome.hidden_thinking_label.clone());
         state.extension_ui.remote = projection;
+        state.sync_extension_reasoning();
         let fullscreen = state.extension_ui.remote.mount(Placement::Fullscreen);
         let has_fullscreen = fullscreen.is_some();
         let capture = fullscreen.is_some_and(|mount| mount.mouse_capture);

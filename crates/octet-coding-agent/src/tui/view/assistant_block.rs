@@ -163,6 +163,8 @@ pub(super) struct AssistantBlock {
     /// Only the newest reasoning block advertises the global disclosure key.
     /// Older repeated hints become noise once a newer thinking event exists.
     pub(super) show_reasoning_hint: bool,
+    pub(super) extension_working: Option<super::ShellExtensionWorking>,
+    pub(super) hidden_thinking_label: Option<String>,
 }
 
 impl AssistantBlock {
@@ -180,6 +182,8 @@ impl AssistantBlock {
         metadata.reasoning_heading = self.reasoning_heading.clone();
         metadata.reasoning_heading_committed_blocks = self.reasoning_heading_committed_blocks;
         metadata.show_reasoning_hint = self.show_reasoning_hint;
+        metadata.extension_working = self.extension_working.clone();
+        metadata.hidden_thinking_label = self.hidden_thinking_label.clone();
         metadata
     }
 
@@ -254,6 +258,8 @@ impl AssistantBlock {
             reasoning_heading: None,
             reasoning_heading_committed_blocks: 0,
             show_reasoning_hint: true,
+            extension_working: None,
+            hidden_thinking_label: None,
         }
     }
 

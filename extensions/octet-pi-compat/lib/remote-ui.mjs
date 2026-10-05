@@ -2,6 +2,7 @@ import { bounded, fields, invalid, rpcError, strict, unsupported } from './error
 import { keyData, mouseData, reservedKey } from './keys.mjs';
 import { mouseModeIntent } from './transport.mjs';
 import { theme, keybindings } from './theme.mjs';
+import { getAutocompleteProvider } from './completions.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 
 const CURSOR_MARKER = '\x1b_pi:c\x07';
@@ -86,8 +87,8 @@ export class RemoteTUI {
     };
     this.requestRender();
     return {
-      hide: remove, setHidden: hidden => { entry.hidden = Boolean(hidden); if (hidden && this.focus === value) this.setFocus(entry.before); else if (!hidden && !options.nonCapturing) this.setFocus(value); this.requestRender(); },
-      isHidden: () => entry.hidden,
+      hide: remove, setHidden: hidden => { if (!this.overlays.includes(entry)) return; entry.hidden = Boolean(hidden); if (hidden && this.focus === value) this.setFocus(entry.before); else if (!hidden && !options.nonCapturing) this.setFocus(value); this.requestRender(); },
+      isHidden: () => entry.hidden || !this.overlays.includes(entry),
       focus: () => { if (this.overlays.includes(entry) && !entry.hidden) { this.overlays.splice(this.overlays.indexOf(entry), 1); this.overlays.push(entry); this.setFocus(value); } },
       unfocus: opts => { if (opts) fields(opts, ['target'], 'overlay.unfocus'); this.setFocus(opts ? opts.target : entry.before); },
       isFocused: () => this.focus === value,
@@ -102,7 +103,8 @@ export class RemoteTUI {
       if (result?.consume) return;
       if (result?.data !== undefined) data = result.data;
     }
-    const focus = this.topOverlay()?.component ?? this.focus;
+    const overlay = this.overlays.find(entry => entry.component === this.focus);
+    const focus = overlay && (overlay.hidden || overlay.options.visible && !overlay.options.visible(this.surface.columns, this.surface.rows)) ? null : this.focus;
     if (release && !focus?.wantsKeyRelease) return;
     focus?.handleInput?.(data);
     this.requestRender();
@@ -138,7 +140,7 @@ export class RemoteTUI {
 
 export class RemoteUI {
   constructor(runtime) { this.runtime = runtime; this.surfaces = new Map(); this.slots = new Map(); this.counter = 0; }
-  async mount(store, placement, title, factory, { done, reject, slot, overlayOptions } = {}) {
+  async mount(store, placement, title, factory, { done, reject, slot, overlayOptions, onHandle } = {}) {
     this.runtime.require('remote_ui'); this.runtime.assertOwner(store);
     if (this.surfaces.size >= 16) throw rpcError(-32012, 'bounds_exceeded remote surfaces');
     if (slot) await this.clearSlot(store, slot);
@@ -167,7 +169,7 @@ export class RemoteUI {
     surface.store = { ...store, surface };
     surface.tui = new RemoteTUI(surface);
     this.surfaces.set(surface.id, surface);
-    if (slot) { surface.slotKey = `${store.state.key}:${store.factory}:${slot}`; this.slots.set(surface.slotKey, surface); }
+    if (slot) { surface.slotKey = `${store.state.key}:${slot}`; this.slots.set(surface.slotKey, surface); }
     try {
       const geometry = await this.admit(surface, title, Boolean(store.mouseCapture));
       if (!geometry || surface.closed) return surface;
@@ -195,8 +197,11 @@ export class RemoteUI {
         if (surface.closed) return surface;
         if (!await this.admit(surface, title, surface.desiredMouseCapture) || surface.closed) return surface;
       }
-      if (overlayOptions) surface.tui.showOverlay(surface.component, overlayOptions);
-      else { surface.tui.children.push(surface.component); surface.tui.setFocus(surface.component); }
+      if (overlayOptions !== undefined) {
+        const resolved = typeof overlayOptions === 'function' ? this.runtime.scope.run(surface.store, overlayOptions) : overlayOptions;
+        const handle = surface.tui.showOverlay(surface.component, resolved ?? (surface.component.width ? { width: surface.component.width } : {}));
+        if (onHandle) this.runtime.scope.run(surface.store, () => onHandle(handle));
+      } else { surface.tui.children.push(surface.component); surface.tui.setFocus(surface.component); }
       if (placement === 'editor') await this.bindEditor(surface);
       if (surface.closed) return surface;
       surface.phase = 'active'; surface.ready = true;
@@ -245,6 +250,7 @@ export class RemoteUI {
     const { text } = await this.runtime.hostCall('composer/get', {}, store);
     if (surface.closed) return;
     store.state.host.composer_text = text; c.setText(text);
+    if (this.runtime.features.has('autocomplete')) c.setAutocompleteProvider?.(getAutocompleteProvider(this.runtime, store));
     const change = c.onChange, submit = c.onSubmit;
     const editor = surface.editor = { pending: 0, mutating: 0, inputRevision: 0, checkpointRevision: 0,
       retired: false, tail: Promise.resolve(), submissions: null };
@@ -393,7 +399,7 @@ export class RemoteUI {
     surface.resolve?.(value);
   }
   clearSlot(store, slot) {
-    const surface = this.slots.get(`${store.state.key}:${store.factory}:${slot}`);
+    const surface = this.slots.get(`${store.state.key}:${slot}`);
     return surface ? this.close(surface) : Promise.resolve();
   }
   async ownerEnded(state) { await Promise.all([...this.surfaces.values()].filter(s => s.store.state === state).map(s => this.close(s, undefined, true))); }

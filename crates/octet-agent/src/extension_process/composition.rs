@@ -39,7 +39,9 @@ struct CompositionContextRequest {
 struct CompositionCallRequest {
     parent_request_id: u64,
     name: String,
-    arguments: serde_json::Map<String, serde_json::Value>,
+    arguments: serde_json::Value,
+    #[serde(default)]
+    full_outcome: bool,
 }
 
 #[derive(Deserialize)]
@@ -55,6 +57,7 @@ enum CompositionOperation {
     Call {
         name: String,
         arguments: serde_json::Value,
+        full_outcome: bool,
     },
     Store {
         set: serde_json::Map<String, serde_json::Value>,
@@ -84,13 +87,14 @@ fn parse_composition_operation(
             if request.name.is_empty() || request.name.len() > 128 {
                 return Err("composition tool name must be 1..=128 UTF-8 bytes".into());
             }
-            let arguments = serde_json::Value::Object(request.arguments);
+            let arguments = request.arguments;
             validate_composition_json(&arguments, MAX_COMPOSITION_ARGUMENT_BYTES)?;
             Ok((
                 request.parent_request_id,
                 CompositionOperation::Call {
                     name: request.name,
                     arguments,
+                    full_outcome: request.full_outcome,
                 },
             ))
         }
@@ -401,10 +405,10 @@ pub(super) fn dispatch_composition_request(
                 CompositionOperation::Context => {
                     service.context().await.map(CompositionResult::Context)
                 }
-                CompositionOperation::Call { name, arguments } => service
-                    .call(name, arguments, cancellation.clone())
-                    .await
-                    .map(CompositionResult::Call),
+                CompositionOperation::Call { name, arguments, full_outcome } => {
+                    if full_outcome { service.call_outcome(name, arguments, cancellation.clone()).await }
+                    else { service.call(name, arguments, cancellation.clone()).await }
+                }.map(CompositionResult::Call),
                 CompositionOperation::Store { set, delete } => service
                     .store(set, delete)
                     .await

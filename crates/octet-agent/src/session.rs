@@ -448,6 +448,84 @@ fn valid_extension_metadata_value(
     }
 }
 
+/// Pi custom-message content, retained without joining distinct text blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CustomMessageContent {
+    /// A single string.
+    Text(String),
+    /// Ordered text blocks. Image blocks are currently refused at ingestion.
+    Parts(Vec<CustomMessagePart>),
+}
+
+/// A model-visible text block in a Pi custom message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CustomMessagePart {
+    /// Text content.
+    Text { /// Model-visible text.
+        text: String },
+}
+
+/// Typed durable Pi custom-message data. The canonical body is user content;
+/// these fields remain outside provider context, including `details`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomMessage {
+    /// Extension-defined message type.
+    pub custom_type: String,
+    /// Original string or ordered content blocks.
+    pub content: CustomMessageContent,
+    /// Whether this message appears in the transcript.
+    pub display: bool,
+    /// Inert extension data, never sent to the model. Explicit null is retained.
+    #[serde(default, deserialize_with = "deserialize_custom_message_details", skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+pub(crate) fn deserialize_custom_message_details<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where D: serde::Deserializer<'de> {
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+impl CustomMessage {
+    /// Validate bounded inert message data at the host ingestion boundary.
+    pub fn validate(&self) -> Result<(), SessionError> {
+        let valid_text = |text: &str| !text.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t'));
+        let text = self.text();
+        let parts_bounded = match &self.content {
+            CustomMessageContent::Text(_) => true,
+            CustomMessageContent::Parts(parts) => parts.len() <= 256,
+        };
+        if self.custom_type.len() > 128 || !valid_text(&self.custom_type)
+            || text.len() > 256 * 1024 || !valid_text(&text) || !parts_bounded
+            || self.details.as_ref().is_some_and(|value| serde_json::to_vec(value).map_or(true, |encoded| encoded.len() > 64 * 1024)) {
+            return Err(SessionError::Limit("custom message exceeds bounds or contains controls".into()));
+        }
+        Ok(())
+    }
+
+    /// Canonical model projection; display and details have no effect on it.
+    pub fn user_parts(&self) -> Vec<UserPart> {
+        match &self.content {
+            CustomMessageContent::Text(text) => vec![UserPart::Text(text.clone())],
+            CustomMessageContent::Parts(parts) => parts.iter().map(|part| match part {
+                CustomMessagePart::Text { text } => UserPart::Text(text.clone()),
+            }).collect(),
+        }
+    }
+
+    /// Human-readable content summary.
+    pub fn text(&self) -> String {
+        match &self.content {
+            CustomMessageContent::Text(text) => text.clone(),
+            CustomMessageContent::Parts(parts) => parts.iter().map(|part| match part {
+                CustomMessagePart::Text { text } => text.as_str(),
+            }).collect::<Vec<_>>().join("\n"),
+        }
+    }
+}
+
 /// Stable presentation metadata attached to a durable session entry.
 ///
 /// Values are inert data, never terminal escape sequences. In addition to the
@@ -456,6 +534,9 @@ fn valid_extension_metadata_value(
 /// visually immutable across model and theme changes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
+    /// Typed Pi custom-message entry alongside its canonical user projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_message: Option<CustomMessage>,
     /// Atomic provenance for a materialized native steering user message.
     /// The tuple is (operation identifier, prepared local submission id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -608,7 +689,8 @@ impl EntryMetadata {
             sanitized_extension_metadata.insert(namespace, entry_metadata);
         }
         self.extension_metadata = sanitized_extension_metadata;
-        (self.native_steering.is_some()
+        (self.custom_message.is_some()
+            || self.native_steering.is_some()
             || self.prompt_model.is_some()
             || self.prompt_model_source.is_some()
             || self.prompt_color.is_some()

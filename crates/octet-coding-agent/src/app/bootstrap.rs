@@ -8025,6 +8025,7 @@ fn build_app_with_consumer(
         &mut extensions,
         resource_consumer,
     );
+    executable_extensions.bind_tool_host(&extensions);
     let definitions = extensions.tool_definitions();
     let compact_model = config
         .compaction

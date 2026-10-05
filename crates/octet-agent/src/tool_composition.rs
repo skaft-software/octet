@@ -57,6 +57,11 @@ pub trait ToolCompositionService: Send + Sync {
         arguments: Value,
         cancellation: CancellationToken,
     ) -> Result<Value, ToolError>;
+    /// Runs through the same broker, returning the complete canonical outcome.
+    async fn call_outcome(&self, _name: String, _arguments: Value,
+        _cancellation: CancellationToken) -> Result<Value, ToolError> {
+        Err(ToolError::new("complete nested outcomes are unavailable"))
+    }
     /// Commits successful script writes to private, branch-scoped session state.
     async fn store(&self, set: Map<String, Value>, delete: Vec<String>) -> Result<(), ToolError>;
 }

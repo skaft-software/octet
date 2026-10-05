@@ -222,27 +222,35 @@ test('resources: configure captures declarations without discovery, requires neg
   const entry = join(dir, 'capture.ts');
   await writeFile(entry, `export default pi => { pi.on('resources_discover', () => { throw new Error('capture must not invoke discovery'); }); };\n`);
   const { registrations } = configure({ reviewed: true, output, extensions: [entry] });
-  assert.deepEqual(registrations.hooks, ['resources_discover']); assert.deepEqual(registrations.events, ['resources_discover']);
+  const { hookEvents } = await import('../lib/api.mjs');
+  const subscribedHooks = [...new Set(Object.values(hookEvents))].sort();
+  const subscribedFeatures = ['resource_paths_v1', 'session_entries', 'pipeline_hooks_v1'];
+  assert.deepEqual(registrations.hooks, subscribedHooks); assert.deepEqual(registrations.events, ['resources_discover']);
   const manifest = await readFile(join(output, 'extension.toml'), 'utf8');
-  assert.match(manifest, /hooks = \["resources_discover"\]/); assert.doesNotMatch(manifest, /resource_paths_v1|skillPaths|resource_paths\s*=/);
+  assert.deepEqual(JSON.parse(manifest.match(/^hooks = (\[.*\])$/m)[1]), subscribedHooks);
+  assert.doesNotMatch(manifest, /resource_paths_v1|skillPaths|resource_paths\s*=/);
   const config = join(output, 'bridge.json'), peer = launch(t, [entry], { config });
   await assert.rejects(peer.init([]), /unsupported_feature resource_paths_v1/); await peer.close();
   const configured = launch(t, [entry], { config });
-  assert.ok((await configured.init(['resource_paths_v1'])).protocol.features.includes('resource_paths_v1'));
+  configured.metadata.hooks = registrations.hooks;
+  assert.ok((await configured.init(subscribedFeatures)).protocol.features.includes('resource_paths_v1'));
   assert.equal(configured.seen.some(f => f.method === 'notification'), false, 'capture/initialize did not execute discovery');
   await configured.close();
   const missingHook = launch(t, [entry], { config });
   const mismatch = await missingHook.request('initialize', { api_version: '0.4', workspace: dir, contributes: {},
-    protocol: { version: '0.4', required_features: ['request_cancellation', 'content_parts'], optional_features: ['resource_paths_v1'] },
+    protocol: { version: '0.4', required_features: ['request_cancellation', 'content_parts'], optional_features: subscribedFeatures },
   }).response;
   assert.match(mismatch.error.message, /manifest hooks differs from reviewed registrations/); await missingHook.close();
   const old = JSON.parse(await readFile(config, 'utf8')); old.registrations.events = [];
   await writeFile(config, JSON.stringify(old));
   const changed = launch(t, [entry], { config });
-  await assert.rejects(changed.init(['resource_paths_v1']), /reviewed registration metadata changed/); await changed.close();
+  changed.metadata.hooks = registrations.hooks;
+  await assert.rejects(changed.init(subscribedFeatures), /reviewed registration metadata changed/); await changed.close();
   const undeclaredEntry = join(dir, 'none.ts'); await writeFile(undeclaredEntry, 'export default pi => {};\n');
-  const undeclared = launch(t, [undeclaredEntry]); await undeclared.init(['resource_paths_v1']);
-  assert.match((await discover(undeclared).response).error.message, /unknown hook resources_discover/); await undeclared.close();
+  configure({ reviewed: true, output, extensions: [undeclaredEntry], overwrite: true });
+  const undeclared = launch(t, [undeclaredEntry], { config });
+  undeclared.metadata.hooks = subscribedHooks; await undeclared.init(subscribedFeatures);
+  assert.deepEqual((await discover(undeclared).response).result, empty); await undeclared.close();
 });
 
 const repo = process.env.PI_REFERENCE_REPO;

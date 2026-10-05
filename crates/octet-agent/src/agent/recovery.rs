@@ -1058,7 +1058,8 @@ pub(super) async fn execute_recovery_call(
                 .unwrap_or_default();
             let (progress_tx, mut progress_rx) =
                 mpsc::channel::<ToolProgress>(PROGRESS_CHANNEL_CAPACITY);
-            let progress_sink = ToolProgressSink::live(progress_tx);
+            let progress_sink = ToolProgressSink::live(progress_tx)
+                .with_tool_call_identity(call.id.0.clone(), None);
             let mut context = ToolContext {
                 workspace: &sandbox.workspace,
                 sandbox,
@@ -1069,6 +1070,13 @@ pub(super) async fn execute_recovery_call(
                 progress: progress_sink,
                 cancellation: CancellationToken::default(),
             };
+            let args =
+                match transform_tool_arguments(hooks, tool.as_ref(), &call.name, args, &context)
+                    .await
+                {
+                    Ok(args) => args,
+                    Err(error) => return Ok(Err(error)),
+                };
             let effect = match tool.effect(&args, &context) {
                 Ok(effect) => effect,
                 Err(error) => return Ok(Err(error)),
@@ -1167,15 +1175,7 @@ pub(super) async fn execute_recovery_call(
                     }
                 }
             }
-            let (output, is_error) = match &result {
-                Ok(output) => (output.text.as_str(), output.is_error()),
-                Err(error) => (error.message.as_str(), true),
-            };
-            for hook in hooks {
-                hook.after_tool_call(&call.name, &hook_arguments, output, is_error, &context)
-                    .await;
-            }
-            result
+            settle_tool_result_hooks(hooks, &call.name, &hook_arguments, result, &context).await
         }
     };
     Ok(result)

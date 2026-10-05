@@ -2,7 +2,64 @@
 
 use super::*;
 
+/// Input accepted by Pi's early raw-input hook, before prompt composition.
+pub struct ExtensionInput {
+    pub text: String,
+    pub images: Option<Vec<octet_ai::Media>>,
+    pub transformed: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum InputEventResult {
+    Continue,
+    Handled,
+    Transform { text: String, #[serde(default)] images: Option<Vec<octet_ai::Media>> },
+}
+
 impl ExecutableExtensions {
+    /// Run ordered early input handlers. `None` means handled: do not persist
+    /// a prompt or start a provider request. Images omitted by a transform stay.
+    pub async fn process_input(
+        &mut self,
+        text: String,
+        images: Option<Vec<octet_ai::Media>>,
+        source: &str,
+        streaming_behavior: Option<&str>,
+    ) -> anyhow::Result<Option<ExtensionInput>> {
+        anyhow::ensure!(["interactive", "rpc", "extension"].contains(&source), "invalid input source");
+        anyhow::ensure!(streaming_behavior.is_none_or(|value| ["steer", "followUp"].contains(&value)), "invalid input delivery");
+        let mut input = ExtensionInput { text, images, transformed: false };
+        for process in &self.processes {
+            if !process.supports_feature("input_transform_v1")
+                || !process.contributions().hooks.contains(&ExtensionHook::BeforePrompt) {
+                continue;
+            }
+            let output = tokio::time::timeout(PROMPT_RPC_DEADLINE, process.run_hook(
+                ExtensionHook::BeforePrompt,
+                serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
+                    "source":source, "streaming_behavior":streaming_behavior}),
+                extension_execution_context(process, self.resource_owner.as_deref()),
+            )).await.map_err(|_| anyhow::anyhow!("extension input hook timed out"))??;
+            anyhow::ensure!(output.disposition == ExtensionHookDisposition::Continue, "extension input hook refused input");
+            let result = output.input_event.map(serde_json::from_value::<InputEventResult>).transpose()?;
+            match result.unwrap_or(InputEventResult::Continue) {
+                InputEventResult::Continue => {}
+                InputEventResult::Handled => return Ok(None),
+                InputEventResult::Transform { text, images } => {
+                    anyhow::ensure!(text.len() <= 262144 && !text.contains('\0'), "transformed input exceeds bounds");
+                    if let Some(images) = images {
+                        anyhow::ensure!(images.len() <= 256, "transformed input image count exceeds bounds");
+                        input.images = Some(images);
+                    }
+                    input.text = text;
+                    input.transformed = true;
+                }
+            }
+        }
+        Ok(Some(input))
+    }
+
     pub async fn begin_turn(&self) -> ExtensionTurnLifecycle {
         let sequence = NEXT_EXTENSION_RUN_ID.fetch_add(1, Ordering::Relaxed);
         let session_id = self
@@ -155,7 +212,7 @@ impl ExecutableExtensions {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let unchanged = initial.model.as_deref() == Some(&model.spec.id.0)
             && initial.model_view == extension_model_view(model)
-            && initial.reasoning == Some(serde_json::Value::String(format!("{reasoning:?}")));
+            && initial.reasoning == pi_thinking_level(model, reasoning).map(serde_json::Value::String);
         drop(initial);
         if !unchanged {
             self.refresh_host_state(session, model, reasoning, sessions);
@@ -169,7 +226,13 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
-        let state = host_state(session, model, reasoning, sessions);
+        let mut state = host_state(session, model, reasoning, sessions);
+        state.pi_models = self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pi_models
+            .clone();
         self.session_id = state.session_id.clone();
         for process in &self.processes {
             if process.descriptor().manifest.runtime.sharing
@@ -232,6 +295,7 @@ impl ExecutableExtensions {
     ) -> anyhow::Result<ExtensionPromptComposition> {
         let mut notifications = self.drain_events();
         let mut effective_system = base_system.to_owned();
+        let mut custom_messages = Vec::new();
         // Composition is transactional. Context already queued by an
         // extension remains pending until the complete composed prompt has
         // passed validation and can be submitted durably.
@@ -291,6 +355,10 @@ impl ExecutableExtensions {
                         "extension before_prompt system replacement exceeds bounds"
                     );
                     effective_system = system;
+                }
+                for message in output.custom_messages {
+                    message.validate()?;
+                    custom_messages.push(message);
                 }
                 let mut dropped = 0usize;
                 let mut last_error = None;
@@ -353,6 +421,7 @@ impl ExecutableExtensions {
         let (system, prompt) = compose_context(&effective_system, prompt, context.into_vec())?;
         notifications.extend(self.drain_events());
         Ok(ExtensionPromptComposition {
+            custom_messages,
             system,
             prompt,
             notifications,

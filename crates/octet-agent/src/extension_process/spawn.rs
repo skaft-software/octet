@@ -427,6 +427,11 @@ pub(super) async fn spawn_connection(
     {
         optional_features.push(EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1.to_owned());
     }
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor.manifest.contributes.hooks.contains(&ExtensionHook::BeforePrompt)
+    {
+        optional_features.push("input_transform_v1".to_owned());
+    }
     if offered_host_services.provider_pipeline
         && descriptor
             .manifest
@@ -441,6 +446,7 @@ pub(super) async fn spawn_connection(
         && offered_host_services.session_lifecycle
     {
         optional_features.push(EXTENSION_FEATURE_SESSION_CONTROL_V1.to_owned());
+        if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 { optional_features.push("process_exec_v1".to_owned()); }
         if offered_host_services.session_compaction {
             optional_features.push(EXTENSION_FEATURE_SESSION_COMPACTION_V1.to_owned());
         }

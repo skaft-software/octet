@@ -644,7 +644,8 @@ async fn prepare_prompt(
     }
     app.agent.set_system_prompt(composition.system);
     app.agent.set_prompt_display_text(Some(original.clone()));
-    let input = input_from_command(command, composition.prompt)?;
+    let mut input = input_from_command(command, composition.prompt)?;
+    input.custom_messages = composition.custom_messages;
     let mut display_input = input.clone();
     if let Some(InputPart::Text(text)) = display_input.parts.first_mut() {
         *text = original;

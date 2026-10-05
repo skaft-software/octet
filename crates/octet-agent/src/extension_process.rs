@@ -74,7 +74,7 @@ use crate::extension_provider::{
     ExtensionProviderOwner, ExtensionProviderRegistry, ExtensionProviderRegistryError,
 };
 use crate::extension_remote_ui::{
-    ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed, ExtensionRemoteUiFrame,
+    ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed, ExtensionRemoteUiFrame,
     ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey, ExtensionRemoteUiMouse,
     ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation, ExtensionRemoteUiResize,
     RemoteUiChildRequest, RemoteUiMailbox, EXTENSION_FEATURE_REMOTE_UI,
@@ -96,6 +96,8 @@ mod composition;
 mod connection;
 mod contributions;
 mod host_requests;
+mod exec;
+pub use self::exec::ExtensionExecRequest;
 mod lifecycle_events;
 mod manifest;
 mod negotiation;
@@ -111,6 +113,9 @@ mod provider_stream;
 mod reader;
 mod resource_paths;
 mod session_control;
+mod model_control;
+pub use self::model_control::ExtensionModelControl;
+use self::model_control::dispatch_model_control;
 pub use resource_paths::{
     ExtensionResourceDiscoveryReason, ExtensionResourcePaths, EXTENSION_FEATURE_RESOURCE_PATHS,
 };
@@ -155,6 +160,8 @@ pub use self::contributions::ExtensionEditorRequest;
 pub use self::contributions::ExtensionEditorResponse;
 pub use self::contributions::ExtensionHookDisposition;
 pub use self::contributions::ExtensionHookOutput;
+pub use self::contributions::ExtensionToolResultReplacement;
+pub use self::contributions::ExtensionMessageDelivery;
 pub use self::contributions::ExtensionMessageInjection;
 pub use self::contributions::ExtensionMessageLifecycle;
 pub use self::contributions::ExtensionMessageUpdated;
@@ -650,8 +657,10 @@ impl_owner_scoped_host_request!(ToolsSetActiveRequest);
 impl_owner_scoped_host_request!(TerminalAcquireRequest);
 impl_owner_scoped_host_request!(TerminalReleaseRequest);
 impl_owner_scoped_host_request!(ContextSnapshotRequest);
+impl_owner_scoped_host_request!(ExtensionExecRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiOpenRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiCloseRequest);
+impl_owner_scoped_host_request!(ExtensionRemoteUiChromeRequest);
 
 #[cfg(test)]
 mod tests;

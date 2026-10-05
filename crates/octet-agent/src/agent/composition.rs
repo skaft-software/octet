@@ -219,6 +219,7 @@ impl CompositionDispatcher {
         id: &octet_ai::ToolCallId,
         context: &ToolContext<'_>,
     ) -> (Result<ToolOutput, ToolError>, Option<ToolPolicyDecision>) {
+        let (result, mut decision) = async {
         let admission = reserve_tool_effect(
             &self.broker,
             tool,
@@ -264,7 +265,7 @@ impl CompositionDispatcher {
                 return (Err(error), Some(decision));
             }
         };
-        let mut decision = Some(policy_decision(
+        let decision = Some(policy_decision(
             &self.sandbox,
             &self.broker,
             Some(effect),
@@ -272,7 +273,7 @@ impl CompositionDispatcher {
             None,
         ));
         let result = tool.execute(arguments.clone(), context).await;
-        if let Ok(output) = &result {
+        if let Some(output) = resolved_tool_output(&result) {
             if let Some(usage) = output.usage() {
                 add_usage(
                     &mut self
@@ -283,14 +284,10 @@ impl CompositionDispatcher {
                 );
             }
         }
-        let (text, is_error) = match &result {
-            Ok(output) => (output.text.as_str(), output.is_error()),
-            Err(error) => (error.message.as_str(), true),
-        };
-        for hook in &self.hooks {
-            hook.after_tool_call(name, &arguments, text, is_error, context)
-                .await;
-        }
+        (result, decision)
+        }.await;
+        let result =
+            settle_tool_result_hooks(&self.hooks, name, &arguments, result, context).await;
         apply_execution_policy_denial(&mut decision, &result);
         (result, decision)
     }
@@ -301,6 +298,7 @@ impl CompositionDispatcher {
         arguments: Value,
         index: usize,
         cancellation: CancellationToken,
+        full_outcome: bool,
     ) -> Result<Value, ToolError> {
         self.ensure_live()?;
         let tool = self
@@ -308,6 +306,9 @@ impl CompositionDispatcher {
             .iter()
             .find(|tool| tool.definition().name == name)
             .ok_or_else(|| ToolError::new(format!("unknown or unavailable nested tool: {name}")))?;
+        let arguments = if tool.prepares_arguments() {
+            tool.prepare_arguments(arguments, &self.resource_owner, cancellation.clone()).await?
+        } else { arguments };
         // The same validator used by provider normalization; no parse/repair
         // fallback, no hand-written schema subset, and no hook before validation.
         match octet_ai::validate_tool_arguments(&name, &arguments, &self.definitions)
@@ -330,7 +331,10 @@ impl CompositionDispatcher {
             .expect("composition slots stay open");
         self.ensure_live()?;
         let (tx, mut rx) = mpsc::channel(PROGRESS_CHANNEL_CAPACITY);
-        let progress = ToolProgressSink::live(tx).for_nested_call();
+        let id = octet_ai::ToolCallId(if full_outcome { format!("{}/{index}", self.parent_id.0) }
+            else { format!("{}:{index}", self.nested_prefix) });
+        let progress = ToolProgressSink::live(tx).for_nested_call()
+            .with_tool_call_identity(id.0.clone(), Some(self.parent_id.0.clone()));
         let context = ToolContext {
             workspace: &self.sandbox.workspace,
             sandbox: &self.sandbox,
@@ -341,6 +345,11 @@ impl CompositionDispatcher {
             progress,
             cancellation,
         };
+        // Hooks mutate before scheduling as well as before effect admission:
+        // a mutation must not execute under a read lock chosen for old args.
+        let arguments = transform_tool_arguments(
+            &self.hooks, tool.as_ref(), &name, arguments, &context,
+        ).await?;
         // Fair reader/writer admission: at most four declared safe reads;
         // every mutation/extension/unknown effect excludes all other calls.
         // Reclassification and broker reservation still happen at dispatch.
@@ -358,7 +367,6 @@ impl CompositionDispatcher {
             read_guard = None;
         }
         self.ensure_live()?;
-        let id = octet_ai::ToolCallId(format!("{}:{index}", self.nested_prefix));
         self.record(ToolCompositionRecord::CallStarted {
             parent: self.parent_id.0.clone(),
             id: id.0.clone(),
@@ -373,7 +381,7 @@ impl CompositionDispatcher {
         self.progress.status(format!(
             "Nested tool {index}/{MAX_COMPOSITION_CALLS}: {name}"
         ));
-        let operation = self.dispatch(tool.as_ref(), &name, arguments, &id, &context);
+        let operation = self.dispatch(tool.as_ref(), &name, arguments.clone(), &id, &context);
         tokio::pin!(operation);
         let (result, decision) = loop {
             tokio::select! {
@@ -413,6 +421,21 @@ impl CompositionDispatcher {
             return Err(ToolError::new(
                 "nested durable-delivery result exceeds its private receipt limit",
             ));
+        }
+        if full_outcome {
+            let is_error = tool_execution_failed(&result);
+            let output = resolved_tool_output(&result);
+            let content = match output {
+                Some(output) => serde_json::to_value(output.content_parts()).map_err(|error| ToolError::new(error.to_string()))?,
+                None => serde_json::json!([{"Text": result.as_ref().err().expect("failed result has an error").message}]),
+            };
+            return Ok(serde_json::json!({
+                "tool_call": {"id":id.0,"name":name,"arguments":arguments},
+                "content":content,"is_error":is_error,
+                "metadata":output.and_then(|output|output.metadata()),
+                "structured_content":output.and_then(|output|output.structured_content()),
+                "usage":output.and_then(|output|output.usage()),
+            }));
         }
         let output = result?;
         if output.is_error() {
@@ -467,10 +490,30 @@ impl ToolCompositionService for CompositionDispatcher {
             _ = self.stop.cancelled() => Err(cancelled_tool_error()),
             _ = cancellation.cancelled() => Err(cancelled_tool_error()),
             _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
-            result = self.execute_call(name, arguments, index, local.0.clone()) => result,
+            result = self.execute_call(name, arguments, index, local.0.clone(), false) => result,
         }
     }
 
+    async fn call_outcome(&self, name: String, arguments: Value, cancellation: CancellationToken) -> Result<Value, ToolError> {
+        let index = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
+        let id = format!("{}/{index}", self.parent_id.0);
+        let original_name = name.clone(); let original_arguments = arguments.clone();
+        let local = CallCancellation(CancellationToken::default());
+        let result = if index > MAX_COMPOSITION_CALLS { Err(ToolError::new("composition exceeded 256 nested calls")) }
+        else { tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(cancelled_tool_error()),
+            _ = self.stop.cancelled() => Err(cancelled_tool_error()),
+            _ = cancellation.cancelled() => Err(cancelled_tool_error()),
+            _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
+            result = self.execute_call(name, arguments, index, local.0.clone(), true) => result,
+        }};
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => Ok(serde_json::json!({"tool_call":{"id":id,"name":original_name,"arguments":original_arguments},
+                "content":[{"Text":error.message}],"is_error":true,"metadata":null,"structured_content":null,"usage":null})),
+        }
+    }
     async fn store(&self, set: Map<String, Value>, delete: Vec<String>) -> Result<(), ToolError> {
         self.ensure_live()?;
         validate_store_writes(&set, &delete)?;

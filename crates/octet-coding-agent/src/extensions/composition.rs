@@ -120,6 +120,7 @@ pub(super) fn clip_lifecycle_reason(reason: &str, limit: usize) -> String {
 }
 
 pub struct ExtensionPromptComposition {
+    pub custom_messages: Vec<octet_agent::session::CustomMessage>,
     pub system: String,
     pub prompt: String,
     pub notifications: Vec<String>,
@@ -407,7 +408,8 @@ pub(super) fn host_state(
         session_name,
         model: Some(model.spec.id.0.clone()),
         model_view: extension_model_view(model),
-        reasoning: Some(serde_json::Value::String(format!("{reasoning:?}"))),
+        reasoning: pi_thinking_level(model, reasoning).map(serde_json::Value::String),
+        pi_models: None,
         active_skills,
     }
 }
@@ -478,7 +480,7 @@ pub(super) fn extension_model_view(
         .clone()
         .or_else(|| octet_ai::model_metadata::model_display_name(&spec.id.0))
         .unwrap_or_else(|| spec.api_name.clone());
-    if !model_field_fits(&spec.id.0) || !model_field_fits(&provider) || !model_field_fits(&name) {
+    if !model_field_fits(&spec.api_name) || !model_field_fits(&provider) || !model_field_fits(&name) {
         return None;
     }
     let mut input = vec!["text".to_owned()];
@@ -490,7 +492,7 @@ pub(super) fn extension_model_view(
         input.push("image".to_owned());
     }
     Some(octet_agent::extension_process::ExtensionModelView {
-        id: spec.id.0.clone(),
+        id: spec.api_name.clone(),
         name: Some(name),
         api: pi_api_name(&spec.protocol).to_owned(),
         provider,

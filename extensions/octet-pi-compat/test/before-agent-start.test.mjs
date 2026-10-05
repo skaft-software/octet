@@ -12,7 +12,10 @@ test('before_agent_start maps actual base and ordered replacements, including em
   assert.deepEqual((await peer.request('hook/run', params(peer, 'chain')).response).result, { disposition: { action: 'continue' }, context: [], notifications: [], system_prompt: 'real base\nfirst\nsecond' });
   assert.equal((await peer.request('hook/run', params(peer, 'empty')).response).result.system_prompt, '');
   assert.equal(Object.hasOwn((await peer.request('hook/run', params(peer, 'unchanged')).response).result, 'system_prompt'), false);
-  for (const prompt of ['unsupported', 'nul']) assert.ok((await peer.request('hook/run', params(peer, prompt)).response).error);
+  const custom = await peer.request('hook/run', params(peer, 'unsupported')).response;
+  assert.ok(!custom.error, JSON.stringify(custom.error));
+  assert.deepEqual(custom.result.custom_messages, [{ custom_type: 'not-bound', content: 'not dropped', display: false }]);
+  assert.ok((await peer.request('hook/run', params(peer, 'nul')).response).error);
   await peer.close();
 });
 test('before_agent_start requires native feature and configure records actual system_prompt permission', async t => {

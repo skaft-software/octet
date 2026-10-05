@@ -99,6 +99,7 @@ use crate::tui::view::{
 
 mod admission;
 mod commands;
+mod exec;
 mod composition;
 mod confirmation;
 mod event_drain;
@@ -108,6 +109,7 @@ mod lifecycle;
 mod notifications;
 mod post_mutation;
 mod provider_runtime;
+pub(crate) mod model_control;
 mod runtime_state;
 mod status;
 mod summaries;
@@ -360,6 +362,9 @@ pub struct ExecutableExtensions {
     pending_editor_requests: VecDeque<PendingEditorRequest>,
     pending_host_requests: VecDeque<PendingHostRequest>,
     pending_session_requests: VecDeque<PendingHostRequest>,
+    // The actual host registry handle, not an adapter-owned tool mirror. Its
+    // interior dynamic registry remains usable while the Agent is borrowed.
+    tool_host: Option<octet_agent::ExtensionHost>,
     /// The one foreground terminal grant the host can cede, or `None` while the
     /// host still owns its own raw terminal.
     terminal_arbiter: TerminalGrantArbiter,
@@ -444,6 +449,7 @@ impl Default for ExecutableExtensions {
             pending_editor_requests: VecDeque::new(),
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),
+            tool_host: None,
             terminal_arbiter: TerminalGrantArbiter::default(),
             remote_ui: remote_ui::RemoteUi::default(),
             remote_ui_wake: None,

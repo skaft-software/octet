@@ -178,5 +178,39 @@ pub(super) fn refresh_fullscreen_overlay(state: &mut ShellState) {
     }
 }
 
+pub(super) fn window_title(state: &ShellState) -> String {
+    state.extension_ui.remote.chrome.as_ref().and_then(|chrome| chrome.title.clone())
+        .unwrap_or_else(|| state.session_name.as_deref().map_or_else(|| "octet".into(), |name| format!("octet · {name}")))
+}
+
+impl super::InteractiveShell {
+    pub(crate) fn extension_window_title(&self) -> String { window_title(&self.state.borrow()) }
+}
+
+impl ShellState {
+    pub(super) fn sync_extension_reasoning(&mut self) {
+        let mut changed = Vec::new();
+        for (index, block) in self.transcript.iter_mut().enumerate() {
+            if let super::TranscriptBlock::Reasoning(reasoning) = block {
+                if reasoning.extension_working != self.extension_ui.working || reasoning.hidden_thinking_label != self.extension_ui.hidden_thinking_label {
+                    reasoning.extension_working = self.extension_ui.working.clone();
+                    reasoning.hidden_thinking_label = self.extension_ui.hidden_thinking_label.clone();
+                    changed.push(index);
+                }
+            }
+        }
+        for index in changed { self.touch_block(index); }
+    }
+}
+
+pub(super) fn working_frame(reasoning: &super::assistant_block::AssistantBlock) -> Option<String> {
+    let working = reasoning.extension_working.as_ref()?;
+    let frames = working.frames.as_ref()?;
+    if frames.is_empty() { return None; }
+    let age = reasoning.activity_started_at.map_or(0, |start| start.elapsed().as_millis());
+    let interval = working.interval_ms.filter(|value| *value > 0).unwrap_or(80);
+    Some(frames[((age / u128::from(interval)) % frames.len() as u128) as usize].clone())
+}
+
 #[cfg(test)]
 mod tests;

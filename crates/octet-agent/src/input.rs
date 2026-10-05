@@ -14,6 +14,8 @@ use octet_ai::{Media, UserPart};
 pub struct UserInput {
     /// Ordered content parts.
     pub parts: Vec<InputPart>,
+    /// Custom messages appended as independent entries after the user prompt.
+    pub custom_messages: Vec<crate::session::CustomMessage>,
 }
 
 /// One part of a [`UserInput`].
@@ -29,6 +31,7 @@ impl From<String> for UserInput {
     fn from(text: String) -> Self {
         Self {
             parts: vec![InputPart::Text(text)],
+            custom_messages: Vec::new(),
         }
     }
 }
@@ -41,11 +44,38 @@ impl From<&str> for UserInput {
 
 impl From<Vec<InputPart>> for UserInput {
     fn from(parts: Vec<InputPart>) -> Self {
-        Self { parts }
+        Self { parts, custom_messages: Vec::new() }
     }
 }
 
 impl UserInput {
+    /// A custom-only prompt, without a substitute user message.
+    pub fn from_custom(message: crate::session::CustomMessage) -> Self {
+        Self { parts: Vec::new(), custom_messages: vec![message] }
+    }
+
+    /// Persist the prompt and each custom message independently, in Pi order.
+    /// Returns the first entry, which is also the run's checkpoint prompt.
+    pub fn append_to(
+        self,
+        session: &mut crate::session::Session,
+        metadata: Option<crate::session::EntryMetadata>,
+    ) -> Result<crate::session::EntryId, crate::session::SessionError> {
+        for message in &self.custom_messages { message.validate()?; }
+        let mut first = None;
+        if !self.parts.is_empty() || self.custom_messages.is_empty() {
+            let message = octet_ai::Message::User(octet_ai::UserMessage {
+                content: UserInput::from(self.parts).into_user_parts(),
+            });
+            first = Some(session.append_with_metadata(crate::session::EntryValue::Message(message), metadata.clone())?);
+        }
+        for message in self.custom_messages {
+            let id = session.append_custom_message(message, metadata.clone())?;
+            if first.is_none() { first = Some(id); }
+        }
+        Ok(first.expect("input always appends at least one entry"))
+    }
+
     /// Human-readable single-line summary: text parts joined, media parts as
     /// `[image]` / `[audio]`. Used for steering-delivery events and logs.
     pub fn text_summary(&self) -> String {
@@ -57,10 +87,22 @@ impl UserInput {
                 InputPart::Media(Media::Audio(_)) => pieces.push("[audio]".into()),
             }
         }
+        pieces.extend(self.custom_messages.iter().map(|message| message.text()));
         pieces.join(" ")
     }
 
-    /// Converts the parts into session-persistable [`UserPart`]s, 1:1.
+    /// Human-visible delivery summary, excluding hidden custom messages.
+    pub fn display_summary(&self) -> String {
+        let ordinary = UserInput::from(self.parts.clone()).text_summary();
+        let mut pieces = Vec::new();
+        if !ordinary.is_empty() { pieces.push(ordinary); }
+        pieces.extend(self.custom_messages.iter().filter(|message| message.display)
+            .map(|message| format!("[{}]\n{}", message.custom_type, message.text())));
+        pieces.join("\n")
+    }
+
+    /// Canonical projection of ordinary and custom input content.
+    /// Persist with `append_to` to retain independent custom entry identities.
     pub fn into_user_parts(self) -> Vec<UserPart> {
         self.parts
             .into_iter()
@@ -68,6 +110,7 @@ impl UserInput {
                 InputPart::Text(text) => UserPart::Text(text),
                 InputPart::Media(media) => UserPart::Media(media),
             })
+            .chain(self.custom_messages.iter().flat_map(|message| message.user_parts()))
             .collect()
     }
 }

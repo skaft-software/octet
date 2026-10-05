@@ -1,6 +1,8 @@
 //! Owner-scoped API 0.4 access to the existing foreground session driver.
 use super::*;
 
+mod replacement;
+
 #[cfg(test)]
 mod tests;
 
@@ -121,6 +123,12 @@ struct SessionControlRequest {
     resource_owner: Option<ExtensionResourceOwner>,
     #[serde(default)]
     session_id: Option<String>,
+    /// Pi `fork(entryId)`.
+    #[serde(default)]
+    entry_id: Option<String>,
+    /// Pi `fork` `position`: `before` (default) or `at`.
+    #[serde(default)]
+    position: Option<String>,
 }
 impl OwnerScopedHostRequest for SessionControlRequest {
     fn parent_request_id(&self) -> u64 {
@@ -164,7 +172,14 @@ pub(super) fn dispatch_session_control(
     let operation = match (method, request.session_id) {
         ("session/wait_for_idle", None) => ExtensionSessionLifecycleOperation::WaitForIdle,
         ("session/create", None) => ExtensionSessionLifecycleOperation::Create,
-        ("session/fork", None) => ExtensionSessionLifecycleOperation::Fork,
+        ("session/fork", None)
+            if matches!(request.position.as_deref(), None | Some("before" | "at")) =>
+        {
+            ExtensionSessionLifecycleOperation::Fork {
+                at: request.position.as_deref() == Some("at"),
+                entry_id: request.entry_id,
+            }
+        }
         ("session/reload", None) => ExtensionSessionLifecycleOperation::Reload,
         ("session/switch", Some(session_id))
             if api_v03::parse_session_switch_params(
@@ -192,10 +207,11 @@ pub(super) fn dispatch_session_control(
         };
         Arc::clone(&child.response_state)
     };
-    queue_registered_session_lifecycle_operation(
-        state,
-        admitted.request_id,
-        operation,
-        response_state,
-    )
+    if matches!(operation, ExtensionSessionLifecycleOperation::Create
+        | ExtensionSessionLifecycleOperation::Fork { .. }
+        | ExtensionSessionLifecycleOperation::Switch { .. }) {
+        replacement::queue_replacement(state, admitted, request.parent_request_id, operation, response_state)
+    } else {
+        queue_registered_session_lifecycle_operation(state, admitted.request_id, operation, response_state)
+    }
 }

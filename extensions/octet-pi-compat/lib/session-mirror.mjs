@@ -15,6 +15,12 @@ export function translateSessionEntries(entries, namespace) {
       if (!Number.isSafeInteger(entry.timestamp_unix_ms) || entry.timestamp_unix_ms < 0) invalid('session timestamp');
       base.timestamp = new Date(entry.timestamp_unix_ms).toISOString();
     }
+    const custom = entry.metadata?.custom_message;
+    if (custom) {
+      return { ...base, type: 'custom_message', customType: bounded(custom.custom_type, 'customType', 128),
+        content: plainJSON(custom.content, 'custom message content', 786432), display: custom.display,
+        ...(Object.hasOwn(custom, 'details') ? { details: plainJSON(custom.details, 'custom message details') } : {}) };
+    }
     const own = namespace && entry.metadata?.extension_metadata?.[namespace];
     if (own) {
       if (own.provenance?.extension !== namespace) invalid('session namespace provenance mismatch');

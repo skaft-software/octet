@@ -419,19 +419,10 @@ fn sync_window_title(
     if shell.startup_pending {
         return;
     }
-    // Compare borrowed names: a session name that has not moved must not cost
-    // a clone or a format on every frame.
-    if last_title
-        .as_ref()
-        .is_some_and(|(previous, _)| *previous == shell.session_name)
-    {
-        return;
-    }
+    let title = super::remote_ui::window_title(&shell);
+    if last_title.as_ref().is_some_and(|(_, previous)| previous == &title) { return; }
     let name = shell.session_name.clone();
     drop(shell);
-    let title = name
-        .as_deref()
-        .map_or_else(|| "octet".to_owned(), |name| format!("octet · {name}"));
     tui.set_window_title(&title);
     *last_title = Some((name, title));
 }
@@ -802,16 +793,12 @@ fn render_native_loop_with_surface(
             let shell = state.borrow();
             (
                 shell.startup_pending,
-                shell.session_name.clone(),
+                super::remote_ui::window_title(&shell),
                 shell.run.is_active(),
             )
         };
         if !startup_pending && last_title.as_ref() != Some(&name) {
-            terminal.set_title(
-                &name
-                    .as_deref()
-                    .map_or_else(|| "octet".into(), |name| format!("octet · {name}")),
-            );
+            terminal.set_title(&name);
             last_title = Some(name);
         }
         if active != last_progress {

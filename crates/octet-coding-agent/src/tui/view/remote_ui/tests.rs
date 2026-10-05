@@ -25,6 +25,7 @@ fn projection(size: (u16, u16), entries: &[(Placement, &str)]) -> Projection {
     Projection {
         components: Arc::new(components),
         mounts,
+        chrome: None,
     }
 }
 

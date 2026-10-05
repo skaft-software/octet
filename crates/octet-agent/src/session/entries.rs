@@ -9,6 +9,25 @@ use super::context::append_context_message;
 use super::*;
 
 impl Session {
+    /// Persist a Pi custom message as a canonical user body plus typed metadata.
+    /// This uses the same invariant as tool details: metadata is never model
+    /// context, and resume projects only the canonical message body.
+    pub fn append_custom_message(
+        &mut self,
+        message: CustomMessage,
+        metadata: Option<EntryMetadata>,
+    ) -> Result<EntryId, SessionError> {
+        message.validate()?;
+        let content = message.user_parts();
+        let mut metadata = metadata.unwrap_or_default();
+        metadata.display_text = None;
+        metadata.custom_message = Some(message);
+        self.append_with_metadata(
+            EntryValue::Message(Message::User(UserMessage { content })),
+            Some(metadata),
+        )
+    }
+
     /// Appends an entry (parented on the current head) and records the new
     /// head. Writes two JSONL records — the entry, then a head record — in a
     /// single synced write to the append-only file.

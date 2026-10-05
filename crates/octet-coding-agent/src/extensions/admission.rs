@@ -166,6 +166,7 @@ pub(super) fn host_request_operation_name(operation: &HostRequestOperation) -> &
             ExtensionContextOperation::SessionManager => "session_manager",
             ExtensionContextOperation::PendingMessages => "pending_messages",
             ExtensionContextOperation::SystemPrompt => "system_prompt",
+            ExtensionContextOperation::Tools => "active_tools",
         },
     }
 }
@@ -180,6 +181,7 @@ pub(super) fn host_request_feature(operation: &HostRequestOperation) -> &'static
         HostRequestOperation::ActiveTools { .. } => EXTENSION_FEATURE_ACTIVE_TOOLS,
         HostRequestOperation::Terminal(_) => EXTENSION_FEATURE_TERMINAL_HANDOFF,
         HostRequestOperation::RemoteUi { .. } => EXTENSION_FEATURE_REMOTE_UI,
+        HostRequestOperation::ContextSnapshot(ExtensionContextOperation::Tools) => EXTENSION_FEATURE_ACTIVE_TOOLS,
         HostRequestOperation::ContextSnapshot(ExtensionContextOperation::SystemPrompt) => {
             EXTENSION_FEATURE_SYSTEM_PROMPT_READ
         }
@@ -336,13 +338,13 @@ pub(super) fn validate_host_request(
             }
         },
         HostRequestOperation::MessageInjection(injection) => match injection {
-            ExtensionMessageInjection::Assistant { text }
-            | ExtensionMessageInjection::System { text }
-            | ExtensionMessageInjection::User { text } => bounded_host_request_text(
-                "injected message text",
-                text,
-                MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
+            ExtensionMessageInjection::User { text, .. } => bounded_host_request_text(
+                "injected message text", text, MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
             ),
+            ExtensionMessageInjection::Custom { custom_type, content, display, details, .. } => {
+                octet_agent::session::CustomMessage { custom_type: custom_type.clone(), content: content.clone(), display: *display, details: details.clone() }
+                    .validate().map_err(|error| (ExtensionRequestFailure::InvalidRequest, error.to_string()))
+            },
         },
         HostRequestOperation::Shortcut {
             shortcut_id,

@@ -513,6 +513,7 @@ pub(super) fn insert_child_request(
     match children.entry(id) {
         std::collections::hash_map::Entry::Vacant(entry) => {
             entry.insert(ChildRequest {
+                exec_cancelled: false,
                 parent_request_id: parent,
                 response_state: Arc::clone(&response_state),
                 policy_intent: None,

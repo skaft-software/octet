@@ -279,9 +279,11 @@ async fn run_prompt(
     app.agent.set_system_prompt(composition.system);
     app.agent.set_prompt_display_text(Some(display_prompt));
     let prior_cache_misses = crate::commands::cache_miss_count(app);
+    let mut composed_input = octet_agent::UserInput::from(composition.prompt);
+    composed_input.custom_messages = composition.custom_messages;
     let mut run = match app
         .agent
-        .prompt_with_responses_prewarm(composition.prompt)
+        .prompt_with_responses_prewarm(composed_input)
         .await
     {
         Ok(run) => run,

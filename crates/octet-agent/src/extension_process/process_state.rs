@@ -332,6 +332,7 @@ pub(super) fn candidate_event_requires_host_response(event: &ExtensionEvent) -> 
     matches!(
         event,
         ExtensionEvent::ConfirmationRequested { .. }
+            | ExtensionEvent::ExecRequested { .. }
             | ExtensionEvent::PolicyEvaluationRequested { .. }
             | ExtensionEvent::InputRequested { .. }
             | ExtensionEvent::RemoteUiRequested { .. }

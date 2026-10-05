@@ -232,7 +232,7 @@ pub use extension_provider::{
     ExtensionProviderRegistryError, ExtensionProviderRoute,
 };
 pub use extension_remote_ui::{
-    validate_remote_ui_line, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiCloseResult,
+    validate_remote_ui_line, ExtensionRemoteUiChrome, ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiCloseResult,
     ExtensionRemoteUiClosed, ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification,
     ExtensionRemoteUiKey, ExtensionRemoteUiKeyKind, ExtensionRemoteUiKeyModifier,
     ExtensionRemoteUiMouse, ExtensionRemoteUiMouseButton, ExtensionRemoteUiMouseKind,

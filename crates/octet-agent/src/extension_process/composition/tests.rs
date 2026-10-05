@@ -5,6 +5,9 @@ use serde_json::{json, Value};
 
 fn definition() -> ToolDefinition {
     ToolDefinition {
+        default_active: None,
+                nested_execution: false,
+                prepare_arguments: false,
         prompt_snippet: None,
         prompt_guidelines: Vec::new(),
         operation: None,
@@ -250,6 +253,7 @@ fn parent(state: &ProtocolReadState, id: u64, service: Arc<FakeCompositionServic
     lock_std_mutex(&state.pending).insert(
         id,
         PendingRequest {
+            method: "tool/call".into(),
             sender,
             terminal: Arc::new(AtomicU8::new(REQUEST_ACTIVE)),
             frame_state: Arc::new(AtomicU8::new(FRAME_WRITTEN)),

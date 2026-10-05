@@ -2,6 +2,111 @@
 
 use super::*;
 
+/// Only portable Pi thinking levels cross this facade. Native On/Ultra and
+/// arbitrary token budgets are not given invented Pi equivalents.
+pub(crate) fn pi_thinking_level(model: &Model, reasoning: &ReasoningConfig) -> Option<String> {
+    let level = crate::app::level_from_reasoning(reasoning, model).ok()?;
+    match level {
+        crate::config::ThinkingLevel::On | crate::config::ThinkingLevel::Ultra => None,
+        _ => Some(level.label().to_owned()),
+    }
+}
+
+impl ExecutableExtensions {
+    /// Snapshot the real credential-scoped catalog and invocation scope. This
+    /// catalog is not Pi's full unauthenticated inventory: do not expose it as
+    /// getAll/find, or assert OAuth state from an endpoint name.
+    pub(crate) fn refresh_pi_model_catalog(
+        &mut self,
+        catalog: &ModelCatalog,
+        scope: Option<&[crate::cli::parity::ScopedModel]>,
+    ) {
+        let mut available = Vec::new();
+        let mut available_representable = true;
+        for spec in catalog.models() {
+            let model = match catalog.resolve(&spec.id) {
+                Ok(model) => model,
+                Err(_) => {
+                    available_representable = false;
+                    break;
+                }
+            };
+            if !model.endpoint.auth.is_configured() {
+                continue;
+            }
+            let Some(view) = extension_model_view(&model) else {
+                available_representable = false;
+                break;
+            };
+            available.push(view);
+        }
+        let mut scoped = Vec::new();
+        let mut representable = true;
+        for entry in scope.into_iter().flatten() {
+            let model = match catalog.resolve(&entry.id) {
+                Ok(model) => model,
+                Err(_) => {
+                    representable = false;
+                    break;
+                }
+            };
+            let Some(view) = extension_model_view(&model) else {
+                representable = false;
+                break;
+            };
+            let thinking = match entry.reasoning.as_deref() {
+                None => None,
+                Some(value) => match crate::config::parse_reasoning(value)
+                    .ok()
+                    .and_then(|reasoning| pi_thinking_level(&model, &reasoning))
+                {
+                    Some(level) => Some(level),
+                    None => {
+                        representable = false;
+                        break;
+                    }
+                },
+            };
+            let mut value = serde_json::json!({"model": view});
+            if let Some(thinking) = thinking {
+                value["thinkingLevel"] = Value::String(thinking);
+            }
+            scoped.push(value);
+        }
+        let mut snapshot = serde_json::json!({});
+        if available_representable {
+            snapshot["available_models"] = serde_json::json!(available);
+        }
+        if representable {
+            snapshot["scoped_models"] = serde_json::json!(scoped);
+        }
+        // Preserve the existing bounded JSON-RPC transport; refuse the whole
+        // snapshot rather than claim a silently truncated available catalog.
+        let snapshot = serde_json::to_vec(&snapshot)
+            .ok()
+            .filter(|bytes| bytes.len() <= 256 * 1024)
+            .map(|_| snapshot);
+        let mut state = self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if state.pi_models == snapshot {
+            return;
+        }
+        state.pi_models = snapshot;
+        for process in &self.processes {
+            if process.descriptor().manifest.runtime.sharing == ExtensionRuntimeSharing::Isolated {
+                process.set_host_state(state.clone());
+            }
+        }
+        *self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+    }
+}
+
 /// Product-owned authorization boundary for API 0.3 extension providers.
 ///
 /// The coding agent does not currently expose a credential or OAuth setup

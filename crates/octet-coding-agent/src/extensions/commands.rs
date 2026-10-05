@@ -477,7 +477,7 @@ impl ExecutableExtensions {
         };
         // Frontends without the App owner retain idle barriers only. The
         // interactive runner opts into yielding mutations to its sole owner.
-        let failure = command.advance(self, confirmations, false).await.err();
+        let failure = command.advance(self, confirmations, false, None).await.err();
         command.finish(self, confirmations, failure).await.map(Some)
     }
 
@@ -811,6 +811,7 @@ impl OwnedExtensionCommand {
         extensions: &mut ExecutableExtensions,
         confirmations: &mut H,
         mutations: bool,
+        mut session_owner: Option<(&mut Agent, &SessionStore)>,
     ) -> anyhow::Result<Option<ExtensionSessionLifecycleRequest>>
     where
         H: ExtensionConfirmationHandler + ?Sized,
@@ -855,6 +856,14 @@ impl OwnedExtensionCommand {
                 }
                 for message in extensions.drain_events_for_shell(shell) {
                     shell.notice(message);
+                }
+                // A synchronous Pi append blocks its factory thread until the
+                // real foreground Agent commits it. Draining only into the
+                // session-request queue would deadlock this live command. The
+                // caller lends the current Agent on each advance, including
+                // after session replacement; retained old contexts stay fenced.
+                if let Some((agent, sessions)) = session_owner.as_mut() {
+                    extensions.apply_session_host_requests(&mut **agent, *sessions);
                 }
                 if extensions.sync_semantic_ui(shell) {
                     shell.render();
@@ -913,7 +922,12 @@ impl OwnedExtensionCommand {
                 continue;
             }
             if let Some(progress) = command_progress {
-                confirmations.progress(extension_name, &progress);
+                if let ToolProgress::Confirmation(request) = &progress {
+                    let approved = confirmations.confirm_effect(extension_name, request).await?;
+                    request.respond(approved);
+                } else {
+                    confirmations.progress(extension_name, &progress);
+                }
                 continue;
             }
             let Some(event) = event else {

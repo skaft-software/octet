@@ -136,7 +136,6 @@ impl ExecutableExtensions {
         if matches!(
             pending.operation,
             HostRequestOperation::SessionEntry(_)
-                | HostRequestOperation::ActiveTools { .. }
                 | HostRequestOperation::ContextSnapshot(ExtensionContextOperation::SystemPrompt)
         ) {
             self.pending_session_requests.push_back(pending);
@@ -350,37 +349,45 @@ impl ExecutableExtensions {
                     &key,
                     description,
                 ),
-                HostRequestOperation::MessageInjection(injection) => match injection {
-                    ExtensionMessageInjection::User { text } => {
-                        if text.trim().is_empty() {
-                            ExtensionRequestOutcome::Failed(
-                                ExtensionRequestFailure::InvalidRequest,
-                                "injected message text must not be empty".to_owned(),
-                            )
-                        } else {
-                            // The queued follow-up is admitted by the owning run
-                            // loop through the real user-turn path.
-                            shell.queue_follow_up(ComposedInput::from_text(text));
-                            ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                HostRequestOperation::MessageInjection(injection) => {
+                    use octet_agent::extension_process::ExtensionMessageDelivery as Delivery;
+                    let message = match injection {
+                        ExtensionMessageInjection::User { text, deliver_as } => {
+                            crate::tui::view::PendingExtensionMessage {
+                                input: ComposedInput::from_text(text),
+                                delivery: deliver_as.unwrap_or(Delivery::FollowUp),
+                                wake: true,
+                                context_only: false,
+                            }
                         }
-                    }
-                    ExtensionMessageInjection::Assistant { .. } => ExtensionRequestOutcome::Failed(
-                        ExtensionRequestFailure::UnsupportedFeature,
-                        "this host build does not inject assistant messages".to_owned(),
-                    ),
-                    ExtensionMessageInjection::System { .. } => ExtensionRequestOutcome::Failed(
-                        ExtensionRequestFailure::UnsupportedFeature,
-                        "this host build does not inject system messages".to_owned(),
-                    ),
-                },
+                        ExtensionMessageInjection::Custom { custom_type, content, display, details, deliver_as, trigger_turn } => {
+                            let custom = octet_agent::session::CustomMessage { custom_type, content, display, details };
+                            let mut input = ComposedInput::from_text(String::new());
+                            input.parts.clear();
+                            if custom.display { input.transcript_text = format!("[{}]\n{}", custom.custom_type, custom.text()); }
+                            input.custom_messages.push(custom);
+                            crate::tui::view::PendingExtensionMessage {
+                                input,
+                                delivery: deliver_as.unwrap_or(Delivery::Steer),
+                                wake: trigger_turn == Some(true),
+                                context_only: trigger_turn == Some(false),
+                            }
+                        }
+                    };
+                    shell.queue_extension_message(message);
+                    ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                }
                 HostRequestOperation::SessionEntry(_) => {
                     // Unreachable: session-entry requests use their own queue.
                     continue;
                 }
-                HostRequestOperation::ActiveTools { .. } => ExtensionRequestOutcome::Failed(
-                    ExtensionRequestFailure::UnsupportedFeature,
-                    "this host build does not apply tools/set_active".to_owned(),
-                ),
+                HostRequestOperation::ActiveTools { names } => match &self.tool_host {
+                    Some(host) => match host.set_active_tools(Some(&names.into_iter().collect())) {
+                        Ok(()) => ExtensionRequestOutcome::Ok(serde_json::json!({})),
+                        Err(error) => ExtensionRequestOutcome::Failed(ExtensionRequestFailure::InvalidRequest, error),
+                    },
+                    None => ExtensionRequestOutcome::Failed(ExtensionRequestFailure::UnsupportedFeature, "live tool registry is not bound".into()),
+                },
                 HostRequestOperation::Terminal(operation) => self.apply_terminal_host_request(
                     shell,
                     pending.process.clone(),
@@ -444,6 +451,10 @@ impl ExecutableExtensions {
             ExtensionContextOperation::PendingMessages => {
                 Self::context_pending_messages_outcome(shell)
             }
+            ExtensionContextOperation::Tools => match &self.tool_host {
+                Some(host) => ExtensionRequestOutcome::Ok(host.pi_tool_snapshot()),
+                None => ExtensionRequestOutcome::Failed(ExtensionRequestFailure::UnsupportedFeature, "live tool registry is not bound".into()),
+            },
             ExtensionContextOperation::SystemPrompt => ExtensionRequestOutcome::Failed(
                 ExtensionRequestFailure::InvalidRequest,
                 "the system prompt is resolved by the session owner".to_owned(),
@@ -675,6 +686,7 @@ impl ExecutableExtensions {
                     ExtensionContextOperation::SystemPrompt => {
                         Self::context_system_prompt_outcome(agent)
                     }
+                    ExtensionContextOperation::Tools => ExtensionRequestOutcome::Ok(agent.extension_tool_snapshot()),
                     // The two session-context reads resolve against the shell
                     // drain, never this agent-owning loop.
                     ExtensionContextOperation::SessionManager

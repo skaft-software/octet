@@ -7,6 +7,17 @@ use super::*;
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum ExtensionEvent {
+    /// Owner-fenced direct process request for the native frontend executor.
+    ExecRequested {
+        /// Reverse request ID.
+        request_id: ExtensionRequestId,
+        /// Native process generation.
+        generation: u64,
+        /// Host-issued resource owner.
+        owner: ExtensionResourceOwner,
+        /// Validated execution parameters.
+        request: ExtensionExecRequest,
+    },
     /// User-visible notification.
     Notification {
         /// Notification content.
@@ -232,18 +243,25 @@ impl ExtensionOperationToken {
 /// the API 0.2 `agent/*` service which manages extension-owned child sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtensionSessionLifecycleOperation {
+    /// Select the foreground model/reasoning without replacing its binding.
+    ModelControl(ExtensionModelControl),
     /// Resolve only at an observed idle foreground boundary; does not mutate state.
     WaitForIdle,
-    /// Create a durable session without switching to it.
+    /// Pi `newSession`: create a durable session and switch to it.
     Create,
-    /// Fork the active durable session without switching to the fork.
-    Fork,
+    /// Pi `fork`: fork the active session at an entry and switch to the fork.
+    Fork {
+        /// Entry to fork at; the active head when absent.
+        entry_id: Option<String>,
+        /// Pi `position: "at"` keeps the entry; `"before"` forks from its parent.
+        at: bool,
+    },
     /// Make an existing workspace session active.
     Switch {
         /// Opaque, schema-bounded session identifier.
         session_id: String,
     },
-    /// Reopen the active session from its durable descriptor.
+    /// Pi `reload`: reload extensions and resources at the idle boundary.
     Reload,
     /// Compact local history at the actual idle boundary, then await after-hooks.
     Compact {
@@ -266,6 +284,8 @@ pub struct ExtensionSessionCompactionResult {
 /// Terminal disposition supplied by the product's active-session driver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExtensionSessionLifecycleError {
+    /// A Pi before-session hook cancelled replacement without changing sessions.
+    Cancelled,
     /// The interactive active-session driver is not safely bound.
     Unavailable,
     /// The bounded operation reached the idle driver but failed.
@@ -287,6 +307,7 @@ pub(super) struct SessionLifecycleDriverState {
 pub struct ExtensionSessionLifecycleService {
     capacity: Arc<Semaphore>,
     compaction: bool,
+    model_control: bool,
     pub(super) sender: mpsc::Sender<ExtensionSessionLifecycleRequest>,
     pub(super) state: Arc<SessionLifecycleDriverState>,
 }
@@ -312,6 +333,7 @@ pub struct ExtensionSessionLifecycleRequest {
 enum SessionLifecycleResponse {
     SessionId(oneshot::Sender<Result<String, ExtensionSessionLifecycleError>>),
     Compaction(oneshot::Sender<Result<ExtensionSessionCompactionResult, String>>),
+    ModelControl(oneshot::Sender<Result<serde_json::Value, String>>),
 }
 
 impl SessionLifecycleResponse {
@@ -319,6 +341,7 @@ impl SessionLifecycleResponse {
         match self {
             Self::SessionId(response) => response.is_closed(),
             Self::Compaction(response) => response.is_closed(),
+            Self::ModelControl(response) => response.is_closed(),
         }
     }
 
@@ -326,6 +349,9 @@ impl SessionLifecycleResponse {
         match self {
             Self::SessionId(response) => {
                 let _ = response.send(Err(ExtensionSessionLifecycleError::Unavailable));
+            }
+            Self::ModelControl(response) => {
+                let _ = response.send(Err("model selection owner retired".into()));
             }
             Self::Compaction(response) => {
                 let _ = response.send(Err(
@@ -378,6 +404,7 @@ impl ExtensionSessionLifecycleService {
             Self {
                 capacity: Arc::new(Semaphore::new(capacity)),
                 compaction: false,
+                model_control: false,
                 sender,
                 state: Arc::clone(&state),
             },
@@ -394,6 +421,29 @@ impl ExtensionSessionLifecycleService {
     pub fn with_compaction(mut self) -> Self {
         self.compaction = true;
         self
+    }
+
+    /// Opt in only when the foreground driver implements in-place selection.
+    pub fn with_model_control(mut self) -> Self {
+        self.model_control = true;
+        self
+    }
+
+    pub(super) fn supports_model_control(&self) -> bool { self.model_control }
+
+    pub(super) fn try_submit_model_control(
+        &self, operation: ExtensionModelControl, authority: SessionCompactionAuthority,
+    ) -> Result<oneshot::Receiver<Result<serde_json::Value, String>>, SessionLifecycleSubmitError> {
+        if !self.model_control || !authority.is_current() {
+            return Err(SessionLifecycleSubmitError::Unavailable);
+        }
+        let (response, receiver) = oneshot::channel();
+        self.try_submit_request(
+            ExtensionSessionLifecycleOperation::ModelControl(operation),
+            SessionLifecycleResponse::ModelControl(response),
+            CancellationToken::default(), Some(authority),
+        )?;
+        Ok(receiver)
     }
 
     pub(super) fn supports_compaction(&self) -> bool {
@@ -556,6 +606,14 @@ impl ExtensionSessionLifecycleRequest {
     /// The issued compaction owner, rechecked against the real foreground Session.
     pub fn resource_owner(&self) -> Option<&ExtensionResourceOwner> {
         self.authority.as_ref().map(|authority| &authority.owner)
+    }
+
+    /// Settle only after the durable, in-place model selection has succeeded.
+    pub fn respond_model_control(self, result: Result<serde_json::Value, String>) {
+        let SessionLifecycleResponse::ModelControl(response) = self.response else {
+            unreachable!("model selections use their own response type")
+        };
+        let _ = response.send(result);
     }
 
     /// Delivers exactly one ordinary lifecycle outcome to the extension process.

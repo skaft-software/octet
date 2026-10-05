@@ -6,14 +6,8 @@ or release has been performed. Protected installed Pi adapter hashes remain unch
 
 ## Coverage artifacts
 
-- [Remaining compatibility work and Lean readiness](pi-extension-lean-readiness.md):
-  implementation/reachability gaps, original/native acceptance, formal property
-  families, checked implementation linkage and reproducible proof/CI prerequisites.
-
-- [Pinned Pi inventory](pi-api-coverage.md) / `pi-api-coverage.json`: 13,279
-  structural rows from 420 pinned reference files plus original-corpus evidence.
-  Implementation, reachability, native tests and original acceptance are separate.
-  AST candidates do not close dynamic imports, aliases or private-patch semantics.
+- [Pi 1.0.2 extension API ledger](pi-extension-api.md): the public API Octet
+  replicates, one row per member, with what is done and what code remains.
 - [Language SDK parity](../sdk/conformance/sdk-parity.md): public authoring
   surfaces, actual host reachability, tests and genuine missing implementations.
 

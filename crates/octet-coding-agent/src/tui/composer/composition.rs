@@ -23,6 +23,7 @@ pub struct ComposedInput {
     /// chips remain readable labels because their payload is non-textual.
     pub transcript_text: String,
     pub parts: Vec<InputPart>,
+    pub custom_messages: Vec<octet_agent::session::CustomMessage>,
     pub attachments: Vec<Attachment>,
     /// When true, the owning provider run must expose no tools.
     pub answer_only: bool,
@@ -32,6 +33,7 @@ impl ComposedInput {
     pub fn from_text(text: String) -> Self {
         Self {
             parts: vec![InputPart::Text(text.clone())],
+            custom_messages: Vec::new(),
             display_text: text.clone(),
             transcript_text: text,
             attachments: Vec::new(),
@@ -48,14 +50,16 @@ impl ComposedInput {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.parts.iter().all(|part| match part {
+        self.custom_messages.is_empty() && self.parts.iter().all(|part| match part {
             InputPart::Text(text) => text.trim().is_empty(),
             InputPart::Media(_) => false,
         })
     }
 
     pub fn into_user_input(self) -> UserInput {
-        UserInput::from(self.parts)
+        let mut input = UserInput::from(self.parts);
+        input.custom_messages = self.custom_messages;
+        input
     }
 
     /// Replace textual model input after deterministic prompt composition while
@@ -185,6 +189,7 @@ pub fn compose(display_text: String, ledger: &mut AttachmentLedger) -> ComposedI
         display_text,
         transcript_text,
         parts,
+        custom_messages: Vec::new(),
         attachments: matched,
         answer_only: false,
     }

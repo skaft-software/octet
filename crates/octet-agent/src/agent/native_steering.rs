@@ -187,10 +187,7 @@ impl NativeState {
             let text = text_input(&pending.payload.input).expect("native text admission");
             let mut metadata = metadata.clone();
             metadata.native_steering = Some((self.operation.clone(), pending.id));
-            session.append_with_metadata(
-                user_message(pending.payload.input.clone()),
-                Some(metadata),
-            )?;
+            pending.payload.input.clone().append_to(session, Some(metadata))?;
             self.materialized.push((
                 pending.id,
                 pending.applied.clone().expect("applied successor"),
@@ -198,7 +195,7 @@ impl NativeState {
             if let Some(evidence) = evidence {
                 evidence.record_request(&text);
             }
-            delivered.push(text);
+            delivered.push(pending.payload.input.display_summary());
             self.pending.remove(0);
         }
         Ok(
@@ -259,11 +256,9 @@ impl NativeState {
 }
 fn text_input(input: &UserInput) -> Option<String> {
     let mut text = String::new();
-    for part in &input.parts {
-        let InputPart::Text(part) = part else {
-            return None;
-        };
-        text.push_str(part);
+    for part in input.clone().into_user_parts() {
+        let UserPart::Text(part) = part else { return None; };
+        text.push_str(&part);
     }
     (!text.is_empty() && text.len() <= 65536).then_some(text)
 }

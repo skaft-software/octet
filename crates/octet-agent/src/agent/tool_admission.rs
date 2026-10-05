@@ -127,6 +127,58 @@ pub(super) fn secondary_hook_denial(
     )
 }
 
+/// Apply argument-replacing tool-call hooks in order, before effect admission,
+/// so the broker classifies and authorizes the exact arguments the tool then
+/// receives. Pi validates before these hooks, never again after mutation;
+/// the tool's effect classifier still validates the actual effect boundary.
+pub(super) async fn transform_tool_arguments(
+    hooks: &[Arc<dyn ToolCallHook>],
+    _tool: &dyn Tool,
+    name: &str,
+    mut arguments: serde_json::Value,
+    context: &ToolContext<'_>,
+) -> Result<serde_json::Value, ToolError> {
+    for hook in hooks {
+        let result = tokio::select! {
+            biased;
+            _ = context.cancellation.cancelled() => return Err(cancelled_tool_error()),
+            result = hook.transform_tool_call(name, &arguments, context) => result,
+        };
+        if context.cancellation.is_cancelled() {
+            return Err(cancelled_tool_error());
+        }
+        if let Some(next) = result? {
+            arguments = next;
+        }
+    }
+    Ok(arguments)
+}
+
+/// Settle a resolved tool call's hooks: result replacements in order, then
+/// observers on the final result. Returns the result the model sees.
+pub(super) async fn settle_tool_result_hooks(
+    hooks: &[Arc<dyn ToolCallHook>],
+    name: &str,
+    arguments: &serde_json::Value,
+    mut result: Result<ToolOutput, ToolError>,
+    context: &ToolContext<'_>,
+) -> Result<ToolOutput, ToolError> {
+    for hook in hooks {
+        result = hook
+            .transform_tool_result(name, arguments, result, context)
+            .await;
+    }
+    let (output, is_error) = match &result {
+        Ok(output) => (output.text.as_str(), output.is_error()),
+        Err(error) => (error.message.as_str(), true),
+    };
+    for hook in hooks {
+        hook.after_tool_call(name, arguments, output, is_error, context)
+            .await;
+    }
+    result
+}
+
 /// Classify a reservation that was invalidated between admission and dispatch.
 pub(super) fn effect_reservation_commit_denial(
     sandbox: &SandboxConfig,
@@ -193,7 +245,7 @@ pub(super) async fn reserve_tool_effect(
             .unwrap_or(ToolPolicyDenialCode::InvalidToolArguments);
         ToolEffectAdmissionError {
             decision: policy_decision(context.sandbox, broker, None, None, Some(denial_code)),
-            error,
+            error: ToolError::policy_denied(denial_code, error.message),
         }
     })?;
     let intent = EffectIntent::new(
@@ -215,7 +267,7 @@ pub(super) async fn reserve_tool_effect(
                 None,
                 Some(denial_code),
             ),
-            error: ToolError::new(error.to_string()),
+            error: ToolError::policy_denied(denial_code, error.to_string()),
         }
     })?;
     let reservation = broker
@@ -231,7 +283,7 @@ pub(super) async fn reserve_tool_effect(
                     None,
                     Some(denial_code),
                 ),
-                error: ToolError::new(error.to_string()),
+                error: ToolError::policy_denied(denial_code, error.to_string()),
             }
         })?;
     Ok(ToolEffectAdmission {
@@ -239,6 +291,15 @@ pub(super) async fn reserve_tool_effect(
         reservation,
         effect,
     })
+}
+
+/// Canonical rich content, including an error's replacement envelope.
+pub(super) fn resolved_tool_output(result: &Result<ToolOutput, ToolError>) -> Option<&ToolOutput> {
+    match result { Ok(output) => Some(output), Err(error) => error.output() }
+}
+
+pub(super) fn tool_result_terminates_run(result: &Result<ToolOutput, ToolError>) -> bool {
+    resolved_tool_output(result).is_some_and(ToolOutput::terminates_run)
 }
 
 /// Terminal status of one tool boundary: a hard error or a tool-reported

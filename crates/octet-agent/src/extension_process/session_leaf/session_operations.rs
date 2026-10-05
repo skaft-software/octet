@@ -19,7 +19,8 @@ struct ProcessSessionOperation {
 }
 
 fn validate_session_operation_output(output: &ExtensionHookOutput) -> Result<(), String> {
-    if output.system_prompt.is_some()
+    if !output.custom_messages.is_empty()
+        || output.system_prompt.is_some()
         || output.provider_context.is_some()
         || output.provider_retry.is_some()
         || output.cache_warming_decision.is_some()

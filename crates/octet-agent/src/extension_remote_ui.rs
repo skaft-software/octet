@@ -92,10 +92,97 @@ pub struct ExtensionRemoteUiCloseRequest {
     pub surface_id: String,
 }
 
+/// Owner-fenced native chrome request. No surface or terminal lease is acquired.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionRemoteUiChromeRequest {
+    /// Live invocation authorizing the update.
+    pub parent_request_id: u64,
+    /// Authoritative foreground session and process incarnation.
+    #[serde(default)]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+    /// Chrome state to read or update.
+    pub chrome: ExtensionRemoteUiChrome,
+}
+
+/// Native foreground chrome controls exposed to extension authors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionRemoteUiChrome {
+    /// Read the authoritative tool expansion state.
+    Get,
+    /// Set the terminal window title.
+    Title {
+        /// Plain terminal title without control sequences.
+        title: String,
+    },
+    /// Override or restore the working message.
+    WorkingMessage {
+        /// Override text; absent restores the native message.
+        message: Option<String>,
+    },
+    /// Show or hide the working indicator.
+    WorkingVisible {
+        /// Whether the indicator is visible.
+        visible: bool,
+    },
+    /// Override or restore spinner animation.
+    WorkingIndicator {
+        /// Animation frames; absent restores the native frames.
+        frames: Option<Vec<String>>,
+        /// Milliseconds between frames; absent restores native timing.
+        interval_ms: Option<u64>,
+    },
+    /// Override or restore the collapsed thinking label.
+    HiddenThinking {
+        /// Override label; absent restores the native label.
+        label: Option<String>,
+    },
+    /// Expand or collapse tool result cards.
+    ToolsExpanded {
+        /// Whether result cards are expanded.
+        expanded: bool,
+    },
+}
+
+impl ExtensionRemoteUiChrome {
+    fn validate(&self) -> ValidationResult {
+        match self {
+            Self::Title { title } => {
+                validate_remote_ui_line(title).map_err(|detail| (ExtensionRequestFailure::InvalidRequest, detail))?;
+                validate_text("terminal title", title, 1024, true)
+            },
+            Self::WorkingMessage { message } | Self::HiddenThinking { label: message } => {
+                if let Some(text) = message { validate_text("chrome text", text, 4096, true)?; }
+                Ok(())
+            }
+            Self::WorkingIndicator { frames, interval_ms } => {
+                if interval_ms.is_some_and(|value| value > MAX_EXTENSION_REMOTE_UI_REVISION) { return Err(bounds("indicator interval exceeds portable integer")); }
+                if let Some(frames) = frames {
+                    if frames.len() > MAX_EXTENSION_REMOTE_UI_LINES { return Err(bounds("too many indicator frames")); }
+                    let mut bytes = 0;
+                    for frame in frames {
+                        bytes += frame.len();
+                        if frame.len() > MAX_EXTENSION_REMOTE_UI_LINE_BYTES || bytes > MAX_EXTENSION_REMOTE_UI_FRAME_BYTES { return Err(bounds("indicator frames exceed frame bounds")); }
+                        validate_remote_ui_line(frame).map_err(|detail| (ExtensionRequestFailure::InvalidRequest, detail))?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// One admitted fullscreen operation awaiting the owning frontend.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionRemoteUiOperation {
+    /// Owner-fenced native chrome read or update.
+    Chrome {
+        /// Requested native chrome operation.
+        chrome: ExtensionRemoteUiChrome,
+    },
     /// Open the single host-owned fullscreen input/rendering surface.
     Open {
         /// Extension-local fullscreen surface identifier.
@@ -139,6 +226,7 @@ impl ExtensionRemoteUiOperation {
                     false,
                 )
             }
+            Self::Chrome { chrome } => chrome.validate(),
             Self::Close { surface_id } => validate_surface_id(surface_id),
         }
     }
@@ -623,6 +711,7 @@ impl RemoteUiMailbox {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         match &operation {
+            ExtensionRemoteUiOperation::Chrome { .. } => {},
             ExtensionRemoteUiOperation::Open {
                 surface_id,
                 mouse_capture,
@@ -896,6 +985,7 @@ impl RemoteUiChildRequest {
             return Ok(None);
         };
         let (surface_id, geometry) = match &self.operation {
+            ExtensionRemoteUiOperation::Chrome { .. } => return Ok(None),
             ExtensionRemoteUiOperation::Open {
                 surface_id,
                 placement,

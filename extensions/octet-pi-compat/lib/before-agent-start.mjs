@@ -1,6 +1,7 @@
 import { bounded, fields, invalid, strict } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { cancellable } from './provider-context.mjs';
+import { customMessage } from './custom-messages.mjs';
 
 function system(text) {
   bounded(text, 'before_agent_start systemPrompt', 262144, { controls: true });
@@ -15,8 +16,9 @@ export async function beforeAgentStart(runtime, payload, store) {
   fields(payload, ['prompt', 'system_prompt'], 'before_agent_start native payload');
   bounded(payload.prompt, 'before_agent_start prompt', 262144, { controls: true });
   let effective = system(payload.system_prompt);
+  const messages = [];
   store.providerContext = true;
-  for (const entry of runtime.events.get('before_agent_start') || []) {
+  for (const entry of [...runtime.events.get('before_agent_start') || []]) {
     store.controller.signal.throwIfAborted(); runtime.assertOwner(store);
     const child = { ...store, factory: entry.factory };
     const event = strict({ type: 'before_agent_start', prompt: payload.prompt, systemPrompt: effective, images: undefined }, 'before_agent_start event');
@@ -30,10 +32,11 @@ export async function beforeAgentStart(runtime, payload, store) {
     }
     store.controller.signal.throwIfAborted(); runtime.assertOwner(store);
     if (result !== undefined) {
-      fields(result, ['systemPrompt'], 'before_agent_start result');
+      fields(result, ['systemPrompt', 'message'], 'before_agent_start result');
+      if (result.message !== undefined) messages.push(customMessage(result.message));
       if (result.systemPrompt !== undefined) effective = system(result.systemPrompt);
     }
     await runtime.flush(child);
   }
-  return effective;
+  return { systemPrompt: effective, messages };
 }

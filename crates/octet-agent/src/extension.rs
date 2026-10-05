@@ -89,6 +89,20 @@ pub trait EventObserver: Send + Sync {
 /// boundary: the deterministic effect broker always runs first.
 #[async_trait::async_trait]
 pub trait ToolCallHook: Send + Sync {
+    /// Runs after argument validation and before effect admission. Returns
+    /// replacement arguments, or `None` to keep them; hooks run in order and
+    /// each sees the previous replacement. The broker then classifies and
+    /// authorizes the final arguments, and the tool receives exactly those.
+    /// Returning an error denies the call before any effect is reserved.
+    async fn transform_tool_call(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        _context: &ToolContext<'_>,
+    ) -> Result<Option<serde_json::Value>, ToolError> {
+        Ok(None)
+    }
+
     /// Runs after argument validation and effect admission, before the tool receives control.
     /// Returning an error denies the call and produces a normal tool error for
     /// the model; no side effect has occurred at this boundary.
@@ -98,6 +112,20 @@ pub trait ToolCallHook: Send + Sync {
         arguments: &serde_json::Value,
         context: &ToolContext<'_>,
     ) -> Result<(), ToolError>;
+
+    /// Runs after the tool has resolved, before observers and before the model
+    /// sees the result. Returns the result to use: hooks run in order and each
+    /// sees the previous one. Effects already happened; only what the model
+    /// sees changes. The default keeps the result.
+    async fn transform_tool_result(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        result: Result<crate::tool::ToolOutput, ToolError>,
+        _context: &ToolContext<'_>,
+    ) -> Result<crate::tool::ToolOutput, ToolError> {
+        result
+    }
 
     /// Runs after the tool has resolved. Failures here are diagnostic only:
     /// an observer cannot erase or relabel an already completed side effect.
@@ -242,6 +270,9 @@ pub struct ProviderContextProjection {
     pub messages: Vec<octet_ai::Message>,
     /// Complete effective system prompt; `None` explicitly clears it.
     pub system: Option<String>,
+    /// Request-local declared tools. Only description changes and omissions are accepted.
+    #[serde(default)]
+    pub tools: Option<Vec<octet_ai::ToolDef>>,
 }
 
 /// Run-owned service for authoritative private session appends while a context
@@ -941,6 +972,18 @@ impl DynamicToolReservation {
             .iter()
             .map(|tool| tool.definition().name)
             .collect::<BTreeSet<_>>();
+        let previous = registry.groups.iter().find(|group| group.owner == self.owner);
+        let old_names = previous.map(|group| group.tools.iter().map(|tool| tool.definition().name).collect::<BTreeSet<_>>()).unwrap_or_default();
+        let previously_default = previous.map(|group| group.tools.iter().filter(|tool| tool.default_active()).map(|tool| tool.definition().name).collect::<BTreeSet<_>>()).unwrap_or_default();
+        let mut active = registry.active_names.clone().unwrap_or_else(|| {
+            registry.static_names.iter().cloned().chain(registry.groups.iter().flat_map(|group| group.tools.iter()).filter(|tool| tool.default_active()).map(|tool| tool.definition().name)).collect()
+        });
+        for removed in old_names.difference(&published) { active.remove(removed); }
+        for tool in &tools {
+            let name = tool.definition().name;
+            if tool.default_active() && !previously_default.contains(&name) { active.insert(name); }
+        }
+        registry.active_names = Some(active);
         let revision = registry.revision.saturating_add(1);
         before_publish(revision, &published);
         if let Some(group) = registry
@@ -1379,6 +1422,22 @@ impl ExtensionHost {
         self.policed_tools(dynamic)
             .map(|tool| tool.definition().name)
             .collect()
+    }
+
+    /// Authoritative registered/active Pi tool view, excluding product-denied tools.
+    pub fn pi_tool_snapshot(&self) -> serde_json::Value {
+        let dynamic = self.dynamic_tools.read().unwrap_or_else(|p| p.into_inner());
+        let active = dynamic.active_names.as_ref();
+        let mut names = Vec::new();
+        let tools = self.policed_tools(&dynamic).map(|tool| {
+            let definition = tool.definition();
+            if active.is_none_or(|active| active.contains(&definition.name)) { names.push(definition.name.clone()); }
+            let prompt = tool.prompt_metadata();
+            serde_json::json!({"name":definition.name,"description":definition.description,"parameters":definition.parameters,
+                "promptGuidelines":prompt.map(|prompt| prompt.guidelines),"exposure":"direct",
+                "sourceInfo":{"path":format!("<native:{}>",definition.name),"source":"native","scope":"temporary","origin":"top-level"}})
+        }).collect::<Vec<_>>();
+        serde_json::json!({"active_tools":names,"all_tools":tools})
     }
 
     /// Every host-policed registered tool name, sorted, including names that

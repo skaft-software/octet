@@ -1,6 +1,7 @@
 import { Type } from '@sinclair/typebox';
 import { unsupported } from '../lib/errors.mjs';
 export { Type };
+export { uuidv7 } from '../lib/uuid.mjs';
 export const StringEnum = (values, options = {}) => Type.Unsafe({ ...options, type: 'string', enum: values });
 export const getModel = () => unsupported('pi-ai.getModel', 'model selection and inventory remain host-owned');
 export const getModels = () => unsupported('pi-ai.getModels', 'model inventory was not supplied by octet');

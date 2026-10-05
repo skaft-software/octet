@@ -10,11 +10,12 @@ passed actual octet binary/PTY acceptance as well as synthetic-host tests. Nativ
 custom-editor draft restoration still fails qualification; full Pi API parity
 and a startup-speed comparison are not established.
 
-This is a bounded compatibility adapter, not general Pi runtime parity. Its
-[package README](../extensions/octet-pi-compat/README.md) lists implemented APIs,
-explicit refusals, and pinned dependencies. The broad capability design in
-[Pi extension power parity](design/pi-extension-power-parity.md) is a roadmap,
-not a claim that SDK, delegation, transformations, or private patches work.
+The contract is **Pi 1.0.2's public extension API**, replicated under Octet's
+subprocess JSON-RPC protocol. The [27-row ledger](pi-extension-api.md) is the
+bounded scope and distinguishes implementation from real-host acceptance.
+Arbitrary third-party extensions, private Pi internals, the Pi CLI and child SDK
+are not targets. The [package README](../extensions/octet-pi-compat/README.md)
+describes the adapter; historical package acceptance is not public API parity.
 
 ## Explicit local setup
 

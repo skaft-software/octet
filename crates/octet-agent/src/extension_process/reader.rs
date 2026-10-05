@@ -678,6 +678,9 @@ pub(super) fn queue_registered_session_lifecycle_operation(
                 };
                 match result {
                     Ok(session_id) => api_v03_session_lifecycle_success(&request_id, session_id),
+                    Err(ExtensionSessionLifecycleError::Cancelled) => Ok(serde_json::json!({
+                        "jsonrpc":"2.0", "id":request_id, "result":{"cancelled":true}
+                    })),
                     Err(ExtensionSessionLifecycleError::Unavailable) => {
                         api_v03_session_lifecycle_error(
                             &request_id,

@@ -7,6 +7,34 @@
 use super::*;
 
 #[test]
+fn custom_message_round_trips_typed_metadata_without_model_details() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = temp_path(&directory);
+    let mut session = Session::create(&path).unwrap();
+    let custom = CustomMessage {
+        custom_type: "job".into(),
+        content: CustomMessageContent::Parts(vec![
+            CustomMessagePart::Text { text: "first".into() },
+            CustomMessagePart::Text { text: "second".into() },
+        ]),
+        display: false,
+        details: Some(serde_json::json!({"private": "NOT_MODEL_CONTEXT"})),
+    };
+    let id = session.append_custom_message(custom.clone(), None).unwrap();
+    session.checkpoint(id.clone()).unwrap();
+    assert_eq!(session.context().unwrap().len(), 1);
+    drop(session);
+    let resumed = Session::open(&path).unwrap();
+    assert_eq!(resumed.entry(&id).unwrap().metadata.as_ref().unwrap().custom_message.as_ref(), Some(&custom));
+    let context = resumed.context().unwrap();
+    let encoded = serde_json::to_string(&context).unwrap();
+    assert!(!encoded.contains("NOT_MODEL_CONTEXT"));
+    assert!(!encoded.contains("custom_type"));
+    let Message::User(user) = &context[0] else { panic!("custom content must project as user") };
+    assert!(matches!(&user.content[..], [UserPart::Text(a), UserPart::Text(b)] if a == "first" && b == "second"));
+}
+
+#[test]
 fn prompt_metadata_persists_safe_identity_and_exact_normalized_color() {
     let dir = tempfile::tempdir().unwrap();
     let path = temp_path(&dir);
@@ -17,6 +45,7 @@ fn prompt_metadata_persists_safe_identity_and_exact_normalized_color() {
             Some(EntryMetadata {
                 prompt_model: Some(ModelId("custom/model-a".into())),
                 prompt_model_source: Some("  deepseek  ".into()),
+                custom_message: None,
                 prompt_color: Some("  #22AACC  ".into()),
                 display_text: Some("visible\ndraft".into()),
                 run_outcome: None,
@@ -36,6 +65,7 @@ fn prompt_metadata_persists_safe_identity_and_exact_normalized_color() {
             Some(EntryMetadata {
                 prompt_model: Some(ModelId("model\u{1b}[31m".into())),
                 prompt_model_source: Some("#2243e6".into()),
+                custom_message: None,
                 prompt_color: Some("rgb(1,2,3)\u{1b}".into()),
                 display_text: Some("bad\u{1b}".into()),
                 run_outcome: None,
@@ -57,6 +87,7 @@ fn prompt_metadata_persists_safe_identity_and_exact_normalized_color() {
         Some(EntryMetadata {
             prompt_model: Some(ModelId("custom/model-a".into())),
             prompt_model_source: Some("deepseek".into()),
+            custom_message: None,
             prompt_color: Some("#22aacc".into()),
             display_text: Some("visible\ndraft".into()),
             run_outcome: None,

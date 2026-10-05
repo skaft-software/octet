@@ -2,14 +2,17 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createJiti } from 'jiti';
 import { readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, hookEvents, notificationEvents, textOnly } from './api.mjs';
-import { commandCompletions } from './completions.mjs';
+import { commandCompletions, retireAutocomplete } from './completions.mjs';
+import { toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext } from './tools.mjs';
 import { discoverResources } from './resources.mjs';
 import { projectContext } from './provider-context.mjs';
+import { transformInput } from './context-api.mjs';
 import { providerPipeline, pipelineHooks } from './provider-pipeline.mjs';
-import { sessionOperation, sessionOperationHooks } from './session-operations.mjs';
+import { sessionOperation, sessionOperationHooks, sessionReplacement, sessionReplacementHooks } from './session-operations.mjs';
 import { modelTurn, modelTurnHooks } from './model-turns.mjs';
 import { compactionCallbackStore, settleCompactions, retireCompactions, cancelCompactions } from './compaction.mjs';
 import { beforeAgentStart } from './before-agent-start.mjs';
@@ -19,7 +22,7 @@ import { RemoteUI } from './remote-ui.mjs';
 import { Timers, deadline } from './timers.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'tools/set_active']);
-const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'remote_ui', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1']);
+const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'artifacts', 'remote_ui', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'tool_composition_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -63,7 +66,7 @@ export class Runtime {
     this.bus = new SharedBus(this); this.ui = new RemoteUI(this); this.timers = new Timers(this);
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
-    this.maxConcurrent = 8; this.foreground = null; this.autocompleteRegistration = null;
+    this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null;
     this.uninstallChildren = installChildRuntime(this);
   }
   mouseIntent(enabled) {
@@ -109,7 +112,8 @@ export class Runtime {
     // Other calls keep their live parent. Wire origin/owner and abort signal stay.
     return this.transport.request(method, {
       parent_request_id: store.id, ...(retained ? { resource_owner: store.state.owner } : {}), ...params,
-    }, { parent: live && !independentCheckpoint ? store.id : undefined, signal: store.controller.signal });
+    }, { parent: live && !independentCheckpoint ? store.id : undefined, signal: store.controller.signal,
+      timeout: method === 'process/exec' ? 2147483647 : undefined });
   }
   appendEntry(type, data, store = this.scope.getStore()) {
     this.require('session_entries');
@@ -189,15 +193,14 @@ export class Runtime {
     if (this.tools.size > 256 || this.commands.size > 256 || this.flags.size > 64 || this.shortcuts.size > 64) throw rpcError(-32012, 'bounds_exceeded registrations');
   }
   metadata() {
-    const hooks = [...new Set([...this.events.keys()].filter(e => hookEvents[e]).map(e => hookEvents[e]))];
-    if (hooks.includes('session_start') || hooks.includes('session_end')) for (const name of ['session_start', 'session_end']) if (!hooks.includes(name)) hooks.push(name);
+    const hooks = [...new Set(this.config.subscribed_hooks ?? [...this.events.keys()].filter(e => hookEvents[e]).map(e => hookEvents[e]))];
+    // Command replacement needs a fresh host binding even when the factory
+    // did not subscribe to session_start. Do not invent a replacement context.
+    if (this.commands.size || hooks.includes('session_start') || hooks.includes('session_end')) for (const name of ['session_start', 'session_end']) if (!hooks.includes(name)) hooks.push(name);
     const completions = [...this.commands].filter(([, command]) => command.definition.getArgumentCompletions).map(([name]) => name);
     return {
       ...(completions.length ? { argument_completions: completions } : {}),
-      tools: [...this.tools].map(([name, { definition: d }]) => ({ name, description: d.description, parameters: JSON.parse(JSON.stringify(d.parameters)),
-        ...(d.promptSnippet === undefined ? {} : { prompt_snippet: d.promptSnippet }),
-        ...(d.promptGuidelines === undefined ? {} : { prompt_guidelines: [...d.promptGuidelines] }),
-        ...(d.output_schema ? { output_schema: d.output_schema } : {}) })),
+      tools: [...this.tools].map(([name, tool]) => toolWire(name, tool)),
       commands: [...this.commands].map(([name, { definition: d }]) => ({ name, description: d.description || name, ...(d.usage ? { usage: d.usage } : {}) })),
       hooks: hooks.sort(), flags: [...this.flags].map(([name, { definition }]) => ({ name, ...definition })),
       shortcuts: [...this.shortcuts].map(([key, { definition: d }], i) => ({ id: `pi-shortcut:${i}`, key, description: d.description || key })),
@@ -215,6 +218,7 @@ export class Runtime {
     if (this.features.has('session_compaction_v1')) this.require('session_control_v1');
     this.maxConcurrent = Math.min(8, params.protocol.limits?.max_concurrent_requests || 1);
     this.namespace = params.extension?.name;
+    this.scratchDirectory = params.artifact_directory;
     this.initialHost = params.host || {}; this.workspace = params.workspace; this.initializingId = store.id;
     for (const flag of params.flag_values || []) this.flagValues.set(flag.name, flag.value);
     await this.load();
@@ -224,12 +228,17 @@ export class Runtime {
     if (metadata.hooks.some(hook => hook === 'provider_context' || sessionOperationHooks.includes(hook) || modelTurnHooks.includes(hook))) this.require('session_entries');
     if (metadata.hooks.some(hook => pipelineHooks.includes(hook))) this.require('pipeline_hooks_v1');
     if (metadata.events.includes('before_agent_start')) this.require('before_prompt_state_v1');
+    if (metadata.events.includes('input')) this.require('input_transform_v1');
     if (metadata.tools.some(tool => tool.prompt_snippet !== undefined || tool.prompt_guidelines !== undefined)) this.require('tool_prompt_metadata_v1');
     for (const [kind, names] of [['tools', metadata.tools.map(t => t.name)], ['commands', metadata.commands.map(c => c.name)], ['hooks', metadata.hooks], ['tool_renderers', metadata.tool_renderers]]) {
+      if (kind === 'tools' && this.features.has('dynamic_tools')) continue;
       if (JSON.stringify([...(declared[kind] || [])].sort()) !== JSON.stringify([...names].sort())) invalid(`manifest ${kind} differs from reviewed registrations: ${names.join(', ')}`);
     }
     const staticMetadata = this.config.registrations;
-    if (staticMetadata && JSON.stringify(staticMetadata) !== JSON.stringify(metadata)) invalid('reviewed registration metadata changed; configure again');
+    if (staticMetadata) {
+      const staticSurface = ({ tools, ...rest }) => rest;
+      if (JSON.stringify(staticSurface(staticMetadata)) !== JSON.stringify(staticSurface(metadata))) invalid('reviewed registration metadata changed; configure again');
+    }
     for (const [name, { definition: d }] of this.flags) {
       const value = this.flagValues.get(name) ?? d.default;
       if (d.type === 'integer' ? !Number.isSafeInteger(value) : typeof value !== d.type) invalid(`flag ${name} type`);
@@ -262,23 +271,40 @@ export class Runtime {
     if (!owner) return;
     const key = ownerKey(owner);
     let state = this.states.get(key);
-    if (!state) {
+    // Revisiting a session creates a new incarnation. Captured old contexts
+    // still point at their retired state and must never become live again.
+    if (state && !state.alive && !(store.method === 'hook/run' && params.hook === 'session_start')) {
+      throw rpcError(-32002, 'not_foreground_owner settled owner');
+    }
+    if (!state || !state.alive) {
       state = { key, owner: Object.freeze({ ...owner }), alive: true, workspace: context.workspace || this.workspace, host: { ...this.initialHost, ...(context.host || {}) }, statuses: new Map(), branchListeners: new Set(), uiQueues: new Map(), parent: store.id };
       this.states.set(key, state);
     } else {
-      if (!state.alive) throw rpcError(-32002, 'not_foreground_owner settled owner');
       state.workspace = context.workspace || state.workspace;
       state.host = { ...state.host, ...(context.host || {}) }; state.parent = store.id;
     }
     if (this.foreground && this.foreground !== state) this.retire(this.foreground).catch(e => this.backgroundError(e));
     this.foreground = state; store.state = state;
+    for (const waiter of this.foregroundWaiters) waiter(state);
     if (params.session_leaf !== undefined) {
       if (store.method !== 'hook/run') invalid('session_leaf requires hook/run');
       store.leaf = { grant: leafGrant(params.session_leaf, state.owner) };
     }
   }
+  // Resolves once the host binds the session that replaced the active one.
+  foregroundFor(sessionId, signal) {
+    signal.throwIfAborted();
+    if (this.foreground?.alive && this.foreground.host.session_id === sessionId) return Promise.resolve(this.foreground);
+    return new Promise((resolve, reject) => {
+      const cleanup = () => { this.foregroundWaiters.delete(waiter); signal.removeEventListener('abort', abort); };
+      const waiter = state => { if (state.alive && state.host.session_id === sessionId) { cleanup(); resolve(state); } };
+      const abort = () => { cleanup(); reject(signal.reason); };
+      this.foregroundWaiters.add(waiter);
+      signal.addEventListener('abort', abort, { once: true });
+    });
+  }
   async retire(state) {
-    state.alive = false; retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
+    state.alive = false; retireAutocomplete(state); retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
     // Awaited resource/context callbacks are cancelled on owner retirement.
     // Existing editor/retained-operation lifetime and cancellation stay unchanged.
     for (const store of this.active.values()) if ((store.resourceDiscovery || store.providerContext) && store.state === state) store.controller.abort(cancelled());
@@ -292,7 +318,7 @@ export class Runtime {
     for (const surface of this.ui.surfaces.values()) if (surface.store.state === state) this.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
   }
   async runEvent(event, value, store, { veto = false } = {}) {
-    for (const entry of this.events.get(event) || []) {
+    for (const entry of [...this.events.get(event) || []]) {
       store.controller.signal.throwIfAborted();
       const childStore = { ...store, factory: entry.factory };
       const result = await this.scope.run(childStore, () => entry.handler(value, createContext(this, childStore)));
@@ -304,6 +330,34 @@ export class Runtime {
       }
     }
     return { action: 'continue' };
+  }
+  // Pi's emitToolResult: handlers chain, a throwing handler is reported and
+  // skipped, and content replaced without structuredContent drops the old one.
+  async runToolResult(payload, store) {
+    const event = { type: 'tool_result', toolName: payload.name, input: payload.arguments, content: [{ type: 'text', text: payload.output }],
+      details: payload.metadata?.pi_details, ...(payload.structured_content === undefined ? {} : { structuredContent: payload.structured_content }), isError: payload.is_error };
+    const changed = new Set();
+    for (const entry of [...this.events.get('tool_result') || []]) {
+      store.controller.signal.throwIfAborted();
+      const childStore = { ...store, factory: entry.factory };
+      let result;
+      try { result = await this.scope.run(childStore, () => entry.handler(event, createContext(this, childStore))); }
+      catch (error) { this.backgroundError(error); continue; }
+      store.controller.signal.throwIfAborted();
+      if (!result) continue;
+      fields(result, ['content', 'details', 'structuredContent', 'isError'], 'tool_result result');
+      if (result.content !== undefined) { event.content = result.content; changed.add('content'); if (result.structuredContent === undefined) { delete event.structuredContent; changed.delete('structuredContent'); } }
+      if (result.details !== undefined) { event.details = result.details; changed.add('details'); }
+      if (result.structuredContent !== undefined) { event.structuredContent = result.structuredContent; changed.add('structuredContent'); }
+      if (result.isError !== undefined) { event.isError = Boolean(result.isError); changed.add('isError'); }
+    }
+    if (!changed.size) return undefined;
+    return {
+      ...(changed.has('content') ? { content: textOnly(event.content).map(part => part.text) } : {}),
+      ...(changed.has('structuredContent') ? { structured_content: plainJSON(event.structuredContent, 'structured content', 262144) } : {}),
+      ...(changed.has('details') ? { metadata: { pi_details: plainJSON(event.details, 'tool details') } } : {}),
+      ...(changed.has('isError') ? { is_error: event.isError } : {}),
+    };
   }
   queued(store, work) {
     if (++this.hookQueued > 128) { this.hookQueued--; throw rpcError(-32012, 'bounds_exceeded ordered hook queue'); }
@@ -319,9 +373,15 @@ export class Runtime {
     if (message.method === 'hook/run' && p.hook === 'resources_discover') return discoverResources(this, p, store);
     if (message.method === 'hook/run' && p.hook === 'provider_context') return projectContext(this, p, store);
     if (message.method === 'hook/run' && pipelineHooks.includes(p.hook)) return providerPipeline(this, p, store);
+    if (message.method === 'hook/run' && sessionReplacementHooks.includes(p.hook)) return sessionReplacement(this, p, store);
     if (message.method === 'hook/run' && sessionOperationHooks.includes(p.hook)) return sessionOperation(this, p, store);
     if (message.method === 'hook/run' && modelTurnHooks.includes(p.hook)) return modelTurn(this, p, store);
     this.bind(p, store);
+    if (message.method === 'hook/run' && p.hook === 'before_prompt' && p.payload?.phase === 'input') {
+      this.require('input_transform_v1');
+      return this.queued(store, async () => ({ disposition: { action: 'continue' }, context: [], notifications: [],
+        input_event: await transformInput(this, p.payload, store) }));
+    }
     if (message.method === 'command/execute') {
       const cmd = this.commands.get(p.name); if (!cmd) invalid(`unknown command ${p.name}`);
       const opened = deferred(); store.detach = () => { store.detached = true; opened.resolve({ text: '', notifications: [], context: [] }); };
@@ -331,44 +391,35 @@ export class Runtime {
           const { text } = await this.hostCall('composer/get', {}, store);
           if (!this.ui.activeEditor(store)) store.state.host.composer_text = text;
         }
-        const result = await cmd.definition.handler((p.arguments || []).join(' '), createContext(this, store));
-        if (result !== undefined) unsupported('command result', 'Pi command handlers return void');
+        // Pi awaits command handlers but ignores their return value.
+        await cmd.definition.handler((p.arguments || []).join(' '), createContext(this, store));
         await this.flush(store); return { text: '', notifications: [], context: [] };
       });
       run.catch(error => { if (store.detached && !store.controller.signal.aborted) this.backgroundError(error); });
       return Promise.race([run, opened.promise]);
     }
-    if (message.method === 'tool/call') {
-      const tool = this.tools.get(p.name); if (!tool) invalid(`unknown tool ${p.name}`);
-      store.factory = tool.factory; let sequence = 0;
-      const update = this.features.has('request_progress') ? result => {
-        fields(result, ['content', 'details'], 'tool update'); store.controller.signal.throwIfAborted();
-        if (result.details !== undefined) unsupported('tool update details', 'host progress has no details payload');
-        return this.track(this.transport.notify('$/progress', { request_id: store.id, sequence: ++sequence,
-          event: { type: 'status', message: textOnly(result.content).map(p => p.text).join('\n') } }), store);
-      } : undefined;
-      const result = await this.scope.run(store, () => tool.definition.execute(String(store.id), p.arguments, store.controller.signal, update, createContext(this, store)));
-      fields(result, ['content', 'details', 'isError', 'structured_content'], 'tool result');
-      if (result.isError !== undefined && typeof result.isError !== 'boolean') invalid('tool isError must be boolean');
-      if (Boolean(tool.definition.output_schema) !== (result.structured_content !== undefined)) invalid('structured_content must match the tool output_schema contract');
-      await this.flush(store);
-      return { content: textOnly(result.content), is_error: result.isError ?? false,
-        ...(result.details === undefined ? {} : { metadata: { pi_details: plainJSON(result.details, 'tool details') } }),
-        ...(result.structured_content === undefined ? {} : { structured_content: plainJSON(result.structured_content, 'structured content', 262144) }),
-      };
-    }
+    if (message.method === 'tool/prepare_arguments') return prepareRegisteredArguments(this, p, store);
+    if (message.method === 'tool/call') return executeRegisteredTool(this, p, store, await createToolContext(this, p, store, createContext(this, store)));
     if (message.method === 'hook/run') return this.queued(store, async () => {
-      const events = Object.keys(hookEvents).filter(e => hookEvents[e] === p.hook);
+      const events = Object.keys(hookEvents).filter(e => e !== 'input' && hookEvents[e] === p.hook);
       if (!this.metadata().hooks.includes(p.hook)) invalid(`unknown hook ${p.hook}`);
       let disposition = { action: 'continue' };
       const payload = p.payload || {};
-      let systemPrompt;
+      let systemPrompt, toolInput, customMessages = [];
+      if (p.hook === 'after_tool_call') {
+        const toolResult = await this.runToolResult(payload, store);
+        await this.flush(store);
+        return { disposition, context: [], notifications: [], ...(toolResult ? { tool_result: toolResult } : {}) };
+      }
       for (const event of events) {
         if (event === 'before_agent_start' && this.events.has(event)) {
-          systemPrompt = await beforeAgentStart(this, payload, store);
+          const before = await beforeAgentStart(this, payload, store);
+          systemPrompt = before.systemPrompt;
+          customMessages.push(...before.messages);
           continue;
         }
-        const value = p.hook === 'before_tool_call' ? { type: event, toolName: payload.name, input: payload.arguments }
+        // Pi hands handlers one mutable input; later handlers see earlier mutations.
+        const value = p.hook === 'before_tool_call' ? { type: event, toolName: payload.name, input: toolInput ??= structuredClone(payload.arguments ?? {}) }
           : p.hook === 'after_tool_call' ? { type: event, toolName: payload.name, input: payload.arguments, content: [{ type: 'text', text: payload.output }], isError: payload.is_error }
           : strict({ type: event, ...payload }, `${event} event`);
         disposition = await this.runEvent(event, value, store, { veto: p.hook === 'before_tool_call' });
@@ -376,7 +427,9 @@ export class Runtime {
       }
       await this.flush(store);
       if (p.hook === 'session_end' && store.state) await this.retire(store.state);
-      return { disposition, context: [], notifications: [], ...(systemPrompt === undefined || systemPrompt === payload.system_prompt ? {} : { system_prompt: systemPrompt }) };
+      const replaced = toolInput !== undefined && disposition.action === 'continue' && !isDeepStrictEqual(toolInput, payload.arguments ?? {});
+      return { disposition, context: [], notifications: [], ...(customMessages.length ? { custom_messages: customMessages } : {}), ...(systemPrompt === undefined || systemPrompt === payload.system_prompt ? {} : { system_prompt: systemPrompt }),
+        ...(replaced ? { arguments: plainJSON(toolInput, 'tool arguments', 1048576) } : {}) };
     });
     if (message.method === 'tool/render') {
       const tool = this.tools.get(p.name); if (!tool) invalid('unknown renderer');

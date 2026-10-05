@@ -179,6 +179,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
+            "model/select" if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 => {
+                dispatch_model_control(state, object, params)?;
+            }
             methods::SESSION_COMPACT => {
                 dispatch_session_compaction(state, object, params)?;
             }
@@ -355,6 +358,10 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     generation: state.generation,
                     contribution,
                 });
+            }
+            "ui/chrome" => {
+                let Some((request, admitted)) = admit_remote_ui_request::<ExtensionRemoteUiChromeRequest>(state, object, method, params)? else { return Ok(()); };
+                dispatch_remote_ui_request(state, &admitted, ExtensionRemoteUiOperation::Chrome { chrome: request.chrome })?;
             }
             methods::UI_OPEN => {
                 let Some((request, admitted)) = admit_remote_ui_request::<
@@ -626,6 +633,24 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     .map_err(|_| "invalid API 0.3 provider stream event".to_owned())?;
                 dispatch_provider_stream_event(state, event)?;
             }
+            "process/exec" => {
+                let Some((request, admitted)) = admit_host_request::<ExtensionExecRequest>(
+                    state, object, method, "process_exec_v1", params)? else { return Ok(()); };
+                if let Err(detail) = request.validate() {
+                    reject_typed_child_request(state, admitted.request_id, ExtensionRequestFailure::InvalidRequest, detail)?;
+                    return Ok(());
+                }
+                dispatch_host_request_event(state, &admitted, |admitted| ExtensionEvent::ExecRequested {
+                    request_id: admitted.request_id.clone(), generation: admitted.generation, owner: admitted.owner.clone(), request,
+                })?;
+            }
+            "process/exec/cancel" => {
+                if object.contains_key("id") { return Err("exec cancellation must be a notification".into()); }
+                require_feature(state, "process_exec_v1")?;
+                let id: ExtensionRequestId = serde_json::from_value(params.get("id").cloned().unwrap_or_default())
+                    .map_err(|error| format!("invalid exec cancellation: {error}"))?;
+                if let Some(child) = lock_std_mutex(&state.child_requests).get_mut(&id) { child.exec_cancelled = true; }
+            }
             methods::SESSION_CREATE => {
                 let id = parse_child_request_id(object, methods::SESSION_CREATE)?;
                 api_v03::parse_session_create_params(params)
@@ -643,7 +668,10 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 queue_api_v03_session_lifecycle_operation(
                     state,
                     id,
-                    ExtensionSessionLifecycleOperation::Fork,
+                    ExtensionSessionLifecycleOperation::Fork {
+                        entry_id: None,
+                        at: false,
+                    },
                 )?;
             }
             methods::SESSION_RELOAD => {
@@ -1240,31 +1268,18 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 else {
                     return Ok(());
                 };
-                let injection = match request.role.as_str() {
-                    "assistant" => ExtensionMessageInjection::Assistant { text: request.text },
-                    "system" => ExtensionMessageInjection::System { text: request.text },
-                    role => {
-                        return refuse_admitted_request(
-                            state,
-                            &admitted,
-                            (
-                                ExtensionRequestFailure::InvalidRequest,
-                                format!(
-                                    "session/send_message role `{role}` must be exactly `assistant` or `system`; user text uses session/send_user_message"
-                                ),
-                            ),
-                        );
-                    }
+                let injection = ExtensionMessageInjection::Custom {
+                    custom_type: request.custom_type,
+                    content: request.content,
+                    display: request.display,
+                    details: request.details,
+                    deliver_as: request.deliver_as,
+                    trigger_turn: request.trigger_turn,
                 };
-                if let Err(failure) = bounded_plain_text_failure(
-                    "injected message",
-                    match &injection {
-                        ExtensionMessageInjection::Assistant { text }
-                        | ExtensionMessageInjection::System { text }
-                        | ExtensionMessageInjection::User { text } => text,
-                    },
-                    MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
-                ) {
+                let ExtensionMessageInjection::Custom { custom_type, content, display, details, .. } = &injection else { unreachable!() };
+                let custom = crate::session::CustomMessage { custom_type: custom_type.clone(), content: content.clone(), display: *display, details: details.clone() };
+                if let Err(failure) = bounded_plain_text_failure("custom type", custom_type, 128)
+                    .and_then(|()| bounded_plain_text_failure("injected message", &custom.text(), MAX_EXTENSION_INJECTED_MESSAGE_BYTES)) {
                     return refuse_admitted_request(state, &admitted, failure);
                 }
                 dispatch_host_request_event(state, &admitted, move |admitted| {
@@ -1294,7 +1309,10 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 ) {
                     return refuse_admitted_request(state, &admitted, failure);
                 }
-                let injection = ExtensionMessageInjection::User { text: request.text };
+                let injection = ExtensionMessageInjection::User {
+                    text: request.text,
+                    deliver_as: request.deliver_as,
+                };
                 if let Err(detail) = injection.validate() {
                     return refuse_admitted_request(
                         state,
@@ -1309,6 +1327,15 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         owner: Some(admitted.owner.clone()),
                         injection,
                     }
+                })?;
+            }
+            "tools/snapshot" => {
+                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                    state, object, method, EXTENSION_FEATURE_ACTIVE_TOOLS, params,
+                )? else { return Ok(()); };
+                dispatch_host_request_event(state, &admitted, |admitted| ExtensionEvent::ContextSnapshotRequested {
+                    request_id: admitted.request_id.clone(), generation: admitted.generation,
+                    owner: Some(admitted.owner.clone()), operation: ExtensionContextOperation::Tools,
                 })?;
             }
             methods::TOOLS_SET_ACTIVE => {

@@ -1187,9 +1187,19 @@ fn collapsed_reasoning_lines_sized(
     width: u16,
 ) -> Vec<String> {
     if reasoning.finished {
-        return Vec::new();
+        return reasoning.hidden_thinking_label.as_ref().filter(|_| !reasoning.text.is_empty())
+            .map_or_else(Vec::new, |label| vec![theme.fg("muted", label)]);
+    }
+    if let Some(working) = reasoning.extension_working.as_ref().filter(|working| working.message.is_some() || working.visible.is_some() || working.frames.is_some() || working.interval_ms.is_some()) {
+        let hidden = || reasoning.hidden_thinking_label.as_ref().filter(|_| !reasoning.text.is_empty()).map(|label| theme.fg("muted", label));
+        if working.visible == Some(false) { return hidden().into_iter().collect(); }
+        let label = working.message.as_deref().unwrap_or(if reasoning.is_working_activity() { "Working" } else { "Thinking" });
+        let mut lines = vec![activity_status_line(theme, reasoning, label, shimmer_frame, rainbow_strength)];
+        lines.extend(hidden());
+        return lines;
     }
     if reasoning.is_working_activity() {
+        if reasoning.extension_working.as_ref().is_some_and(|working| working.visible == Some(false)) { return Vec::new(); }
         let label = reasoning
             .retry_activity
             .as_ref()
@@ -1197,7 +1207,7 @@ fn collapsed_reasoning_lines_sized(
         let status = activity_status_line(
             theme,
             reasoning,
-            label.as_deref().unwrap_or("Working"),
+            label.as_deref().unwrap_or_else(|| reasoning.extension_working.as_ref().and_then(|working| working.message.as_deref()).unwrap_or("Working")),
             shimmer_frame,
             rainbow_strength,
         );
@@ -1230,7 +1240,7 @@ fn collapsed_reasoning_lines_sized(
     let mut lines = vec![activity_status_line(
         theme,
         reasoning,
-        "Thinking",
+        reasoning.hidden_thinking_label.as_deref().unwrap_or("Thinking"),
         shimmer_frame,
         0,
     )];

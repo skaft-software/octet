@@ -29,16 +29,19 @@ test('tool prompt metadata maps verbatim to the negotiated tool catalog, not the
   ];
   const { entry, directory } = await factory(t, definitions);
   const output = join(directory, 'octet-pi-compat');
-  configure({ reviewed: true, output, extensions: [entry] });
+  const { registrations } = configure({ reviewed: true, output, extensions: [entry] });
   const peer = launch(t, [entry], { config: join(output, 'bridge.json') });
-  const result = await peer.init(['tool_prompt_metadata_v1']);
+  // The configured adapter reserves all mapped hooks for late subscriptions.
+  // Declare that reviewed surface and negotiate its existing native consumers.
+  peer.metadata.hooks = registrations.hooks;
+  const result = await peer.init(['tool_prompt_metadata_v1', 'resource_paths_v1', 'session_entries', 'pipeline_hooks_v1']);
   assert.ok(result.protocol.features.includes('tool_prompt_metadata_v1'));
   assert.deepEqual(result.tools, peer.metadata.tools);
   for (const [i, expected] of definitions.entries()) {
     assert.equal(result.tools[i].prompt_snippet, expected.promptSnippet);
     assert.deepEqual(result.tools[i].prompt_guidelines, expected.promptGuidelines);
   }
-  assert.deepEqual(Object.keys(result.tools[2]).sort(), ['description', 'name', 'parameters']);
+  assert.deepEqual(Object.keys(result.tools[2]).sort(), ['description', 'name', 'nested_execution', 'parameters']);
   assert.doesNotMatch(await readFile(join(output, 'extension.toml'), 'utf8'), /prompt_snippet|prompt_guidelines|tool_prompt_metadata_v1/);
   const call = await peer.request('tool/call', { name: 'metadata_0', arguments: {}, context: peer.context() }).response;
   assert.equal(call.result.content[0].text, 'executed');

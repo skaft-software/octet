@@ -886,6 +886,17 @@ impl ProcessGroupGuard {
         }
     }
 
+    /// Send SIGTERM to this registered group without disarming its cleanup guard.
+    /// Callers still own the bounded SIGKILL/reap fallback.
+    pub fn signal_terminate(&self) {
+        #[cfg(unix)]
+        if let Some(id) = valid_process_group_id(self.process_group_id.load(Ordering::Acquire)) {
+            signal_registered_processes(&[(id, self.registration_id)], libc::SIGTERM);
+        }
+        #[cfg(not(unix))]
+        self.terminate_now();
+    }
+
     /// Immediately force-terminates the owned process group.
     pub fn terminate_now(&self) {
         #[cfg(windows)]

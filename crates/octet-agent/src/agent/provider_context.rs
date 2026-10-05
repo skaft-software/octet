@@ -238,6 +238,15 @@ pub(super) async fn project_provider_context(
         if let Some(projection) = projection {
             request.messages = projection.messages;
             request.system = projection.system;
+            if let Some(tools) = projection.tools {
+                let mut seen = HashSet::new();
+                for tool in &tools {
+                    let Some(original) = canonical.tools.iter().find(|original| original.name == tool.name) else { return Err(refused("loadout introduced an unregistered tool")); };
+                    let mut unchanged = tool.clone(); unchanged.description = original.description.clone();
+                    if !seen.insert(tool.name.clone()) || serde_json::to_value(&unchanged).expect("canonical tool serializes") != serde_json::to_value(original).expect("canonical tool serializes") { return Err(refused("loadout changed tool authority")); }
+                }
+                request.tools = tools;
+            }
         }
         validate_size(&request)?;
         // Never accept a change that opaque replay would ignore, or discard

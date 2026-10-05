@@ -103,10 +103,10 @@ impl BackgroundTools {
                 ),
             };
             if let Some(after) = completed.after.take() {
-                run_parallel_after_tool_hooks(
+                completed.execution.result = run_parallel_after_tool_hooks(
                     after,
                     &hooks,
-                    &completed.execution.result,
+                    completed.execution.result,
                     &sandbox,
                     &tool_scope,
                     &resource_owner,
@@ -221,7 +221,7 @@ impl BackgroundTools {
             });
         }
         context.tool_finished();
-        if let Ok(output) = &execution.result {
+        if let Some(output) = resolved_tool_output(&execution.result) {
             if let Some(tool_usage) = output.usage() {
                 add_usage(usage, tool_usage);
             }

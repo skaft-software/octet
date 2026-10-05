@@ -100,6 +100,7 @@ mod error;
 mod images;
 mod live_output;
 mod model_turn;
+mod model_control;
 mod parallel_reads;
 mod provider_context;
 mod recovery;
@@ -944,6 +945,7 @@ impl Agent {
 
     fn prompt_entry_metadata(&mut self) -> EntryMetadata {
         EntryMetadata {
+            custom_message: None,
             prompt_model: Some(self.model.spec.id.clone()),
             prompt_model_source: self.prompt_model_source.clone(),
             prompt_color: self.prompt_color.clone(),
@@ -1294,6 +1296,11 @@ impl Agent {
     /// the exact schemas the next provider request would advertise.
     pub fn registered_tool_names(&self) -> Vec<String> {
         self.extensions.policed_tool_names()
+    }
+
+    /// Read-only authoritative registered and active tool catalogs for extensions.
+    pub fn extension_tool_snapshot(&self) -> serde_json::Value {
+        self.extensions.pi_tool_snapshot()
     }
 
     /// Narrows the host-policed tool surface this agent advertises and

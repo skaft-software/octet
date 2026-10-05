@@ -1507,6 +1507,33 @@ impl ExtensionProcess {
 
     /// Answers one admitted owner-scoped request only while its generation is
     /// current. This is the resource-owner fence for the request surface.
+    /// Return the real parent frontend progress sink and negotiated frame bound.
+    /// No extension-supplied confirmation channel is ever accepted.
+    pub fn exec_request_frontend_context(&self, id: &ExtensionRequestId, generation: u64) -> (Option<ToolProgressSink>, usize) {
+        let connection = read_std_lock(&self.inner.connection);
+        let capacity = connection.max_message_bytes();
+        if generation != connection.generation || !connection_is_usable(&connection) || connection.draining.load(Ordering::Acquire) {
+            return (None, capacity);
+        }
+        let parent = {
+            let children = lock_std_mutex(&connection.child_requests);
+            children.get(id).filter(|child| child.response_state.state.load(Ordering::Acquire) == CHILD_ACTIVE)
+                .map(|child| child.parent_request_id)
+        };
+        let progress = parent.and_then(|parent| lock_std_mutex(&connection.pending).get(&parent)
+            .and_then(|pending| pending.progress.clone().or_else(|| pending.child_interaction_progress.clone())));
+        (progress, capacity)
+    }
+
+    /// Whether an admitted exec was cancelled, settled, or replaced.
+    pub fn exec_request_is_cancelled(&self, id: &ExtensionRequestId, generation: u64) -> bool {
+        let connection = read_std_lock(&self.inner.connection);
+        if connection.generation != generation || !connection_is_usable(&connection) || connection.draining.load(Ordering::Acquire) { return true; }
+        let children = lock_std_mutex(&connection.child_requests);
+        children.get(id).is_none_or(|child| child.exec_cancelled || child.response_state.state.load(Ordering::Acquire) != CHILD_ACTIVE)
+    }
+
+    /// Answer a generation-fenced host request.
     pub async fn respond_to_extension_request(
         &self,
         request_id: ExtensionRequestId,

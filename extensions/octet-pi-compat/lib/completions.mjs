@@ -41,6 +41,7 @@ export function commandArgumentRequest(params) {
 }
 
 async function cancellable(promise, signal) {
+  if (!signal) return promise;
   signal.throwIfAborted();
   let abort;
   try {
@@ -56,7 +57,7 @@ const activeQueries = new WeakMap();
 
 function baseProvider(runtime) {
   return {
-    async getSuggestions(lines, cursorLine, cursorCol, options) {
+    async getSuggestions(lines, cursorLine, cursorCol, options = {}) {
       const { text, index } = piPosition(lines, cursorLine, cursorCol);
       if (options.force) return null; // Filesystem completion remains the native fallback.
       const query = commandArgumentRequest({ text, cursor: Buffer.byteLength(text.slice(0, index)), revision: 0 });
@@ -65,7 +66,7 @@ function baseProvider(runtime) {
       const store = runtime.scope.getStore();
       const result = await cancellable(runtime.scope.run({ ...store, factory: command.factory },
         () => command.definition.getArgumentCompletions(query.prefix)), options.signal);
-      options.signal.throwIfAborted();
+      options.signal?.throwIfAborted();
       // This is the pinned Pi command-callback policy, not the provider-result grammar.
       return Array.isArray(result) && result.length ? { prefix: query.prefix, items: result } : null;
     },
@@ -126,6 +127,8 @@ export function addAutocompleteProvider(runtime, store, factory) {
   }
   if (triggers.length) provider.triggerCharacters = [...new Set(triggers)];
   chains.set(store.state, { entries, provider });
+  const editor = runtime.ui.activeEditor(store);
+  if (editor?.component) runtime.scope.run(editor.store, () => editor.component.setAutocompleteProvider?.(provider));
   if (!runtime.autocompleteRegistration) {
     // A dynamic provider may be the first completion contribution. Initialization
     // has already settled; this remains a process-owned registration, never a fake parent.

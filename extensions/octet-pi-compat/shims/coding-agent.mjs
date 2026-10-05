@@ -1,11 +1,16 @@
 // Host facades and pure utilities only; never import the Pi coding-agent runtime.
 export { calculateContextTokens, estimateTokens, buildSessionContext } from '../lib/context.mjs';
+export { CONFIG_DIR_NAME, getAgentDir, isToolCallEventType, isBashToolResult, isPowerShellToolResult, isReadToolResult, isEditToolResult,
+  isWriteToolResult, isGrepToolResult, isFindToolResult, isLsToolResult, parseFrontmatter, stripFrontmatter,
+  withFileMutationQueue, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES, formatSize, truncateHead, truncateTail,
+  truncateLine, convertToLlm, serializeConversation } from '../lib/public-helpers.mjs';
 import { unsupported } from '../lib/errors.mjs';
 import { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
 import { theme } from '../lib/theme.mjs';
 export const defineTool = definition => definition;
 export const getEditorTheme = () => ({ borderColor: theme.borderColor, selectList: theme.selectList });
 export const getSelectListTheme = () => theme.selectList;
+export { BorderedLoader, DynamicBorder, getSettingsListTheme, keyHint } from '../lib/ui-api.mjs';
 export const getMarkdownTheme = () => ({
   heading: text => theme.fg('mdHeading', text), link: text => theme.fg('mdLink', text), linkUrl: text => theme.fg('mdLinkUrl', text),
   code: text => theme.fg('mdCode', text), codeBlock: text => theme.fg('mdCodeBlock', text), codeBlockBorder: text => theme.fg('mdCodeBlockBorder', text),

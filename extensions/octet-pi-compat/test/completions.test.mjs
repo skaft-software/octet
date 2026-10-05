@@ -206,7 +206,9 @@ test('completion factories require negotiation and configure retains callback de
   const { registrations } = configure({ reviewed: true, output, extensions: [fixture] });
   assert.deepEqual(registrations.argument_completions, ['complete']);
   assert.doesNotMatch(await readFile(join(output, 'extension.toml'), 'utf8'), /argument_completions|getArgumentCompletions|autocomplete/);
-  const configured = await started(t, { config: join(output, 'bridge.json') });
+  const configured = launch(t, [fixture], { config: join(output, 'bridge.json') });
+  configured.metadata.hooks = registrations.hooks;
+  await configured.init(['autocomplete', 'resource_paths_v1', 'session_entries', 'pipeline_hooks_v1']);
   assert.equal((await query(configured, snapshot('/complete configured')).response).result.prefix, 'configured');
   await configured.close();
 });

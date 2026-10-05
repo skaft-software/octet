@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Pi 1.0.2 extension API semantics (see `docs/pi-extension-api.md`): `tool_call`
+  handlers run before policy admission and may replace arguments, which the
+  host then authorizes and executes; `tool_result` handlers may replace the
+  result the model sees. `pi.sendMessage` sends typed custom messages with
+  `deliverAs` (`steer`, `followUp`, `nextTurn`) and `triggerTurn`, and wakes an
+  idle session instead of injecting a substitute user message.
+  `ctx.newSession`, `ctx.fork(entryId, {position})` and `ctx.switchSession`
+  replace the active session and run `withSession` with a fresh context;
+  `ctx.reload` reloads extensions and resources. Removed the 13,279-row
+  structural Pi inventory and its checker.
 - Preserve the local Working-dot shimmer patch: the sweep crosses the margin
   dot before the label, then returns it to its resting colour.
 - Add the optional, explicitly reviewed `octet-pi-compat` Node source package and

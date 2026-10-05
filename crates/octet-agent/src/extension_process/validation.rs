@@ -767,12 +767,6 @@ pub(super) fn decode_tool_call_output(
                 definition.name
             ))
         })?;
-    if parts.is_empty() {
-        return Err(ExtensionRuntimeError::Protocol(format!(
-            "API 0.2 tool `{}` returned no content parts",
-            definition.name
-        )));
-    }
     if parts.len() > MAX_EXTENSION_RESULT_CONTENT_PARTS {
         return Err(ExtensionRuntimeError::Protocol(format!(
             "API 0.2 tool `{}` returned {} content parts; limit is {MAX_EXTENSION_RESULT_CONTENT_PARTS}",
@@ -782,12 +776,10 @@ pub(super) fn decode_tool_call_output(
     }
 
     let mut native_parts = Vec::with_capacity(parts.len());
-    let mut saw_text = false;
     let mut referenced_media_bytes = 0_u64;
     for part in parts {
         match part {
             ExtensionToolContentPart::Text { text } => {
-                saw_text = true;
                 native_parts.push(ToolOutputContentPart::Text(text));
             }
             ExtensionToolContentPart::Image {
@@ -909,12 +901,6 @@ pub(super) fn decode_tool_call_output(
             }
         }
     }
-    if !saw_text {
-        return Err(ExtensionRuntimeError::Protocol(format!(
-            "API 0.2 tool `{}` must include an explicit compact text part",
-            definition.name
-        )));
-    }
 
     match (&definition.output_schema, &structured_content) {
         (Some(schema), Some(structured)) => {
@@ -932,13 +918,9 @@ pub(super) fn decode_tool_call_output(
             )));
         }
         (Some(_), None) => {}
-        (None, Some(_)) => {
-            return Err(ExtensionRuntimeError::Protocol(format!(
-                "tool `{}` returned structured_content without output_schema",
-                definition.name
-            )));
-        }
-        (None, None) => {}
+        // Pi permits structuredContent without an output schema. Only tools
+        // declaring a schema expose it as a programmatic composition value.
+        (None, _) => {}
     }
     crate::extension_diagnostics::validate_metadata(&wire.metadata)
         .map_err(ExtensionRuntimeError::Protocol)?;

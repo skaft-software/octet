@@ -186,9 +186,7 @@ impl Agent {
         if self.model.responses_features().reasoning_effort_updates {
             persist_reasoning_selection(&mut self.session, &self.model, &self.reasoning)?;
         }
-        let first_entry = self
-            .session
-            .append_with_metadata(user_message(input), Some(prompt_metadata.clone()))?;
+        let first_entry = input.append_to(&mut self.session, Some(prompt_metadata.clone()))?;
         if let Some(input) = observer_input.as_ref() {
             for observer in &self.extensions.observers {
                 observer.on_run_started_for_owner(
@@ -384,6 +382,7 @@ impl Agent {
             let background_cancellation = abort.cancellation.clone();
             let mut pending_reasoning = None;
             let mut pending_steer: Vec<ReservedInput> = Vec::new();
+            let mut pending_context: Vec<ReservedInput> = Vec::new();
             let mut followups: VecDeque<ReservedInput> = VecDeque::new();
             // Preserve octet's historical defaults; frontends that expose queue
             // modes can update either mode through RunControl.
@@ -553,6 +552,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -577,6 +577,7 @@ impl Agent {
                     match control_rx.try_recv() {
                         Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                         Ok(Control::FollowUp(input)) => followups.push_back(input),
+                        Ok(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                         Ok(Control::FinishNow(input)) => {
                             input.push_pending(&mut pending_steer);
                             answer_only = true;
@@ -613,6 +614,13 @@ impl Agent {
                 if abort.is_set() { break 'run FinishReason::Aborted; }
                 if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
                     break 'run finish;
+                }
+
+                if background_tools.is_empty() && !native.has_pending() {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session) {
+                        break 'run FinishReason::Failed(error);
+                    }
+                    context_capacity.invalidate();
                 }
 
                 if let Some(selection) = if native.connection.is_none() { pending_reasoning.take() } else { None } {
@@ -781,6 +789,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -1033,6 +1042,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open && !native_enabled => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -1130,6 +1140,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -1282,6 +1293,7 @@ impl Agent {
                         },
                         Next::Steering(_) => unreachable!("handled above"),
                         Next::Ctl(Some(Control::FollowUp(input))) => followups.push_back(input),
+                        Next::Ctl(Some(Control::AppendCustom(input))) => input.push_pending(&mut pending_context),
                         Next::Ctl(Some(Control::FinishNow(input))) => {
                             input.push_pending(&mut pending_steer);
                             answer_only = true;
@@ -1390,6 +1402,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -1539,7 +1552,7 @@ impl Agent {
                 let deferred_handle = response.deferred.clone();
                 let deferred_diagnostics = response.diagnostics.clone();
                 let assistant = response.message;
-                let calls: Vec<ToolCall> = assistant
+                let mut calls: Vec<ToolCall> = assistant
                     .content
                     .iter()
                     .filter_map(|part| match part {
@@ -1547,6 +1560,25 @@ impl Agent {
                         _ => None,
                     })
                     .collect();
+                let mut preparation_errors = HashMap::new();
+                for call in &mut calls {
+                    let Some(tool) = tool_map.get(&call.name).filter(|tool| tool.prepares_arguments()) else { continue; };
+                    let Ok(arguments) = call.arguments_value() else { continue; };
+                    let prepared = tokio::select! {
+                        biased;
+                        _ = abort.wait() => Err(cancelled_tool_error()),
+                        result = tool.prepare_arguments(arguments, &resource_owner, abort.cancellation.clone()) => result,
+                    };
+                    match prepared {
+                        Ok(arguments) => {
+                            call.arguments_json = serde_json::to_string(&arguments).expect("JSON arguments serialize");
+                            call.argument_error = if matches!(octet_ai::validate_tool_arguments(&call.name, &arguments, &request_tool_defs), Ok(octet_ai::ToolArgumentValidation::Valid)) {
+                                None
+                            } else { Some(ToolCallArgumentError::SchemaMismatch) };
+                        },
+                        Err(error) => { call.argument_error = Some(ToolCallArgumentError::SchemaMismatch); preparation_errors.insert(call.id.clone(), error); },
+                    }
+                }
 
                 if auto_compaction_mode == AgentCompactionMode::NativeResponses
                     && model.spec.protocol == Protocol::OpenAiResponses
@@ -1763,6 +1795,7 @@ impl Agent {
                             control = control_rx.recv(), if control_open => match control {
                                 Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Some(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer); answer_only = true; finish_pending = true;
                                 }
@@ -1796,6 +1829,7 @@ impl Agent {
                         match control_rx.try_recv() {
                             Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                             Ok(Control::FollowUp(input)) => followups.push_back(input),
+                            Ok(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                             Ok(Control::FinishNow(input)) => {
                                 input.push_pending(&mut pending_steer);
                                 answer_only = true;
@@ -1818,6 +1852,13 @@ impl Agent {
                         && pending_steer.is_empty() && pending_reasoning.is_none() && followups.is_empty() {
                         *admission = false;
                     }
+                }
+
+                if background_tools.is_empty() && calls.is_empty() && !native.has_pending() {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session) {
+                        break 'run FinishReason::Failed(error);
+                    }
+                    context_capacity.invalidate();
                 }
 
                 // A response is not successful merely because it contains no
@@ -1973,6 +2014,7 @@ impl Agent {
                                     control = control_rx.recv(), if control_open => match control {
                                         Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                         Some(Control::FollowUp(input)) => followups.push_back(input),
+                                        Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                         Some(Control::FinishNow(input)) => {
                                             input.push_pending(&mut pending_steer);
                                             answer_only = true;
@@ -2020,6 +2062,7 @@ impl Agent {
                                 match control_rx.try_recv() {
                                     Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                     Ok(Control::FollowUp(input)) => followups.push_back(input),
+                                    Ok(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                     Ok(Control::FinishNow(input)) => {
                                         input.push_pending(&mut pending_steer);
                                         answer_only = true;
@@ -2323,6 +2366,7 @@ impl Agent {
                                     control = control_rx.recv(), if control_open => match control {
                                         Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                         Some(Control::FollowUp(input)) => followups.push_back(input),
+                                        Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                         Some(Control::FinishNow(input)) => {
                                             input.push_pending(&mut pending_steer);
                                             answer_only = true;
@@ -2528,13 +2572,13 @@ impl Agent {
                                     .expect("policy decision slot is not poisoned") = Some(decision);
                                 Err(error)
                             }
-                            (Some(tool), Ok(args)) => {
+                            (Some(tool), Ok(args)) => 'dispatch: {
                                 let active_skills = session
                                     .head()
                                     .and_then(|head| session.resolve_active_skills(&head).ok())
                                     .map(|state| state.active_skills)
                                     .unwrap_or_default();
-                                let composition_scope = tool.composition_config().map(|_| CompositionDispatcher::scope(
+                                let composition_scope = tool.nested_execution().then(|| CompositionDispatcher::scope(
                                     call.id.clone(), call.name.clone(), composition_tools.clone(),
                                     sandbox.clone(), tool_scope.clone(), resource_owner.clone(),
                                     effect_run_id.clone(), tool_revision, active_skills.clone(),
@@ -2556,9 +2600,31 @@ impl Agent {
                                     progress: tool_progress,
                                     cancellation: abort.cancellation.clone(),
                                 };
+                                let args = match transform_tool_arguments(
+                                    &tool_call_hooks,
+                                    tool.as_ref(),
+                                    &call.name,
+                                    args,
+                                    &tool_ctx,
+                                )
+                                .await
+                                {
+                                    Ok(args) => args,
+                                    Err(error) => {
+                                        if tool_ctx.cancellation.is_cancelled() {
+                                            cancellation_won = true;
+                                            break 'dispatch Err(cancelled_tool_error());
+                                        }
+                                        let (_, decision) =
+                                            secondary_hook_denial(&sandbox, &effect_broker, None);
+                                        *policy_decision_slot
+                                            .lock()
+                                            .expect("policy decision slot is not poisoned") =
+                                            Some(decision);
+                                        break 'dispatch Err(error);
+                                    }
+                                };
                                 let hook_arguments = args.clone();
-                                let effect_committed = Arc::new(AtomicBool::new(false));
-                                let committed_marker = Arc::clone(&effect_committed);
                                 let policy_decision_marker = Arc::clone(&policy_decision_slot);
                                 let operation = async {
                                     let admission = reserve_tool_effect(
@@ -2639,7 +2705,6 @@ impl Agent {
                                             Some(receipt.authorization()),
                                             None,
                                         ));
-                                    committed_marker.store(true, Ordering::Release);
                                     started_at_marker
                                         .store(crate::session::now_unix_millis(), Ordering::Release);
                                     if composition_scope.is_some() {
@@ -2667,6 +2732,7 @@ impl Agent {
                                         c = control_rx.recv(), if control_open => match c {
                                             Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                             Some(Control::FollowUp(input)) => followups.push_back(input),
+                                            Some(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                             Some(Control::FinishNow(input)) => {
                                                 input.push_pending(&mut pending_steer);
                                                 answer_only = true;
@@ -2818,23 +2884,14 @@ impl Agent {
                                     notify_observers(&observers, &ev);
                                     yield ev;
                                 }
-                                if effect_committed.load(Ordering::Acquire) {
-                                    let (output, is_error) = match &result {
-                                        Ok(output) => (output.text.as_str(), output.is_error()),
-                                        Err(error) => (error.message.as_str(), true),
-                                    };
-                                    for hook in &tool_call_hooks {
-                                        hook.after_tool_call(
-                                            &call.name,
-                                            &hook_arguments,
-                                            output,
-                                            is_error,
-                                            &tool_ctx,
-                                        )
-                                        .await;
-                                    }
-                                }
-                                result
+                                settle_tool_result_hooks(
+                                    &tool_call_hooks,
+                                    &call.name,
+                                    &hook_arguments,
+                                    result,
+                                    &tool_ctx,
+                                )
+                                .await
                             }
                         }
                         };
@@ -2856,11 +2913,11 @@ impl Agent {
                             cancellation_won,
                         }
                     };
-                    if let Some(after) = deferred_after {
+                    let result = if let Some(after) = deferred_after {
                         run_parallel_after_tool_hooks(
                             after,
                             &tool_call_hooks,
-                            &result,
+                            result,
                             &sandbox,
                             &tool_scope,
                             &resource_owner,
@@ -2868,8 +2925,10 @@ impl Agent {
                             &registered_tools,
                             abort.cancellation.clone(),
                         )
-                        .await;
-                    }
+                        .await
+                    } else {
+                        result
+                    };
                     let result = if should_annotate_repetition {
                         annotate_repeated_tool_result(result, repeated_recently)
                     } else {
@@ -2883,7 +2942,7 @@ impl Agent {
                     // script is admitted; checkpoints alone are not the hard
                     // session-limit ledger.
                     let usage_commit = if composition_tools.iter().any(|tool| {
-                        tool.definition().name == call.name && tool.composition_config().is_some()
+                        tool.definition().name == call.name && tool.nested_execution()
                     }) {
                         if let Some(usage) = result.as_ref().ok().and_then(|output| output.usage()).copied() {
                             run_cost.add(None);
@@ -3068,6 +3127,13 @@ impl Agent {
                     break 'run finish;
                 }
 
+                if background_tools.is_empty() && !native.has_pending() {
+                    if let Err(error) = append_context_inputs(&mut pending_context, session) {
+                        break 'run FinishReason::Failed(error);
+                    }
+                    context_capacity.invalidate();
+                }
+
                 // Every emitted call now has a durable result, including calls
                 // that were never started because the user aborted. Do not
                 // enter another model turn after controlled cancellation.
@@ -3091,6 +3157,7 @@ impl Agent {
                             match control_rx.try_recv() {
                                 Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Ok(Control::FollowUp(input)) => followups.push_back(input),
+                                Ok(Control::AppendCustom(input)) => input.push_pending(&mut pending_context),
                                 Ok(Control::FinishNow(input)) => {
                                     input.push_pending(&mut pending_steer);
                                     answer_only = true;
@@ -3186,7 +3253,13 @@ impl Agent {
             }
             *control_admission.lock().unwrap_or_else(|error| error.into_inner()) = false;
             control_rx.close();
-            while control_rx.try_recv().is_ok() {}
+            while let Ok(control) = control_rx.try_recv() {
+                if let Control::AppendCustom(input) = control { input.push_pending(&mut pending_context); }
+            }
+            // No terminal path silently drops an admitted context-only message.
+            if let Err(error) = append_context_inputs(&mut pending_context, session) {
+                reason = FinishReason::Failed(error);
+            }
             pending_steer.clear();
             followups.clear();
             // A fully driven prompt always leaves an explicit durable restore

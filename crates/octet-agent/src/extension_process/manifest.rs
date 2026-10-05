@@ -535,6 +535,10 @@ pub struct ManifestContributions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionHook {
+    /// Cancellable Pi new/resume boundary.
+    SessionBeforeSwitch,
+    /// Cancellable Pi fork boundary.
+    SessionBeforeFork,
     /// Supplies temporary filesystem resource roots to a real host loader.
     /// Requires API 0.4 and the resource_paths_v1 consumer.
     ResourcesDiscover,

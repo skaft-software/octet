@@ -381,6 +381,47 @@ impl Tool for ProcessTool {
         self.definition.output_schema.clone()
     }
 
+    fn default_active(&self) -> bool {
+        self.definition.default_active.unwrap_or(true)
+    }
+
+    fn nested_execution(&self) -> bool {
+        self.definition.nested_execution
+            && read_std_lock(&self.connection.protocol).supports(EXTENSION_FEATURE_TOOL_COMPOSITION)
+            || self.composition_config().is_some()
+    }
+
+    fn prepares_arguments(&self) -> bool {
+        self.definition.prepare_arguments
+    }
+
+    async fn prepare_arguments(
+        &self,
+        arguments: serde_json::Value,
+        owner: &str,
+        cancellation: CancellationToken,
+    ) -> Result<serde_json::Value, ToolError> {
+        let mut context = self.process.execution_context();
+        let resource_owner = ExtensionResourceOwner {
+            session_id: owner.to_owned(),
+            extension_instance_id: self.process.inner.instance_id.clone(),
+            process_generation: self.connection.generation,
+        };
+        context.resource_owner = Some(resource_owner.clone());
+        let request = self.connection.request_with_resource_owner(
+            "tool/prepare_arguments",
+            serde_json::json!({"name":self.definition.name,"arguments":arguments,"context":context}),
+            self.process.inner.config.request_timeout,
+            Some(resource_owner),
+        );
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ToolError::new("tool argument preparation cancelled")),
+            result = request => result.map_err(|error|ToolError::new(error.to_string()))?,
+        };
+        result.get("arguments").cloned().ok_or_else(||ToolError::new("argument preparation returned no arguments"))
+    }
+
     fn replay_safety(&self) -> ReplaySafety {
         ReplaySafety::Unsafe
     }
@@ -505,6 +546,7 @@ impl Tool for ProcessTool {
                         ));
                     }
                     Ok(ExtensionEvent::ComposerRequested { .. })
+                    | Ok(ExtensionEvent::ExecRequested { .. })
                     | Ok(ExtensionEvent::SessionEntryRequested { .. })
                     | Ok(ExtensionEvent::MessageInjectionRequested { .. })
                     | Ok(ExtensionEvent::ShortcutRequested { .. })

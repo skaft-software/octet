@@ -85,7 +85,7 @@ export async function discoverResources(runtime, params, store) {
     live();
     const paths = { skill_paths: [], prompt_paths: [], theme_paths: [] }, budget = { cwd, count: 0, bytes: 0 };
     // Snapshot before the first callback, in factory/registration order, like Pi.
-    for (const entry of [...runtime.events.get('resources_discover')]) {
+    for (const entry of [...runtime.events.get('resources_discover') || []]) {
       live();
       const child = { ...store, factory: entry.factory };
       const provenance = `resources_discover factory ${runtime.config.extensions[entry.factory]}`;

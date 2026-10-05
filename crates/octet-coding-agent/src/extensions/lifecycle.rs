@@ -219,7 +219,7 @@ impl ExecutableExtensions {
                 let (service, receiver) =
                     ExtensionSessionLifecycleService::channel(SESSION_LIFECYCLE_QUEUE_CAPACITY)
                         .expect("fixed session lifecycle queue capacity is bounded");
-                (Some(service.with_compaction()), Some(receiver))
+                (Some(service.with_compaction().with_model_control()), Some(receiver))
             } else {
                 (None, None)
             };
@@ -503,6 +503,7 @@ impl ExecutableExtensions {
 
         let mut extensions = Self::default();
         extensions.processes = processes;
+        extensions.bind_tool_host(host);
         extensions.provider_runtime = provider_runtime;
         extensions.runtime_manager = managed_runtime;
         extensions.runtime_binding = runtime_binding;
@@ -528,6 +529,11 @@ impl ExecutableExtensions {
         extensions.refresh_host_state(session, model, reasoning, sessions);
         extensions.start_session_lifecycle();
         extensions
+    }
+
+    /// Bind the final host-policed catalog after static tools and policy are assembled.
+    pub fn bind_tool_host(&mut self, host: &octet_agent::ExtensionHost) {
+        self.tool_host = Some(host.clone());
     }
 
     /// Returns the durable process-fleet owner, if discovery created one.

@@ -18,6 +18,7 @@ function harness() {
   const calls = [], state = { alive: true, owner: { session_id: 's', extension_instance_id: 'i', process_generation: 1 } };
   const runtime = { features: new Set(['autocomplete', 'autocomplete_edit_v1']), foreground: state, commands: new Map(),
     scope: new AsyncLocalStorage(), autocompleteRegistration: null,
+    ui: { activeEditor() { return undefined; } },
     require(feature) { if (!this.features.has(feature)) throw Error(`unsupported_feature ${feature}`); },
     assertOwner(store) { if (!store.state?.alive || this.foreground !== store.state) throw Error('not_foreground_owner'); },
     transport: { request(method, params) { calls.push({ method, params }); return Promise.resolve({ accepted: true }); } },

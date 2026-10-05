@@ -3,6 +3,7 @@
 // Canonical request projection only: never mutate tools, routing or the Session.
 import { bounded, fields, invalid, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
+import { prepareToolLoadout } from './tools.mjs';
 
 const apis = { open_ai_responses: 'openai-responses', open_ai_chat: 'openai-completions', anthropic_messages: 'anthropic-messages', bedrock_converse: 'bedrock-converse-stream', google_generative_ai: 'google-generative-ai', mistral_conversations: 'mistral-conversations', pi_messages: 'pi-messages' };
 const protocols = Object.fromEntries(Object.entries(apis).map(([key, value]) => [value, key]));
@@ -215,7 +216,10 @@ export async function projectContext(runtime, params, store) {
   const live = () => { signal.throwIfAborted(); runtime.assertOwner(store); };
   return cancellable(runtime.queued(store, async () => {
     live();
-    const system = request.system === null || request.system === undefined ? null : text(request.system);
+    const tools = prepareToolLoadout(runtime, store, request.tools);
+    if (!runtime.events.get('context')?.length && !runtime.events.get('context_with_system')?.length) return { disposition: { action: 'continue' }, context: [], notifications: [], ...(tools ? { provider_context: { messages: request.messages, system: request.system ?? null, tools } } : {}) };
+    let system = request.system === null || request.system === undefined ? null : text(request.system);
+    const originalSystem = system;
     store.state.host.system_prompt = system ?? '';
     store.state.host.session_id = preparation.session_id;
     let messages = canonicalToPi(request.messages);
@@ -238,8 +242,48 @@ export async function projectContext(runtime, params, store) {
       // Refuse unsupported mutations before exposing them to another callback.
       piToCanonical(messages);
     }
+    if (runtime.events.has('context_with_system')) {
+      const tools = array(request.tools || [], 'context tools').map(tool => {
+        record(tool, ['name', 'description', 'parameters', 'async', 'constrained_sampling'], 'canonical context tool');
+        if (tool.async) unsupported('context async tool declarations', 'Pi Tool has no scheduling field');
+        return { name: name(tool.name), description: text(tool.description), parameters: plainJSON(tool.parameters, 'context tool schema', 262144),
+          ...(tool.constrained_sampling == null ? {} : { constrainedSampling: plainJSON(tool.constrained_sampling, 'constrained sampling') }) };
+      });
+      const originalTools = JSON.stringify(tools);
+      let full = [strict({ role: 'system', content: system ?? '', toolsAdded: tools, sections: undefined, toolsRemoved: undefined }, 'system message'), ...messages];
+      for (const entry of [...runtime.events.get('context_with_system') || []]) {
+        live(); const child = { ...store, factory: entry.factory };
+        let result;
+        try { result = await cancellable(runtime.scope.run(child, () => entry.handler(
+          strict({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))), signal); }
+        catch (error) {
+          live(); if (Number.isInteger(error?.code)) throw error;
+          runtime.backgroundError(new Error('context_with_system callback failed (private context details redacted)'));
+          continue;
+        }
+        live();
+        if (result !== undefined) { record(result, ['messages'], 'context_with_system result'); if (result.messages != null) full = array(result.messages, 'context_with_system messages'); }
+        const leading = full[0]?.role === 'system' ? full[0] : undefined;
+        if (!leading && originalTools !== '[]') unsupported('context_with_system removed tool declarations', 'native preparation cannot replace the advertised tool snapshot');
+        if (leading) {
+          record(leading, ['role', 'content', 'toolsAdded', 'sections', 'toolsRemoved', 'timestamp'], 'system message');
+          if (JSON.stringify(leading.toolsAdded ?? []) !== originalTools || leading.toolsRemoved?.length) unsupported('context_with_system tool changes', 'native preparation cannot replace the advertised tool snapshot');
+          const content = typeof leading.content === 'string' ? text(leading.content) : array(leading.content, 'system content').map(part => {
+            record(part, ['type', 'text'], 'system text part'); if (part.type !== 'text') invalid('system content must be text'); return text(part.text);
+          }).join('\n');
+          const sections = leading.sections ?? {}; if (!sections || typeof sections !== 'object' || Array.isArray(sections)) invalid('system sections');
+          system = [content, ...Object.values(sections).filter(value => value !== null).map(text)].filter(value => value.length).join('\n\n');
+        } else {
+          system = null;
+          runtime.backgroundError(new Error('context_with_system handler removed the leading system message'));
+        }
+        messages = leading ? full.slice(1) : full;
+        if (messages.some(message => message.role === 'system')) unsupported('context_with_system later system messages', 'native canonical messages cannot represent mid-transcript system changes');
+        piToCanonical(messages);
+      }
+    }
     await cancellable(runtime.flush(store), signal); live();
     return { disposition: { action: 'continue' }, context: [], notifications: [],
-      ...(JSON.stringify(messages) === original ? {} : { provider_context: { messages: piToCanonical(messages), system } }) };
+      ...(JSON.stringify(messages) === original && system === originalSystem && tools === undefined ? {} : { provider_context: { messages: piToCanonical(messages), system, ...(tools === undefined ? {} : { tools }) } }) };
   }), signal);
 }

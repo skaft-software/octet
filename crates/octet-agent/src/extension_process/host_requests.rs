@@ -31,6 +31,15 @@ pub struct ToolDefinition {
     /// Optional API `0.4` provider-side constrained-sampling request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constrained_sampling: Option<octet_ai::ConstrainedSampling>,
+    /// Whether a newly registered tool joins the model-visible active set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_active: Option<bool>,
+    /// Request-scoped nested dispatch without composition presentation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nested_execution: bool,
+    /// Prepare raw arguments before the exact advertised-schema validation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepare_arguments: bool,
 }
 
 /// API `0.2` request to add or replace extension-owned tools.
@@ -367,16 +376,28 @@ pub struct SessionSetLabelRequest {
     pub resource_owner: Option<ExtensionResourceOwner>,
 }
 
-/// API `0.2` request to inject one bounded assistant or system message.
+/// Pi `sendMessage`: one custom message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSendMessageRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
-    /// Exactly `assistant` or `system`. Any other role is refused.
-    pub role: String,
-    /// Bounded injected message text.
-    pub text: String,
+    /// Extension-defined message type.
+    pub custom_type: String,
+    /// Original string or ordered text blocks.
+    pub content: crate::session::CustomMessageContent,
+    /// Whether the transcript shows the message.
+    #[serde(default)]
+    pub display: bool,
+    /// Extension-defined data that the model never sees.
+    #[serde(default, deserialize_with = "crate::session::deserialize_custom_message_details", skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    /// Pi `deliverAs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver_as: Option<ExtensionMessageDelivery>,
+    /// Pi `triggerTurn`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_turn: Option<bool>,
     /// Explicit owner for a caller that outlived its host request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_owner: Option<ExtensionResourceOwner>,
@@ -390,6 +411,9 @@ pub struct SessionSendUserMessageRequest {
     pub parent_request_id: u64,
     /// Bounded injected user message text.
     pub text: String,
+    /// Pi `deliverAs` while a run is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver_as: Option<ExtensionMessageDelivery>,
     /// Explicit owner for a caller that outlived its host request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_owner: Option<ExtensionResourceOwner>,
@@ -700,7 +724,10 @@ pub struct ExtensionHostState {
     /// Pi-shaped view of the current model, when the host resolved one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_view: Option<ExtensionModelView>,
-    /// Inspectably serialized reasoning configuration.
+    /// Bounded, secret-free Pi available/scoped model facts supplied by the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_models: Option<serde_json::Value>,
+    /// Portable Pi thinking level, absent for unrepresentable native controls.
     #[serde(default)]
     pub reasoning: Option<serde_json::Value>,
     /// Skills explicitly active at this boundary.
@@ -718,7 +745,7 @@ pub struct ExtensionHostState {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionModelView {
-    /// Canonical model identifier, as octet resolves it.
+    /// Provider model identifier (the route's API model name).
     pub id: String,
     /// Human-facing model name.
     #[serde(default, skip_serializing_if = "Option::is_none")]

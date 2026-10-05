@@ -25,6 +25,15 @@ impl ExecutableExtensions {
 }
 
 impl ExtensionLifecycleSnapshot {
+    /// Await Pi's cancellable replacement boundary on captured process handles.
+    pub async fn before_session_change(&self, owner: &str, hook: ExtensionHook, payload: serde_json::Value) -> anyhow::Result<bool> {
+        for process in &self.processes {
+            if !process.contributions().hooks.contains(&hook) { continue; }
+            let output = process.run_hook(hook, payload.clone(), process.current_context_for_resource_owner(owner)).await?;
+            if matches!(output.disposition, ExtensionHookDisposition::Deny { .. }) { return Ok(true); }
+        }
+        Ok(false)
+    }
     /// Open one host-owned dialog boundary on every captured process.
     pub fn dialog_started(&self, dialog: &str) {
         for process in &self.processes {

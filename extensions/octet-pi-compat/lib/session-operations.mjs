@@ -3,6 +3,40 @@ import { bounded, fields, invalid, ownerKey, strict, unsupported } from './error
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable } from './provider-context.mjs';
 import { translateSessionEntries } from './session-mirror.mjs';
+export const sessionReplacementHooks = ['session_before_switch', 'session_before_fork'];
+export async function sessionReplacement(runtime, params, store) {
+  const hook = params.hook, signal = store.controller.signal;
+  if (!sessionReplacementHooks.includes(hook) || !runtime.metadata().hooks.includes(hook)) invalid('undeclared session replacement');
+  ownerKey(params.context?.resource_owner); runtime.bind(params, store);
+  const payload = params.payload;
+  fields(payload, hook === 'session_before_switch' ? ['reason', 'targetSessionFile'] : ['entryId', 'position'], `${hook} event`);
+  if (hook === 'session_before_switch') {
+    if (!['new', 'resume'].includes(payload.reason)) invalid('session switch reason');
+    if (payload.targetSessionFile !== undefined) bounded(payload.targetSessionFile, 'target session file', 4096);
+  } else {
+    bounded(payload.entryId, 'fork entry', 256);
+    if (!['before', 'at'].includes(payload.position)) invalid('fork position');
+  }
+  return cancellable(runtime.queued(store, async () => {
+    let disposition = { action: 'continue' };
+    for (const entry of [...runtime.events.get(hook) || []]) {
+      signal.throwIfAborted(); runtime.assertOwner(store);
+      const child = { ...store, factory: entry.factory };
+      const result = await cancellable(runtime.scope.run(child, () => entry.handler(
+        strict({ type: hook, ...payload }, `${hook} event`), createContext(runtime, child))), signal);
+      signal.throwIfAborted();
+      if (result === undefined) continue;
+      fields(result, hook === 'session_before_switch' ? ['cancel'] : ['cancel', 'skipConversationRestore'], `${hook} result`);
+      for (const name of ['cancel', 'skipConversationRestore']) if (result[name] !== undefined && typeof result[name] !== 'boolean') invalid(`${hook} ${name}`);
+      // Pi 1.0.2 AgentSessionRuntime consumes cancel only; its before-fork
+      // result does not propagate skipConversationRestore into replacement.
+      if (result.cancel) { disposition = { action: 'deny', reason: 'Session replacement cancelled' }; break; }
+    }
+    await cancellable(runtime.flush(store), signal);
+    return { disposition, context: [], notifications: [] };
+  }), signal);
+}
+
 export const sessionOperationHooks = ['session_before_compact', 'session_compact', 'session_before_tree', 'session_tree'];
 export async function sessionOperation(runtime, params, store) {
   runtime.require('session_entries'); const hook = params.hook;

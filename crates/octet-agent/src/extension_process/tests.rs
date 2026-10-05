@@ -118,6 +118,7 @@ pub(super) fn insert_test_parent(
     lock_std_mutex(&state.pending).insert(
         id,
         PendingRequest {
+            method: "tool/call".into(),
             sender: reply,
             terminal: Arc::new(AtomicU8::new(REQUEST_ACTIVE)),
             frame_state: Arc::new(AtomicU8::new(FRAME_WRITTEN)),
@@ -1145,7 +1146,7 @@ fn wave1_session_tools_and_injection_dispatch_stay_typed_and_bounded() {
         ],
     );
 
-    // A role other than assistant/system is refused, never coerced.
+    // Pi sendMessage has no role; a role-shaped request is refused.
     handle_protocol_line(
         &wave1_line(
             200,
@@ -1164,7 +1165,7 @@ fn wave1_session_tools_and_injection_dispatch_stay_typed_and_bounded() {
         &wave1_line(
             201,
             methods::SESSION_SEND_MESSAGE,
-            serde_json::json!({"parent_request_id": 1, "role": "system", "text": "note"}),
+            serde_json::json!({"parent_request_id": 1, "custom_type": "job", "content": "note", "display": true, "deliver_as": "follow_up", "trigger_turn": true}),
         ),
         &state,
     )
@@ -1172,8 +1173,13 @@ fn wave1_session_tools_and_injection_dispatch_stay_typed_and_bounded() {
     match received.try_recv().expect("injection event") {
         ExtensionEvent::MessageInjectionRequested { injection, .. } => assert_eq!(
             injection,
-            ExtensionMessageInjection::System {
-                text: "note".to_owned()
+            ExtensionMessageInjection::Custom {
+                custom_type: "job".to_owned(),
+                content: crate::session::CustomMessageContent::Text("note".to_owned()),
+                display: true,
+                details: None,
+                deliver_as: Some(ExtensionMessageDelivery::FollowUp),
+                trigger_turn: Some(true),
             }
         ),
         other => panic!("expected message injection, got {other:?}"),
@@ -1192,7 +1198,8 @@ fn wave1_session_tools_and_injection_dispatch_stay_typed_and_bounded() {
         ExtensionEvent::MessageInjectionRequested { injection, .. } => assert_eq!(
             injection,
             ExtensionMessageInjection::User {
-                text: "question".to_owned()
+                text: "question".to_owned(),
+                deliver_as: None,
             }
         ),
         other => panic!("expected user injection, got {other:?}"),
@@ -1522,16 +1529,21 @@ fn wave1_request_structs_round_trip_and_deny_unknown_fields() {
     assert_round_trip(
         SessionSendMessageRequest {
             parent_request_id: 7,
-            role: "assistant".into(),
-            text: "hello".into(),
+            custom_type: "job".into(),
+            content: crate::session::CustomMessageContent::Text("hello".into()),
+            display: false,
+            details: None,
+            deliver_as: Some(ExtensionMessageDelivery::NextTurn),
+            trigger_turn: None,
             resource_owner: None,
         },
-        serde_json::json!({"parent_request_id": 7, "role": "assistant", "text": "hello"}),
+        serde_json::json!({"parent_request_id": 7, "custom_type": "job", "content": "hello", "display": false, "deliver_as": "next_turn"}),
     );
     assert_round_trip(
         SessionSendUserMessageRequest {
             parent_request_id: 7,
             text: "hello".into(),
+            deliver_as: None,
             resource_owner: None,
         },
         serde_json::json!({"parent_request_id": 7, "text": "hello"}),
@@ -1773,7 +1785,7 @@ async fn session_lifecycle_service_is_bounded_and_epoch_fenced() {
 
     service.activate();
     let stale = service
-        .try_submit(ExtensionSessionLifecycleOperation::Fork)
+        .try_submit(ExtensionSessionLifecycleOperation::Fork { entry_id: None, at: false })
         .unwrap();
     assert!(matches!(
         service.try_submit(ExtensionSessionLifecycleOperation::Reload),
@@ -1845,7 +1857,7 @@ async fn api_v03_session_lifecycle_dispatch_validates_and_settles_canonically() 
             "fork-request",
             methods::SESSION_FORK,
             serde_json::json!({}),
-            ExtensionSessionLifecycleOperation::Fork,
+            ExtensionSessionLifecycleOperation::Fork { entry_id: None, at: false },
             "forked-session",
         ),
         (
@@ -2245,6 +2257,7 @@ fn old_operation_rejects_reused_parent_id_from_replacement_generation() {
 
 fn child_request(parent_request_id: u64, state: u8) -> ChildRequest {
     ChildRequest {
+        exec_cancelled: false,
         remote_ui: None,
         parent_request_id,
         response_state: Arc::new(ChildResponseState {
@@ -2668,6 +2681,7 @@ fn child_arriving_after_parent_cancellation_is_terminal_not_fatal() {
     lock_std_mutex(&state.pending).insert(
         7,
         PendingRequest {
+            method: "tool/call".into(),
             sender: reply,
             terminal: Arc::new(AtomicU8::new(REQUEST_ACTIVE)),
             frame_state: Arc::new(AtomicU8::new(FRAME_WRITTEN)),
@@ -2714,6 +2728,7 @@ fn parent_settlement_cannot_overtake_child_registration() {
     lock_std_mutex(&state.pending).insert(
         7,
         PendingRequest {
+            method: "tool/call".into(),
             sender: reply,
             terminal: Arc::new(AtomicU8::new(REQUEST_ACTIVE)),
             frame_state: Arc::new(AtomicU8::new(FRAME_WRITTEN)),
@@ -2794,6 +2809,7 @@ fn non_tool_input_is_delivered_to_an_event_consumer() {
     lock_std_mutex(&state.pending).insert(
         7,
         PendingRequest {
+            method: "tool/call".into(),
             sender: reply,
             terminal: Arc::new(AtomicU8::new(REQUEST_ACTIVE)),
             frame_state: Arc::new(AtomicU8::new(FRAME_WRITTEN)),
@@ -2844,6 +2860,7 @@ fn non_tool_input_fails_closed_without_an_event_consumer() {
     lock_std_mutex(&state.pending).insert(
         7,
         PendingRequest {
+            method: "tool/call".into(),
             sender: reply,
             terminal: Arc::new(AtomicU8::new(REQUEST_ACTIVE)),
             frame_state: Arc::new(AtomicU8::new(FRAME_WRITTEN)),
@@ -2871,6 +2888,9 @@ fn non_tool_input_fails_closed_without_an_event_consumer() {
 #[test]
 fn prospective_tool_catalog_has_one_input_and_output_schema_byte_budget() {
     let tool = |name: &str, bytes: usize| ToolDefinition {
+        default_active: None,
+                nested_execution: false,
+                prepare_arguments: false,
         prompt_snippet: None,
         prompt_guidelines: Vec::new(),
         operation: None,
@@ -3811,6 +3831,9 @@ fn handshake_must_exactly_match_manifest_contribution_names() {
     let response = InitializeResponse {
         api_version: manifest.api_version.clone(),
         tools: vec![ToolDefinition {
+            default_active: None,
+                nested_execution: false,
+                prepare_arguments: false,
             prompt_snippet: None,
             prompt_guidelines: Vec::new(),
             operation: None,
@@ -3898,6 +3921,9 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
     let response = InitializeResponse {
         api_version: EXTENSION_API_VERSION_0_4.into(),
         tools: vec![ToolDefinition {
+            default_active: None,
+                nested_execution: false,
+                prepare_arguments: false,
             prompt_snippet: None,
             prompt_guidelines: Vec::new(),
             operation: None,

@@ -128,6 +128,7 @@ pub(super) type PendingReply = Result<serde_json::Value, PendingError>;
 pub(super) type PendingSender = oneshot::Sender<PendingReply>;
 
 pub(super) struct PendingRequest {
+    pub(super) method: String,
     pub(super) sender: PendingSender,
     pub(super) terminal: Arc<AtomicU8>,
     pub(super) frame_state: Arc<AtomicU8>,
@@ -159,6 +160,7 @@ pub(super) const CHILD_RESPONDING: u8 = 1;
 pub(super) const CHILD_SETTLED: u8 = 2;
 
 pub(super) struct ChildRequest {
+    pub(super) exec_cancelled: bool,
     pub(super) parent_request_id: u64,
     pub(super) response_state: Arc<ChildResponseState>,
     pub(super) policy_intent: Option<ExtensionActionIntent>,
@@ -1066,6 +1068,7 @@ impl ProcessConnection {
             lock_std_mutex(&connection.pending).insert(
                 id,
                 PendingRequest {
+                    method: method.to_owned(),
                     sender: reply_tx,
                     terminal,
                     frame_state: Arc::clone(&frame_state),

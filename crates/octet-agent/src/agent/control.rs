@@ -155,6 +155,7 @@ pub(super) enum Control {
     SetReasoning(ReasoningConfig),
     Steer(ReservedInput),
     FollowUp(ReservedInput),
+    AppendCustom(ReservedInput),
     FinishNow(ReservedInput),
     SetSteeringMode(QueueDeliveryMode),
     SetFollowUpMode(QueueDeliveryMode),
@@ -198,7 +199,9 @@ pub(super) fn control_input_bytes(input: &UserInput) -> usize {
             };
             total.saturating_add(bytes)
         },
-    )
+    ).saturating_add(input.custom_messages.iter().map(|message| {
+        serde_json::to_vec(message).expect("custom message JSON").len()
+    }).sum::<usize>())
 }
 
 /// Clonable control handle for an active [`Run`].
@@ -355,6 +358,20 @@ impl RunControl {
         Ok(())
     }
 
+    /// Queue a context-only custom message for the safe end-of-turn boundary.
+    /// This admission never requests another model call.
+    pub fn try_append_custom(&self, message: crate::session::CustomMessage) -> Result<(), AgentError> {
+        let input = self.reserve_input(UserInput::from_custom(message))?;
+        let permit = self.tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => AgentError::ControlQueueFull,
+            mpsc::error::TrySendError::Closed(_) => AgentError::RunEnded,
+        })?;
+        let admission = self.admission.lock().unwrap_or_else(|error| error.into_inner());
+        if !*admission { return Err(AgentError::RunEnded); }
+        permit.send(Control::AppendCustom(input));
+        Ok(())
+    }
+
     pub(super) fn try_send(&self, control: UnreservedControl) -> Result<(), AgentError> {
         let control = self.reserve_control(control)?;
         let permit = self.tx.try_reserve().map_err(|error| match error {
@@ -486,7 +503,7 @@ impl RunControl {
 
     /// Attempts to enqueue a follow-up without allowing a producer to wait
     /// behind the run's bounded control queue.
-    pub(crate) fn try_follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
+    pub fn try_follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
         self.try_send(UnreservedControl::FollowUp(input.into()))
     }
 
@@ -542,6 +559,16 @@ impl AbortFlag {
             }
         }
     }
+}
+
+pub(super) fn append_context_inputs(pending: &mut Vec<ReservedInput>, session: &mut Session) -> Result<(), AgentError> {
+    for queued in std::mem::take(pending) {
+        if let Some(ReservedPayload { input, reservation }) = queued.claim() {
+            input.append_to(session, None)?;
+            drop(reservation);
+        }
+    }
+    Ok(())
 }
 
 /// Which queue a batch of control inputs came from; only the announced event
@@ -639,7 +666,8 @@ pub(super) async fn deliver_control_inputs(
         if let Some(evidence) = terminal_gate_evidence {
             evidence.record_request(&summary);
         }
-        if let Err(e) = session.append_with_metadata(user_message(input), Some(metadata.clone())) {
+        let display = input.display_summary();
+        if let Err(e) = input.append_to(session, Some(metadata.clone())) {
             let event = (!delivered.is_empty())
                 .then(|| kind.delivered_event(std::mem::take(&mut delivered)));
             let _ = observation.observe(session);
@@ -648,7 +676,7 @@ pub(super) async fn deliver_control_inputs(
                 finish: FinishReason::Failed(e.into()),
             };
         }
-        delivered.push(summary);
+        delivered.push(display);
         // Never free admission capacity merely because ingress was drained.
         // Both permits remain live through the successful durable append.
         drop(reservation);
