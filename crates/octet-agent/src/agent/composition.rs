@@ -456,7 +456,7 @@ impl CompositionDispatcher {
             let mut outcome = match output {
                 Some(output) => crate::tool_composition::native_result_value(output)?,
                 None => {
-                    serde_json::json!({"content":[{"Text":result.as_ref().err().expect("failed result has an error").message}]})
+                    serde_json::json!({"content":[{"Text":result.as_ref().expect_err("failed result has an error").message}]})
                 }
             };
             outcome["tool_call"] = serde_json::json!({"id":id.0,"name":name,"arguments":arguments});

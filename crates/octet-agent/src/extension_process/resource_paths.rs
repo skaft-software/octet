@@ -224,8 +224,10 @@ mod tests {
             }))
             .is_err()
         );
-        let mut paths = ExtensionResourcePaths::default();
-        paths.skill_paths = vec![root(); 64];
+        let mut paths = ExtensionResourcePaths {
+            skill_paths: vec![root(); 64],
+            ..Default::default()
+        };
         paths.validate().unwrap();
         paths.prompt_paths.push(root());
         assert!(paths.validate().is_err());

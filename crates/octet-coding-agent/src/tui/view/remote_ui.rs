@@ -209,6 +209,7 @@ impl super::InteractiveShell {
         Some(std::sync::Arc::new(tokio::sync::Notify::new()))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub(crate) fn extension_window_title(&self) -> String {
         window_title(&self.state.borrow())
     }

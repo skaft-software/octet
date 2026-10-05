@@ -6479,25 +6479,6 @@ where
     replace_extension_active_session(app, session).map(Some)
 }
 
-async fn reload_extension_session<S>(
-    app: &mut App,
-    shell: &mut InteractiveShell,
-    input: &mut S,
-    request: &ExtensionSessionLifecycleRequest,
-) -> anyhow::Result<Option<String>>
-where
-    S: Stream<Item = std::io::Result<Event>> + Unpin,
-{
-    let path = app.agent.session().path().to_owned();
-    let session = open_extension_session(path, shell, input, "reloading session…").await?;
-    if request.is_cancelled() {
-        return Ok(None);
-    }
-    app.executable_extensions
-        .revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
-    replace_extension_active_session(app, session).map(Some)
-}
-
 /// The same sole idle owner used by create/fork/switch. Keep the native future
 /// alive through cancellation so provider accounting and after-hooks settle.
 async fn compact_extension_session<S>(

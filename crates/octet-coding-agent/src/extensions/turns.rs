@@ -170,6 +170,7 @@ impl ExecutableExtensions {
     /// process snapshot, starts observation for the replacement session, and
     /// fences queued active-session mutations from the previous snapshot. The
     /// active agent has already changed by the time this is called.
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub fn transition_active_session(
         &mut self,
         session: &Session,

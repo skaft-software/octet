@@ -185,6 +185,7 @@ impl ExecutableExtensions {
             })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub async fn execute_presentation_action_with_confirmation<H>(
         &mut self,
         extension: &str,
@@ -319,6 +320,7 @@ impl ExecutableExtensions {
     /// a host confirmation when the extension marked it destructive. `place`
     /// names the menu the action was chosen from.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub async fn execute_menu_action_with_confirmation<H>(
         &mut self,
         extension: &str,
@@ -363,6 +365,7 @@ impl ExecutableExtensions {
         .ok_or_else(|| anyhow::anyhow!("{extension} no longer offers {label:?}"))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub async fn execute_command_with_confirmation<H>(
         &mut self,
         name: &str,
@@ -459,6 +462,7 @@ impl ExecutableExtensions {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub(super) async fn execute_command_with_confirmation_scoped<H>(
         &mut self,
         extension: Option<&str>,
@@ -866,7 +870,7 @@ impl OwnedExtensionCommand {
                 // caller lends the current Agent on each advance, including
                 // after session replacement; retained old contexts stay fenced.
                 if let Some((agent, sessions)) = session_owner.as_mut() {
-                    extensions.apply_session_host_requests(&mut **agent, *sessions);
+                    extensions.apply_session_host_requests(agent, sessions);
                 }
                 if extensions.sync_semantic_ui(shell) {
                     shell.render();

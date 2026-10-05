@@ -136,6 +136,7 @@ impl ExecutableExtensions {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub(crate) fn load_resource_discovery(
         &self,
         base: &Config,

@@ -94,6 +94,7 @@ pub trait ExtensionConfirmationHandler {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // used by tests only
 pub(super) struct PreapprovedExtensionConfirmation<'a, H: ?Sized> {
     // One action-level approval may satisfy only the first confirmation emitted
     // by that same manifest-scoped command; later prompts still reach the UI.

@@ -372,7 +372,7 @@ fn json_themes_share_native_trust_order_reserved_names_bounds_and_no_follow() {
     .unwrap();
     assert_eq!(
         trusted
-            .discover(ResourceKind::Theme, &[explicit.clone()])
+            .discover(ResourceKind::Theme, std::slice::from_ref(&explicit))
             .get("precedence")
             .unwrap()
             .path,

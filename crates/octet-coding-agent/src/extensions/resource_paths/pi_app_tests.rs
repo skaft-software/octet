@@ -313,7 +313,7 @@ fn assert_phase(app: &App, root: &Path, current: &str, captures: &[Request]) {
         let name = format!("pi-{factory}-{current}");
         assert!(app
             .skills
-            .load(&name.clone().into())
+            .load(&name.clone())
             .unwrap()
             .instructions
             .contains(&format!("PI-{factory}-{current}-BODY")));
@@ -322,10 +322,7 @@ fn assert_phase(app: &App, root: &Path, current: &str, captures: &[Request]) {
             .text
             .contains(&format!("PI-{factory}-{current}-PROMPT argument")));
         assert!(!app.prompts.contains(&format!("pi-{factory}-{old}")));
-        assert!(app
-            .skills
-            .load(&format!("pi-{factory}-{old}").into())
-            .is_err());
+        assert!(app.skills.load(&format!("pi-{factory}-{old}")).is_err());
         assert_eq!(
             system
                 .matches(&format!("PI-{factory}-{current}-CATALOG"))
@@ -408,7 +405,7 @@ async fn configured_pi_factories_first_provider_reload_and_empty_withdrawal() {
         for factory in ["first", "second"] {
             let name = format!("pi-{factory}-{current}");
             assert!(!fixture.app.prompts.contains(&name));
-            assert!(fixture.app.skills.load(&name.into()).is_err());
+            assert!(fixture.app.skills.load(&name).is_err());
         }
     }
     assert_eq!(fixture.app.config.skill_paths, original.skill_paths);
@@ -490,12 +487,13 @@ async fn configured_pi_failed_start_cannot_discover_or_become_success_by_reload(
     assert!(!fixture.app.prompts.contains("pi-first-b"));
     assert!(render(&fixture.app, "user-proof").is_ok());
     complete(&mut fixture.app).await.unwrap();
-    let requests = captures.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    let system = requests[0].system.as_ref().unwrap();
-    assert_eq!(system.matches("PI-EXPLICIT-CATALOG").count(), 1);
-    assert!(!system.contains("PI-first-") && !system.contains("PI-second-"));
-    drop(requests);
+    {
+        let requests = captures.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let system = requests[0].system.as_ref().unwrap();
+        assert_eq!(system.matches("PI-EXPLICIT-CATALOG").count(), 1);
+        assert!(!system.contains("PI-first-") && !system.contains("PI-second-"));
+    }
     let rows = trace(&root);
     assert_eq!(
         rows.iter()

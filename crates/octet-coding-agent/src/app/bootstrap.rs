@@ -7737,6 +7737,7 @@ fn configured_extensions(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn configured_extensions_with_runtime_manager(
     config: &Config,
     session: &Session,

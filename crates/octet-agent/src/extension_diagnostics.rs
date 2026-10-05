@@ -158,7 +158,7 @@ fn opaque_id(id: &str) -> bool {
 impl Location {
     fn valid(&self) -> bool {
         self.span.start_byte <= self.span.end_byte
-            && self.span.end_byte <= (1_u64 << 53) - 1
+            && self.span.end_byte < (1_u64 << 53)
             && match &self.source {
                 Source::Workspace { path, revision } => {
                     !path.is_empty()

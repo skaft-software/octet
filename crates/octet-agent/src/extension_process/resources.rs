@@ -226,6 +226,7 @@ impl ResourceRegistry {
         Ok(record)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn admit(
         &mut self,
         id: u64,

@@ -944,6 +944,7 @@ impl ExecutableExtensions {
         self.reload_report().await.into_notices()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
     pub(crate) async fn reload_report(&mut self) -> ExtensionReloadReport {
         let results = self.prepare_resource_process_reload().await;
         self.finish_resource_process_reload(results).await

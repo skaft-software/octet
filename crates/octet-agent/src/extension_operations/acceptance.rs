@@ -305,14 +305,14 @@ async fn d08_d09_actual_agent_pagination_replaces_selection_without_eager_schema
     assert_eq!(turn.load(Ordering::SeqCst), 4);
     let requests = requests(&server).await;
     assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 4);
-    for index in 1..4 {
-        let page = last_page(&requests[index]["messages"]).unwrap();
+    for request in &requests[1..4] {
+        let page = last_page(&request["messages"]).unwrap();
         let cards = page["operations"].as_array().unwrap();
         let selected: BTreeSet<_> = cards
             .iter()
             .map(|card| card["tool"].as_str().unwrap())
             .collect();
-        let projected: BTreeSet<_> = requests[index]["tools"]
+        let projected: BTreeSet<_> = request["tools"]
             .as_array()
             .unwrap()
             .iter()
@@ -322,7 +322,7 @@ async fn d08_d09_actual_agent_pagination_replaces_selection_without_eager_schema
             projected, selected,
             "page replaces selection; no accumulated schemas"
         );
-        for tool in requests[index]["tools"].as_array().unwrap() {
+        for tool in request["tools"].as_array().unwrap() {
             if tool["name"] != DISCOVERY_TOOL_NAME {
                 let exact = originals
                     .iter()

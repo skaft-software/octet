@@ -827,7 +827,7 @@ fn decode_retained_tool_output(
                 mime_type,
                 _alt: _,
             } => {
-                require_artifact_feature(&protocol, &definition.name)?;
+                require_artifact_feature(protocol, &definition.name)?;
                 let artifact_owner = artifact_owner.ok_or_else(|| {
                     ExtensionRuntimeError::Protocol(format!(
                         "tool `{}` returned an artifact without a host-owned session context",
@@ -884,7 +884,7 @@ fn decode_retained_tool_output(
                 mime_type,
                 transcript,
             } => {
-                require_artifact_feature(&protocol, &definition.name)?;
+                require_artifact_feature(protocol, &definition.name)?;
                 let artifact_owner = artifact_owner.ok_or_else(|| {
                     ExtensionRuntimeError::Protocol(format!(
                         "tool `{}` returned an artifact without a host-owned session context",
