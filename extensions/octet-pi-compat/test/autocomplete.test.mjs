@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
-import { addAutocompleteProvider, commandCompletions, getAutocompleteProvider, retireAutocomplete } from '../lib/completions.mjs';
+import { addAutocompleteProvider, commandCompletions, getAutocompleteProvider, retireAutocomplete, startCompletionChain } from '../lib/completions.mjs';
 import { applyPiCompletion, autocompleteSnapshot, completionResponse, piPosition } from '../lib/autocomplete-edits.mjs';
 import { CombinedAutocompleteProvider } from '../node_modules/@earendil-works/pi-tui/dist/autocomplete.js';
 
@@ -18,7 +18,9 @@ function harness() {
   let next = 1;
   const calls = [], errors = [], state = { alive: true, owner: { session_id: 's', extension_instance_id: 'i', process_generation: 1 } };
   const runtime = { features: new Set(['autocomplete', 'autocomplete_edit_v1']), foreground: state, commands: new Map(),
-    scope: new AsyncLocalStorage(), autocompleteRegistration: null,
+    scope: new AsyncLocalStorage(), autocompleteRegistration: null, autocompleteStarted: false, autocompleteSettle: null,
+    // The chain itself is production code; this harness only supplies the runtime.
+    registerAutocomplete(contribution) { return startCompletionChain(this, contribution); },
     ui: { activeEditor() { return undefined; } },
     require(feature) { if (!this.features.has(feature)) throw Error(`unsupported_feature ${feature}`); },
     assertOwner(store) { if (!store.state?.alive || this.foreground !== store.state) throw Error('not_foreground_owner'); },

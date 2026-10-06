@@ -128,6 +128,47 @@ function scopedProvider(runtime, state, factory, provider) {
   };
 }
 
+/** The one process-owned completion chain. It must exist before the initialize
+ * reply write can settle: the host may read that line and query completions
+ * immediately, and those queries await this promise. The registration request
+ * itself still follows the reply, because the host resolves the negotiated
+ * `autocomplete` feature from it.
+ */
+export function ensureCompletionChain(runtime) {
+  if (!runtime.autocompleteRegistration) {
+    runtime.autocompleteRegistration = new Promise((resolve, reject) => { runtime.autocompleteSettle = { resolve, reject }; });
+    // A chain nobody queries yet must not surface as an unhandled rejection;
+    // waiting queries still observe the real failure.
+    runtime.autocompleteRegistration.catch(() => {});
+  }
+  return runtime.autocompleteRegistration;
+}
+
+/** Start the chain once the initialize reply (or a dynamic provider) makes it
+ * legal. `contribution` covers a component-only provider in a command-less
+ * process. Returns the chain, or null when this process contributes nothing.
+ */
+export function startCompletionChain(runtime, contribution = false) {
+  if (runtime.autocompleteStarted || !runtime.features.has('autocomplete') || !(contribution || runtime.commands.size)) return runtime.autocompleteRegistration;
+  runtime.autocompleteStarted = true;
+  const chain = ensureCompletionChain(runtime);
+  const request = runtime.transport.request('ui/autocomplete/register', { revision: 1 }).then(result => {
+    fields(result, ['accepted'], 'autocomplete registration acknowledgement');
+    if (typeof result.accepted !== 'boolean') invalid('autocomplete registration accepted must be boolean');
+    if (!result.accepted) unsupported('command completions', 'host refused autocomplete registration');
+    runtime.autocompleteSettle?.resolve(result);
+    runtime.autocompleteSettle = null;
+  });
+  // One failure path for a rejected transport and for a refused or malformed
+  // admission: waiting queries see it, and the process reports it once.
+  request.catch(error => {
+    runtime.autocompleteSettle?.reject(error);
+    runtime.autocompleteSettle = null;
+    runtime.backgroundError(error);
+  });
+  return chain;
+}
+
 /** API glue: ui.addAutocompleteProvider(factory) calls this with its actual store. */
 export function addAutocompleteProvider(runtime, store, factory) {
   runtime.require('autocomplete'); runtime.require('autocomplete_edit_v1'); runtime.assertOwner(store);
@@ -150,7 +191,7 @@ export function addAutocompleteProvider(runtime, store, factory) {
   if (!runtime.autocompleteStarted) {
     // A dynamic provider may be the first completion contribution. Initialization
     // has already settled; this remains a process-owned registration, never a fake parent.
-    runtime.registerAutocomplete(true);
+    startCompletionChain(runtime, true);
   }
   runtime.track(runtime.autocompleteRegistration, store);
 }
@@ -207,7 +248,7 @@ export async function commandCompletions(runtime, params, store) {
   runtime.require('autocomplete');
   // The chain is armed before initialize settles; a query that still finds none
   // starts it here, which stays after the reply on the wire.
-  const registration = runtime.autocompleteRegistration ?? runtime.registerAutocomplete();
+  const registration = runtime.autocompleteRegistration ?? startCompletionChain(runtime);
   if (!registration) unsupported('command completions', 'no registered completion chain');
   const snapshot = autocompleteSnapshot(params);
   const state = runtime.foreground, chain = state && chains.get(state);

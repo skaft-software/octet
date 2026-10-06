@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { isAbsolute } from 'node:path';
 import { bounded, facade, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
-import { commandCompletions, retireAutocomplete } from './completions.mjs';
+import { commandCompletions, ensureCompletionChain, retireAutocomplete, startCompletionChain } from './completions.mjs';
 import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent } from './tools.mjs';
 import { discoverResources } from './resources.mjs';
 import { cancellable, projectContext } from './provider-context.mjs';
@@ -412,47 +412,19 @@ export class Runtime {
   reportStartupIssues() { this.issues.startup(); }
   // Late renderer registrations are still inert without the native consumer.
   reportInertRenderers() { this.issues.reportInertRenderers(); }
-  /// The one process-owned completion chain. It must exist before the
-  /// initialize reply write can settle: the host may read that line and query
-  /// completions immediately, and those queries await this promise. The
-  /// registration request itself still follows the reply, because the host
-  /// resolves the negotiated `autocomplete` feature from it.
+  /// The completion chain lives in one place: `lib/completions.mjs`. These
+  /// wrappers only expose it to the initialize path and to provider admission.
   ensureAutocompleteChain() {
-    if (!this.autocompleteRegistration) {
-      this.autocompleteRegistration = new Promise((resolve, reject) => { this.autocompleteSettle = { resolve, reject }; });
-      // A chain nobody queries yet must not surface as an unhandled rejection;
-      // waiting queries still observe the real failure.
-      this.autocompleteRegistration.catch(() => {});
-    }
-    return this.autocompleteRegistration;
+    return ensureCompletionChain(this);
   }
   /// Called before the initialize reply is written, so no completion query can
   /// see a missing chain while that reply is in flight.
   armAutocomplete() {
     if (this.autocompleteStarted || !this.features.has('autocomplete') || !this.commands.size) return this.autocompleteRegistration;
-    return this.ensureAutocompleteChain();
+    return ensureCompletionChain(this);
   }
-  /// Start the chain once the reply (or a dynamic provider) has made it legal.
-  /// `contribution` covers a component-only provider in a command-less process.
   registerAutocomplete(contribution = false) {
-    if (this.autocompleteStarted || !this.features.has('autocomplete') || !(contribution || this.commands.size)) return this.autocompleteRegistration;
-    this.autocompleteStarted = true;
-    const chain = this.ensureAutocompleteChain();
-    const request = this.transport.request('ui/autocomplete/register', { revision: 1 }).then(result => {
-      fields(result, ['accepted'], 'autocomplete registration acknowledgement');
-      if (typeof result.accepted !== 'boolean') invalid('autocomplete registration accepted must be boolean');
-      if (!result.accepted) unsupported('command completions', 'host refused autocomplete registration');
-      this.autocompleteSettle?.resolve(result);
-      this.autocompleteSettle = null;
-    });
-    // One failure path for a rejected transport and for a refused or malformed
-    // admission: the waiting queries see it, and the process reports it once.
-    request.catch(error => {
-      this.autocompleteSettle?.reject(error);
-      this.autocompleteSettle = null;
-      this.backgroundError(error);
-    });
-    return chain;
+    return startCompletionChain(this, contribution);
   }
   bind(params, store, { foreground = store.method === 'hook/run' && params.hook === 'session_start', requireLeaf, preparationHead } = {}) {
     const context = params.context || {};

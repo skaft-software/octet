@@ -503,8 +503,17 @@ roots are still the native consumer's responsibility; the adapter cannot supply 
 
 A completion request is `{text,cursor,revision}` with a UTF-8 byte cursor and a safe
 nonnegative revision. One process-owned chain is registered after `initialize`;
-no numeric parent or session owner is invented. Native text/cursor/revision/focus
-and provider-owner fences must reject stale results before display and acceptance.
+no numeric parent or session owner is invented. The chain promise is armed
+*before* the initialize reply can settle, because the host may query completions
+the instant it reads that line: such a query waits for admission instead of being
+refused, while the registration request itself still follows the reply (the host
+resolves the negotiated `autocomplete` feature from it). Nothing orders the
+host's next inbound request after a write callback, so this ordering is
+deliberate, not timing. `completion-registration-order.test.mjs` holds the reply
+write to make it deterministic.
+
+Native text/cursor/revision/focus and provider-owner fences must reject stale
+results before display and acceptance.
 Requests may finish out of order; the adapter preserves each snapshot/request ID,
 not an invented cross-session revision counter. Cancellation terminates the wire
 request promptly; a late callback result cannot publish a second reply. Arbitrary
