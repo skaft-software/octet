@@ -57,6 +57,37 @@ function appendPaths(paths, contribution, budget) {
     }
   }
 }
+
+// Mirror mode: a reviewed opt-in activates the equivalents of this machine's Pi
+// 1.0.2 setup. Discovery is read-only and bounded; the native host still owns
+// admission, parsing, precedence and publication.
+function appendMirrorPaths(runtime, paths, budget) {
+  const setup = discoverPiSetup({ agentDir: runtime.config.pi_agent_dir, env: process.env, cwd: budget.cwd });
+  for (const diagnostic of setup.diagnostics.slice(0, 32)) runtime.diagnostic(`mirror ${diagnostic}`);
+  // Theme roots are flattened to individual palettes: a directory plus the
+  // exact selected file would register one name twice, and the exact file must
+  // be an entry for `default_theme` admission.
+  const themeFiles = themeCandidates(setup.themesPaths, setup.diagnostics);
+  appendPaths(paths, {
+    skillPaths: setup.skillsPaths,
+    promptPaths: setup.promptsPaths,
+    themePaths: themeFiles,
+  }, budget);
+  // Pi's selected palette becomes the session-only native preference; the
+  // native loader still parses and admits it.
+  const theme = resolveThemeFile(themeFiles, setup.defaultTheme, setup.diagnostics);
+  if (theme) {
+    const preferred = normalizeResourcePath(theme, budget.cwd);
+    if (paths.theme_paths.includes(preferred)) paths.default_theme = preferred;
+    else runtime.diagnostic(`mirror theme ${theme} exceeded the resource path budget; no native preference`);
+  } else if (setup.defaultTheme) {
+    runtime.diagnostic(`mirror theme ${setup.defaultTheme} was not found in the Pi setup; no native preference`);
+  }
+  if (setup.keybindingsPath) paths.keybindings_paths = [normalizeResourcePath(setup.keybindingsPath, budget.cwd)];
+  if (setup.contextPath) paths.context_paths = [normalizeResourcePath(setup.contextPath, budget.cwd)];
+  if (setup.defaultModel) paths.default_model = setup.defaultModel;
+}
+
 async function cancellable(promise, signal) {
   signal.throwIfAborted();
   let abort;
@@ -88,32 +119,7 @@ export async function discoverResources(runtime, params, store) {
     // Mirror mode: a reviewed opt-in activates the equivalents of this machine's
     // Pi 1.0.2 setup. Discovery is read-only and bounded; the native host still
     // owns admission, parsing, precedence and publication.
-    if (runtime.mirrorPiSetup) {
-      const setup = discoverPiSetup({ agentDir: runtime.config.pi_agent_dir, env: process.env, cwd });
-      for (const diagnostic of setup.diagnostics.slice(0, 32)) runtime.diagnostic(`mirror ${diagnostic}`);
-      // Theme roots are flattened to individual palettes: a directory plus the
-      // exact selected file would register one name twice, and the exact file
-      // must be an entry for `default_theme` admission.
-      const themeFiles = themeCandidates(setup.themesPaths, setup.diagnostics);
-      appendPaths(paths, {
-        skillPaths: setup.skillsPaths,
-        promptPaths: setup.promptsPaths,
-        themePaths: themeFiles,
-      }, budget);
-      // Pi's selected palette becomes the session-only native preference; the
-      // native loader still parses and admits it.
-      const theme = resolveThemeFile(themeFiles, setup.defaultTheme, setup.diagnostics);
-      if (theme) {
-        const preferred = normalizeResourcePath(theme, cwd);
-        if (paths.theme_paths.includes(preferred)) paths.default_theme = preferred;
-        else runtime.diagnostic(`mirror theme ${theme} exceeded the resource path budget; no native preference`);
-      } else if (setup.defaultTheme) {
-        runtime.diagnostic(`mirror theme ${setup.defaultTheme} was not found in the Pi setup; no native preference`);
-      }
-      if (setup.keybindingsPath) paths.keybindings_paths = [normalizeResourcePath(setup.keybindingsPath, cwd)];
-      if (setup.contextPath) paths.context_paths = [normalizeResourcePath(setup.contextPath, cwd)];
-      if (setup.defaultModel) paths.default_model = setup.defaultModel;
-    }
+    if (runtime.mirrorPiSetup) appendMirrorPaths(runtime, paths, budget);
     // Reviewed import snapshots use the same native owner/trust/retirement
     // gates as factory resources. This preference never writes host settings.
     appendPaths(paths, { themePaths: runtime.config.pi_theme_paths }, budget);

@@ -152,7 +152,7 @@ export function resolveManagedPackage(agentDir, source) {
   return join(agentDir, 'npm', 'node_modules', spec);
 }
 
-function packageResources(agentDir, packages, cwd, diagnostics, setup) {
+function packageResources(agentDir, packages, cwd, diagnostics, setup, seen) {
   if (packages === undefined) return;
   if (!Array.isArray(packages)) { diagnostics.push('settings.packages is not an array; skipped'); return; }
   if (packages.length > MAX_PACKAGES) {
@@ -177,12 +177,12 @@ function packageResources(agentDir, packages, cwd, diagnostics, setup) {
     }
     const autoload = filters.autoload !== false;
     if (autoload) {
-      for (const kind of RESOURCE_KINDS) resourceEntries([join(root, kind)], cwd, diagnostics, `${source} ${kind}`, setup[`${kind}Paths`], setup.seen);
+      for (const kind of RESOURCE_KINDS) resourceEntries([join(root, kind)], cwd, diagnostics, `${source} ${kind}`, setup[`${kind}Paths`], seen);
       extensionEntries([join(root, 'extensions')], cwd, diagnostics, `${source} extensions`, setup.extensions);
     }
     const declared = packageManifestResources(root, source, diagnostics);
     if (autoload && declared) {
-      for (const kind of RESOURCE_KINDS) if (declared[kind]) resourceEntries(declared[kind], cwd, diagnostics, `${source} ${kind}`, setup[`${kind}Paths`], setup.seen);
+      for (const kind of RESOURCE_KINDS) if (declared[kind]) resourceEntries(declared[kind], cwd, diagnostics, `${source} ${kind}`, setup[`${kind}Paths`], seen);
       if (declared.extensions) extensionEntries(declared.extensions, cwd, diagnostics, `${source} extensions`, setup.extensions);
     }
     for (const [field, kind] of [['extensions', 'extensions'], ['skills', 'skills'], ['prompts', 'prompts'], ['themes', 'themes']]) {
@@ -194,7 +194,7 @@ function packageResources(agentDir, packages, cwd, diagnostics, setup) {
       }
       const paths = values.map(value => value.endsWith('/**') ? resolve(root, value.slice(0, -3)) : resolve(root, value));
       if (kind === 'extensions') extensionEntries(paths, cwd, diagnostics, `${source} extensions`, setup.extensions);
-      else resourceEntries(paths, cwd, diagnostics, `${source} ${kind}`, setup[`${kind}Paths`], setup.seen);
+      else resourceEntries(paths, cwd, diagnostics, `${source} ${kind}`, setup[`${kind}Paths`], seen);
     }
   }
 }
@@ -254,8 +254,8 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
     defaultThinkingLevel: undefined,
     defaultModel: undefined,
     diagnostics,
-    seen: new Set(),
   };
+  const seen = new Set();
   const settings = readJson(join(resolvedAgentDir, 'settings.json'), 'settings.json', diagnostics);
   if (settings !== undefined) {
     if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) {
@@ -287,16 +287,16 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
   }
   for (const scope of scopes) {
     const settings = scope === resolvedAgentDir ? scopeSettings[0] : scopeSettings[1] ?? {};
-    for (const kind of RESOURCE_KINDS) resourceEntries([join(scope, kind)], cwd, diagnostics, kind, setup[`${kind}Paths`], setup.seen);
+    for (const kind of RESOURCE_KINDS) resourceEntries([join(scope, kind)], cwd, diagnostics, kind, setup[`${kind}Paths`], seen);
     for (const kind of RESOURCE_KINDS) {
-      resourceEntries(settingsPathList(settings, kind, diagnostics), cwd, diagnostics, kind, setup[`${kind}Paths`], setup.seen);
+      resourceEntries(settingsPathList(settings, kind, diagnostics), cwd, diagnostics, kind, setup[`${kind}Paths`], seen);
     }
     extensionEntries([join(scope, 'extensions')], cwd, diagnostics, 'extensions', setup.extensions);
     extensionEntries(settingsPathList(settings, 'extensions', diagnostics), cwd, diagnostics, 'extensions', setup.extensions);
   }
-  packageResources(resolvedAgentDir, setup.settings.packages, cwd, diagnostics, setup);
+  packageResources(resolvedAgentDir, setup.settings.packages, cwd, diagnostics, setup, seen);
   const projectPackages = scopeSettings[1]?.packages;
-  if (projectPackages !== undefined) packageResources(resolvedAgentDir, projectPackages, cwd, diagnostics, setup);
+  if (projectPackages !== undefined) packageResources(resolvedAgentDir, projectPackages, cwd, diagnostics, setup, seen);
   if (setup.extensions.length > MAX_EXTENSIONS) {
     diagnostics.push(`Pi setup has ${setup.extensions.length} extensions; only the first ${MAX_EXTENSIONS} are mirrored`);
     setup.extensions = setup.extensions.slice(0, MAX_EXTENSIONS);
@@ -307,7 +307,6 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
     const candidate = join(resolvedAgentDir, name);
     if (regularFile(candidate, diagnostics, 'context')) { setup.contextPath = candidate; break; }
   }
-  delete setup.seen;
   return setup;
 }
 
