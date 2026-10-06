@@ -70,6 +70,7 @@ use crate::tui::view::{
 };
 
 mod extension_menu;
+mod model_controls;
 mod onboarding;
 
 use extension_menu::{
@@ -472,6 +473,16 @@ pub enum PendingIdleAction {
     Setup,
     Logout(Option<String>),
     ChangeModel(ModelId),
+    /// Accepted from the original issued extension owner, rechecked at idle.
+    ExtensionModelControl {
+        owner: octet_agent::extension_process::ExtensionResourceOwner,
+        selection: octet_agent::extension_process::ExtensionModelControl,
+    },
+    ExtensionActiveThinking {
+        owner: octet_agent::extension_process::ExtensionResourceOwner,
+        level: String,
+        reasoning: ReasoningConfig,
+    },
     Fast(bool),
     CacheWarming(octet_agent::CacheWarmMode),
     /// Preference is already saved and sent to the active session owner.
@@ -2426,7 +2437,7 @@ fn stage_active_thinking(
 ) -> bool {
     if let Some(action) = queue
         .iter_mut()
-        .find(|action| matches!(action, PendingIdleAction::ActiveThinkingSelection(_)))
+        .find(|action| model_controls::is_active_thinking(action))
     {
         *action = PendingIdleAction::ActiveThinkingSelection(reasoning.clone());
         return true;
@@ -2448,10 +2459,13 @@ fn settle_active_thinking(
     inspection: &ActiveRunInspection,
     queue: &mut VecDeque<PendingIdleAction>,
 ) {
-    if !queue
-        .iter()
-        .any(|action| matches!(action, PendingIdleAction::ActiveThinkingSelection(_)))
-    {
+    if !queue.iter().any(|action| {
+        matches!(
+            action,
+            PendingIdleAction::ActiveThinkingSelection(_)
+                | PendingIdleAction::ExtensionActiveThinking { .. }
+        )
+    }) {
         return;
     }
     let effective = inspection
@@ -2465,6 +2479,7 @@ fn settle_active_thinking(
                 .map(|(_, reasoning)| reasoning)
         })
         .unwrap_or_else(|| inspection.reasoning.clone());
+    model_controls::settle_active_controls(queue, &effective);
     let mut latest = None;
     for action in queue.iter_mut() {
         if let PendingIdleAction::ActiveThinkingSelection(reasoning) = action {
@@ -3634,6 +3649,9 @@ where
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        if shell.set_pending_controls(model_controls::queue_labels(pending_actions)) {
+            shell.render();
+        }
         if settled_outcome.is_some() {
             // Ctrl+C can arrive after root settlement while a stop response is
             // pending. It must still revoke previously armed follow-up dispatch.
@@ -3738,7 +3756,7 @@ where
                         }
                         Err(error) if selected_reasoning == reasoning => {
                             selected_reasoning = last_control_reasoning.clone();
-                            pending_actions.retain(|action| !matches!(action, PendingIdleAction::ActiveThinkingSelection(choice) if choice == &reasoning));
+                            pending_actions.retain(|action| !matches!(action, PendingIdleAction::ActiveThinkingSelection(choice) | PendingIdleAction::ExtensionActiveThinking { reasoning: choice, .. } if choice == &reasoning));
                             if last_control_reasoning != inspection.reasoning {
                                 stage_active_thinking(pending_actions, &last_control_reasoning);
                             }
@@ -3826,6 +3844,17 @@ where
                 if apply_extension_background(shell, executable_extensions) { shell.render(); }
             }
             _ = extension_tick.tick() => {
+                if let Some(request) = executable_extensions.next_model_control_request() {
+                    if let Some(reasoning) = model_controls::admit_busy_control(
+                        request, executable_extensions, inspection, pending_actions, shell, aborting,
+                    ) {
+                        selected_reasoning = reasoning.clone();
+                        pending_reasoning = Some(reasoning);
+                        pending_reasoning_announce = true;
+                    }
+                    shell.set_pending_controls(model_controls::queue_labels(pending_actions));
+                    shell.render();
+                }
                 if apply_extension_background(shell, executable_extensions) {
                     shell.render();
                 }
@@ -3979,7 +4008,7 @@ where
                                             continue;
                                         }
                                     };
-                                    if inspection.model.responses_features().reasoning_effort_updates && !aborting {
+                                    if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) {
                                         if !stage_active_thinking(pending_actions, &reasoning) {
                                             shell.error("command queue is full; thinking unchanged".into());
                                             shell.render();
@@ -4253,8 +4282,8 @@ where
                             Command::Unknown(text) => subagents_command_arguments(text, executable_extensions).is_some_and(|args| subagent_list_requested(&args) || matches!(args.as_slice(), [action, _] if action == "stop")),
                             _ => false,
                         };
-                        let live_thinking = matches!(&parsed, Command::Thinking(Some(_))) && inspection.model.responses_features().reasoning_effort_updates && !aborting;
-                        let replaces_thinking = live_thinking && pending_actions.iter().any(|action| matches!(action, PendingIdleAction::ActiveThinkingSelection(_)));
+                        let live_thinking = matches!(&parsed, Command::Thinking(Some(_))) && inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions);
+                        let replaces_thinking = live_thinking && pending_actions.iter().any(model_controls::is_active_thinking);
                         if active_command_needs_idle_slot(&parsed) && !prompt_template && !live_subagent_control && !replaces_thinking && pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
                             shell.error("command queue is full; draft and attachments retained".into());
                             shell.render();
@@ -4267,7 +4296,7 @@ where
                             ));
                             match requested {
                                 Err(error) => { shell.error(error.to_string()); shell.render(); continue; }
-                                Ok(reasoning) if inspection.model.responses_features().reasoning_effort_updates && !aborting => {
+                                Ok(reasoning) if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) => {
                                     if !stage_active_thinking(pending_actions, &reasoning) {
                                         shell.error("command queue is full; thinking unchanged".into());
                                         shell.render();
@@ -4418,7 +4447,7 @@ where
                         shell.render();
                     }
                     InputAction::CycleThinking => {
-                        if inspection.model.responses_features().reasoning_effort_updates && !aborting {
+                        if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) {
                             let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
                             // Cycle from the latest user selection, including a
                             // value whose control send is still in flight.
@@ -4488,6 +4517,11 @@ where
                         if let Ok(session) = inspection.read_only_session() {
                             if let Ok(Some((_, reasoning))) = session.responses_reasoning(&inspection.model.endpoint.id, &inspection.model.spec.id) {
                                 shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &reasoning_label(&reasoning));
+                                if model_controls::acknowledge_response_boundary(pending_actions, &reasoning) {
+                                    executable_extensions.refresh_host_state(&session, &inspection.model, &reasoning, &inspection.sessions);
+                                    shell.set_pending_controls(model_controls::queue_labels(pending_actions));
+                                    shell.notice(format!("thinking {} applied at the host response boundary; not provider acknowledgement", reasoning_label(&reasoning)));
+                                }
                             }
                         }
                     }
@@ -4712,6 +4746,16 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
 }
 
 fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
+    // Owning &mut App proves no Run can have an in-flight request. Startup and
+    // other idle hook pumps need the same consumer as an idle command; never
+    // leave a synchronous setter waiting behind the hook which called it.
+    let model_control = app
+        .executable_extensions
+        .next_model_control_request()
+        .map(|request| {
+            let result = model_controls::apply_idle_request(app, &request);
+            (request, result)
+        });
     app.executable_extensions.refresh_host_state(
         app.agent.session(),
         &app.model,
@@ -4736,6 +4780,10 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
     shell.set_extension_commands(Arc::from(native_slash_command_suggestions(
         &app.executable_extensions,
     )));
+    if let Some((request, result)) = model_control {
+        update_status(shell, app);
+        request.respond_model_control(result);
+    }
 }
 
 /// Pi's idle delivery: a message that triggers a turn runs now, through the
@@ -7422,15 +7470,8 @@ where
             create_extension_session_with_options(app, shell, input, &request, parent_session, None)
                 .await
         }
-        ExtensionSessionLifecycleOperation::ModelControl(selection) => {
-            let result = if request
-                .resource_owner()
-                .is_some_and(|owner| owner.session_id == app.agent.session().resource_owner_key())
-            {
-                crate::extensions::model_control::apply_idle_model_control(app, &selection)
-            } else {
-                Err("model selection owner is not the foreground session".into())
-            };
+        ExtensionSessionLifecycleOperation::ModelControl(_) => {
+            let result = model_controls::apply_idle_request(app, &request);
             // Publish the native snapshot before waking the synchronous caller.
             request_extension_ui(shell, app);
             update_status(shell, app);
@@ -7763,9 +7804,17 @@ async fn apply_pending_actions(
         }
         refresh_resource_paths(&mut app, shell, input).await?;
         let Some(action) = pending_actions.pop_front() else {
+            shell.set_pending_controls(Vec::new());
             break;
         };
+        shell.set_pending_controls(model_controls::queue_labels(pending_actions));
         match action {
+            PendingIdleAction::ExtensionModelControl { owner, selection } => {
+                model_controls::apply_queued_control(&mut app, shell, &owner, &selection);
+            }
+            PendingIdleAction::ExtensionActiveThinking { .. } => {
+                unreachable!("run settlement converts active controls")
+            }
             PendingIdleAction::Login(provider) => match validate_provider(provider.as_deref()) {
                 Ok("codex") => login_codex(&mut app, shell, input).await?,
                 Ok("custom") => login_custom(shell)?,
