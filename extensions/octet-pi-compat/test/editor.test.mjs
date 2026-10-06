@@ -287,3 +287,23 @@ test('session_start carries Pi\'s startup reason', async t => {
   assert.equal(notice.params.message, 'reason:startup');
   await peer.close();
 });
+
+test('CustomEditor retains its draft until native composer admission, and follow-up uses resolved keys', async t => {
+  const peer = launch(t, [await fixture(t)], { composer: '/model', hold: ['composer/submit'] });
+  await peer.init(); await peer.start({keybindings: {...(await import('./helper.mjs')).host.keybindings, 'app.message.followUp': ['ctrl+y']}});
+  const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
+  peer.editorKey(id, 'Enter');
+  const submit = await peer.wait(f => f.method === 'composer/submit');
+  assert.equal(submit.params.text, '/model');
+  assert.equal(submit.params.follow_up, false);
+  assert.equal(peer.seen.some(f => f.method === 'composer/set' && f.params.text === ''), false);
+  peer.send({jsonrpc: '2.0', id: submit.id, result: {accepted: false}});
+  await peer.wait(frame('/model'));
+  peer.editorKey(id, 'y', 'press', ['ctrl']);
+  const follow = await peer.wait(f => f.method === 'composer/submit');
+  assert.equal(follow.params.text, '/model');
+  assert.equal(follow.params.follow_up, true);
+  peer.send({jsonrpc: '2.0', id: follow.id, result: {accepted: true}});
+  await peer.wait(f => f.method === 'composer/set' && f.params.text === '');
+  await peer.close();
+});

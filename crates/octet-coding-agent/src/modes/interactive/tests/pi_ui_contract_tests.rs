@@ -373,3 +373,35 @@ export default function(pi) {
     shell.interrupt_run(run);
     app.executable_extensions.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_submits_through_native_composer() {
+    let (_directory, mut app, mut shell) = live_ui_app(r#"
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+export default pi => {
+  pi.on('session_start', (_, ctx) => ctx.ui.setEditorComponent((t, theme, keys) => new CustomEditor(t, theme, keys)));
+  pi.registerCommand('fixture-command', {handler: () => {}});
+  for (const [i, text] of ['/model', '/fixture-command', 'ordinary prompt'].entries())
+    pi.registerCommand('seed-' + i, {handler: async (_, ctx) => { await ctx.ui.setEditorText(text); }});
+};
+"#).await;
+    for (i, text) in ["/model", "/fixture-command", "ordinary prompt"].into_iter().enumerate() {
+        command(&mut app, &mut shell, &format!("seed-{i}")).await.unwrap();
+        component_key(&mut app, &mut shell, KeyCode::Enter);
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let mut scroll = tokio::time::interval(Duration::from_millis(16));
+        let mut extensions = tokio::time::interval(Duration::from_millis(10));
+        let (watcher, mut reload, mut tick) = test_reload();
+        let idle = tokio::time::timeout(Duration::from_secs(5), wait_for_prompt(
+            &mut shell, &mut input, &mut scroll, &mut extensions,
+            &mut app.executable_extensions, None, &mut tick, &watcher, &mut reload,
+            Some(&mut app.agent),
+        )).await.expect("custom editor submission did not reach the native composer").unwrap();
+        match idle {
+            Idle::Command(command) if text.starts_with('/') => assert_eq!(command, text),
+            Idle::Submit(input) if !text.starts_with('/') => assert_eq!(input.display_text, text),
+            _ => panic!("custom editor bypassed native admission for {text}"),
+        }
+    }
+    app.executable_extensions.shutdown().await;
+}
