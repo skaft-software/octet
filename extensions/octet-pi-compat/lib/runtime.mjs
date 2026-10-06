@@ -555,9 +555,15 @@ export class Runtime {
       ...(changed.has('isError') ? { is_error: event.isError } : {}),
     };
   }
-  queued(store, work) {
+  queued(store, work, { holdOnCancel = false } = {}) {
     if (++this.hookQueued > 128) { this.hookQueued--; throw rpcError(-32012, 'bounds_exceeded ordered hook queue'); }
-    const result = this.hookTail.then(() => { store.controller.signal.throwIfAborted(); return cancellable(Promise.resolve().then(work), store.controller.signal); });
+    const running = this.hookTail.then(() => { store.controller.signal.throwIfAborted(); return Promise.resolve().then(work); });
+    const raced = cancellable(running, store.controller.signal);
+    const result = holdOnCancel ? raced.catch(async error => {
+      if (!store.controller.signal.aborted) throw error;
+      try { await running; } catch { /* Preserve cancellation after the callback settles. */ }
+      throw error;
+    }) : raced;
     this.hookTail = result.catch(() => {});
     return result.finally(() => { this.hookQueued--; });
   }
@@ -644,7 +650,7 @@ export class Runtime {
       const replaced = toolInput !== undefined && disposition.action === 'continue' && !isDeepStrictEqual(toolInput, payload.arguments ?? {});
       return { disposition, context: [], notifications: [], ...(customMessages.length ? { custom_messages: customMessages } : {}), ...(systemPrompt === undefined || systemPrompt === payload.system_prompt ? {} : { system_prompt: systemPrompt }),
         ...(replaced ? { arguments: plainJSON(toolInput, 'tool arguments', 1048576) } : {}), ...(store.toolTermination === undefined ? {} : { terminate: store.toolTermination }) };
-    });
+    }, { holdOnCancel: true });
     if (message.method === 'tool/render') {
       const tool = this.tools.get(p.name); if (!tool) invalid('unknown renderer');
       const components = [];
