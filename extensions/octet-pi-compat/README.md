@@ -110,6 +110,27 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
 
 ## Implemented surface
 
+- Pi's own plain-object call semantics for the objects a factory is handed. The
+  `pi` object, `ctx`, `ctx.ui`, `pi.events` and every callback event payload
+  report an optional member exactly as Pi does: reading a member this build does
+  not define yields `undefined`, so a factory can detect a field or an API from
+  another Pi release (`ctx.goalStorageRoot !== undefined`,
+  `pi.events[channel]`, a later event field) without the callback failing.
+  Assigning such a member is refused, because it would silently shadow the API.
+  Members Pi 1.0.2 has but Octet deliberately does not honor stay explicit
+  refusing functions (`ctx.abort`, `ctx.shutdown`, `ctx.ui.onTerminalInput`,
+  `pi.events.clear`, the unemulated provider/session factories), so an
+  unsupported *operation* still fails loudly. Octet-built data objects (observed
+  assistant messages and their usage, native receipts, stream options) keep the
+  opposite rule: an unavailable fact refuses instead of reading as absent.
+- Pi 1.0.2 `config.ts` package helpers (`getPackageDir`, `getPackageJsonPath`,
+  `getReadmePath`) resolved against the package that provides the
+  `pi-coding-agent` module: this adapter package on the emulated path, the
+  managed Pi release on the installed-Pi route. `docs/` and `examples/` get no
+  helper because this package ships no such directories.
+- Pi 1.0.2 `CURRENT_SESSION_VERSION` (3) and the `keybinding-hints` helpers
+  `keyText`, `keyHint` and `rawKeyHint`, implemented from Pi's source against
+  the pinned Pi TUI keybindings (host-supplied bindings on the installed route).
 - Pure `calculateContextTokens`, `estimateTokens`, and `buildSessionContext`
   exports on both coding-agent aliases. They operate on caller-supplied Pi data,
   including compaction-aware branches and context edits; they neither transform
@@ -248,6 +269,17 @@ Other negotiated tool/compaction/model/dialog observations are dispatched in ord
 Reading unavailable Pi fields or returning an unapplied transformation/veto fails
 explicitly. Command argument arrays join with spaces; the wire cannot reconstruct
 original shell quoting.
+
+A synchronous reverse request that the host drops (it cancels the hook together
+with the child request it issued) no longer takes the extension down. A dropped
+*read-only* request (`tools/snapshot`, `composition/context`) is terminal
+cancellation: the factory thread is woken with `request cancelled` instead of
+waiting on a reply that will never arrive. A durable or effectful request keeps
+waiting for its native outcome, because only that outcome decides whether the
+append/registration committed. Replies that arrive after a wait settled are
+dropped, and the connection keeps serving later hooks. Only a local deadline
+stays an unknown outcome, which terminalizes the connection and is never
+replayed.
 
 **pi-clm 1.0.0 is not qualified.** Unchanged pinned registration capture now
 succeeds with native per-model-turn mappings; no whole-run aliases are installed

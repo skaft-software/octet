@@ -5,9 +5,19 @@ import { fields, invalid, rpcError } from './errors.mjs';
 import { notificationIntent } from './desktop-notifications.mjs';
 
 export const MAX_FRAME = 1048576;
+// Synchronous reverse-request completion statuses shared with the transport
+// worker: a real reply, an unknown outcome (fatal, never replayed), and a
+// read-only request the host dropped (terminal cancellation).
+export const SYNC_REPLY = 2;
+export const SYNC_UNKNOWN = 3;
+export const SYNC_CANCELLED = 4;
 const MAX_QUEUE = 128, MAX_QUEUE_BYTES = 4194304;
+// A worker that cannot be stopped (pending inherited-pipe read) must not hold
+// shutdown open; see Transport.close().
+const TERMINATE_DEADLINE = 250;
 const nativeTimeout = globalThis.setTimeout;
 const nativeClearTimeout = globalThis.clearTimeout;
+const terminateDeadline = () => new Promise(resolve => { nativeTimeout(resolve, TERMINATE_DEADLINE).unref?.(); });
 
 // Capture the only protocol writer before loading ANY foreign factory. Neither
 // console nor process.stdout.write from an extension can enter this writer.
@@ -282,9 +292,13 @@ export class Transport {
     if (length < 1 || length > MAX_FRAME) { const error = rpcError(-32600, 'invalid synchronous response length'); this.fail(error); throw error; }
     const reply = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(this.syncBuffer, 16, length)));
     Atomics.store(this.syncHeader, 0, 0);
-    if (status === 3) { const error = rpcError(reply.code, `session append outcome unknown: ${reply.message}`); this.fail(error); throw error; }
+    if (status === SYNC_UNKNOWN) { const error = rpcError(reply.code, `session append outcome unknown: ${reply.message}`); this.fail(error); throw error; }
+    // A dropped read-only request has no commitment to learn: it is cancelled,
+    // and the healthy connection keeps serving. Durable/effectful requests
+    // instead keep waiting for their native outcome (the watchdog above).
+    if (status === SYNC_CANCELLED) throw rpcError(reply.code, reply.message);
     this.validate(reply);
-    if (status !== 2 || reply.id !== id) { const error = rpcError(-32600, 'invalid synchronous response identity'); this.fail(error); throw error; }
+    if (status !== SYNC_REPLY || reply.id !== id) { const error = rpcError(-32600, 'invalid synchronous response identity'); this.fail(error); throw error; }
     if (Atomics.load(this.syncHeader, 2)) onCancel?.();
     if (reply.error) throw rpcError(reply.error.code, reply.error.message);
     return reply.result;
@@ -292,7 +306,13 @@ export class Transport {
   async close() {
     if (!this.worker) return;
     this.closed = true;
-    await this.worker.terminate();
+    // Termination is best effort. Bun has to read the inherited stdin pipe with
+    // a pending `fs.read` (it cannot open an inherited pipe fd as a socket), and
+    // `worker.terminate()` cannot resolve while that read is outstanding — the
+    // same limit applies to a pending callback read under Node. The host owns
+    // final process-tree cleanup, and the caller (the runner) bounds this call
+    // too, so shutdown must never wait forever on a worker that is already idle.
+    await Promise.race([this.worker.terminate().catch(() => {}), terminateDeadline()]);
   }
   fail(error, eof = false) {
     if (this.closed) return;

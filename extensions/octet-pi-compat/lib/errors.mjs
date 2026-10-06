@@ -13,6 +13,30 @@ export function fields(value, allowed, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(`${name} must be an object`);
   for (const key of Object.keys(value)) if (!allowed.includes(key)) unsupported(`${name}.${key}`, 'option would not be honored');
 }
+// An object handed to an extension callback with Pi's own plain-object shape
+// (the `ctx`/`ui` facades, `pi.events`, event payloads). In Pi an optional
+// member a factory probes is simply absent, so absence must read as absent:
+// third-party factories detect features and other Pi releases this way
+// (`ctx.goalStorageRoot !== undefined`, `pi.events[channel]`, an event field
+// added by a later release). Members Pi 1.0.2 has but octet deliberately does
+// not honor are registered at the facade as explicit refusing functions, so an
+// unsupported *operation* still fails loudly.
+export function facade(object, label) {
+  return new Proxy(object, {
+    get(target, key, receiver) {
+      if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
+      if (typeof key === 'symbol' || key === 'then' || key === 'toJSON') return undefined;
+      return undefined;
+    },
+    set(target, key, value, receiver) {
+      if (Reflect.has(target, key) || typeof key === 'symbol') return Reflect.set(target, key, value, receiver);
+      return unsupported(`${label}.${String(key)}`, 'the facade has no such member to assign');
+    },
+  });
+}
+// An octet-built *data* object (an observed message, a native receipt, stream
+// options). Here an absent member is a fact the host could not supply, and
+// reading it must fail explicitly instead of looking like a real Pi value.
 export function strict(object, label) {
   return new Proxy(object, { get(target, key, receiver) {
     if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
