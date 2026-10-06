@@ -1,5 +1,5 @@
 // Actual model iterations, not whole-run lifecycle notification aliases.
-import { bounded, fields, invalid, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
 import { canonicalToPi, cancellable } from './provider-context.mjs';
 import { assistantObservation, emitRunPrompt, settleRunTurn, settleStreamedPartial } from './run-messages.mjs';
 
@@ -102,7 +102,7 @@ export async function modelTurn(runtime, params, store) {
       runtime.reportObservationError(hook === 'model_turn_start' ? 'turn_start' : 'turn_end');
       return reply;
     }
-    await cancellable(runtime.runEvent(event.type, strict(event, `${event.type} event`), store), signal);
+    await cancellable(runtime.runEvent(event.type, facade(event, `${event.type} event`), store), signal);
     if (hook === 'model_turn_start') await cancellable(emitRunPrompt(runtime, store), signal);
     await cancellable(runtime.flush(store), signal); live();
     return reply;

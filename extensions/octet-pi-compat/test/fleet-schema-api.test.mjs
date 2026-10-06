@@ -4,7 +4,7 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAPI } from '../lib/api.mjs';
-import { strict } from '../lib/errors.mjs';
+import { facade, strict } from '../lib/errors.mjs';
 import { validateTool, toolWire } from '../lib/tools.mjs';
 import { Compile } from '../node_modules/typebox/build/compile/index.mjs';
 import { inspect, launch } from './helper.mjs';
@@ -28,7 +28,16 @@ test('Pi 1.0.2 absent API members support optional feature detection, not invent
     assert.throws(() => pi[name]('stale'), TypeError);
   }
   assert.equal(Object.getPrototypeOf(pi), Object.prototype);
-  assert.throws(() => strict({}, 'ctx').missing, /unsupported_feature ctx.missing/);
+  // Pi's own callback objects are plain: an optional member a factory probes
+  // (`ctx.goalStorageRoot`, `pi.events[channel]`, an event field from another
+  // release) is absent, not an error, and assigning an undefined member cannot
+  // silently shadow the facade. An octet-built data object keeps refusing an
+  // unavailable fact, because there absence means the host could not supply it.
+  assert.equal(facade({}, 'ctx').missing, undefined);
+  assert.equal('missing' in facade({}, 'ctx'), false);
+  assert.equal(facade({}, 'ctx').missing?.('stale'), undefined);
+  assert.throws(() => { facade({}, 'ctx').missing = 1; }, /unsupported_feature ctx.missing/);
+  assert.throws(() => strict({}, 'assistant usage').missing, /unsupported_feature assistant usage.missing/);
 });
 
 test('known unimplemented Pi API members remain explicit refusing methods', () => {

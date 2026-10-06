@@ -1,5 +1,5 @@
 // Awaited native Session operations, never advisory lifecycle notifications.
-import { bounded, fields, invalid, ownerKey, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, ownerKey, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable } from './provider-context.mjs';
 import { translateSessionEntries } from './session-mirror.mjs';
@@ -24,7 +24,7 @@ export async function sessionReplacement(runtime, params, store) {
       signal.throwIfAborted(); runtime.assertSessionOwner(store);
       const child = { ...store, factory: entry.factory };
       const result = await cancellable(runtime.scope.run(child, () => entry.handler(
-        strict({ type: hook, ...payload }, `${hook} event`), createContext(runtime, child))), signal);
+        facade({ type: hook, ...payload }, `${hook} event`), createContext(runtime, child))), signal);
       signal.throwIfAborted();
       if (result === undefined) continue;
       fields(result, hook === 'session_before_switch' ? ['cancel'] : ['cancel', 'skipConversationRestore'], `${hook} result`);
@@ -76,7 +76,7 @@ export async function sessionOperation(runtime, params, store) {
     let decision = { action: 'continue' };
     for (const entry of [...runtime.events.get(hook) || []]) {
       live(); const child = { ...store, factory: entry.factory };
-      const result = await cancellable(runtime.scope.run(child, () => entry.handler(strict({ ...event }, `${hook} event`), createContext(runtime, child))), signal);
+      const result = await cancellable(runtime.scope.run(child, () => entry.handler(facade({ ...event }, `${hook} event`), createContext(runtime, child))), signal);
       live();
       if (result === undefined) continue;
       if (!['session_before_compact', 'session_before_tree'].includes(hook)) unsupported(`${hook} result`, 'observation follows actual commit');
