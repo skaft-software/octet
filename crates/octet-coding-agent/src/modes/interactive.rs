@@ -61,8 +61,8 @@ use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
     background_from_terminal_rgb, compiled_file_theme_name, is_reserved_theme_name,
-    load_named_theme_for_background, load_theme, load_theme_for_background,
-    selectable_file_themes, TerminalBackground, TerminalThemeChoice,
+    load_named_theme_for_background, load_theme, load_theme_for_background, selectable_file_themes,
+    TerminalBackground, TerminalThemeChoice,
 };
 use crate::tui::view::{
     InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult, Panel, PanelAction, PanelResult,

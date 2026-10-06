@@ -117,8 +117,13 @@ pub enum ExtensionRemoteUiChrome {
         #[serde(default)]
         name: Option<String>,
     },
-    /// List pre-resolved native palettes available to this foreground shell.
-    ThemeList,
+    /// List the native palette catalog available to this foreground shell.
+    ///
+    /// The catalog is metadata only, so the variant carries no fields; a
+    /// field-less struct variant (not a unit variant) keeps the request closed
+    /// against unknown keys, which internally tagged unit variants silently
+    /// accept.
+    ThemeList {},
     /// Commit a native theme selection before acknowledging the request.
     ThemeSet {
         /// Native selector, including imported Pi resource selectors.
