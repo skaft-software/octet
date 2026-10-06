@@ -174,6 +174,16 @@
 - Release packaging: the native linux packager no longer requires tracked private
   workstation records (`docs/rc/…`) in the public documentation inventory, with a
   regression that runs the producer against the real tracked listing.
+- Pi setup mirroring (U16). Enabling the reviewed octet-pi-compat bridge discovers
+  the user's Pi 1.0.2 setup read-only (settings, installed extensions and packages,
+  skills, prompt templates, themes, keybindings, models and context files), activates
+  the equivalent through the adapter and native machinery, and disabling it returns
+  exactly to the Octet-only setup with no Pi residue; toggling is idempotent.
+- Checkpoint baseline repairs (U15). Inherited failures in extension hook/lifecycle
+  delivery, the MCP bridge host-access replay check, Pi session replacement,
+  activity/steering PTY contracts, headless before-prompt tool snapshots and the
+  API 0.1 conformance wire are fixed, together with the inherited dead-code and
+  collapsible-if clippy lints.
 
 ## [0.8.2] - 2026-09-30
 
