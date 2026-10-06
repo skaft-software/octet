@@ -1,132 +1,142 @@
-//! The `AiClient`, the resolved `Model` handle, and request dispatch.
+//! The `AiClient`: one entry point for every provider request.
+//!
+//! `AiClient` is the whole public surface of the request path. It resolves a
+//! [`Model`] into a dispatched request and is the only place that knows which
+//! of several transports an endpoint asked for. The transports themselves live
+//! in sibling modules, one per boundary:
+//!
+//! - `hooks` — the host payload-hook and host-transport seams.
+//! - `transport` — reqwest failure classification and the body-read clocks.
+//! - `diagnostics` — redaction and size bounds for anything a provider sent.
+//! - `stream` — opening a streaming request, decoding SSE and Bedrock frames.
+//! - `websocket` — the steerable Responses WebSocket transport and its resume.
+//! - `batch` — the OpenRouter batch HTTP surface.
+//!
+//! What stays here is the part that is genuinely a client: the public entry
+//! points, and the decisions about which transport an endpoint supports. That
+//! list is short on purpose — every helper beneath it can now be read without
+//! first knowing how a response is dispatched.
+
+mod batch;
+mod diagnostics;
+mod hooks;
+mod stream;
+mod transport;
+mod websocket;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use futures_util::StreamExt;
-use std::collections::HashMap;
-use std::error::Error as _;
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::auth::CredentialRedactor;
 use crate::catalog::Model;
 use crate::deferred::DeferredHandle;
 use crate::error::{
-    AiError, DecodeError, HttpError, ProviderError, StreamProgress, StreamProtocolError,
-    TransportError, TransportPhase,
+    AiError, DecodeError, HttpError, StreamProtocolError, TransportError, TransportPhase,
 };
 use crate::host_transport::{HostStreamModel, HostStreamTransport};
 use crate::responses_ws::{ResponsesWsLiveness, ResponsesWsPool};
-use crate::runtime::{is_reserved_header, HookModelContext, HostRequestOptions};
-use crate::stream::{
-    ProviderLifecycle, ProviderLifecycleState, ResponseBuilder, ResponseStream, StreamEvent,
-};
-use crate::types::{EndpointId, Protocol, Request, Response, ToolDef};
+use crate::runtime::{HookModelContext, HostRequestOptions, ProviderRequestHook};
+use crate::stream::{ResponseStream, StreamEvent};
+use crate::types::{EndpointId, Protocol, Request, Response};
 use crate::{ResponsesCompactRequest, ResponsesCompactResponse};
 
-fn merge_preset_headers(
-    headers: &mut http::HeaderMap,
-    values: &std::collections::BTreeMap<String, String>,
-) -> Result<(), AiError> {
-    for (name, value) in values {
-        let name = http::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| crate::ConfigError::Parse("invalid request header name".into()))?;
-        let mut value = http::HeaderValue::from_str(value)
-            .map_err(|_| crate::ConfigError::Parse("invalid request header value".into()))?;
-        value.set_sensitive(true);
-        headers.insert(name, value);
-    }
-    Ok(())
+struct FirstRequestActions {
+    observed: bool,
+    actions: Vec<Box<dyn FnOnce() + Send + 'static>>,
 }
 
-/// Maximum encoded request body a host payload hook may produce.
-const MAX_HOOKED_BODY_BYTES: usize = 64 * 1024 * 1024;
+static FIRST_REQUEST_ACTIONS: OnceLock<StdMutex<FirstRequestActions>> = OnceLock::new();
 
-/// Applies one host payload hook to an encoded JSON request body.
+fn first_request_actions() -> &'static StdMutex<FirstRequestActions> {
+    FIRST_REQUEST_ACTIONS.get_or_init(|| {
+        StdMutex::new(FirstRequestActions {
+            observed: false,
+            actions: Vec::new(),
+        })
+    })
+}
+
+/// Defer startup work until this process has opened its first inference request.
 ///
-/// The hook sees exactly the codec's payload. A non-JSON body, an oversized
-/// replacement, or a hook error fails the attempt before authentication or
-/// dispatch; there is no hidden retry.
-fn apply_payload_hook(
-    hook: &Arc<dyn crate::runtime::PayloadHook>,
-    model: &Model,
-    body: bytes::Bytes,
-) -> Result<bytes::Bytes, AiError> {
-    if body.is_empty() {
-        return Ok(body);
-    }
-    let payload: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-    let host_model = HookModelContext::from_model(model);
-    let Some(replacement) = hook.on_payload(payload, &host_model)? else {
-        return Ok(body);
+/// Hosts use this for optional background work that must not add a provider
+/// request ahead of the user's first turn. If inference has already started,
+/// `action` runs immediately.
+pub fn defer_until_first_request(action: impl FnOnce() + Send + 'static) {
+    let action: Box<dyn FnOnce() + Send + 'static> = Box::new(action);
+    let action = {
+        let mut state = first_request_actions()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.observed {
+            Some(action)
+        } else {
+            state.actions.push(action);
+            None
+        }
     };
-    let encoded = serde_json::to_vec(&replacement)
-        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-    if encoded.len() > MAX_HOOKED_BODY_BYTES {
-        return Err(crate::ConfigError::Parse(format!(
-            "payload hook produced a body larger than the {MAX_HOOKED_BODY_BYTES}-byte limit"
-        ))
-        .into());
+    if let Some(action) = action {
+        action();
     }
-    Ok(bytes::Bytes::from(encoded))
 }
 
-/// Canonical preparation shared by every host-mediated attempt.
-///
-/// Replay history is derived without mutating the caller's conversation and
-/// strict validation runs before the transport sees the request, so a host
-/// transport can never observe a request that the built-in path would reject.
-fn prepare_host_request(
-    model: &Model,
-    req: Request,
-) -> Result<(Request, Vec<crate::error::Diagnostic>), AiError> {
-    let mut request = req;
-    request.messages = crate::transform::transform_request_messages_owned(request.messages, model);
-    let request = crate::validate::normalize_request_reasoning(&request, &model.spec.capabilities)
-        .into_owned();
-    let diagnostics = crate::validate::validate_request(
-        &request,
-        &model.spec.capabilities,
-        &model.spec.limits,
-        model.spec.protocol,
-        &model.spec.id,
-        crate::CompatibilityMode::Strict,
-    )?;
-    Ok((request, diagnostics))
+fn notify_first_request_opened() {
+    let actions = {
+        let mut state = first_request_actions()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.observed {
+            return;
+        }
+        state.observed = true;
+        std::mem::take(&mut state.actions)
+    };
+    for action in actions {
+        action();
+    }
 }
 
-// A session may select new model headers, credentials or an endpoint URL.
-// Never reuse a handshake bound to an earlier authority/configuration, and
-// never place raw credentials in the connection pool's identity.
-fn responses_websocket_key(
-    model: &Model,
-    session: &str,
-    url: &url::Url,
-    headers: &http::HeaderMap,
-) -> String {
-    use sha2::{Digest, Sha256};
-    let mut digest = Sha256::new();
-    let mut field = |value: &[u8]| {
-        digest.update((value.len() as u64).to_le_bytes());
-        digest.update(value);
-    };
-    for value in [
-        model.endpoint.id.0.as_str(),
-        model.spec.id.0.as_str(),
-        session,
-        url.as_str(),
-    ] {
-        field(value.as_bytes());
+use self::batch::{
+    batch_http_request, openrouter_batch_item_url, openrouter_batch_url, MAX_BATCH_BODY_BYTES,
+};
+// Re-exported rather than re-homed: both are crate-internal and are already
+// addressed as `crate::client::` from `images` and `responses_ws`.
+pub(crate) use self::diagnostics::sanitize_ai_error;
+use self::hooks::{
+    apply_payload_hook, merge_preset_headers, prepare_host_request, validate_hook_headers,
+    ProviderRequestAttempt,
+};
+use self::stream::{stream_http, websocket_open_failure_is_replay_safe, HttpStreamRequest};
+pub(crate) use self::transport::DEFAULT_CONNECT_TIMEOUT;
+use self::transport::{
+    next_body_chunk, request_open_transport_error, DEFAULT_STREAM_DEADLINE,
+    DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_INITIAL_TIMEOUT, MAX_COMPLETED_BODY_BYTES,
+    MAX_ERROR_BODY_DEADLINE, MAX_ERROR_BODY_IDLE_TIMEOUT,
+};
+use self::websocket::{
+    responses_websocket_key, responses_websocket_stream, steering_event_stream, ResponsesResume,
+};
+// Request-group scoped only: never installed back into the catalog or agent.
+struct SettledCredential(crate::auth::ResolvedCredential);
+
+#[async_trait::async_trait]
+impl crate::auth::CredentialResolver for SettledCredential {
+    async fn resolve(&self) -> Result<crate::auth::ResolvedCredential, crate::AuthError> {
+        Ok(crate::auth::ResolvedCredential {
+            scheme: match &self.0.scheme {
+                crate::auth::CredentialScheme::Bearer => crate::auth::CredentialScheme::Bearer,
+                crate::auth::CredentialScheme::Header(name) => {
+                    crate::auth::CredentialScheme::Header(name.clone())
+                }
+            },
+            value: self.0.value.clone(),
+            extra_headers: self.0.extra_headers.clone(),
+        })
     }
-    let mut entries: Vec<_> = headers.iter().collect();
-    // Stable sorting preserves the ordering of repeated values of one header.
-    entries.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
-    for (name, value) in entries {
-        field(name.as_str().as_bytes());
-        field(value.as_bytes());
-    }
-    format!("responses:{:x}", digest.finalize())
 }
 
 /// A native compact response whose HTTP headers have actually arrived.
@@ -269,1881 +279,6 @@ impl PendingResponsesCompact {
         })
     }
 }
-
-/// Hard cap on a buffered non-streaming response body before JSON decode
-/// (design §20). Crossing it is a [`DecodeError::BodyTooLarge`].
-const MAX_COMPLETED_BODY_BYTES: usize = 64 * 1024 * 1024;
-/// Enough of an unexpected successful-status body to decode a structured
-/// provider error without buffering an unbounded non-SSE response.
-const MAX_SUCCESS_ERROR_BODY_BYTES: usize = 64 * 1024;
-/// Bound DNS/TCP/TLS establishment independently from a provider's header
-/// timeout. Without this, a dead route can consume the full endpoint timeout on
-/// every retry before the UI receives an error.
-pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Maximum time to wait for the first response-body chunk after headers. A
-/// provider may have accepted the request and still be processing a very large
-/// prompt or loading a local model.
-const DEFAULT_STREAM_INITIAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-/// Maximum silence allowed between SSE body chunks after the response starts.
-/// Slow local servers can pause for several minutes between reasoning/output
-/// chunks without being dead, especially while paging or swapping a large
-/// model.
-const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-/// Absolute deadline for one response-body read. This remains finite so a
-/// wedged provider is eventually surfaced, while leaving room for large
-/// compaction/reasoning turns and rate-limited gateways.
-const DEFAULT_STREAM_DEADLINE: Duration = Duration::from_secs(60 * 60);
-/// Error bodies are optional diagnostics after the status and retry metadata
-/// are already known. Never let a slow snippet inherit generation-scale waits.
-const MAX_ERROR_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_ERROR_BODY_DEADLINE: Duration = Duration::from_secs(5);
-/// Compression level used by the ChatGPT Codex SSE endpoint and the official
-/// Codex-compatible client. Level 3 is fast enough to keep request preparation
-/// cheap while substantially shrinking replayed tool history.
-const CODEX_REQUEST_ZSTD_LEVEL: i32 = 3;
-
-fn truncate_transport_message(message: &mut String, max_bytes: usize) {
-    if message.len() <= max_bytes {
-        return;
-    }
-    let mut end = max_bytes;
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    message.truncate(end);
-}
-
-const MAX_PROVIDER_DIAGNOSTIC_BYTES: usize = 4096;
-const MAX_DIAGNOSTIC_METADATA_BYTES: usize = 512;
-/// A stream can surface only a finite amount of advisory endpoint telemetry.
-const MAX_PROVIDER_LIFECYCLE_EVENTS: usize = 64;
-/// Lifecycle detail remains brief enough for a status row and cannot retain an
-/// endpoint-controlled unbounded string.
-const MAX_PROVIDER_LIFECYCLE_DETAIL_BYTES: usize = 160;
-const LIFECYCLE_HEADER: &str = "x-octet-lifecycle";
-const LIFECYCLE_REQUEST_VALUE: &str = "1";
-const LIFECYCLE_COMMENT_PREFIX: &str = "octet-lifecycle:";
-
-/// Parses octet's explicitly negotiated OpenAI-compatible lifecycle value.
-///
-/// The wire form is `state` or `state; detail`, where state is one of
-/// `queued`, `loading`, or `ready`. Unknown states and malformed namespaces
-/// are deliberately ignored: this is advisory telemetry, never assistant text.
-fn parse_provider_lifecycle(
-    value: &str,
-    diagnostic_redactor: &CredentialRedactor,
-) -> Option<ProviderLifecycle> {
-    let (state, detail) = value
-        .split_once(';')
-        .map_or((value, None), |(state, detail)| (state, Some(detail)));
-    let state = ProviderLifecycleState::from_wire(state)?;
-    let detail = detail.and_then(|detail| {
-        let detail = detail.trim();
-        (!detail.is_empty()).then(|| {
-            sanitize_diagnostic(
-                diagnostic_redactor,
-                detail,
-                MAX_PROVIDER_LIFECYCLE_DETAIL_BYTES,
-            )
-        })
-    });
-    Some(ProviderLifecycle { state, detail })
-}
-
-/// Extracts a lifecycle comment without treating ordinary SSE comments as
-/// provider data. The `octet-lifecycle:` namespace is accepted only after the
-/// endpoint explicitly opted in through the request header.
-fn lifecycle_from_sse_comment(
-    comment: &str,
-    diagnostic_redactor: &CredentialRedactor,
-) -> Option<ProviderLifecycle> {
-    parse_provider_lifecycle(
-        comment.strip_prefix(LIFECYCLE_COMMENT_PREFIX)?.trim_start(),
-        diagnostic_redactor,
-    )
-}
-
-fn is_bidi_format_control(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061c}'
-            | '\u{200e}'
-            | '\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}'
-    )
-}
-
-/// Redact request credentials, render control characters inert, and retain a
-/// hard post-sanitization byte bound. Provider diagnostics cross a trust
-/// boundary: they must be safe to persist or print verbatim.
-fn sanitize_diagnostic(redactor: &CredentialRedactor, input: &str, max_bytes: usize) -> String {
-    let redacted = redactor.redact(input);
-    let mut output = String::with_capacity(redacted.len().min(max_bytes));
-    let mut truncated = false;
-
-    for character in redacted.chars() {
-        if character.is_control() || is_bidi_format_control(character) {
-            let escaped = character.escape_default().to_string();
-            if output.len().saturating_add(escaped.len()) > max_bytes {
-                truncated = true;
-                break;
-            }
-            output.push_str(&escaped);
-        } else {
-            if output.len().saturating_add(character.len_utf8()) > max_bytes {
-                truncated = true;
-                break;
-            }
-            output.push(character);
-        }
-    }
-
-    if truncated && max_bytes >= '…'.len_utf8() {
-        let limit = max_bytes - '…'.len_utf8();
-        while output.len() > limit {
-            let _ = output.pop();
-        }
-        output.push('…');
-    }
-    output
-}
-
-fn sanitize_optional_diagnostic(
-    redactor: &CredentialRedactor,
-    value: &mut Option<String>,
-    max_bytes: usize,
-) {
-    if let Some(value) = value {
-        *value = sanitize_diagnostic(redactor, value, max_bytes);
-    }
-}
-
-fn sanitize_batch_error(redactor: &CredentialRedactor, error: &mut crate::batch::BatchError) {
-    use crate::batch::BatchError;
-
-    match error {
-        BatchError::InvalidEndpoint(value)
-        | BatchError::InvalidCustomId(value)
-        | BatchError::DuplicateCustomId(value)
-        | BatchError::RequestBodyNotObject(value)
-        | BatchError::InvalidBatchId(value)
-        | BatchError::InvalidStatus(value)
-        | BatchError::UnsupportedProvider(value) => {
-            *value = sanitize_diagnostic(redactor, value, MAX_DIAGNOSTIC_METADATA_BYTES);
-        }
-        BatchError::ModelMismatch { custom_id, model } => {
-            *custom_id = sanitize_diagnostic(redactor, custom_id, MAX_DIAGNOSTIC_METADATA_BYTES);
-            *model = sanitize_diagnostic(redactor, model, MAX_DIAGNOSTIC_METADATA_BYTES);
-        }
-        BatchError::EmptyModel | BatchError::EmptyRequests | BatchError::InvalidLimit(_) => {}
-    }
-}
-
-pub(crate) fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiError) -> AiError {
-    match &mut error {
-        AiError::Http(error) => {
-            sanitize_optional_diagnostic(
-                redactor,
-                &mut error.request_id,
-                MAX_DIAGNOSTIC_METADATA_BYTES,
-            );
-            sanitize_optional_diagnostic(
-                redactor,
-                &mut error.provider_code,
-                MAX_DIAGNOSTIC_METADATA_BYTES,
-            );
-            sanitize_optional_diagnostic(
-                redactor,
-                &mut error.body_snippet,
-                MAX_PROVIDER_DIAGNOSTIC_BYTES,
-            );
-        }
-        AiError::Transport(error) | AiError::NetworkUnavailable(error) => {
-            error.message =
-                sanitize_diagnostic(redactor, &error.message, MAX_DIAGNOSTIC_METADATA_BYTES);
-        }
-        AiError::Provider(error) | AiError::ResponsesFailed(error) => {
-            sanitize_optional_diagnostic(redactor, &mut error.code, MAX_DIAGNOSTIC_METADATA_BYTES);
-            sanitize_optional_diagnostic(redactor, &mut error.kind, MAX_DIAGNOSTIC_METADATA_BYTES);
-            error.message =
-                sanitize_diagnostic(redactor, &error.message, MAX_PROVIDER_DIAGNOSTIC_BYTES);
-            sanitize_optional_diagnostic(
-                redactor,
-                &mut error.request_id,
-                MAX_DIAGNOSTIC_METADATA_BYTES,
-            );
-        }
-        AiError::Decode(
-            DecodeError::Json(message) | DecodeError::InvalidProviderField(message),
-        )
-        | AiError::StreamProtocol(StreamProtocolError::UnexpectedEvent(message)) => {
-            *message = sanitize_diagnostic(redactor, message, MAX_PROVIDER_DIAGNOSTIC_BYTES);
-        }
-        AiError::StreamFailure { inner, .. } => {
-            // The progress counters are purely numeric and can never carry
-            // provider text; only the wrapped inner error can, so sanitize
-            // that in place.
-            let drained = std::mem::replace(&mut **inner, AiError::Canceled);
-            **inner = sanitize_ai_error(redactor, drained);
-        }
-        AiError::Batch(error) => sanitize_batch_error(redactor, error),
-        // A deferred poll refusal carries only the static refusal wording and
-        // numeric permit/leaf generations, so there is nothing provider-owned
-        // to redact here.
-        AiError::Deferred(_) => {}
-        AiError::Config(_)
-        | AiError::Auth(_)
-        | AiError::Validation(_)
-        | AiError::Unsupported(_)
-        | AiError::Decode(_)
-        | AiError::Pricing(_)
-        | AiError::StreamProtocol(_)
-        | AiError::Canceled => {}
-    }
-    error
-}
-
-/// Annotate a mid-stream failure with how far the response had progressed.
-///
-/// Wrapping only happens inside the response-body loop, where the builder is
-/// still alive: the raw provider frame/event counts and the retained content
-/// bytes are exactly what distinguishes "the provider sent 400 frames and
-/// then went silent" from "the provider sent nothing". Pre-stream failures
-/// (connection, headers, HTTP status) are left unannotated.
-fn annotate_stream_failure(
-    inner: AiError,
-    builder: &ResponseBuilder,
-    first_body_chunk: bool,
-    started_at: Instant,
-    last_event_at: Option<Instant>,
-) -> AiError {
-    AiError::StreamFailure {
-        inner: Box::new(inner),
-        progress: StreamProgress {
-            provider_events: builder.provider_event_count,
-            decoded_events: builder.event_count,
-            content_bytes: builder.aggregate_content_bytes,
-            buffered_bytes: builder.buffered_content_bytes,
-            first_body_seen: !first_body_chunk,
-            elapsed_ms: u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
-            last_event_ms: last_event_at.map(|event_at| {
-                u64::try_from(event_at.duration_since(started_at).as_millis()).unwrap_or(u64::MAX)
-            }),
-        },
-    }
-}
-
-fn reqwest_transport_error(
-    error: reqwest::Error,
-    phase: TransportPhase,
-    operation: &str,
-) -> AiError {
-    let timeout = error.is_timeout();
-    let category = if error.is_connect() {
-        "connection failed"
-    } else if timeout {
-        "timed out"
-    } else if error.is_body() {
-        "body transfer failed"
-    } else {
-        "transport failed"
-    };
-    // Reqwest's top-level Display includes the request URL. Walk only its
-    // source chain so DNS/TCP/TLS/reset details survive without endpoint paths,
-    // queries, or URL credentials. Bound it because third-party TLS/DNS errors
-    // are not under octet's control.
-    let mut details = Vec::new();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        let detail = cause.to_string();
-        if !detail.trim().is_empty() && details.last() != Some(&detail) {
-            details.push(detail);
-        }
-        if details.len() == 4 {
-            break;
-        }
-        source = cause.source();
-    }
-    let mut message = format!("{operation} {category}");
-    if !details.is_empty() {
-        message.push_str(": ");
-        message.push_str(&details.join(": "));
-    }
-    truncate_transport_message(&mut message, 512);
-    let transient_pre_send = phase == TransportPhase::Connect
-        && error.is_connect()
-        && (timeout || transient_connection_source(&error));
-    let transport = TransportError {
-        phase,
-        timeout,
-        message,
-    };
-    if transient_pre_send {
-        AiError::NetworkUnavailable(transport)
-    } else {
-        AiError::Transport(transport)
-    }
-}
-
-fn transient_connection_source(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut source = Some(error);
-    while let Some(cause) = source {
-        if cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(crate::error::transient_connection_io)
-        {
-            return true;
-        }
-        source = cause.source();
-    }
-    false
-}
-
-fn request_open_transport_error(error: reqwest::Error, operation: &str) -> AiError {
-    let phase = if error.is_connect() {
-        TransportPhase::Connect
-    } else {
-        // Once connection establishment succeeded, request-send failures and
-        // response-header failures are ambiguous: the provider may have
-        // accepted the POST even though no response was observed locally.
-        TransportPhase::ResponseHeaders
-    };
-    reqwest_transport_error(error, phase, operation)
-}
-
-fn json_scalar_string(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => Some(value.clone()),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-/// Some OpenAI-compatible servers return a JSON error envelope with HTTP 200
-/// for request-validation failures. Detect that envelope before the empty SSE
-/// stream is misreported as a missing terminal event.
-fn provider_error_from_success_body(body: &[u8]) -> Option<ProviderError> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let error = value.get("error")?;
-    let mut message = error
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| error.as_str())?
-        .to_owned();
-    truncate_transport_message(&mut message, 4096);
-    let code = error.get("code").and_then(json_scalar_string);
-    let kind = error
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let request_id = value
-        .get("request_id")
-        .or_else(|| error.get("request_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    Some(ProviderError {
-        code,
-        kind,
-        message,
-        request_id,
-    })
-}
-
-/// Apply the request runtime selected by the endpoint declaration.
-///
-/// Codecs produce canonical bodies. Endpoint declarations independently opt
-/// into documented transport behavior, so providers sharing a codec never need
-/// a provider-name branch here. Compression failure is only an optimization
-/// miss: preserve the valid uncompressed request instead of failing the model
-/// turn. The zstd work runs on the blocking thread pool so multi-hundred-KB
-/// request bodies never stall the async runtime worker.
-async fn prepare_request_body(
-    runtime: crate::types::RequestRuntime,
-    headers: &mut http::HeaderMap,
-    body: bytes::Bytes,
-) -> bytes::Bytes {
-    if runtime.body_encoding != crate::types::RequestBodyEncoding::Zstd {
-        return body;
-    }
-
-    let owned = body.clone();
-    match tokio::task::spawn_blocking(move || {
-        zstd::bulk::compress(owned.as_ref(), CODEX_REQUEST_ZSTD_LEVEL)
-    })
-    .await
-    {
-        Ok(Ok(compressed)) => {
-            headers.insert(
-                http::header::CONTENT_ENCODING,
-                http::HeaderValue::from_static("zstd"),
-            );
-            bytes::Bytes::from(compressed)
-        }
-        // Compression failure (or a panicked worker) is only an optimization
-        // miss: send the valid uncompressed body.
-        _ => body,
-    }
-}
-
-async fn next_body_chunk<S>(
-    stream: &mut S,
-    idle_timeout: Duration,
-    initial_timeout: Duration,
-    first_chunk: bool,
-    started_at: Instant,
-    deadline: Duration,
-    body_name: &'static str,
-) -> Result<Option<bytes::Bytes>, AiError>
-where
-    S: futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
-{
-    let remaining = deadline.saturating_sub(started_at.elapsed());
-    if remaining.is_zero() {
-        return Err(AiError::Transport(TransportError {
-            phase: TransportPhase::Body,
-            timeout: true,
-            message: format!("{body_name} exceeded its overall deadline"),
-        }));
-    }
-    let quiet_timeout = if first_chunk {
-        initial_timeout
-    } else {
-        idle_timeout
-    };
-    let wait_for = remaining.min(quiet_timeout);
-    match tokio::time::timeout(wait_for, stream.next()).await {
-        Err(_) => Err(AiError::Transport(TransportError {
-            phase: TransportPhase::Body,
-            timeout: true,
-            message: if remaining <= quiet_timeout {
-                format!("{body_name} exceeded its overall deadline")
-            } else if first_chunk {
-                format!("{body_name} was idle beyond its initial timeout")
-            } else {
-                format!("{body_name} was idle beyond its timeout")
-            },
-        })),
-        Ok(Some(Err(error))) => Err(reqwest_transport_error(
-            error,
-            TransportPhase::Body,
-            body_name,
-        )),
-        Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
-        Ok(None) => Ok(None),
-    }
-}
-
-const MAX_BATCH_BODY_BYTES: usize = 256 * 1024 * 1024;
-const MAX_BATCH_ERROR_SNIPPET_BYTES: usize = 4096;
-
-async fn read_batch_body(
-    response: reqwest::Response,
-    initial_timeout: Duration,
-    idle_timeout: Duration,
-    deadline: Duration,
-    operation: &'static str,
-) -> Result<Vec<u8>, AiError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_BATCH_BODY_BYTES as u64)
-    {
-        return Err(DecodeError::BodyTooLarge.into());
-    }
-
-    let mut body = Vec::with_capacity(
-        response
-            .content_length()
-            .unwrap_or_default()
-            .min(MAX_BATCH_BODY_BYTES as u64) as usize,
-    );
-    let mut stream = response.bytes_stream();
-    let started_at = Instant::now();
-    let mut first_chunk = true;
-
-    while let Some(chunk) = next_body_chunk(
-        &mut stream,
-        idle_timeout,
-        initial_timeout,
-        first_chunk,
-        started_at,
-        deadline,
-        operation,
-    )
-    .await?
-    {
-        first_chunk = false;
-        if body
-            .len()
-            .checked_add(chunk.len())
-            .is_none_or(|size| size > MAX_BATCH_BODY_BYTES)
-        {
-            return Err(DecodeError::BodyTooLarge.into());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-fn openrouter_batch_url(endpoint: &crate::types::Endpoint) -> Result<url::Url, AiError> {
-    if endpoint.id.0 != "openrouter" {
-        return Err(crate::batch::BatchError::UnsupportedProvider(endpoint.id.0.clone()).into());
-    }
-    crate::catalog::validate_endpoint(endpoint)?;
-    endpoint
-        .base_url
-        .join("../beta/batches")
-        .map_err(|error| crate::error::ConfigError::Parse(error.to_string()).into())
-}
-
-fn openrouter_batch_item_url(
-    endpoint: &crate::types::Endpoint,
-    id: &str,
-) -> Result<url::Url, AiError> {
-    crate::batch::validate_batch_id(id)?;
-    let mut url = openrouter_batch_url(endpoint)?;
-    let path = format!("{}/{}", url.path().trim_end_matches('/'), id);
-    url.set_path(&path);
-    Ok(url)
-}
-
-async fn read_batch_error_snippet(
-    response: reqwest::Response,
-    initial_timeout: Duration,
-    idle_timeout: Duration,
-    deadline: Duration,
-) -> String {
-    let mut body = Vec::with_capacity(MAX_BATCH_ERROR_SNIPPET_BYTES);
-    let mut stream = response.bytes_stream();
-    let started_at = Instant::now();
-    while body.len() < MAX_BATCH_ERROR_SNIPPET_BYTES {
-        match next_body_chunk(
-            &mut stream,
-            idle_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
-            initial_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
-            false,
-            started_at,
-            deadline.min(MAX_ERROR_BODY_DEADLINE),
-            "batch HTTP error response body",
-        )
-        .await
-        {
-            Ok(Some(chunk)) => {
-                let remaining = MAX_BATCH_ERROR_SNIPPET_BYTES - body.len();
-                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            }
-            Ok(None) | Err(_) => break,
-        }
-    }
-    String::from_utf8_lossy(&body).into_owned()
-}
-
-async fn batch_http_request(
-    client: &AiClient,
-    endpoint: &crate::types::Endpoint,
-    method: http::Method,
-    url: url::Url,
-    body: Option<bytes::Bytes>,
-    operation: &'static str,
-) -> Result<serde_json::Value, AiError> {
-    let proxy = client.request_proxy(&url)?;
-    let mut headers = endpoint.default_headers.clone();
-    if body.is_some() {
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/json"),
-        );
-    }
-
-    let resolved_headers = crate::auth::resolve_headers(&endpoint.auth)
-        .await
-        .map_err(AiError::Auth)?;
-    let mut diagnostic_redactor = resolved_headers.redactor;
-    diagnostic_redactor.include_header_values(&endpoint.default_headers);
-    if let Some(proxy) = &proxy {
-        diagnostic_redactor.include_proxy_url(proxy);
-    }
-    let mut current_key = None;
-    for (key, value) in resolved_headers.headers {
-        if let Some(key) = key {
-            current_key = Some(key.clone());
-            headers.insert(key, value);
-        } else if let Some(key) = &current_key {
-            headers.append(key.clone(), value);
-        }
-    }
-
-    let builder = client.http.request(method, url).headers(headers);
-    let builder = if let Some(body) = body {
-        builder.body(body)
-    } else {
-        builder
-    };
-    let response = tokio::time::timeout(endpoint.timeout, builder.send())
-        .await
-        .map_err(|_| {
-            AiError::Transport(TransportError {
-                phase: TransportPhase::ResponseHeaders,
-                timeout: true,
-                message: format!("{operation} timed out waiting for response headers"),
-            })
-        })?
-        .map_err(|error| request_open_transport_error(error, operation))
-        .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
-
-    let status = response.status();
-    let request_id = response
-        .headers()
-        .get("x-request-id")
-        .or_else(|| response.headers().get("request-id"))
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let retry_after = response
-        .headers()
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs);
-
-    if !status.is_success() {
-        let snippet = read_batch_error_snippet(
-            response,
-            client.stream_initial_timeout,
-            client.stream_idle_timeout,
-            client.stream_deadline,
-        )
-        .await;
-        let provider_code = serde_json::from_str::<serde_json::Value>(&snippet)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("error")
-                    .and_then(|error| error.get("code"))
-                    .and_then(json_scalar_string)
-            });
-        let retryable = matches!(
-            status,
-            http::StatusCode::REQUEST_TIMEOUT
-                | http::StatusCode::TOO_MANY_REQUESTS
-                | http::StatusCode::BAD_GATEWAY
-                | http::StatusCode::SERVICE_UNAVAILABLE
-                | http::StatusCode::GATEWAY_TIMEOUT
-        );
-        return Err(sanitize_ai_error(
-            &diagnostic_redactor,
-            HttpError {
-                status,
-                request_id,
-                retry_after,
-                provider_code,
-                body_snippet: (!snippet.is_empty()).then_some(snippet),
-                retryable,
-            }
-            .into(),
-        ));
-    }
-
-    let body = read_batch_body(
-        response,
-        client.stream_initial_timeout,
-        client.stream_idle_timeout,
-        client.stream_deadline,
-        "batch response body",
-    )
-    .await
-    .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
-    serde_json::from_slice(&body).map_err(|error| {
-        sanitize_ai_error(
-            &diagnostic_redactor,
-            AiError::Decode(DecodeError::Json(error.to_string())),
-        )
-    })
-}
-
-struct HttpStreamRequest {
-    model: Model,
-    compatibility: crate::types::CompatibilityMode,
-    parts: crate::protocol::HttpRequestParts,
-    headers: http::HeaderMap,
-    requested_audio_format: Option<crate::types::AudioFormat>,
-    requested_service_tier: Option<crate::types::ServiceTier>,
-    tool_definitions: Vec<ToolDef>,
-    pre_send_diagnostics: Vec<crate::error::Diagnostic>,
-    buffer_ambiguous_compatibility_content: bool,
-    diagnostic_redactor: CredentialRedactor,
-    /// Optional host hook observing the HTTP response before its body is read.
-    on_response: Option<Arc<dyn crate::runtime::ResponseHook>>,
-}
-
-/// Falling back is replay-safe only when opening the WebSocket failed before
-/// the generation request could have been sent. Once the request actor accepts
-/// a frame, every timeout, decode failure, or disconnect is ambiguous and must
-/// remain terminal unless the provider supplies an idempotency contract.
-fn websocket_open_failure_is_replay_safe(error: &AiError) -> bool {
-    matches!(
-        error,
-        AiError::Transport(TransportError {
-            phase: TransportPhase::Connect,
-            ..
-        }) | AiError::NetworkUnavailable(_)
-    )
-}
-
-struct BedrockResponseStreamRequest {
-    response: reqwest::Response,
-    model: Model,
-    tool_definitions: Vec<ToolDef>,
-    pre_send_diagnostics: Vec<crate::error::Diagnostic>,
-    buffer_ambiguous_compatibility_content: bool,
-    diagnostic_redactor: CredentialRedactor,
-    stream_initial_timeout: Duration,
-    stream_idle_timeout: Duration,
-    stream_deadline: Duration,
-}
-
-fn bedrock_response_stream(request: BedrockResponseStreamRequest) -> ResponseStream {
-    let BedrockResponseStreamRequest {
-        response,
-        model,
-        tool_definitions,
-        pre_send_diagnostics,
-        buffer_ambiguous_compatibility_content,
-        diagnostic_redactor,
-        stream_initial_timeout,
-        stream_idle_timeout,
-        stream_deadline,
-    } = request;
-    let raw_event_stream = try_stream! {
-        let mut decoder = crate::protocol::bedrock::BedrockEventStreamDecoder::new();
-        let mut state = crate::protocol::bedrock::BedrockStreamState::default();
-        let mut builder = ResponseBuilder::new(
-            model.spec.id.clone(),
-            model.spec.protocol,
-            model.spec.pricing.clone(),
-        );
-        builder.set_tool_definitions(&tool_definitions)?;
-        builder.strict_tool_sampling = crate::protocol::strict_mode_for(&model);
-        builder.set_buffer_ambiguous_compatibility_content(
-            buffer_ambiguous_compatibility_content,
-        );
-        for diagnostic in &pre_send_diagnostics {
-            builder.add_diagnostic(diagnostic.clone());
-        }
-
-        let mut stream = response.bytes_stream();
-        let mut terminal_seen = false;
-        let mut provider_event_seen = false;
-        let mut successful_body_prefix = Vec::new();
-        let mut first_body_chunk = true;
-        let started_at = Instant::now();
-        let mut last_event_at = None;
-        'read: loop {
-            let remaining = stream_deadline.saturating_sub(started_at.elapsed());
-            if remaining.is_zero() {
-                Err(annotate_stream_failure(
-                    AiError::Transport(TransportError {
-                        phase: TransportPhase::Body,
-                        timeout: true,
-                        message: "stream exceeded its overall deadline".to_owned(),
-                    }),
-                    &builder,
-                    first_body_chunk,
-                    started_at,
-                    last_event_at,
-                ))?;
-            }
-            let quiet_timeout = if first_body_chunk {
-                stream_initial_timeout
-            } else {
-                stream_idle_timeout
-            };
-            let wait_for = remaining.min(quiet_timeout);
-            let chunk_result = tokio::time::timeout(wait_for, stream.next())
-                .await
-                .map_err(|_| {
-                    annotate_stream_failure(
-                        AiError::Transport(TransportError {
-                            phase: TransportPhase::Body,
-                            timeout: true,
-                            message: if remaining <= quiet_timeout {
-                                "stream exceeded its overall deadline".to_owned()
-                            } else if first_body_chunk {
-                                "stream was idle beyond its initial timeout".to_owned()
-                            } else {
-                                "stream was idle beyond its timeout".to_owned()
-                            },
-                        }),
-                        &builder,
-                        first_body_chunk,
-                        started_at,
-                        last_event_at,
-                    )
-                })?;
-            let Some(chunk_result) = chunk_result else {
-                break;
-            };
-            let chunk = chunk_result.map_err(|error| {
-                annotate_stream_failure(
-                    reqwest_transport_error(error, TransportPhase::Body, "Bedrock response body"),
-                    &builder,
-                    first_body_chunk,
-                    started_at,
-                    last_event_at,
-                )
-            })?;
-            first_body_chunk = false;
-            if !provider_event_seen && successful_body_prefix.len() < MAX_SUCCESS_ERROR_BODY_BYTES {
-                let remaining = MAX_SUCCESS_ERROR_BODY_BYTES - successful_body_prefix.len();
-                successful_body_prefix.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            }
-            let messages = decoder.push(&chunk).map_err(|error| {
-                annotate_stream_failure(
-                    AiError::Decode(error),
-                    &builder,
-                    first_body_chunk,
-                    started_at,
-                    last_event_at,
-                )
-            })?;
-            if !messages.is_empty() {
-                provider_event_seen = true;
-                last_event_at = Some(Instant::now());
-                successful_body_prefix.clear();
-            }
-            for message in messages {
-                let events = crate::protocol::bedrock::decode_stream_event(
-                    &model,
-                    &message,
-                    &mut builder,
-                    &mut state,
-                )
-                .map_err(|error| {
-                    annotate_stream_failure(
-                        error,
-                        &builder,
-                        first_body_chunk,
-                        started_at,
-                        last_event_at,
-                    )
-                })?;
-                for event in events {
-                    let terminal = matches!(event, StreamEvent::Finished(_));
-                    yield event;
-                    if terminal {
-                        terminal_seen = true;
-                        break 'read;
-                    }
-                }
-            }
-        }
-
-        if !terminal_seen {
-            decoder.finish().map_err(|error| {
-                annotate_stream_failure(
-                    AiError::Decode(error),
-                    &builder,
-                    first_body_chunk,
-                    started_at,
-                    last_event_at,
-                )
-            })?;
-            let mut final_events = Vec::new();
-            crate::protocol::bedrock::finish_stream(&mut builder, &mut state, &mut final_events)
-                .map_err(|error| {
-                    annotate_stream_failure(
-                        error,
-                        &builder,
-                        first_body_chunk,
-                        started_at,
-                        last_event_at,
-                    )
-                })?;
-            for event in final_events {
-                let terminal = matches!(event, StreamEvent::Finished(_));
-                yield event;
-                terminal_seen |= terminal;
-            }
-        }
-        if !terminal_seen && !provider_event_seen {
-            if let Some(error) = provider_error_from_success_body(&successful_body_prefix) {
-                Err(annotate_stream_failure(
-                    AiError::Provider(error),
-                    &builder,
-                    first_body_chunk,
-                    started_at,
-                    last_event_at,
-                ))?;
-            }
-        }
-    };
-    let sanitized = raw_event_stream
-        .map(move |event| event.map_err(|error| sanitize_ai_error(&diagnostic_redactor, error)));
-    crate::stream::guard(sanitized)
-}
-
-async fn stream_http(
-    http: reqwest::Client,
-    request: HttpStreamRequest,
-    request_dispatch: Option<Arc<std::sync::atomic::AtomicBool>>,
-    stream_initial_timeout: Duration,
-    stream_idle_timeout: Duration,
-    stream_deadline: Duration,
-) -> Result<ResponseStream, AiError> {
-    let HttpStreamRequest {
-        model,
-        compatibility,
-        parts,
-        mut headers,
-        requested_audio_format,
-        requested_service_tier,
-        tool_definitions,
-        pre_send_diagnostics,
-        buffer_ambiguous_compatibility_content,
-        mut diagnostic_redactor,
-        on_response,
-    } = request;
-    let lifecycle_feedback = parts.streaming
-        && model.spec.protocol == Protocol::OpenAiChat
-        && model.endpoint.runtime.lifecycle_feedback;
-    if lifecycle_feedback {
-        headers.insert(
-            http::HeaderName::from_static(LIFECYCLE_HEADER),
-            http::HeaderValue::from_static(LIFECYCLE_REQUEST_VALUE),
-        );
-    }
-    let request_body =
-        prepare_request_body(model.endpoint.runtime, &mut headers, parts.body.clone()).await;
-    if matches!(&model.endpoint.auth, crate::auth::Auth::RequestSigner(_)) {
-        let resolved = crate::auth::resolve_headers_for_request(
-            &model.endpoint.auth,
-            http::Method::POST,
-            parts.url.clone(),
-            request_body.clone(),
-            headers.clone(),
-        )
-        .await
-        .map_err(AiError::Auth)?;
-        diagnostic_redactor.include(resolved.redactor);
-        diagnostic_redactor.include_header_values(&headers);
-        let mut current_key = None;
-        for (key, value) in resolved.headers {
-            if let Some(key) = key {
-                current_key = Some(key.clone());
-                headers.insert(key, value);
-            } else if let Some(key) = &current_key {
-                headers.append(key.clone(), value);
-            }
-        }
-    }
-
-    // 3. Send the HTTP request
-    let builder = http
-        .post(parts.url.clone())
-        .headers(headers)
-        .body(request_body);
-
-    // `RequestBuilder::timeout` applies until the response body is fully
-    // consumed, which kills valid long-running SSE generations. Bound only
-    // the pre-stream phase instead: after headers arrive, the caller owns
-    // the stream lifetime and may cancel by dropping it.
-    if let Some(state) = &request_dispatch {
-        state.store(true, std::sync::atomic::Ordering::Release);
-    }
-    let res = tokio::time::timeout(model.endpoint.timeout, builder.send())
-        .await
-        .map_err(|_| {
-            AiError::Transport(TransportError {
-                phase: TransportPhase::ResponseHeaders,
-                timeout: true,
-                message: "request timed out waiting for response headers".to_string(),
-            })
-        })?
-        .map_err(|error| request_open_transport_error(error, "request"))
-        .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
-
-    // A host response hook observes every provider response (success or error)
-    // before the body stream is touched. It is advisory and cannot replace or
-    // retry the response.
-    let status = res.status();
-    if let Some(hook) = on_response {
-        hook.on_response(status, res.headers(), &HookModelContext::from_model(&model));
-    }
-
-    // 4. Handle non-2xx HTTP errors
-    if !status.is_success() {
-        // Extract only the two headers needed for the structured error
-        // before consuming the response. Cloning the whole HeaderMap
-        // here adds an allocation on every non-2xx response.
-        let request_id = res
-            .headers()
-            .get("x-request-id")
-            .or_else(|| res.headers().get("x-amzn-requestid"))
-            .or_else(|| res.headers().get("request-id"))
-            .and_then(|h| h.to_str().ok())
-            .map(String::from);
-        let retry_after = res
-            .headers()
-            .get("retry-after")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(Duration::from_secs);
-
-        let mut body = Vec::with_capacity(4096);
-        let mut error_stream = res.bytes_stream();
-        let started_at = Instant::now();
-        while body.len() < 4096 {
-            match next_body_chunk(
-                &mut error_stream,
-                stream_idle_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
-                stream_idle_timeout.min(MAX_ERROR_BODY_IDLE_TIMEOUT),
-                false,
-                started_at,
-                stream_deadline.min(MAX_ERROR_BODY_DEADLINE),
-                "HTTP error response body",
-            )
-            .await
-            {
-                Ok(Some(chunk)) => {
-                    let remaining = 4096 - body.len();
-                    body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                }
-                // The status and retry metadata are already known. Preserve
-                // that structured HTTP error if its optional snippet stalls.
-                Ok(None) | Err(_) => break,
-            }
-        }
-        let body_bytes = String::from_utf8_lossy(&body).into_owned();
-
-        let mut code = None;
-
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body_bytes) {
-            if let Some(err_obj) = val.get("error") {
-                code = err_obj.get("code").and_then(json_scalar_string);
-            }
-        }
-
-        // Mark only gateway/transient statuses as replay-safe. The agent
-        // still gates retries on having seen no generated bytes, so a
-        // POST cannot duplicate a completed tool-producing turn.
-        let retryable = matches!(
-            status,
-            http::StatusCode::REQUEST_TIMEOUT
-                | http::StatusCode::INTERNAL_SERVER_ERROR
-                | http::StatusCode::TOO_MANY_REQUESTS
-                | http::StatusCode::BAD_GATEWAY
-                | http::StatusCode::SERVICE_UNAVAILABLE
-                | http::StatusCode::GATEWAY_TIMEOUT
-        );
-
-        return Err(sanitize_ai_error(
-            &diagnostic_redactor,
-            AiError::Http(HttpError {
-                status,
-                request_id,
-                retry_after,
-                provider_code: code,
-                body_snippet: if body_bytes.is_empty() {
-                    None
-                } else {
-                    Some(body_bytes)
-                },
-                retryable,
-            }),
-        ));
-    }
-
-    // 5. Decode ResponseStream
-    let initial_lifecycle = lifecycle_feedback
-        .then(|| {
-            res.headers()
-                .get(LIFECYCLE_HEADER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| parse_provider_lifecycle(value, &diagnostic_redactor))
-        })
-        .flatten();
-    let model_clone = model.clone();
-    if parts.streaming && model.spec.protocol == Protocol::BedrockConverse {
-        return Ok(bedrock_response_stream(BedrockResponseStreamRequest {
-            response: res,
-            model: model_clone,
-            tool_definitions,
-            pre_send_diagnostics,
-            buffer_ambiguous_compatibility_content,
-            diagnostic_redactor,
-            stream_initial_timeout,
-            stream_idle_timeout,
-            stream_deadline,
-        }));
-    }
-    if parts.streaming {
-        let byte_stream = res.bytes_stream();
-        let diags = pre_send_diagnostics;
-        let lifecycle_redactor = diagnostic_redactor.clone();
-        let raw_event_stream = try_stream! {
-            let mut sse_decoder = crate::protocol::sse::SseDecoder::new();
-            let mut builder = ResponseBuilder::new(
-                model_clone.spec.id.clone(),
-                model_clone.spec.protocol,
-                model_clone.spec.pricing.clone()
-            );
-            builder.compatibility = compatibility;
-            builder.requested_service_tier = requested_service_tier;
-            builder.set_tool_definitions(&tool_definitions)?;
-            builder.strict_tool_sampling = crate::protocol::strict_mode_for(&model_clone);
-            builder.set_buffer_ambiguous_compatibility_content(
-                buffer_ambiguous_compatibility_content,
-            );
-            for d in &diags {
-                builder.add_diagnostic(d.clone());
-            }
-
-            let mut lifecycle_stream_started = false;
-            let mut lifecycle_events_emitted = 0usize;
-            if let Some(lifecycle) = initial_lifecycle {
-                // Header feedback arrives before any provider SSE event. Seed
-                // the canonical stream first so advisory telemetry still obeys
-                // the `Started`-is-first invariant.
-                let started = StreamEvent::Started { response_id: None };
-                builder.on_event(&started)?;
-                yield started;
-                lifecycle_stream_started = true;
-                lifecycle_events_emitted += 1;
-                yield StreamEvent::ProviderLifecycle(lifecycle);
-            }
-
-            let mut stream = byte_stream;
-            // The provider's terminal event (`[DONE]` / `response.completed`
-            // / `message_stop`) yields a `Finished`. Per design §8 ("No events
-            // after `Finished"), the HTTP body read must stop there: reading
-            // further can block after success, surface a late body transport
-            // error, or feed post-terminal frames into the codec. We stop the
-            // instant the codec emits `Finished`.
-            let mut terminal_seen = false;
-            let mut provider_event_seen = false;
-            let mut successful_body_prefix = Vec::new();
-            let mut first_body_chunk = true;
-            let started_at = Instant::now();
-            let mut last_event_at = None;
-            'read: loop {
-                let remaining = stream_deadline.saturating_sub(started_at.elapsed());
-                if remaining.is_zero() {
-                    Err(annotate_stream_failure(
-                        AiError::Transport(TransportError {
-                            phase: TransportPhase::Body,
-                            timeout: true,
-                            message: "stream exceeded its overall deadline".to_string(),
-                        }),
-                        &builder,
-                        first_body_chunk,
-                        started_at,
-                        last_event_at,
-                    ))?;
-                }
-                let quiet_timeout = if first_body_chunk {
-                    stream_initial_timeout
-                } else {
-                    stream_idle_timeout
-                };
-                let wait_for = remaining.min(quiet_timeout);
-                let chunk_res = tokio::time::timeout(wait_for, stream.next())
-                    .await
-                    .map_err(|_| {
-                        annotate_stream_failure(
-                            AiError::Transport(TransportError {
-                                phase: TransportPhase::Body,
-                                timeout: true,
-                                message: if remaining <= quiet_timeout {
-                                    "stream exceeded its overall deadline".to_string()
-                                } else if first_body_chunk {
-                                    "stream was idle beyond its initial timeout".to_string()
-                                } else {
-                                    "stream was idle beyond its timeout".to_string()
-                                },
-                            }),
-                            &builder,
-                            first_body_chunk,
-                            started_at,
-                            last_event_at,
-                        )
-                    })?;
-                let Some(chunk_res) = chunk_res else {
-                    break;
-                };
-                let chunk = chunk_res.map_err(|error| {
-                    annotate_stream_failure(
-                        reqwest_transport_error(error, TransportPhase::Body, "response body"),
-                        &builder,
-                        first_body_chunk,
-                        started_at,
-                        last_event_at,
-                    )
-                })?;
-                first_body_chunk = false;
-
-                if !provider_event_seen
-                    && successful_body_prefix.len() < MAX_SUCCESS_ERROR_BODY_BYTES
-                {
-                    let remaining = MAX_SUCCESS_ERROR_BODY_BYTES - successful_body_prefix.len();
-                    successful_body_prefix
-                        .extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                }
-
-                let sse_frames = if lifecycle_feedback {
-                    sse_decoder.push_frames(&chunk)
-                } else {
-                    sse_decoder.push(&chunk).map(|events| {
-                        events
-                            .into_iter()
-                            .map(crate::protocol::sse::SseFrame::Event)
-                            .collect()
-                    })
-                }
-                .map_err(|error| {
-                    annotate_stream_failure(
-                        AiError::Decode(error),
-                        &builder,
-                        first_body_chunk,
-                        started_at,
-                        last_event_at,
-                    )
-                })?;
-                let lifecycle_frame_seen = lifecycle_feedback
-                    && lifecycle_events_emitted < MAX_PROVIDER_LIFECYCLE_EVENTS
-                    && sse_frames.iter().any(|frame| {
-                        matches!(
-                            frame,
-                            crate::protocol::sse::SseFrame::Comment(comment)
-                                if lifecycle_from_sse_comment(comment, &lifecycle_redactor).is_some()
-                        )
-                    });
-                if sse_frames.iter().any(|frame| matches!(frame, crate::protocol::sse::SseFrame::Event(_)))
-                    || lifecycle_frame_seen
-                {
-                    provider_event_seen = true;
-                    last_event_at = Some(Instant::now());
-                    successful_body_prefix.clear();
-                }
-
-                for frame in sse_frames {
-                    match frame {
-                        crate::protocol::sse::SseFrame::Comment(comment) => {
-                            if lifecycle_feedback
-                                && lifecycle_events_emitted < MAX_PROVIDER_LIFECYCLE_EVENTS
-                            {
-                                if let Some(lifecycle) =
-                                    lifecycle_from_sse_comment(&comment, &lifecycle_redactor)
-                                {
-                                    if !lifecycle_stream_started {
-                                        let started = StreamEvent::Started { response_id: None };
-                                        builder.on_event(&started)?;
-                                        yield started;
-                                        lifecycle_stream_started = true;
-                                    }
-                                    lifecycle_events_emitted += 1;
-                                    yield StreamEvent::ProviderLifecycle(lifecycle);
-                                }
-                            }
-                        }
-                        crate::protocol::sse::SseFrame::Event(sse) => {
-                            let stream_events = match model_clone.spec.protocol {
-                                Protocol::OpenAiChat => crate::protocol::openai_chat::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::AnthropicMessages => crate::protocol::anthropic::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::OpenAiResponses => crate::protocol::openai_responses::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::BedrockConverse => unreachable!("Bedrock uses AWS Event Stream, not SSE"),
-                                Protocol::GoogleGenerativeAi => crate::protocol::google::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::MistralConversations => crate::protocol::mistral_conversations::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::PiMessages => crate::protocol::pi_messages::decode_stream_event(&model_clone, &sse, &mut builder),
-                            }
-                            .map_err(|error| {
-                                annotate_stream_failure(
-                                    error,
-                                    &builder,
-                                    first_body_chunk,
-                                    started_at,
-                                    last_event_at,
-                                )
-                            })?;
-                            for ev in stream_events {
-                                let started = matches!(ev, StreamEvent::Started { .. });
-                                let terminal = matches!(ev, StreamEvent::Finished(_));
-                                yield ev;
-                                lifecycle_stream_started |= started;
-                                if terminal {
-                                    terminal_seen = true;
-                                    break 'read;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Only flush trailing SSE frames if no terminal event was seen;
-            // after `Finished` the stream is closed and any residue is ignored
-            // rather than decoded into post-terminal events.
-            if !terminal_seen {
-                let trailing_frames = if lifecycle_feedback {
-                    sse_decoder.finish_frames()
-                } else {
-                    sse_decoder.finish().map(|event| {
-                        event
-                            .into_iter()
-                            .map(crate::protocol::sse::SseFrame::Event)
-                            .collect()
-                    })
-                }
-                .map_err(|error| {
-                    annotate_stream_failure(
-                        AiError::Decode(error),
-                        &builder,
-                        first_body_chunk,
-                        started_at,
-                        last_event_at,
-                    )
-                })?;
-                let lifecycle_frame_seen = lifecycle_feedback
-                    && lifecycle_events_emitted < MAX_PROVIDER_LIFECYCLE_EVENTS
-                    && trailing_frames.iter().any(|frame| {
-                        matches!(
-                            frame,
-                            crate::protocol::sse::SseFrame::Comment(comment)
-                                if lifecycle_from_sse_comment(comment, &lifecycle_redactor).is_some()
-                        )
-                    });
-                if trailing_frames.iter().any(|frame| matches!(frame, crate::protocol::sse::SseFrame::Event(_)))
-                    || lifecycle_frame_seen
-                {
-                    provider_event_seen = true;
-                    last_event_at = Some(Instant::now());
-                    successful_body_prefix.clear();
-                }
-
-                for frame in trailing_frames {
-                    if terminal_seen {
-                        break;
-                    }
-                    match frame {
-                        crate::protocol::sse::SseFrame::Comment(comment) => {
-                            if lifecycle_feedback
-                                && lifecycle_events_emitted < MAX_PROVIDER_LIFECYCLE_EVENTS
-                            {
-                                if let Some(lifecycle) =
-                                    lifecycle_from_sse_comment(&comment, &lifecycle_redactor)
-                                {
-                                    if !lifecycle_stream_started {
-                                        let started = StreamEvent::Started { response_id: None };
-                                        builder.on_event(&started)?;
-                                        yield started;
-                                        lifecycle_stream_started = true;
-                                    }
-                                    lifecycle_events_emitted += 1;
-                                    yield StreamEvent::ProviderLifecycle(lifecycle);
-                                }
-                            }
-                        }
-                        crate::protocol::sse::SseFrame::Event(sse) => {
-                            let stream_events = match model_clone.spec.protocol {
-                                Protocol::OpenAiChat => crate::protocol::openai_chat::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::AnthropicMessages => crate::protocol::anthropic::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::OpenAiResponses => crate::protocol::openai_responses::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::BedrockConverse => unreachable!("Bedrock uses AWS Event Stream, not SSE"),
-                                Protocol::GoogleGenerativeAi => crate::protocol::google::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::MistralConversations => crate::protocol::mistral_conversations::decode_stream_event(&model_clone, &sse, &mut builder),
-                                Protocol::PiMessages => crate::protocol::pi_messages::decode_stream_event(&model_clone, &sse, &mut builder),
-                            }
-                            .map_err(|error| {
-                                annotate_stream_failure(
-                                    error,
-                                    &builder,
-                                    first_body_chunk,
-                                    started_at,
-                                    last_event_at,
-                                )
-                            })?;
-                            for ev in stream_events {
-                                let started = matches!(ev, StreamEvent::Started { .. });
-                                let terminal = matches!(ev, StreamEvent::Finished(_));
-                                yield ev;
-                                lifecycle_stream_started |= started;
-                                if terminal {
-                                    terminal_seen = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if !terminal_seen && !provider_event_seen {
-                if let Some(error) =
-                    provider_error_from_success_body(&successful_body_prefix)
-                {
-                    Err(annotate_stream_failure(
-                        AiError::Provider(error),
-                        &builder,
-                        first_body_chunk,
-                        started_at,
-                        last_event_at,
-                    ))?;
-                }
-            }
-            // Native Conversations and pi-messages entries settle only on their
-            // own terminal event, even when their deltas already form valid
-            // JSON. Classify the missing native terminal here before the generic
-            // guard handles raw EOF.
-            if matches!(
-                model_clone.spec.protocol,
-                Protocol::MistralConversations | Protocol::PiMessages
-            ) && !terminal_seen {
-                Err(annotate_stream_failure(
-                    AiError::StreamProtocol(StreamProtocolError::MissingFinish),
-                    &builder,
-                    first_body_chunk,
-                    started_at,
-                    last_event_at,
-                ))?;
-            }
-        };
-
-        let sanitized_event_stream = raw_event_stream.map(move |event| {
-            event.map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))
-        });
-        Ok(crate::stream::guard(sanitized_event_stream))
-    } else {
-        // Non-streaming path (completed response, e.g. Chat Audio output)
-        let mut body_bytes = Vec::new();
-        let mut byte_stream = res.bytes_stream();
-        let mut first_body_chunk = true;
-        let started_at = Instant::now();
-
-        while let Some(chunk) = next_body_chunk(
-            &mut byte_stream,
-            stream_idle_timeout,
-            stream_initial_timeout,
-            first_body_chunk,
-            started_at,
-            stream_deadline,
-            "completed response body",
-        )
-        .await
-        .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?
-        {
-            first_body_chunk = false;
-            if body_bytes
-                .len()
-                .checked_add(chunk.len())
-                .is_none_or(|size| size > MAX_COMPLETED_BODY_BYTES)
-            {
-                return Err(AiError::Decode(DecodeError::BodyTooLarge));
-            }
-            body_bytes.extend_from_slice(&chunk);
-        }
-
-        // The non-streaming path exists solely for the OpenAI Chat audio-output
-        // request (design §12.1). Only that codec sets `streaming = false`;
-        // Responses and Anthropic always stream, so no other codec needs a
-        // non-streaming decoder. This is an invariant of `build_request`, not
-        // a runtime branch, so no per-codec `decode_response` stub exists.
-        debug_assert!(
-            matches!(model_clone.spec.protocol, Protocol::OpenAiChat),
-            "non-streaming path is Chat-only",
-        );
-        let mut response = crate::protocol::openai_chat::decode_response_with_tools(
-            &model_clone,
-            &body_bytes,
-            requested_audio_format,
-            &tool_definitions,
-        )
-        .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
-        response.diagnostics.extend(pre_send_diagnostics);
-
-        let response_id = response.response_id.clone();
-        let message = response.message.clone();
-        let usage = response.usage;
-
-        let raw_event_stream = try_stream! {
-            yield StreamEvent::Started { response_id: response_id.clone() };
-
-            let mut index_counter = 0;
-            for part in &message.content {
-                match part {
-                    crate::types::AssistantPart::ProviderMetadata(_) => {}
-                    crate::types::AssistantPart::Text(text) => {
-                        let idx = index_counter;
-                        index_counter += 1;
-                        yield StreamEvent::TextStart { index: idx };
-                        yield StreamEvent::TextDelta { index: idx, delta: text.clone() };
-                        yield StreamEvent::TextEnd { index: idx };
-                    }
-                    crate::types::AssistantPart::Reasoning(reasoning) => {
-                        let idx = index_counter;
-                        index_counter += 1;
-                        yield StreamEvent::ReasoningStart { index: idx };
-                        if let Some(ref text) = reasoning.text {
-                            yield StreamEvent::ReasoningDelta { index: idx, delta: text.clone() };
-                        }
-                        yield StreamEvent::ReasoningEnd { index: idx };
-                    }
-                    crate::types::AssistantPart::Media(media) => {
-                        let idx = index_counter;
-                        index_counter += 1;
-                        yield StreamEvent::MediaCompleted { index: idx, media: media.clone() };
-                    }
-                    crate::types::AssistantPart::ToolCall(tc) => {
-                        let idx = index_counter;
-                        index_counter += 1;
-                        yield StreamEvent::ToolCallStart {
-                            async_execution: false,
-                            index: idx,
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                        };
-                        yield StreamEvent::ToolCallArgsDelta {
-                            index: idx,
-                            delta: tc.arguments_json.clone(),
-                        };
-                        yield StreamEvent::ToolCallEnd {
-                            index: idx,
-                            argument_error: tc.argument_error,
-                        };
-                    }
-                }
-            }
-
-            yield StreamEvent::Usage(usage);
-            yield StreamEvent::Finished(response);
-        };
-
-        Ok(crate::stream::guard(raw_event_stream))
-    }
-}
-
-/// Resumes a retained Responses generation after a WebSocket drop.
-///
-/// Reads the Responses retrieve endpoint
-/// (`GET <responses>/{id}?stream=true&starting_after=N`) and hands the remaining
-/// raw events to the WebSocket actor, which forwards only the ones the consumer
-/// has not seen. This is the transport the provider documents for continuing an
-/// in-flight response, and it is only reachable when the request asked the
-/// provider to store the response ([`crate::responses_ws::body_requests_storage`]).
-struct ResponsesResume {
-    http: reqwest::Client,
-    endpoint: url::Url,
-    headers: http::HeaderMap,
-}
-
-impl ResponsesResume {
-    /// Boxes this reader into the actor's resumer hook.
-    fn resumer(self: Arc<Self>) -> crate::responses_ws::ResponseResumer {
-        Arc::new(move |response_id: String, starting_after: u64| {
-            let this = Arc::clone(&self);
-            Box::pin(async move { this.open(&response_id, starting_after).await })
-                as crate::responses_ws::ResumeFuture
-        })
-    }
-
-    /// Opens one resumed read and streams decoded events to the actor.
-    async fn open(
-        &self,
-        response_id: &str,
-        starting_after: u64,
-    ) -> Result<mpsc::Receiver<Result<serde_json::Value, AiError>>, AiError> {
-        let mut url = self.endpoint.clone();
-        url.path_segments_mut()
-            .map_err(|_| {
-                AiError::Config(crate::error::ConfigError::Parse(
-                    "Responses resume endpoint is a base URL".to_owned(),
-                ))
-            })?
-            .pop_if_empty()
-            .push(response_id);
-        url.query_pairs_mut()
-            .append_pair("stream", "true")
-            .append_pair("starting_after", &starting_after.to_string());
-        let response = self
-            .http
-            .get(url)
-            .headers(self.headers.clone())
-            .send()
-            .await
-            .map_err(|error| {
-                AiError::Transport(TransportError {
-                    phase: TransportPhase::ResponseHeaders,
-                    timeout: error.is_timeout(),
-                    message: format!("Responses resume request: {error}"),
-                })
-            })?;
-        if !response.status().is_success() {
-            return Err(AiError::Transport(TransportError {
-                phase: TransportPhase::ResponseHeaders,
-                timeout: false,
-                message: format!(
-                    "Responses resume rejected with status {}",
-                    response.status()
-                ),
-            }));
-        }
-        let (sender, receiver) = mpsc::channel(16);
-        let mut stream = response.bytes_stream();
-        tokio::spawn(async move {
-            let mut decoder = crate::protocol::sse::SseDecoder::new();
-            loop {
-                let chunk = tokio::select! {
-                    biased;
-                    _ = sender.closed() => return,
-                    chunk = stream.next() => chunk,
-                };
-                let Some(Ok(chunk)) = chunk else {
-                    return;
-                };
-                let Ok(events) = decoder.push(&chunk) else {
-                    return;
-                };
-                for event in events {
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.data) else {
-                        continue;
-                    };
-                    if sender.send(Ok(value)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        });
-        Ok(receiver)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-// A separate guard and builder are created for every response.created. A tiny
-// in-memory channel feeds already-decoded canonical events to the existing
-// guard one at a time; no extra inference loop or background decoder is needed.
-fn steering_event_stream(
-    pool: ResponsesWsPool,
-    key: Option<String>,
-    model: Model,
-    mut raw: crate::responses_ws::EventReceiver,
-    request: Arc<StdMutex<Request>>,
-    ledger: crate::steering::Ledger,
-    completed: Arc<StdMutex<Option<crate::AssistantMessage>>>,
-    diagnostics: Vec<crate::Diagnostic>,
-    redactor: CredentialRedactor,
-) -> std::pin::Pin<
-    Box<dyn futures_core::Stream<Item = Result<crate::steering::SteeringEvent, AiError>> + Send>,
-> {
-    use crate::steering::SteeringEvent;
-    let decode = try_stream! {
-        let mut segment: Option<(String, ResponseBuilder, mpsc::Sender<StreamEvent>, ResponseStream)> = None;
-        let mut first = true;
-        while let Some(value) = raw.recv().await {
-            let value = value?;
-            if value.get("type").and_then(serde_json::Value::as_str)==Some("octet.steer.update") {
-                let update = serde_json::from_value(value.get("update").cloned().unwrap_or_default())
-                    .map_err(|_| crate::steering::invalid("invalid internal steering update"))?;
-                yield SteeringEvent::Steer(update);
-                continue;
-            }
-            if value.get("type").and_then(serde_json::Value::as_str)==Some("response.created") {
-                if segment.is_some() { Err(crate::steering::invalid("overlapping response segments"))?; }
-                let id = value.pointer("/response/id").and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| crate::steering::invalid("response segment has no id"))?.to_owned();
-                let req = request.lock().unwrap_or_else(|p|p.into_inner()).clone();
-                let mut builder = ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, model.spec.pricing.clone());
-                builder.set_tool_definitions(&req.tools)?;
-                builder.requested_service_tier = req.responses.as_ref().and_then(|o|o.service_tier);
-                builder.set_buffer_ambiguous_compatibility_content(req.compatibility==crate::CompatibilityMode::Lossy);
-                if first { for diagnostic in &diagnostics { builder.add_diagnostic(diagnostic.clone()); } first=false; }
-                let (tx, mut rx) = mpsc::channel(1);
-                let guard = crate::stream::guard(try_stream! { while let Some(event) = rx.recv().await { yield event; } });
-                segment = Some((id,builder,tx,guard));
-            }
-            let (id,builder,tx,guard) = segment.as_mut()
-                .ok_or_else(|| crate::steering::invalid("provider event outside response segment"))?;
-            let sse = crate::protocol::sse::SseEvent { event:None, data:value.to_string() };
-            let decoded = crate::protocol::openai_responses::decode_stream_event(&model,&sse,builder)?;
-            let mut finished = false;
-            for event in decoded {
-                tx.send(event).await.map_err(|_| crate::steering::invalid("response segment guard closed"))?;
-                let event = guard.next().await.ok_or_else(|| crate::steering::invalid("response segment guard ended"))??;
-                finished = matches!(&event,StreamEvent::Finished(_));
-                if let StreamEvent::Finished(response) = &event {
-                    *completed.lock().unwrap_or_else(|p|p.into_inner()) = Some(response.message.clone());
-                }
-                yield SteeringEvent::Response {response_id:id.clone(),event};
-            }
-            if finished {
-                let (_,_,tx,mut guard) = segment.take().expect("active segment");
-                drop(tx);
-                if let Some(event) = guard.next().await { event?; }
-            }
-        }
-        if segment.is_some() { Err(AiError::StreamProtocol(StreamProtocolError::PrematureEof))?; }
-    };
-    let stream = decode.then(move |item| {
-        let pool = pool.clone();
-        let key = key.clone();
-        let ledger = ledger.clone();
-        let redactor = redactor.clone();
-        async move {
-            if item.is_err() {
-                crate::steering::ambiguous(&ledger);
-                pool.disable(key.as_deref()).await;
-            }
-            item.map_err(|e| sanitize_ai_error(&redactor, e))
-        }
-    });
-    Box::pin(stream)
-}
-
-/// Decode a cached Responses WebSocket using the same protocol builder as the
-/// ordinary SSE path. The wire event shape is JSON rather than `data:` framed
-/// SSE, so each message is wrapped in the codec's private event view.
-#[allow(clippy::too_many_arguments)]
-fn responses_websocket_stream(
-    pool: ResponsesWsPool,
-    pool_key: Option<String>,
-    model: Model,
-    requested_service_tier: Option<crate::types::ServiceTier>,
-    mut events: crate::responses_ws::EventReceiver,
-    diagnostics: Vec<crate::error::Diagnostic>,
-    tool_definitions: Vec<ToolDef>,
-    buffer_ambiguous_compatibility_content: bool,
-    diagnostic_redactor: CredentialRedactor,
-    stream_initial_timeout: Duration,
-    stream_idle_timeout: Duration,
-    stream_deadline: Duration,
-) -> ResponseStream {
-    let raw_event_stream = try_stream! {
-        let mut builder = ResponseBuilder::new(
-            model.spec.id.clone(),
-            model.spec.protocol,
-            model.spec.pricing.clone(),
-        );
-        builder.requested_service_tier = requested_service_tier;
-        builder.set_tool_definitions(&tool_definitions)?;
-        builder.strict_tool_sampling = crate::protocol::strict_mode_for(&model);
-        builder.set_buffer_ambiguous_compatibility_content(
-            buffer_ambiguous_compatibility_content,
-        );
-        for diagnostic in diagnostics {
-            builder.add_diagnostic(diagnostic);
-        }
-
-        let started_at = Instant::now();
-        let mut terminal_seen = false;
-        let mut emitted_event = false;
-        let mut first_provider_event = false;
-        let mut last_event_at = None;
-        while !terminal_seen {
-            let remaining = stream_deadline.saturating_sub(started_at.elapsed());
-            let event_result = if remaining.is_zero() {
-                Err(AiError::Transport(TransportError {
-                    phase: TransportPhase::Body,
-                    timeout: true,
-                    message: "websocket stream exceeded its overall deadline".to_owned(),
-                }))
-            } else {
-                let quiet_timeout = if emitted_event {
-                    stream_idle_timeout
-                } else {
-                    stream_initial_timeout
-                };
-                tokio::time::timeout(remaining.min(quiet_timeout), events.recv())
-                    .await
-                    .map_err(|_| AiError::Transport(TransportError {
-                        phase: TransportPhase::Body,
-                        timeout: true,
-                        message: if remaining <= quiet_timeout {
-                            "websocket stream exceeded its overall deadline".to_owned()
-                        } else if emitted_event {
-                            "websocket stream was idle beyond its timeout".to_owned()
-                        } else {
-                            "websocket stream was idle beyond its initial timeout".to_owned()
-                        },
-                    }))
-            };
-            let event = match event_result {
-                Ok(Some(event)) => event,
-                Ok(None) => Err(AiError::Transport(TransportError {
-                    phase: TransportPhase::Body,
-                    timeout: false,
-                    message: "Responses WebSocket ended before completion".to_owned(),
-                })),
-                Err(error) => Err(error),
-            };
-            let event = match event {
-                Ok(event) => event,
-                Err(error) => {
-                    events.close();
-                    Err(annotate_stream_failure(
-                        error,
-                        &builder,
-                        !first_provider_event,
-                        started_at,
-                        last_event_at,
-                    ))?
-                }
-            };
-            first_provider_event = true;
-            last_event_at = Some(Instant::now());
-            let data = match serde_json::to_string(&event) {
-                Ok(data) => data,
-                Err(error) => {
-                    events.close();
-                    Err(annotate_stream_failure(
-                        AiError::Decode(DecodeError::Json(error.to_string())),
-                        &builder,
-                        !first_provider_event,
-                        started_at,
-                        last_event_at,
-                    ))?
-                }
-            };
-            let sse_event = crate::protocol::sse::SseEvent {
-                event: None,
-                data,
-            };
-            let decoded = match crate::protocol::openai_responses::decode_stream_event(
-                &model,
-                &sse_event,
-                &mut builder,
-            ) {
-                Ok(decoded) => decoded,
-                Err(error) => {
-                    events.close();
-                    Err(annotate_stream_failure(
-                        error,
-                        &builder,
-                        !first_provider_event,
-                        started_at,
-                        last_event_at,
-                    ))?
-                }
-            };
-            for event in decoded {
-                let terminal = matches!(event, StreamEvent::Finished(_));
-                emitted_event = true;
-                yield event;
-                if terminal {
-                    terminal_seen = true;
-                    break;
-                }
-            }
-        }
-    };
-    let guarded = crate::stream::guard(raw_event_stream);
-    Box::pin(guarded.then(move |event| {
-        let pool = pool.clone();
-        let pool_key = pool_key.clone();
-        let redactor = diagnostic_redactor.clone();
-        async move {
-            if event.is_err() {
-                pool.disable(pool_key.as_deref()).await;
-            }
-            event.map_err(|error| sanitize_ai_error(&redactor, error))
-        }
-    }))
-}
-
 /// Client wrapper for executing AI service requests.
 #[derive(Clone)]
 pub struct AiClient {
@@ -2155,6 +290,7 @@ pub struct AiClient {
     stream_idle_timeout: Duration,
     stream_deadline: Duration,
     request_dispatch: Option<Arc<std::sync::atomic::AtomicBool>>,
+    provider_request_hooks: Vec<Arc<dyn ProviderRequestHook>>,
 }
 
 impl Default for AiClient {
@@ -2164,6 +300,23 @@ impl Default for AiClient {
 }
 
 impl AiClient {
+    /// Clones this client, appending an owner-bound async HTTP hook chain.
+    ///
+    /// Existing clients and their shared transport registry remain unchanged.
+    /// Hooks apply to conversational requests and native HTTP compaction, not
+    /// batch/image/deferred services. Preferred WebSockets use HTTP while hooks
+    /// are installed; opaque host transports/native steering fail explicitly.
+    pub fn with_provider_request_hooks(&self, hooks: Vec<Arc<dyn ProviderRequestHook>>) -> Self {
+        let mut client = self.clone();
+        client.provider_request_hooks.extend(hooks);
+        client
+    }
+
+    /// Whether this client has an async provider-boundary subscriber.
+    pub fn has_provider_request_hooks(&self) -> bool {
+        !self.provider_request_hooks.is_empty()
+    }
+
     /// Clones this client with fresh, sticky dispatch tracking for one attempt.
     /// The original client is unaffected. Do not reuse this clone for a new attempt.
     pub fn track_request_dispatch(&self) -> Self {
@@ -2239,6 +392,7 @@ impl AiClient {
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             stream_deadline: DEFAULT_STREAM_DEADLINE,
             request_dispatch: None,
+            provider_request_hooks: Vec::new(),
         })
     }
 
@@ -2253,6 +407,7 @@ impl AiClient {
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             stream_deadline: DEFAULT_STREAM_DEADLINE,
             request_dispatch: None,
+            provider_request_hooks: Vec::new(),
         }
     }
 
@@ -2358,6 +513,7 @@ impl AiClient {
         overrides: crate::RequestOverrides,
         host_options: HostRequestOptions,
     ) -> Result<ResponseStream, AiError> {
+        let started = Instant::now();
         overrides
             .validate()
             .map_err(|error| crate::ConfigError::Parse(error.to_string()))?;
@@ -2405,7 +561,7 @@ impl AiClient {
             )
             .into());
         }
-        if host_transport && host_options.has_wire_hooks() {
+        if host_transport && (host_options.has_wire_hooks() || self.has_provider_request_hooks()) {
             return Err(crate::ConfigError::Parse(
                 "per-request api key, metadata, and payload/header/response hooks are unsupported by a host stream transport".into(),
             )
@@ -2454,9 +610,15 @@ impl AiClient {
         };
         let open = client.stream_once(&model, req, &overrides, &host_options);
         let Some(deadline) = deadline else {
-            return open.await;
+            let stream = open.await?;
+            notify_first_request_opened();
+            return Ok(crate::inference::measured_stream(
+                stream,
+                started,
+                crate::inference::ClientTimingScope::Request,
+            ));
         };
-        let mut stream = tokio::time::timeout_at(deadline, open)
+        let stream = tokio::time::timeout_at(deadline, open)
             .await
             .map_err(|_| {
                 AiError::Transport(TransportError {
@@ -2465,6 +627,12 @@ impl AiClient {
                     message: "request-local opening deadline exceeded".into(),
                 })
             })??;
+        notify_first_request_opened();
+        let mut stream = crate::inference::measured_stream(
+            stream,
+            started,
+            crate::inference::ClientTimingScope::Request,
+        );
         Ok(Box::pin(try_stream! {
             loop {
                 let item = tokio::time::timeout_at(deadline, stream.next()).await.map_err(|_| {
@@ -2488,6 +656,14 @@ impl AiClient {
         mut req: Request,
     ) -> Result<crate::steering::SteeringSession, AiError> {
         use crate::steering::{SteeringControl, SteeringSession};
+        if self.has_provider_request_hooks() {
+            return Err(crate::ConfigError::Parse(
+                "async HTTP provider hooks are unsupported by native steering".into(),
+            )
+            .into());
+        }
+        crate::steering::validate_request(&req)?;
+        let started_at = Instant::now();
         let mut prepared = model.clone();
         crate::declarations::azure::apply(&mut prepared, None, &Default::default())?;
         let model = &prepared;
@@ -2618,8 +794,39 @@ impl AiClient {
                 completed,
                 parts.diagnostics,
                 redactor,
+                started_at,
             ),
         })
+    }
+
+    /// Open one inference after optional Responses setup, resolving a dynamic
+    /// credential exactly once for both operations. Credential failures are
+    /// inference opening failures, not ignorable setup failures. The optional
+    /// socket timeout starts only after credential settlement.
+    pub async fn stream_with_responses_prewarm(
+        &self,
+        model: &Model,
+        request: Request,
+        warm_request: Request,
+    ) -> Result<ResponseStream, AiError> {
+        if self.has_provider_request_hooks() {
+            return self.stream(model, request).await;
+        }
+        let mut prepared = model.clone();
+        crate::catalog::validate_endpoint(&prepared.endpoint)?;
+        crate::catalog::validate_model_spec(&prepared.spec)?;
+        // Validate before a potentially rotating credential exchange.
+        crate::protocol::openai_responses::build_request(&prepared, &request)?;
+        crate::protocol::openai_responses::build_request(&prepared, &warm_request)?;
+        if let crate::Auth::Dynamic(resolver) = &prepared.endpoint.auth {
+            let credential = resolver.resolve().await.map_err(AiError::Auth)?;
+            Arc::make_mut(&mut prepared.endpoint).auth =
+                crate::Auth::Dynamic(Arc::new(SettledCredential(credential)));
+        }
+        let timeout = prepared.endpoint.timeout.min(Duration::from_secs(30));
+        let _ =
+            tokio::time::timeout(timeout, self.prewarm_responses(&prepared, warm_request)).await;
+        self.stream(&prepared, request).await
     }
 
     /// Best-effort prewarms a cached OpenAI Responses WebSocket.
@@ -2630,6 +837,10 @@ impl AiClient {
     /// the result; ordinary [`Self::stream`] calls always retain HTTP/SSE
     /// fallback behavior.
     pub async fn prewarm_responses(&self, model: &Model, req: Request) -> Result<(), AiError> {
+        if self.has_provider_request_hooks() {
+            // The hooked request uses HTTP; do not create an unobserved socket.
+            return Ok(());
+        }
         let mut prepared = model.clone();
         crate::declarations::azure::apply(&mut prepared, None, &Default::default())?;
         let model = &prepared;
@@ -2786,6 +997,14 @@ impl AiClient {
         if let Some(hook) = &host_options.on_payload {
             parts.body = apply_payload_hook(hook, model, parts.body)?;
         }
+        let provider_hooks = ProviderRequestAttempt::new(
+            model,
+            &self.provider_request_hooks,
+            &host_options.provider_hooks,
+        );
+        if let Some(hooks) = &provider_hooks {
+            parts.body = hooks.payload(parts.body).await?;
+        }
 
         let proxy = self.request_proxy(&parts.url)?;
 
@@ -2820,11 +1039,10 @@ impl AiClient {
         if let Some(transform) = &host_options.transform_headers {
             let before = headers.clone();
             transform.transform_headers(&mut headers, &HookModelContext::from_model(model))?;
-            for name in headers.keys() {
-                if is_reserved_header(name) && before.get(name) != headers.get(name) {
-                    return Err(crate::ConfigError::ReservedHeader(name.clone()).into());
-                }
-            }
+            validate_hook_headers(&before, &headers)?;
+        }
+        if let Some(hooks) = &provider_hooks {
+            hooks.headers(&mut headers).await?;
         }
 
         // Request-aware signers (SigV4) must run after body encoding, so the
@@ -2872,6 +1090,7 @@ impl AiClient {
             buffer_ambiguous_compatibility_content,
             diagnostic_redactor: diagnostic_redactor.clone(),
             on_response: host_options.on_response.clone(),
+            provider_hooks,
         };
 
         // Responses WebSockets are deliberately opt-in per endpoint. A
@@ -2887,6 +1106,7 @@ impl AiClient {
             session_key.is_some(),
         );
         if transport.uses_websocket()
+            && fallback_request.provider_hooks.is_none()
             && model.spec.protocol == Protocol::OpenAiResponses
             && !request_aware_signer
             && proxy.is_none()
@@ -3083,7 +1303,12 @@ impl AiClient {
         // Codex compresses ordinary streaming Responses requests, but its
         // compact endpoint contract is plain JSON. Do not apply the normal
         // Responses transport compression policy here.
-        let body = bytes::Bytes::from(body);
+        let mut body = bytes::Bytes::from(body);
+        let provider_hooks = ProviderRequestAttempt::new(model, &self.provider_request_hooks, &[]);
+        if let Some(hooks) = &provider_hooks {
+            body = hooks.payload(body).await?;
+            hooks.headers(&mut headers).await?;
+        }
         let resolved_headers = crate::auth::resolve_headers(&model.endpoint.auth)
             .await
             .map_err(AiError::Auth)?;
@@ -3116,13 +1341,19 @@ impl AiClient {
         })?
         .map_err(|error| request_open_transport_error(error, "compact request"))
         .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
+        let opened_at = Instant::now();
+        if let Some(hooks) = &provider_hooks {
+            hooks
+                .response(response.status(), response.headers())
+                .await?;
+        }
         Ok(PendingResponsesCompact {
             response,
             diagnostic_redactor,
             stream_idle_timeout: self.stream_idle_timeout,
             stream_initial_timeout: self.stream_initial_timeout,
             stream_deadline: self.stream_deadline,
-            opened_at: Instant::now(),
+            opened_at,
         })
     }
 
@@ -3354,6 +1585,7 @@ impl AiClient {
         overrides: crate::RequestOverrides,
         poll_after_ms: Option<u64>,
     ) -> Result<ResponseStream, AiError> {
+        let started = Instant::now();
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         Self::validate_deferred_overrides(&overrides)?;
@@ -3368,7 +1600,11 @@ impl AiClient {
                 poll_after_ms,
             )
             .await?;
-        Ok(crate::stream::guard(stream))
+        Ok(crate::inference::measured_stream(
+            crate::stream::guard(stream),
+            started,
+            crate::inference::ClientTimingScope::DeferredSubmit,
+        ))
     }
 
     /// Polls one deferred handle under a one-shot, generation-bound permit.
@@ -3386,6 +1622,7 @@ impl AiClient {
         leaf_generation: u64,
         wait_ms: Option<u64>,
     ) -> Result<ResponseStream, AiError> {
+        let started = Instant::now();
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         permit.consume(leaf_generation)?;
@@ -3406,7 +1643,11 @@ impl AiClient {
         let stream = transport
             .fetch_deferred(HostStreamModel::from(model), handle, wait_ms)
             .await?;
-        Ok(crate::stream::guard(stream))
+        Ok(crate::inference::measured_stream(
+            crate::stream::guard(stream),
+            started,
+            crate::inference::ClientTimingScope::DeferredPoll,
+        ))
     }
 
     /// Best-effort cancellation of one deferred handle.
@@ -3433,379 +1674,5 @@ impl AiClient {
             .await
     }
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn dropping_a_resumed_receiver_closes_a_quiet_http_body() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut byte = [0u8; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
-                request.push(byte[0]);
-            }
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
-            // Only keepalive data: no decoded event will ever attempt send().
-            socket.write_all(b"d\r\n: keepalive\n\n\r\n").await.unwrap();
-            let closed = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
-                .await
-                .expect("cancelled body reader must release the connection")
-                .unwrap();
-            assert_eq!(closed, 0);
-        });
-        let resumer = ResponsesResume {
-            http: reqwest::Client::new(),
-            endpoint: format!("http://{address}/responses").parse().unwrap(),
-            headers: http::HeaderMap::new(),
-        };
-        let receiver = resumer.open("resp_1", 1).await.unwrap();
-        drop(receiver);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn client_generated_websocket_errors_fence_pool_before_publication() {
-        let catalog = crate::catalog::ModelCatalog::builtin().unwrap();
-        let id = catalog
-            .models()
-            .find(|model| model.protocol == Protocol::OpenAiResponses)
-            .unwrap()
-            .id
-            .clone();
-        let model = catalog.resolve(&id).unwrap();
-        for deadline in [Duration::ZERO, Duration::from_secs(5)] {
-            let pool = ResponsesWsPool::default();
-            let (sender, receiver) = crate::responses_ws::event_channel(1);
-            sender
-                .send(Ok(serde_json::json!({
-                    "type": "error", "code": "invalid_request_error", "message": "invalid"
-                })))
-                .await
-                .unwrap();
-            // No actor exists to observe receiver closure or perform cleanup.
-            // Both a client deadline and decoded provider error must fence the
-            // session themselves before exposing failure to the consumer.
-            let mut stream = responses_websocket_stream(
-                pool.clone(),
-                Some("poisoned".into()),
-                model.clone(),
-                None,
-                receiver,
-                Vec::new(),
-                Vec::new(),
-                false,
-                CredentialRedactor::default(),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                deadline,
-            );
-            loop {
-                match stream.next().await {
-                    Some(Err(_)) => break,
-                    Some(Ok(_)) => {}
-                    None => panic!("expected client failure"),
-                }
-            }
-            let error = pool
-                .request(
-                    Some("poisoned"),
-                    url::Url::parse("ws://127.0.0.1:9/").unwrap(),
-                    http::HeaderMap::new(),
-                    serde_json::json!({}),
-                    ResponsesWsLiveness::for_response_idle(Duration::from_secs(5)),
-                    Duration::from_secs(5),
-                    Some(DEFAULT_CONNECT_TIMEOUT),
-                    None,
-                )
-                .await
-                .unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("disabled after an earlier failure"));
-            drop(sender);
-        }
-    }
-
-    #[tokio::test]
-    async fn declared_request_runtime_compresses_without_provider_identity() {
-        let original = bytes::Bytes::from(vec![b'a'; 128 * 1024]);
-        let mut headers = http::HeaderMap::new();
-        let compressed = prepare_request_body(
-            crate::types::RequestRuntime {
-                body_encoding: crate::types::RequestBodyEncoding::Zstd,
-                ..crate::types::RequestRuntime::default()
-            },
-            &mut headers,
-            original.clone(),
-        )
-        .await;
-        assert_eq!(headers[http::header::CONTENT_ENCODING], "zstd");
-        assert!(compressed.len() < original.len() / 10);
-        assert_eq!(
-            zstd::stream::decode_all(compressed.as_ref()).unwrap(),
-            original.as_ref()
-        );
-
-        let mut generic_headers = http::HeaderMap::new();
-        let generic = prepare_request_body(
-            crate::types::RequestRuntime::default(),
-            &mut generic_headers,
-            original.clone(),
-        )
-        .await;
-        assert_eq!(generic, original);
-        assert!(generic_headers
-            .get(http::header::CONTENT_ENCODING)
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn transport_diagnostic_keeps_cause_but_removes_request_url() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        let secret = "must-not-appear";
-        let url = format!("http://{address}/private/catalog?token={secret}");
-        let error = reqwest::Client::new()
-            .get(&url)
-            .send()
-            .await
-            .expect_err("the released listener must refuse the connection");
-        let AiError::NetworkUnavailable(error) = request_open_transport_error(error, "request")
-        else {
-            unreachable!()
-        };
-        assert_eq!(error.phase, TransportPhase::Connect);
-        assert!(error.message.starts_with("request connection failed:"));
-        assert!(error.message.contains("refused") || error.message.contains("connect"));
-        assert!(!error.message.contains(secret));
-        assert!(!error.message.contains("/private/catalog"));
-        assert!(!error.message.contains(&address.to_string()));
-    }
-
-    #[tokio::test]
-    async fn stalled_tls_connect_timeout_is_network_unavailable_before_post() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(async move {
-            let (_socket, _) = listener.accept().await.unwrap();
-            // No TLS acknowledgement, so HTTP POST cannot have been sent.
-            let _ = release_rx.await;
-        });
-        let error = reqwest::Client::builder()
-            .no_proxy()
-            .connect_timeout(Duration::from_millis(50))
-            .build()
-            .unwrap()
-            .post(format!("https://{address}/responses"))
-            .body("not accepted")
-            .send()
-            .await
-            .unwrap_err();
-        let error = request_open_transport_error(error, "request");
-        assert!(
-            matches!(error, AiError::NetworkUnavailable(ref transport)
-            if transport.phase == TransportPhase::Connect && transport.timeout),
-            "{error:?}"
-        );
-        drop(release);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn invalid_tls_handshake_is_not_network_unavailable() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut hello = [0_u8; 4096];
-            assert!(socket.read(&mut hello).await.unwrap() > 0);
-            socket.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
-        });
-        let error = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .post(format!("https://{address}/responses"))
-            .send()
-            .await
-            .unwrap_err();
-        assert!(error.is_connect());
-        let error = request_open_transport_error(error, "request");
-        assert!(
-            matches!(error, AiError::Transport(ref transport)
-            if transport.phase == TransportPhase::Connect && !transport.timeout),
-            "{error:?}"
-        );
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn disconnect_after_post_is_not_network_unavailable() {
-        use tokio::io::AsyncReadExt;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 4096];
-            let count = socket.read(&mut request).await.unwrap();
-            assert!(count > 0, "POST reached the server before disconnect");
-        });
-        let error = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .post(format!("http://{address}/responses"))
-            .body("may already be accepted")
-            .send()
-            .await
-            .unwrap_err();
-        assert!(!error.is_connect());
-        assert!(matches!(
-            request_open_transport_error(error, "request"),
-            AiError::Transport(TransportError {
-                phase: TransportPhase::ResponseHeaders,
-                ..
-            })
-        ));
-        server.await.unwrap();
-    }
-
-    #[test]
-    fn invalid_certificate_configuration_is_not_network_unavailable() {
-        let certificate = reqwest::Certificate::from_der(b"invalid certificate").unwrap();
-        let error = reqwest::Client::builder()
-            .add_root_certificate(certificate)
-            .build()
-            .unwrap_err();
-        assert!(!matches!(
-            request_open_transport_error(error, "request"),
-            AiError::NetworkUnavailable(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn dns_failure_requires_typed_transient_evidence() {
-        struct FailedDns(std::io::ErrorKind);
-        impl reqwest::dns::Resolve for FailedDns {
-            fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-                let kind = self.0;
-                Box::pin(async move {
-                    Err(Box::new(std::io::Error::new(kind, "connection refused"))
-                        as Box<dyn std::error::Error + Send + Sync>)
-                })
-            }
-        }
-        for (kind, transient) in [
-            (std::io::ErrorKind::TimedOut, true),
-            (std::io::ErrorKind::NetworkUnreachable, true),
-            (std::io::ErrorKind::NotFound, false),
-            (std::io::ErrorKind::Other, false),
-        ] {
-            let error = reqwest::Client::builder()
-                .no_proxy()
-                .dns_resolver(Arc::new(FailedDns(kind)))
-                .build()
-                .unwrap()
-                .post("http://offline.invalid/responses")
-                .send()
-                .await
-                .unwrap_err();
-            assert!(error.is_connect());
-            assert_eq!(
-                matches!(
-                    request_open_transport_error(error, "request"),
-                    AiError::NetworkUnavailable(_)
-                ),
-                transient,
-                "{kind:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn connection_source_classification_uses_io_kinds_not_messages() {
-        for kind in [
-            std::io::ErrorKind::ConnectionRefused,
-            std::io::ErrorKind::ConnectionReset,
-            std::io::ErrorKind::ConnectionAborted,
-            std::io::ErrorKind::NetworkDown,
-            std::io::ErrorKind::NetworkUnreachable,
-            std::io::ErrorKind::HostUnreachable,
-            std::io::ErrorKind::TimedOut,
-        ] {
-            assert!(transient_connection_source(&std::io::Error::new(
-                kind,
-                "invalid certificate"
-            )));
-        }
-        for kind in [
-            std::io::ErrorKind::InvalidData,
-            std::io::ErrorKind::InvalidInput,
-            std::io::ErrorKind::PermissionDenied,
-            std::io::ErrorKind::NotFound,
-            std::io::ErrorKind::Other,
-        ] {
-            assert!(!transient_connection_source(&std::io::Error::new(
-                kind,
-                "connection refused; timed out"
-            )));
-        }
-    }
-
-    #[test]
-    fn lifecycle_details_are_redacted_control_safe_and_bounded() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert("authorization", "Bearer lifecycle-secret".parse().unwrap());
-        let mut redactor = CredentialRedactor::default();
-        redactor.include_header_values(&headers);
-        let detail = format!("Bearer lifecycle-secret \x1b{}", "é".repeat(200));
-
-        let lifecycle = parse_provider_lifecycle(&format!("loading; {detail}"), &redactor)
-            .expect("known lifecycle state");
-        assert_eq!(lifecycle.state, ProviderLifecycleState::Loading);
-        let detail = lifecycle.detail.expect("nonempty detail");
-        assert!(detail.len() <= MAX_PROVIDER_LIFECYCLE_DETAIL_BYTES);
-        assert!(detail.is_char_boundary(detail.len()));
-        assert!(detail.contains("[REDACTED]"));
-        assert!(!detail.contains("lifecycle-secret"));
-        assert!(!detail.chars().any(char::is_control));
-        assert!(lifecycle_from_sse_comment("ordinary keepalive", &redactor).is_none());
-        assert!(parse_provider_lifecycle("unknown; ignored", &redactor).is_none());
-    }
-
-    #[test]
-    fn provider_diagnostics_are_control_safe_and_post_sanitize_bounded() {
-        let input = format!("\x1b\x07\u{202e}{}", "é".repeat(3_000));
-        let output = sanitize_diagnostic(
-            &CredentialRedactor::default(),
-            &input,
-            MAX_PROVIDER_DIAGNOSTIC_BYTES,
-        );
-        assert!(output.len() <= MAX_PROVIDER_DIAGNOSTIC_BYTES);
-        assert!(output.is_char_boundary(output.len()));
-        assert!(output.ends_with('…'));
-        assert!(!output.chars().any(char::is_control));
-        assert!(!output.contains('\u{202e}'));
-        assert!(output.contains(r"\u{1b}"));
-        assert!(output.contains(r"\u{7}"));
-        assert!(output.contains(r"\u{202e}"));
-    }
-
-    #[test]
-    fn transport_diagnostic_truncation_preserves_utf8_boundaries() {
-        let mut message = format!("{}étail", "a".repeat(511));
-        truncate_transport_message(&mut message, 512);
-        assert_eq!(message.len(), 511);
-        assert!(message.chars().all(|character| character == 'a'));
-    }
-}
+mod tests;
