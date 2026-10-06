@@ -184,6 +184,22 @@
   activity/steering PTY contracts, headless before-prompt tool snapshots and the
   API 0.1 conformance wire are fixed, together with the inherited dead-code and
   collapsible-if clippy lints.
+- Large-history transport (U1). The approved session-repair.v2 chunked transport
+  replaces the legacy 512 KiB session mirror between the host and the adapter:
+  complete history travels in bounded chunks with the frame bound checked before
+  append admission, `session_owner_routes_v1` and `session_snapshot_transport_v1`
+  negotiate together, mid-transfer cancellation leaves no partial state, and
+  session-facts publication readiness never depends on the negotiated transport.
+  A routed publication only invalidates its own delivery barrier, and a
+  non-foreground owner is no longer an error.
+- Pre-native terminal input lane (U6). Pi `onTerminalInput` handlers observe raw
+  terminal input before native handling and may consume or transform it, in the
+  Pi ordering, with bounded timeout behaviour: a hung handler never freezes
+  typing, and the adapter negotiates `terminal_input_intercept_v1`.
+- Pi adapter shims and crash repairs (U13). The missing Pi 1.0.2 module surface is
+  implemented in the adapter's shims, and the extension-process crashes found by
+  the real-package matrix (for example `extension stdout closed` in
+  pi-mcp-adapter, and lens/permission-system startup refusals) are fixed.
 
 ## [0.8.2] - 2026-09-30
 
