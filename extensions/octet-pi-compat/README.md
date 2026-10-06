@@ -311,6 +311,15 @@ full tree-summary preparation) remain explicit refusals, not fabricated values.
 `ctx.waitForIdle` requires a live command and negotiated `session_control_v1`, then
 awaits the actual same-session idle receipt. No hook can wait for its own run to end.
 
+`ctx.newSession({parentSession, setup, withSession})` replaces the native session
+at its idle boundary. A request made while a turn is busy waits for that turn to
+settle; it never takes its session writer. The old session's end precedes writable
+setup, and the new session's start follows setup's durable writes. Only the
+original live command can consume the host's creation receipt, with its exact
+process instance/generation and cancellation lifetime. Captured old contexts stay
+retired; the setup manager closes before `withSession`. Parent linkage is stored
+in the replacement's durable header, not inferred from a foreground UI context.
+
 `ctx.compact({customInstructions?, onComplete?, onError?})` is synchronous void.
 It requires both `session_control_v1` and `session_compaction_v1` and an opted-in
 native interactive idle driver. From a live command/tool/hook it queues locally,
