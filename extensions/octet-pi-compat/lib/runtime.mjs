@@ -534,22 +534,32 @@ export class Runtime {
     await this.ui.ownerEnded(state);
   }
   updated(params) {
-    if (this.sessionTransport && params.host?.session_view_revision !== undefined) {
+    const key = ownerKey(params.resource_owner);
+    // A routed publication always invalidates its own delivery barrier first;
+    // that is delivery bookkeeping for any owner, never a foreground change.
+    const routedPublication = this.sessionTransport && params.host?.session_view_revision !== undefined;
+    if (routedPublication) {
       const revision = params.host.session_view_revision;
       if (!Number.isSafeInteger(revision) || revision < 1) invalid('session view revision');
       this.sessionTransport.invalidate(params.resource_owner, revision);
-      // A peer without a retained frontend has nothing left to update; the
-      // invalidation above is the whole effect of this notification for it.
-      if (!this.features.has('remote_ui')) return;
     }
-    this.require('remote_ui'); const key = ownerKey(params.resource_owner), state = this.states.get(key);
-    if (!state || !state.alive || state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context/updated');
+    const state = this.states.get(key);
+    if (routedPublication) {
+      // Retained host facts belong to the current foreground only. For any
+      // other owner the invalidation above is the whole effect: that is a
+      // delivery fact, not a refusal.
+      if (!this.features.has('remote_ui') || !state?.alive || state !== this.foreground) return;
+    } else {
+      this.require('remote_ui');
+      if (!state || !state.alive || state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context/updated');
+    }
     const next = plainJSON(params.host, 'host snapshot', 524288);
     if (Object.hasOwn(next, 'theme')) nativeTheme(next.theme);
     const previous = state.host.git_branch; state.host = { ...state.host, ...next };
     if (previous !== state.host.git_branch) for (const listener of state.branchListeners) listener();
     for (const surface of this.ui.surfaces.values()) if (surface.store.state === state) this.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
   }
+
   async runEvent(event, value, store, { veto = false } = {}) {
     for (const entry of [...this.events.get(event) || []]) {
       store.controller.signal.throwIfAborted();
