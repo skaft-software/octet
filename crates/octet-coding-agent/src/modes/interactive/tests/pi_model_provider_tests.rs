@@ -366,3 +366,65 @@ async fn pi_idle_model_setters_preserve_the_live_command_and_binding() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_busy_model_controls_queue_without_mutating_the_active_request() {
+    use super::support::{scripted_model, text_turn};
+    use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(text_turn()))
+        .mount(&server).await;
+    let (directory, mut app) = pi_app(r#"
+import { appendFileSync } from 'node:fs';
+export default pi => {
+  pi.on('turn_start', async (_, ctx) => {
+    const before = ctx.model.id;
+    const target = ctx.modelRegistry.getAvailable().find(m => m.id === 'queued-model');
+    const selected = await pi.setModel(target);
+    pi.setThinkingLevel('off');
+    appendFileSync(TRACE, JSON.stringify({selected, before, after:ctx.model.id})+'\n');
+  });
+};
+"#);
+    let model = scripted_model(&server.uri());
+    app.catalog.register_endpoint((*model.endpoint).clone()).unwrap();
+    app.catalog.register_model((*model.spec).clone()).unwrap();
+    let mut target = (*model.spec).clone();
+    target.id = ModelId("queued-model".into());
+    target.api_name = "queued-model".into();
+    app.catalog.register_model(target).unwrap();
+    app = rebuild_app(app, Some(model), None, None, None).unwrap();
+    app.executable_extensions.activate_session_lifecycle_driver();
+    let mut shell = InteractiveShell::test_shell();
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input).await.unwrap();
+    request_extension_ui(&mut shell, &mut app);
+    let inspection = ActiveRunInspection::capture(&app);
+    let mut run = app.agent.prompt("exercise busy selection").await.unwrap();
+    let control = run.control();
+    let id = shell.begin_run("busy selection");
+    shell.set_awaiting_provider(id);
+    let mut pending = VecDeque::new();
+    let outcome = tokio::time::timeout(Duration::from_secs(20), drive_active_run(
+        &mut run, &control, &mut shell, &mut input,
+        &mut tokio::time::interval(Duration::from_millis(16)), &mut pending,
+        &mut false, None, None, &mut app.executable_extensions, &mut false,
+        &inspection, &mut None,
+    )).await.expect("hook setter must not deadlock its own run").unwrap();
+    drop(run);
+    assert_eq!(outcome, HostRunOutcome::Completed, "{}", shell.debug_snapshot());
+    let trace = std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap_or_default();
+    assert!(!trace.is_empty(), "active hook setters must succeed, not be refused: {}", shell.debug_snapshot());
+    let receipt: serde_json::Value = serde_json::from_str(trace.trim()).unwrap();
+    assert_eq!(receipt["selected"], true);
+    assert_eq!(receipt["before"], receipt["after"], "queue admission is not application");
+    assert_eq!(app.agent.model().spec.id.0, "scripted");
+    assert_eq!(pending.len(), 2, "both controls must survive until idle");
+    assert!(shell.debug_snapshot().contains("queued"));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let wire: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(wire["model"], "scripted");
+    app.executable_extensions.shutdown().await;
+}
