@@ -77,6 +77,8 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
     assert!(!uses_alternate_screen(&octet.pty.output));
     assert!(!contains_bytes(&octet.pty.output, b"\x1b[?1016h"));
     assert!(!contains_bytes(&octet.pty.output, b"\x1b[?1007h"));
+    // Clear inherited pixel/alternate-scroll modes before requesting cells.
+    assert!(contains_bytes(&octet.pty.output, b"\x1b[?1016l\x1b[?1007l"));
     octet.pty.write_input(b"draft-kept");
     await_screen(
         &mut octet,
@@ -151,6 +153,7 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
         );
         // Resume, PageUp and PageDown must leave pointer coordinates aligned.
         octet.pty.write_input(b"\x1b[5~\x1b[6~");
+        octet.pty.write_input(&sgr(64, 20, 3, false).repeat(4));
         settle(&mut octet, &mut parser, &mut consumed);
         for legacy in [false, true] {
             let row = (2..rows - 7)
