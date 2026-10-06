@@ -6934,10 +6934,17 @@ where
     // Pi integration refreshes its session reference on every `agent_start`.
     let previous_session_id = herdr_session_id(&app);
     let start_source = herdr_reconfig_source(&reconfig);
+    // A model transition is the user's explicit session choice. It must survive
+    // later rebuilds and stay authoritative over session-only resource
+    // contributions (for example a mirrored Pi default model).
+    let explicit_model_change = matches!(&reconfig, Reconfig::Model(_));
     let mut app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
         apply_reconfig(app, reconfig)
     })
     .await?;
+    if explicit_model_change {
+        app.config.model_explicit = true;
+    }
     refresh_resource_paths(&mut app, shell, input).await?;
     shell.hydrate(app.agent.session())?;
     let session_id = herdr_session_id(&app);

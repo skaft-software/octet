@@ -354,3 +354,42 @@ async fn mirrored_pi_setup_reload_is_idempotent() {
     assert_ne!(restored.theme.as_deref(), Some("pi-setup-theme"));
     drop(app);
 }
+
+/// An explicit in-session model choice (the provenance `transition` records for
+/// `/model` and the picker) must stay authoritative over the mirrored default,
+/// and withdrawal must not undo it either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mirrored_pi_setup_yields_to_an_explicit_user_model_choice() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let pi = fixture_pi_home(&root);
+    configure_mirror(&root, &pi, &workspace);
+
+    let mut app = app_for(&root, &workspace, true);
+    app.refresh_resource_paths_headless().await.unwrap();
+    assert_eq!(app.model.spec.api_name, "pi-mirror-model");
+
+    // The user picks another route; the real interactive transition records the
+    // same provenance bit this test sets.
+    let user_model = app
+        .catalog
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let reasoning = crate::app::default_reasoning_for_model(&user_model);
+    app.agent
+        .select_model_at_idle(
+            user_model.clone(),
+            reasoning.clone(),
+            crate::app::reasoning_label(&reasoning),
+        )
+        .unwrap();
+    app.model = user_model;
+    app.config.model_explicit = true;
+    app.mark_resource_paths_reload();
+    app.refresh_resource_paths_headless().await.unwrap();
+    assert_eq!(app.model.spec.api_name, "gpt-4o-mini");
+    // The mirrored resources stay active; only the route preference yields.
+    assert!(app.user_keybindings.contains_key("app.exit"));
+}
