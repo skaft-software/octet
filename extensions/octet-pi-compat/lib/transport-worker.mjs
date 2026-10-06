@@ -2,7 +2,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { read, write } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import { Socket } from 'node:net';
-import { Transport, MAX_FRAME } from './transport.mjs';
+import { Transport, MAX_FRAME, SYNC_REPLY, SYNC_UNKNOWN, SYNC_CANCELLED } from './transport.mjs';
 import { rpcError } from './errors.mjs';
 
 const header = new Int32Array(workerData.syncBuffer, 0, 4);
@@ -43,10 +43,24 @@ const output = new Writable({
 });
 let sync, sequence = 0, bytes = 0;
 const forwarded = new Map();
+// Async request ids this extension issued. Ids are never reused, so this is
+// also the tombstone set for replies that arrive after an async request was
+// cancelled or settled (the factory thread drops known ids).
 const issuedAsync = new Set();
+// Settled or host-cancelled synchronous request ids, bounded oldest-first. A
+// reply for one of these is dropped here: the factory thread has no channel for
+// a reply it no longer waits on, so forwarding it would be a protocol error.
+const MAX_SETTLED_SYNC = 4096;
+const settledSync = new Set();
+function tombstoneSync(id) {
+  if (id === undefined || settledSync.has(id)) return;
+  settledSync.add(id);
+  if (settledSync.size > MAX_SETTLED_SYNC) settledSync.delete(settledSync.values().next().value);
+}
 const activeParents = new Set(), cancelledParents = new Set();
 let shutdownRequested = false;
 function complete(value, status) {
+  tombstoneSync(sync?.id);
   if (Atomics.load(header, 0) !== 1) return;
   clearTimeout(sync?.timer); clearTimeout(sync?.watchdog);
   const encoded = Buffer.from(JSON.stringify(value));
@@ -55,7 +69,20 @@ function complete(value, status) {
   sync = undefined;
   Atomics.store(header, 0, status); Atomics.notify(header, 0);
 }
+// The host dropped a synchronous reverse request as a unit, so its outcome is
+// terminal cancellation: request cancellation is still announced, but the
+// factory thread is woken as cancelled instead of waiting for a reply that will
+// never arrive (a late reply is tolerated through `issued`).
 function cancelSync() {
+  if (!sync || sync.cancelled) return;
+  sync.cancelled = true; Atomics.store(header, 2, 1);
+  const id = sync.id;
+  transport.notify('$/cancelRequest', { id, reason: 'cancelled' }).catch(error => transport.fail(error));
+  complete({ code: -32800, message: 'request cancelled: the host dropped this synchronous request' }, SYNC_CANCELLED);
+}
+// A local deadline instead keeps waiting for the authoritative outcome; the
+// watchdog below terminalizes as unknown, and the request is never replayed.
+function deadlineSync() {
   if (!sync || sync.cancelled) return;
   sync.cancelled = true; Atomics.store(header, 2, 1);
   transport.notify('$/cancelRequest', { id: sync.id, reason: 'cancelled' }).catch(error => transport.fail(error));
@@ -80,18 +107,18 @@ function forward(message) {
 const transport = new Transport({ write: output.write.bind(output), output }, {
   local: true, onMessage: forward,
   onLost(error, eof) {
-    complete({ code: error.code || -32002, message: String(error.message).slice(0, 4096) }, 3);
+    complete({ code: error.code || -32002, message: String(error.message).slice(0, 4096) }, SYNC_UNKNOWN);
     parentPort.postMessage({ kind: 'lost', code: error.code || -32002, message: String(error.message).slice(0, 4096), eof });
     input.destroy(); output.destroy(); parentPort.close();
   },
 });
 transport.response = message => {
-  if (sync && message.id === sync.id) { complete(message, 2); return; }
-  // Keep bounded async tombstones independently of the blocked factory thread.
-  // A reply to an unknown or already-settled sync ID terminalizes immediately;
-  // it cannot leave the factory waiting for a reply that may never arrive.
-  if (!issuedAsync.has(message.id)) throw rpcError(-32600, 'unknown host response id');
-  forward(message);
+  if (sync && message.id === sync.id) { complete(message, SYNC_REPLY); return; }
+  // A late reply for a settled or host-cancelled synchronous request is
+  // dropped here; it is not a protocol error. Unknown ids still terminalize.
+  if (settledSync.has(message.id)) return;
+  if (issuedAsync.has(message.id)) { forward(message); return; }
+  throw rpcError(-32600, 'unknown host response id');
 };
 parentPort.on('message', packet => {
   try {
@@ -103,7 +130,7 @@ parentPort.on('message', packet => {
     if (packet.kind === 'sync') {
       if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
       sync = { id: packet.message.id, parent: packet.parent };
-      sync.timer = setTimeout(cancelSync, packet.timeout);
+      sync.timer = setTimeout(deadlineSync, packet.timeout);
       sync.watchdog = setTimeout(() => transport.fail(rpcError(-32002, 'session append outcome unknown: reply deadline')), packet.timeout + 29000);
       transport.send(packet.message).catch(error => transport.fail(error));
       if (shutdownRequested || cancelledParents.has(sync.parent)) cancelSync();
