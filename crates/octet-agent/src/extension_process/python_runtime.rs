@@ -471,10 +471,13 @@ fn open_private_runtime_member(path: &Path) -> io::Result<std::fs::File> {
         let metadata = file.metadata()?;
         // SAFETY: geteuid has no preconditions and accepts no pointers.
         let owner = unsafe { libc::geteuid() };
-        if metadata.uid() != owner || metadata.nlink() != 1
+        if metadata.uid() != owner
+            || metadata.nlink() != 1
             || !matches!(metadata.mode() & 0o7777, 0o600 | 0o700)
         {
-            return Err(io::Error::other("runtime member is not an owner-only 0600/0700 regular file"));
+            return Err(io::Error::other(
+                "runtime member is not an owner-only 0600/0700 regular file",
+            ));
         }
         Ok(file)
     }
@@ -652,9 +655,12 @@ fn inventory(
                 safe_relative(&relative)?;
                 let file = open_private_runtime_member(&path)?;
                 let mut bytes = Vec::new();
-                file.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+                file.take(MAX_FILE_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
                 if bytes.len() > MAX_FILE_BYTES {
-                    return Err(io::Error::other("private Python runtime member exceeds its size limit"));
+                    return Err(io::Error::other(
+                        "private Python runtime member exceeds its size limit",
+                    ));
                 }
                 expanded = expanded
                     .checked_add(bytes.len() as u64)
