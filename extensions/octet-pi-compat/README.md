@@ -218,8 +218,10 @@ deliberate differences from Pi's unbounded, blocking chain.
 - `setStatus` is local footer-provider metadata, not an assertion that every
   frontend displays ambient chrome. The compatibility palette is local, not a
   claim to reproduce octet's host theme; unknown roles are explicit errors.
-- Selected TUI components/utilities, including `CustomEditor` based only on the
-  Pi TUI `Editor`. `new TUI`, `ProcessTerminal`, terminal image escapes and
+- Selected Pi TUI components/utilities, with `Editor` and `CustomEditor` sharing
+  a synchronous native-backed facade rather than Pi's editing class. Rust owns
+  text/caret/undo/history/paste and autocomplete state; JS retains presentation,
+  hooks and provider callback handles. `new TUI`, `ProcessTerminal`, terminal image escapes and
   provider/auth storage have no SDK fallback and remain explicitly unsupported.
   `createAgentSession` and coding-tool descriptors now delegate through the
   installed host-owned child facade and negotiated agent-session features only.
@@ -515,8 +517,13 @@ host's next inbound request after a write callback, so this ordering is
 deliberate, not timing. `completion-registration-order.test.mjs` holds the reply
 write to make it deterministic.
 
-Native text/cursor/revision/focus and provider-owner fences must reject stale
-results before display and acceptance.
+Native text/cursor/revision/focus and provider-owner fences reject stale
+results before display and acceptance. A custom native facade additionally binds
+its primary component handle: queries capture the mount/handle/native revision
+and use the actual native caret, including UTF-8/UTF-16 conversion. One native
+registry menu owns Up/Down and Tab before component hooks/consumers, preserves
+text after the caret, and commits into that same native model. Clear or mount
+retirement invalidates outstanding callbacks; a late result cannot revive it.
 Requests may finish out of order; the adapter preserves each snapshot/request ID,
 not an invented cross-session revision counter. Cancellation terminates the wire
 request promptly; a late callback result cannot publish a second reply. Arbitrary
@@ -622,7 +629,10 @@ active Tern. These cases do not establish complete renderer/UI or corpus parity.
 ## Verification
 
 ```sh
+export CARGO_TARGET_DIR=/absolute/existing-target
+CARGO_PROFILE_DEV_DEBUG=0 cargo build -p octet-coding-agent --example native-editor-test-host --locked -j3
 npm test --prefix extensions/octet-pi-compat
+npm run test:editor-native --prefix extensions/octet-pi-compat
 # Optional read-only managed Pi 1.0.2 helper/color integration (isolated HOME):
 PI_THEME_AGENT_DIR=/absolute/pi-agent node --test extensions/octet-pi-compat/test/runtime-theme.test.mjs
 # Optional guarded execution of the unchanged reviewed hashline factory:
@@ -632,8 +642,15 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The latest bounded adapter run covered 566 tests in two batches with a disposable
-HOME: **539 passed, 27 skipped, zero failed**. The separate original-hashline/override run passed all
+The complete adapter run is **836 tests: 809 passed, 27 optional skips, zero
+failures**. Editor fixtures require the compiled native test peer above (or
+`OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing peers fail explicitly,
+never substitute a JS model. The immutable 193 upstream cases plus the separate
+ownership guard pass **194/194 with zero skips**. See the
+[corpus provenance and fixture boundary](test/pi-v1.0.2/README.md): native-service
+coverage is distinct from actual App/adapter owner/admission/registry tests and
+real-terminal qualification. The earlier two-batch adapter run covered 566 tests
+with a disposable HOME: **539 passed, 27 skipped, zero failed**. The separate original-hashline/override run passed all
 8 tests: installed-route selection, native-style reviewed grants, session-start
 active-tool ACKs, real hashed text read, anchored replacement and PNG execution
 with verified artifact bytes/digest. Its isolated file/network/child-process
