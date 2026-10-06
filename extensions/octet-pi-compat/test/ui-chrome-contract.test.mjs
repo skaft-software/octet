@@ -23,6 +23,7 @@ test('chrome getter consumes authoritative receipt rather than cached JS state',
   let nativeExpanded = false;
   const calls = [];
   const runtime = {
+    features: new Set(['remote_ui']),
     require: feature => assert.equal(feature, 'remote_ui'), assertOwner: current => assert.equal(current, store),
     transport: {requestSync(method, params, options) {
       assert.equal(method, 'ui/chrome'); assert.equal(params.resource_owner, owner);

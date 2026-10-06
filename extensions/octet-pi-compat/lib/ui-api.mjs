@@ -1,4 +1,4 @@
-import { bounded, fields, invalid } from './errors.mjs';
+import { bounded, fields, invalid, unsupported } from './errors.mjs';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 import { Text } from '../node_modules/@earendil-works/pi-tui/dist/components/text.js';
 import { Input } from '../node_modules/@earendil-works/pi-tui/dist/components/input.js';
@@ -50,9 +50,27 @@ export function chromeAPI(runtime, store) {
   // The same synchronous transport used for durable append provides a real
   // shell receipt. Getters never invent state, and set/get in one callback sees
   // the committed value even when a native Ctrl+O happened between callbacks.
+  //
+  // A host without an interactive frontend is Pi's print/headless mode: its UI
+  // context still exists and presentation setters do nothing, because there is
+  // no chrome to update. Refusing them made a factory that unconditionally
+  // calls `ctx.ui.setWidget`/`setTitle` at session_start look like it needed an
+  // unsupported API (pi-plan-mode). Theme *catalog* reads and selection stay
+  // explicit refusals: they would have to invent a native catalog.
+  const headless = () => !runtime.features.has('remote_ui');
+  const headlessReceipt = operation => {
+    const state = store.state;
+    if (operation.kind === 'tools_expanded') state.host.tools_expanded = operation.expanded;
+    if (['theme_get', 'theme_list', 'theme_set'].includes(operation.kind)) {
+      unsupported(`ctx.ui.${operation.kind === 'theme_set' ? 'setTheme' : 'theme'}`, 'the native theme catalog requires an interactive frontend');
+    }
+    return { tools_expanded: state.host.tools_expanded === true };
+  };
   const call = operation => {
-    runtime.require('remote_ui'); runtime.assertOwner(store);
+    runtime.assertOwner(store);
     store.controller.signal.throwIfAborted();
+    if (headless()) return headlessReceipt(operation);
+    runtime.require('remote_ui');
     const result = runtime.transport.requestSync('ui/chrome', {
       parent_request_id: store.id, resource_owner: store.state.owner, chrome: operation,
     }, { parent: store.live ? store.id : undefined, signal: store.controller.signal });
@@ -214,7 +232,9 @@ export function editorAPI(runtime, store, setSlot) {
   return {
     getEditorComponent() { runtime.assertOwner(store); return editorFactories.get(store.state)?.factory; },
     setEditorComponent(factory) {
-      runtime.require('remote_ui'); runtime.assertOwner(store);
+      runtime.assertOwner(store);
+      // No interactive editor exists headless; mounting is a no-op there.
+      if (!runtime.features.has('remote_ui')) return;
       if (factory !== undefined && typeof factory !== 'function') invalid('editor factory');
       const previous = editorFactories.get(store.state), next = { factory };
       editorFactories.set(store.state, next);
