@@ -222,11 +222,7 @@ struct CopyRows {
 }
 
 impl CopyRows {
-    fn build(
-        painted: &[String],
-        copy_text: &str,
-        geometry: SurfaceGeometry,
-    ) -> Self {
+    fn build(painted: &[String], copy_text: &str, geometry: SurfaceGeometry) -> Self {
         let first = geometry
             .transition_rows
             .saturating_add(geometry.leading_rows);
@@ -383,9 +379,8 @@ fn strip_row_decoration(trimmed: &str) -> Option<(u16, &str)> {
         }
         break;
     }
-    let core_end = rest.trim_end_matches(|character: char| {
-        character.is_whitespace() || is_frame_glyph(character)
-    });
+    let core_end = rest
+        .trim_end_matches(|character: char| character.is_whitespace() || is_frame_glyph(character));
     let width = visible_width(&trimmed[..end]) as u16;
     Some((width, &rest[..core_end.len()]))
 }
