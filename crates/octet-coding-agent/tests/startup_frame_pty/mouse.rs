@@ -83,17 +83,22 @@ fn default_mouse_owner_decision_preserves_native_scrollback_and_selection() {
     // Read/copy old text from the terminal's own saved rows, without sending
     // pointer input to octet. This models native scrollback/selection, not an
     // application-owned viewport or a physical client's clipboard permissions.
-    parser.set_scrollback(usize::MAX);
-    assert!(parser.screen().scrollback() > 350);
-    let row = (0..24)
-        .find(|row| row_text(&parser, *row, 100).contains("MOUSE-ROW-001"))
+    // vt100 0.15 cannot read offsets taller than its viewport. Enlarge only a
+    // disposable snapshot, leaving the live parser's cursor/wrap state intact.
+    let mut native = vt100::Parser::new(24, 100, 1024);
+    native.process(&octet.pty.output);
+    native.set_size(1024, 100);
+    native.set_scrollback(usize::MAX);
+    let saved_rows = native.screen().scrollback();
+    assert!(saved_rows > 350);
+    let row = (0..saved_rows as u16)
+        .find(|row| row_text(&native, *row, 100).contains("MOUSE-ROW-001"))
         .expect("complete resumed history remains in native scrollback");
-    let selected = row_text(&parser, row, 100);
+    let selected = row_text(&native, row, 100);
     assert_eq!(
         selected.trim(),
         "1. MOUSE-ROW-001 clipboard line with unique words"
     );
-    parser.set_scrollback(0);
     assert!(parser.screen().contents().contains("MOUSE-END"));
     octet.pty.write_input(b"native-draft");
     await_screen(

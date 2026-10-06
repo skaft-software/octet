@@ -29,15 +29,14 @@ pub fn resolve_workspace(explicit: Option<&Path>, cwd: &Path) -> std::io::Result
     cwd.canonicalize()
 }
 
-/// Mouse ownership policy. `App` (the default) runs the fullscreen
-/// alternate-screen viewport and captures mouse gestures for it. `Auto`,
-/// `Terminal`, and `Off` stay inline and preserve terminal selection and
-/// uncaptured wheel history; keyboard navigation can claim the viewport
-/// independently in every mode.
+/// Mouse ownership policy. `Auto` (the default), `Terminal`, and `Off` stay
+/// inline and preserve terminal selection and uncaptured wheel history. `App`
+/// opts into the bounded semantic viewport and captures mouse gestures for it;
+/// keyboard navigation can claim the viewport independently in every mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseMode {
-    Auto,
     #[default]
+    Auto,
     App,
     Terminal,
     Off,

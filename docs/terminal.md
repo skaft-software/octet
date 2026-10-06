@@ -133,16 +133,18 @@ another input. See [all keys](commands.md#keys).
 
 ```sh
 octet --color auto
-octet --mouse auto
+octet --mouse app   # opt in to in-app scrolling and drag selection
 ```
 
-By default octet runs fullscreen (`mouse = "app"`): it starts in its own
-viewport, captures the wheel and drag selection, and lets a resumed session load
-newest-first. `--mouse auto` (or `terminal`, or `off`) leaves mouse reporting
-off instead, so your terminal keeps drag selection and wheel history. Inline,
-the renderer follows the height of the content, not a fixed full-screen composer
-and footer; it loads the complete resumed branch and appends to native
-scrollback.
+By default octet stays inline (`mouse = "auto"`) on the primary screen and
+leaves mouse reporting off, so your terminal keeps drag selection and
+wheel/touchpad history. `--mouse terminal` and `--mouse off` also preserve native
+gestures. Inline, the renderer follows the height of the content, not a fixed
+full-screen composer and footer; it loads the complete resumed branch and appends
+to native scrollback. Explicit `--mouse app` (or `mouse = "app"` in configuration)
+opts into the bounded semantic viewport, captures the wheel and drag selection,
+and lets a resumed session load newest-first. Explicit CLI choices take precedence
+over configured mouse policy.
 
 With capture on (`--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
@@ -171,7 +173,7 @@ Markdown participate in the same algorithm; visible changes do not force history
 replay. Dimension changes and canonical changes above the old viewport clear and
 replay the complete native transcript, so saved and live output remain complete.
 This can reset your terminal's reading position, and replay work grows with
-history. PageUp and the default fullscreen mode instead use a separate bounded semantic viewport.
+history. PageUp and explicit `--mouse app` instead use a separate bounded semantic viewport.
 Resize bursts settle after 75 ms of quiet (150 ms maximum); width changes reflow
 the transcript, while height-only changes reuse its wrapping. Away-and-back
 resizes also rebuild native history. The hardware composer cursor stays visible

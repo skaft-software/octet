@@ -12,8 +12,8 @@ vocabulary that uses that hierarchy without adding a second TUI.
 
 ## Terminal guarantees
 
-- The interactive frontend renders on the primary screen. `auto`, `terminal`,
-  and `off` use the complete logical-frame renderer: the first frame writes
+- The interactive frontend renders on the primary screen. `auto` (the default),
+  `terminal`, and `off` use the complete logical-frame renderer: the first frame writes
   every materialized row and pure appends flow naturally into terminal scrollback.
   Dimension changes and canonical mutations above the old viewport clear and
   replay the complete canonical frame, keeping saved and live rows complete.
