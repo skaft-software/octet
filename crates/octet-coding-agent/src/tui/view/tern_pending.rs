@@ -6,11 +6,13 @@ use super::terminal_text::sanitize_for_terminal;
 use super::{tern_controls, ShellState};
 
 pub(super) fn node(shell: &ShellState) -> Option<Node> {
-    let count = shell.steering_queue.len() + shell.follow_up_queue.len();
+    let count = shell.steering_queue.len() + shell.follow_up_queue.len() + shell.pending_controls.len();
     if count == 0 {
         return None;
     }
-    let label = if shell.follow_up_queue.is_empty() {
+    let label = if !shell.pending_controls.is_empty() {
+        "Controls"
+    } else if shell.follow_up_queue.is_empty() {
         "Steering"
     } else if shell.steering_queue.is_empty() {
         "Follow-up"
@@ -60,11 +62,13 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
             ));
         }
     }
-    let display = shell
-        .steering_queue
-        .first()
-        .map(|entry| entry.display.as_str())
-        .unwrap_or_else(|| shell.follow_up_queue[0].composed.transcript_text.as_str());
+    let controls = shell.pending_controls.join("; ");
+    let display = if !controls.is_empty() {
+        controls.as_str()
+    } else {
+        shell.steering_queue.first().map(|entry| entry.display.as_str())
+            .unwrap_or_else(|| shell.follow_up_queue[0].composed.transcript_text.as_str())
+    };
     let display = sanitize_for_terminal(display).replace('\n', " ↵ ");
     let mut preview = display.chars().take(240).collect::<String>();
     if preview.len() < display.len() {
