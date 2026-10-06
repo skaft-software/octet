@@ -198,8 +198,8 @@ struct CopyRow {
     text: String,
     /// Byte offset in the copy text where `text` starts.
     offset: usize,
-    /// Decorative cells painted before `text` (rails, markers, list indents).
-    decoration: usize,
+    /// Painted cell where `text` starts (rails, markers, list indents).
+    painted_cells: u16,
 }
 
 /// The painted content rows of one block, each aligned with the semantic copy
@@ -216,11 +216,17 @@ struct CopyRow {
 /// instead of stealing the following line.
 #[derive(Default)]
 struct CopyRows {
+    /// Painted cell where the block's content inset starts.
+    content_left: u16,
     rows: Vec<CopyRow>,
 }
 
 impl CopyRows {
-    fn build(painted: &[String], copy_text: &str, geometry: SurfaceGeometry) -> Self {
+    fn build(
+        painted: &[String],
+        copy_text: &str,
+        geometry: SurfaceGeometry,
+    ) -> Self {
         let first = geometry
             .transition_rows
             .saturating_add(geometry.leading_rows);
@@ -238,59 +244,61 @@ impl CopyRows {
             let mut row = CopyRow {
                 text: String::new(),
                 offset: cursor,
-                decoration: 0,
+                painted_cells: geometry.content_left,
             };
             for candidate in copy_candidates(&plain) {
                 let Some(relative) = copy_text[cursor..].find(candidate.text) else {
                     continue;
                 };
                 let matched = cursor + relative;
-                if let Some(marker_cells) = candidate.after_marker {
+                row = if candidate.line {
                     // The copy text spells its own marker for this row (`-`,
-                    // `1.`, `#`), so the row names that complete line. When the
-                    // copy line starts with the matched text instead, the
-                    // painted marker is decoration in front of it.
+                    // `1.`, `#`), so the row names that complete copy line. The
+                    // copy line starts where its own marker starts, one painted
+                    // cell earlier per marker cell.
                     let line_start = copy_text[..matched]
                         .rfind('\n')
                         .map_or(0, |newline| newline + 1);
                     let line_end = copy_text[matched..]
                         .find('\n')
                         .map_or(copy_text.len(), |newline| matched + newline);
-                    let decoration = if matched == line_start {
-                        candidate.decoration
-                    } else {
-                        candidate.decoration.saturating_sub(marker_cells)
-                    };
-                    row = CopyRow {
+                    let prefix_cells = visible_width(&copy_text[line_start..matched]) as u16;
+                    let painted_cells = candidate.painted_cells.saturating_sub(prefix_cells);
+                    cursor = line_end;
+                    CopyRow {
                         text: copy_text[line_start..line_end].to_owned(),
                         offset: line_start,
-                        decoration,
-                    };
-                    cursor = line_end;
+                        painted_cells,
+                    }
                 } else {
-                    row = CopyRow {
+                    cursor = matched + candidate.text.len();
+                    CopyRow {
                         text: candidate.text.to_owned(),
                         offset: matched,
-                        decoration: candidate.decoration,
-                    };
-                    cursor = matched + candidate.text.len();
-                }
+                        painted_cells: candidate.painted_cells,
+                    }
+                };
                 break;
             }
             rows.push(row);
         }
-        Self { rows }
+        Self {
+            content_left: geometry.content_left,
+            rows,
+        }
     }
 
     fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
 
-    /// Copy offset for one cell of a painted content row.
+    /// Copy offset for one cell of a painted content row. `col` is relative to
+    /// the block's content inset, the same cell the renderer used.
     fn offset_for(&self, content_row: usize, col: u16) -> Option<usize> {
         let row = self.rows.get(content_row)?;
-        let col = usize::from(col).saturating_sub(row.decoration);
-        Some(row.offset + visual_col_to_offset(&row.text, col))
+        let absolute = usize::from(col).saturating_add(usize::from(self.content_left));
+        let within = absolute.saturating_sub(usize::from(row.painted_cells));
+        Some(row.offset + visual_col_to_offset(&row.text, within))
     }
 
     /// Painted content row holding one copy offset.
@@ -308,45 +316,84 @@ impl CopyRows {
 
 /// One candidate source segment for a painted row.
 struct CopyCandidate<'a> {
-    /// Byte length of the painted marker this candidate stripped, if any.
-    after_marker: Option<usize>,
-    /// Decorative cells painted before `text`.
-    decoration: usize,
+    /// Whether the candidate is the row's text after its painted decoration,
+    /// which the copy text may spell with a marker of its own.
+    line: bool,
+    /// Painted cell where `text` starts.
+    painted_cells: u16,
     /// Source segment to look for in the copy text.
     text: &'a str,
 }
 
-/// Candidate source segments for one painted row, longest first.
+/// Candidate source segments for one painted row, most specific first.
 ///
-/// A rendered marker (`•`, `#`, a code frame) may stand for the copy text's own
-/// marker, so the row's text after that marker is a second candidate.
+/// The row's own text is the primary candidate: when it appears verbatim in the
+/// copy text the row maps exactly as before. A row whose painted decoration is
+/// not part of the copy text (`•`, a card rail, a code frame) also offers the
+/// text after that decoration, which then names the complete copy line.
 fn copy_candidates(plain: &str) -> Vec<CopyCandidate<'_>> {
-    let indent = plain.len() - plain.trim_start().len();
-    let trimmed = plain.trim_start();
+    let line = plain.trim_end();
+    let indent = line.len() - line.trim_start().len();
+    let trimmed = line.trim_start();
     if trimmed.is_empty() {
         return Vec::new();
     }
-    let indent_cells = visible_width(&plain[..indent]);
+    let indent_cells = visible_width(&line[..indent]) as u16;
     let mut candidates = vec![CopyCandidate {
-        after_marker: None,
-        decoration: indent_cells,
+        line: false,
+        painted_cells: indent_cells,
         text: trimmed,
     }];
-    if let Some(marker) = rendered_marker(trimmed) {
-        let content = trimmed[marker..].trim_start();
-        if !content.is_empty() {
-            let marker_cells = visible_width(&trimmed[..marker]);
+    if let Some((decoration_cells, core)) = strip_row_decoration(trimmed) {
+        if !core.is_empty() && core != trimmed {
             candidates.push(CopyCandidate {
-                after_marker: Some(marker_cells),
-                decoration: indent_cells + marker_cells,
-                text: content,
+                line: true,
+                painted_cells: indent_cells + decoration_cells,
+                text: core,
             });
         }
     }
     candidates
 }
 
-/// Byte length of a rendered list, heading or frame marker, if any.
+/// Strip one row's painted decoration and return its cell width with the text.
+///
+/// Decoration is whitespace, box/rail glyphs, a prompt chevron, and at most one
+/// list, heading, task or quote marker - exactly the cells a surface paints
+/// before the semantic text, and a trailing frame or padding run.
+fn strip_row_decoration(trimmed: &str) -> Option<(u16, &str)> {
+    let mut end = 0;
+    let mut marker_seen = false;
+    let mut rest = trimmed;
+    while let Some(character) = rest.chars().next() {
+        let width = character.len_utf8();
+        if character.is_whitespace() || is_frame_glyph(character) {
+            rest = &rest[width..];
+            end += width;
+            continue;
+        }
+        if marker_seen {
+            break;
+        }
+        marker_seen = true;
+        if let Some(marker) = rendered_marker(rest) {
+            rest = &rest[marker..];
+            end += marker;
+            continue;
+        }
+        break;
+    }
+    let core_end = rest.trim_end_matches(|character: char| {
+        character.is_whitespace() || is_frame_glyph(character)
+    });
+    let width = visible_width(&trimmed[..end]) as u16;
+    Some((width, &rest[..core_end.len()]))
+}
+
+/// Byte length of one list, heading, task or quote marker, if any.
+///
+/// The marker is only decoration when the row continues with whitespace, so a
+/// prose row that happens to start with a dash keeps its own text.
 fn rendered_marker(trimmed: &str) -> Option<usize> {
     let digits = trimmed
         .find(|character: char| !character.is_ascii_digit())
@@ -358,11 +405,23 @@ fn rendered_marker(trimmed: &str) -> Option<usize> {
         .strip_prefix("[ ]")
         .or_else(|| trimmed.strip_prefix("[x]"))
     {
-        return Some(trimmed.len() - rest.len());
+        end = trimmed.len() - rest.len();
     } else if let Some(character) = trimmed.chars().next() {
         if matches!(
             character,
-            '•' | '●' | '◦' | '▪' | '‣' | '-' | '*' | '+' | '>' | '#' | '|' | '│' | '┃'
+            '•' | '●'
+                | '◦'
+                | '▪'
+                | '‣'
+                | '❯'
+                | '›'
+                | '»'
+                | '→'
+                | '-'
+                | '*'
+                | '+'
+                | '>'
+                | '#'
         ) {
             end = character.len_utf8();
         }
@@ -370,6 +429,35 @@ fn rendered_marker(trimmed: &str) -> Option<usize> {
     (end > 0 && trimmed[end..].starts_with(' ')).then_some(end)
 }
 
+fn is_frame_glyph(character: char) -> bool {
+    matches!(
+        character,
+        '│' | '|'
+            | '┃'
+            | '╭'
+            | '╮'
+            | '╰'
+            | '╯'
+            | '┌'
+            | '┐'
+            | '└'
+            | '┘'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '─'
+            | '━'
+            | '═'
+            | '❯'
+            | '›'
+            | '»'
+            | '→'
+    )
+}
+
+/// The painted content rows of one block, aligned with its copy text.
 /// The painted content rows of one block, aligned with its copy text.
 fn painted_copy_rows(
     state: &ShellState,
