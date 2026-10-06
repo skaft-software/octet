@@ -385,3 +385,26 @@ test('host-resolved editing overrides reach the same slot; no adapter submit pat
   assert.equal(peer.seen.some(f => f.method === 'composer/submit'), false);
   await peer.close();
 });
+
+test('Ctrl+G is delivered and checkpointed in the composer before native clear and slash input', async t => {
+  const make = `(tui,theme,kb) => {
+    const c = new CustomEditor(tui,theme,kb), input = c.handleInput.bind(c);
+    c.handleInput = data => { if (data === '\\x07') c.setText(c.getText() + 'G'); else input(data); };
+    return c;
+  }`;
+  const peer = launch(t, [await fixture(t, '', make)], {composer: 'draft', hold: ['composer/set']});
+  await peer.init(); await peer.start();
+  const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
+  peer.editorKey(id, 'g', 'press', ['control']);
+  const controlG = await peer.wait(f => f.method === 'composer/set');
+  checkpoint(controlG, id, 1, 1); assert.equal(controlG.params.text, 'draftG'); ack(peer, controlG);
+  peer.notify('ui/editor-text', {surface_id: id, text: ''});
+  const clear = await peer.wait(f => f.method === 'composer/set');
+  checkpoint(clear, id, 1, 2); assert.equal(clear.params.text, ''); ack(peer, clear);
+  peer.editorKey(id, '/');
+  const slash = await peer.wait(f => f.method === 'composer/set');
+  checkpoint(slash, id, 2, 3); assert.equal(slash.params.text, '/'); ack(peer, slash);
+  await peer.wait(frame('/'));
+  assert.equal(peer.seen.some(f => f.method === 'ui/close'), false);
+  await peer.close();
+});
