@@ -1,0 +1,15 @@
+{
+  "version": "1.0.2",
+  "upstreamDirectory": "packages/tui/test",
+  "license": "../../LICENSE.pi",
+  "suites": {
+    "editor": {
+      "sha256": "95613151af4d529535fa084b3bfc93bdf9d9642ac51a389dfa361ad0eb096b1f",
+      "cases": 192
+    },
+    "editor-history-keybindings": {
+      "sha256": "a055311e76a141062038a1a835fae1271108d29034fe0d0eec7521c6c79cb948",
+      "cases": 1
+    }
+  }
+}
