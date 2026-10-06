@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn measured_context_is_branch_route_and_message_bound_not_an_estimate() {
         let directory = tempfile::tempdir().unwrap();
-        let mut session = Session::create(&directory.path().join("session.jsonl")).unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
         let endpoint = octet_ai::EndpointId("fixture".into());
         let model = octet_ai::ModelId("fixture-model".into());
         let observed = |session: &Session| observed_context_tokens(session, &endpoint, &model);
@@ -220,7 +220,7 @@ mod tests {
                 AssistantMessage {
                     content: vec![],
                     model: model.spec.id.clone(),
-                    protocol: model.spec.protocol.clone(),
+                    protocol: model.spec.protocol,
                 },
             )))
             .unwrap();
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn absent_zero_counters_remain_unknown_and_bucket_subsets_are_not_double_counted() {
         let directory = tempfile::tempdir().unwrap();
-        let mut session = Session::create(&directory.path().join("session.jsonl")).unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
         let endpoint = octet_ai::EndpointId("fixture".into());
         let model = octet_ai::ModelId("fixture-model".into());
         for (usage, expected) in [

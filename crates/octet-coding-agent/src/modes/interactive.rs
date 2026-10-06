@@ -2217,11 +2217,16 @@ pub struct ActiveRunInspection {
     ///
     /// A narrowed picker waits for idle ownership of the app, then opens from
     /// the current catalog while deferred fleet discovery runs independently.
+    #[cfg(test)]
     catalog_is_narrowed: bool,
 }
 
 impl ActiveRunInspection {
     /// Whether this run's catalog is missing providers the launch deferred.
+    ///
+    /// Test-only observation of the capture above; the production picker opens
+    /// from the current catalog and defers fleet discovery on its own.
+    #[cfg(test)]
     fn is_narrowed(&self) -> bool {
         self.catalog_is_narrowed
     }
@@ -2238,6 +2243,7 @@ impl ActiveRunInspection {
             reasoning: app.reasoning.clone(),
             sandbox: app.config.sandbox.clone(),
             effect_policy: app.config.effect_policy,
+            #[cfg(test)]
             catalog_is_narrowed: !app.readiness.is_fleet(),
             sessions: app.sessions.clone(),
             subagents_available: app.subagents_available(),
@@ -3745,15 +3751,13 @@ where
                         Ok(()) => {
                             last_control_reasoning = reasoning.clone();
                             let label = reasoning_label(&reasoning);
-                            if selected_reasoning == reasoning {
-                                if announce {
-                                    shell.set_identity(
-                                        &inspection.model.endpoint.id.0,
-                                        &inspection.model.spec.id.0,
-                                        &format!("{label} (queued)"),
-                                    );
-                                    shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
-                                }
+                            if selected_reasoning == reasoning && announce {
+                                shell.set_identity(
+                                    &inspection.model.endpoint.id.0,
+                                    &inspection.model.spec.id.0,
+                                    &format!("{label} (queued)"),
+                                );
+                                shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
                             }
                         }
                         Err(error) if selected_reasoning == reasoning => {
