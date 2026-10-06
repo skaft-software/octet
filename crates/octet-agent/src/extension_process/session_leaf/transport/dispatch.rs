@@ -38,6 +38,7 @@ pub(in crate::extension_process) fn stage(
 pub(in crate::extension_process) fn attach(
     connection: &ProcessConnection,
     id: u64,
+    method: &str,
     owner: Option<&ExtensionResourceOwner>,
     params: &mut Value,
 ) -> Result<Option<RequestViews>, ExtensionRuntimeError> {
@@ -58,12 +59,20 @@ pub(in crate::extension_process) fn attach(
     } else {
         "session_snapshot"
     };
-    // History is attached only where a dispatched callback actually reads it:
-    // hook payloads (and the invocation snapshots they already carry). Every
-    // other request (transcript render, UI, tools) must never pay a document
-    // read, and its retained facts stay available through the peer's own
-    // prepared view exactly like the legacy mirror.
-    let carries_payload = params.get("payload").is_some();
+    // History is attached only to dispatches whose callbacks can read session
+    // state: hooks (which already carry an invocation snapshot), commands,
+    // shortcuts, tool calls and argument preparation. Presentation-only
+    // requests (transcript render, UI frames, tool render, provider pipeline)
+    // must never pay a document read; their retained facts stay available
+    // through the peer's own prepared view exactly like the legacy mirror.
+    let wants_session = matches!(
+        method,
+        methods::HOOK_RUN
+            | methods::COMMAND_EXECUTE
+            | methods::SHORTCUT_EXECUTE
+            | methods::TOOL_CALL
+            | "tool/prepare_arguments"
+    );
     let view = if let Some(descriptor) = params.get(field) {
         let descriptor: Descriptor =
             serde_json::from_value(descriptor.clone()).map_err(|_| unavailable())?;
@@ -76,7 +85,7 @@ pub(in crate::extension_process) fn attach(
         }
         transfer.parent = id;
         Some(Arc::clone(&transfer.view))
-    } else if carries_payload {
+    } else if wants_session {
         match store.current.get(owner) {
             Some(Some(view)) => Some(Arc::clone(view)),
             Some(None) => return Err(unavailable()),
