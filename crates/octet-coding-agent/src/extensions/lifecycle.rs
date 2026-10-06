@@ -927,9 +927,7 @@ impl ExecutableExtensions {
         for task in self.renderer_tasks.drain(..) {
             task.abort();
         }
-        for task in self.autocomplete_tasks.drain(..) {
-            task.abort();
-        }
+        self.cancel_editor_autocomplete();
         for task in self.shortcut_tasks.drain(..) {
             task.abort();
         }

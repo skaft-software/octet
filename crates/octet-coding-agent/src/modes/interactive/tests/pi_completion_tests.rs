@@ -81,6 +81,11 @@ async fn native_pi_argument_completions_appear_on_typing_and_select_without_exec
         shell.translate_input(Some(down), false),
         InputAction::Ignore
     ));
+    assert_eq!(
+        shell.pending(),
+        "/cmd ",
+        "menu navigation must not edit the draft"
+    );
     let tab = Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert!(matches!(
         shell.translate_input(Some(tab), false),
