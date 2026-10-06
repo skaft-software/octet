@@ -121,7 +121,12 @@ receives secret-free host model/session/context snapshots instead of fabricated
 usage or OAuth data. Unavailable capabilities fail explicitly. Custom editor
 state uses the host composer handoff rather than a separate agent input loop.
 `Ctrl+G` rescues a focused component; `Ctrl+D` remains host-owned shutdown.
-Settings-only standard Pi editors (no inherited editor-method overrides) keep
+`onTerminalInput` listeners run before native handling over the raw terminal
+spelling, in registration order, and may consume or replace one event. The whole
+chain is bounded to 50 ms per event: a listener that stops answering is latched
+off and its input is delivered unchanged, because Pi would block typing
+indefinitely. Those two host keys and input past the 256-byte wire bound stay
+native. Settings-only standard Pi editors (no inherited editor-method overrides) keep
 octet's native editor and slash menu. Their prompt history seeds the native
 composer through bounded, owner-fenced `composer/history`; native prompts remain
 newer and the current draft is unchanged. Custom behavior still mounts remotely.

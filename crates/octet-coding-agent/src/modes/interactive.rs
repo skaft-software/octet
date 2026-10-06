@@ -10048,7 +10048,10 @@ where
     .await
 }
 
-async fn apply_detected_terminal_background_with_timeout<S, E: Into<crate::tui::terminal::InputPacket>>(
+async fn apply_detected_terminal_background_with_timeout<
+    S,
+    E: Into<crate::tui::terminal::InputPacket>,
+>(
     shell: &mut InteractiveShell,
     input: &mut EventStream<S>,
     config: &crate::config::Config,
