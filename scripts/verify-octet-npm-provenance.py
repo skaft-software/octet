@@ -21,6 +21,7 @@ PACKAGE_ARTIFACTS = {
     "@skaft/octet-darwin-arm64": "octet-darwin-arm64-{version}.tgz",
     "@skaft/octet-darwin-x64": "octet-darwin-x64-{version}.tgz",
     "@skaft/octet-linux-x64-gnu": "octet-linux-x64-gnu-{version}.tgz",
+    "@skaft/octet-win32-x64": "octet-win32-x64-{version}.tgz",
 }
 
 
@@ -227,7 +228,7 @@ def verify_manifest(
         entry.get("name") for entry in packages if isinstance(entry, Mapping)
     }
     if package_names != set(PACKAGE_ARTIFACTS):
-        fail("npm manifest package list is not the expected four-package release")
+        fail("npm manifest package list is not the expected five-package release")
     expected_artifact_template = PACKAGE_ARTIFACTS.get(package)
     if expected_artifact_template is None:
         fail(f"unsupported npm release package: {package}")

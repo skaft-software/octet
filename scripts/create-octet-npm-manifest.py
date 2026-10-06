@@ -36,6 +36,11 @@ PACKAGES = (
         "@skaft/octet-linux-x64-gnu",
         "x86_64-unknown-linux-gnu",
     ),
+    (
+        "octet-win32-x64-{version}.tgz",
+        "@skaft/octet-win32-x64",
+        "x86_64-pc-windows-msvc",
+    ),
 )
 
 
@@ -121,6 +126,7 @@ def read_release_metadata(
         fail("release metadata checksum manifest identity is malformed")
     expected_assets = {
         "install-octet.sh": ("installer", None),
+        "install-octet.ps1": ("installer", None),
         f"octet-{version}-aarch64-apple-darwin.tar.gz": (
             "binary",
             "aarch64-apple-darwin",
@@ -132,6 +138,10 @@ def read_release_metadata(
         f"octet-{version}-x86_64-unknown-linux-gnu.tar.gz": (
             "binary",
             "x86_64-unknown-linux-gnu",
+        ),
+        f"octet-{version}-x86_64-pc-windows-msvc.zip": (
+            "binary",
+            "x86_64-pc-windows-msvc",
         ),
     }
     assets = value.get("assets")
