@@ -1320,6 +1320,8 @@ pub(crate) struct ShellState {
     // Immutable queue roots make render publication O(1), including payloads.
     // A queue mutation copies only Arc handles, never other accepted messages.
     steering_queue: Arc<Vec<Arc<QueuedSteering>>>,
+    /// Native safe-boundary controls; presentation only, never an input owner.
+    pending_controls: Arc<Vec<String>>,
     /// Enter-submitted follow-ups remain local and editable until run settlement.
     follow_up_queue: Arc<std::collections::VecDeque<Arc<QueuedFollowUp>>>,
     /// Shared admission order across steering and follow-ups, independent of text.
@@ -1762,6 +1764,7 @@ impl ShellState {
             history_prepended: Default::default(),
             block_revisions: Default::default(),
             steering_queue: Default::default(),
+            pending_controls: Default::default(),
             follow_up_queue: Default::default(),
             next_pending_sequence: Default::default(),
             follow_up_ready: Default::default(),
@@ -5028,6 +5031,23 @@ impl InteractiveShell {
     /// This is the exact queue `session/send_user_message` feeds.
     pub fn queued_follow_up_len(&self) -> usize {
         self.state.borrow().follow_up_queue.len()
+    }
+
+    /// Publish the bounded native control queue alongside pending input.
+    pub(crate) fn set_pending_controls(&mut self, controls: Vec<String>) -> bool {
+        let mut state = self.state.borrow_mut();
+        if *state.pending_controls != controls {
+            state.pending_controls = Arc::new(controls);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_pending_controls(&self) -> String {
+        let state = self.state.borrow();
+        input_overlays::render_pending_steering(&state, 200, 3).join("\n")
     }
 
     /// Only authoritative completion or an explicit Escape dispatch arms the

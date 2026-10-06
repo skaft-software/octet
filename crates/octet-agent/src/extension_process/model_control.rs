@@ -200,21 +200,6 @@ pub(super) fn dispatch_model_control(
             ),
         );
     };
-    // Until the request-boundary control is integrated, reject an active tool or
-    // hook promptly rather than park a synchronous request behind its own run.
-    let live_command = lock_std_mutex(&state.pending)
-        .get(&request.parent_request_id)
-        .is_some_and(|parent| parent.method == "command/execute");
-    if !live_command {
-        return refuse_admitted_request(
-            state,
-            &admitted,
-            (
-                ExtensionRequestFailure::UnsupportedFeature,
-                "active-turn model selection requires the request-boundary consumer".into(),
-            ),
-        );
-    }
     let response_state = {
         let children = lock_std_mutex(&state.child_requests);
         let Some(child) = children.get(&admitted.request_id) else {
