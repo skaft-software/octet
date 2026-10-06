@@ -3602,10 +3602,13 @@ pub struct InteractiveShell {
     /// Exact display discovery/configuration roots, retained by the input owner
     /// only; never cloned into renderer publications.
     runtime_config: Option<Config>,
-    /// The user's own keybinding file, captured once. Session-only overrides
-    /// contributed by a live resource binding are layered on top and can be
-    /// withdrawn without losing the user's file.
+    /// The user's own keybinding file, captured at construction and refreshed
+    /// by an explicit reload. Session-only overrides contributed by a live
+    /// resource binding are layered on top and can be withdrawn without losing
+    /// the user's file.
     base_user_bindings: std::collections::BTreeMap<String, Vec<String>>,
+    /// Live session-only overrides, re-layered over the user's file on reload.
+    session_keybindings: std::collections::BTreeMap<String, Vec<String>>,
     theme_preview: Option<(OctetTheme, Option<usize>)>,
     extension_themes: RefCell<Option<Vec<(String, OctetTheme)>>>,
     /// Best-effort Herdr pane lifecycle reporting. Inert outside Herdr.
@@ -3674,6 +3677,7 @@ impl InteractiveShell {
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             runtime_config: None,
             base_user_bindings,
+            session_keybindings: std::collections::BTreeMap::new(),
             theme_preview: None,
             extension_themes: RefCell::new(None),
             herdr: crate::herdr::PaneReporter::detect(),
@@ -3710,6 +3714,7 @@ impl InteractiveShell {
         bindings: crate::tui::keymap::keybindings::KeybindingsManager,
     ) {
         self.base_user_bindings = bindings.user_bindings().clone();
+        self.session_keybindings.clear();
         self.input_dispatch.bindings = bindings;
     }
 
@@ -3750,6 +3755,7 @@ impl InteractiveShell {
             // the test process inherits one.
             runtime_config: None,
             base_user_bindings,
+            session_keybindings: std::collections::BTreeMap::new(),
             theme_preview: None,
             extension_themes: RefCell::new(None),
             herdr: crate::herdr::PaneReporter::disabled(),
