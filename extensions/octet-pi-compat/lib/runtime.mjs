@@ -28,12 +28,13 @@ import { TranscriptRenderers } from './transcript-renderers.mjs';
 import { Timers, deadline } from './timers.mjs';
 import { activateInstalledPi, classifyLoadFailure, fallbackData, installedPiAliases, piRuntimeMode, scanPiImportGaps } from './installed-pi.mjs';
 import { emulatedPiAliases, typeboxAliases } from './pi-modules.mjs';
+import { discoverPiSetup } from './pi-setup.mjs';
 import { ExtensionIssues } from './issues.mjs';
 import { installHostKeybindings } from './keybindings.mjs';
 import { bindHostTheme, nativeTheme } from './theme.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select']);
-const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
+const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -81,9 +82,17 @@ export class Runtime {
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map(); this.failedFactories = new Set();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
     this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null;
+    this.entrypoints = [];
     this.uninstallChildren = installChildRuntime(this);
     bindHostTheme(this);
   }
+  /// Mirror mode is an explicit reviewed opt-in recorded in bridge.json; it is
+  /// never inferred from the presence of a Pi agent directory.
+  get mirrorPiSetup() { return this.config.mirror_pi_setup === true; }
+  diagnostic(message) {
+    console.error(`[pi-compat] ${String(message).slice(0, 4096)}`);
+  }
+  entrypoint(factory) { return this.entrypoints[factory] ?? this.config.extensions?.[factory] ?? `<factory ${factory}>`; }
   mouseIntent(enabled) {
     this.require('remote_ui'); const store = this.scope.getStore(); this.assertOwner(store);
     const surface = store.surface;
@@ -194,8 +203,18 @@ export class Runtime {
   reportObservationError(event) { this.issues.observation(event); }
   async load() {
     if (this.loaded) return;
-    const extensions = this.config.extensions;
+    let extensions = this.config.extensions;
+    if (this.mirrorPiSetup) {
+      // Reviewed mirror opt-in: the enabled Pi setup on this machine defines the
+      // factory list at startup. Discovery is read-only and never installs.
+      const setup = discoverPiSetup({ agentDir: this.config.pi_agent_dir, env: process.env, cwd: this.workspace });
+      for (const diagnostic of setup.diagnostics.slice(0, 32)) this.diagnostic(`mirror ${diagnostic}`);
+      extensions = setup.extensions;
+      this.diagnostic(`mirror loading ${extensions.length} enabled Pi ${extensions.length === 1 ? 'extension' : 'extensions'}`);
+    }
     if (!Array.isArray(extensions) || extensions.length > 64 || extensions.some(p => typeof p !== 'string')) invalid('bridge extensions must be an explicit list');
+    this.entrypoints = [...extensions];
+    const advertisedHooks = new Set(this.config.subscribed_hooks ?? []);
     // The module table Pi 1.0.2's own loader uses: Pi packages resolve to the
     // emulated shims, and both TypeBox spellings to the TypeBox Pi ships.
     const aliases = { ...typeboxAliases(), ...emulatedPiAliases() };
@@ -247,6 +266,19 @@ export class Runtime {
           if (typeof fn !== 'function') invalid(`default export must be a factory: ${entry}`);
           const s = { id: this.initializingId, controller: new AbortController(), factory, pending: new Set(), errors: [], live: false };
           await this.scope.run(s, () => fn(createAPI(this, factory)));
+          // Mirror mode advertises one fixed hook set recorded at configure time.
+          // A hook outside it would be silently inert at the host, so name it and
+          // skip the factory instead of claiming a partial mirror.
+          if (this.mirrorPiSetup) {
+            const registered = new Set();
+            for (const [event, list] of this.events) {
+              if (list.some(entry => entry.factory === factory) && hookEvents[event]) registered.add(hookEvents[event]);
+            }
+            const unsupportedHooks = [...registered].filter(hook => !advertisedHooks.has(hook)).sort();
+            if (unsupportedHooks.length) {
+              throw rpcError(-32601, `unsupported_feature mirror hook ${unsupportedHooks.join(', ')}: not advertised by this mirror configuration; re-run configure.mjs --mirror after reviewing the Pi setup`);
+            }
+          }
         } catch (error) { throw mode === 'installed' ? error : await classifyLoadFailure(error, entry, this.jiti); }
       } catch (error) {
         this.forgetFactory(factory, entry);
@@ -341,12 +373,18 @@ export class Runtime {
     if (metadata.events.includes('before_agent_start')) this.require('before_prompt_state_v1');
     if (metadata.events.includes('input')) this.require('input_transform_v1');
     if (metadata.tools.some(tool => tool.prompt_snippet !== undefined || tool.prompt_guidelines !== undefined)) this.require('tool_prompt_metadata_v1');
+    // A mirror configuration has no frozen registration catalog; its runtime
+    // catalogs are the reviewed opt-in's actual output and need the host's
+    // dynamic-negotiation features instead of a manifest equality check.
+    if (!this.config.registrations && metadata.tool_renderers.length) this.require('dynamic_tool_renderers');
     // A skipped extension leaves its declared registrations unused; nothing
     // beyond the reviewed declarations may appear.
     const skipped = this.loadFailures?.length > 0;
     if (skipped && !isDeepStrictEqual([...metadata.commands.map(command => command.name)].sort(), [...(declared.commands || [])].sort())) this.require('runtime_commands');
     for (const [kind, names] of [['tools', metadata.tools.map(t => t.name)], ['commands', metadata.commands.map(c => c.name)], ['hooks', metadata.hooks], ['tool_renderers', metadata.tool_renderers]]) {
       if (kind === 'tools' && this.features.has('dynamic_tools')) continue;
+      if (kind === 'commands' && this.features.has('runtime_commands')) continue;
+      if (kind === 'tool_renderers' && this.features.has('dynamic_tool_renderers')) continue;
       const allowed = [...(declared[kind] || [])];
       const matches = skipped ? names.every(name => allowed.includes(name)) : JSON.stringify(allowed.sort()) === JSON.stringify([...names].sort());
       if (!matches) invalid(`manifest ${kind} differs from reviewed registrations: ${names.join(', ')}`);

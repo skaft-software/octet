@@ -50,7 +50,11 @@ export function isolateStdout() {
   for (const method of ['end', 'destroy']) Object.defineProperty(output, method, {
     value: () => { throw rpcError(-32601, `unsupported_feature process.stdout.${method}: RPC transport is host-owned`); }, writable: false, configurable: false,
   });
-  const diagnosticStream = new Writable({ write(chunk, encoding, callback) { diagnostic(chunk, encoding, callback); } });
+  // Complete each console write as soon as it reaches stderr. A completion
+  // callback that waits for the underlying fd would leave later diagnostics
+  // buffered, and an immediate `process.exit` on a startup failure would drop
+  // them instead of reporting the reason.
+  const diagnosticStream = new Writable({ write(chunk, encoding, callback) { diagnostic(chunk, encoding); callback(); } });
   globalThis.console = new Console({ stdout: diagnosticStream, stderr: diagnosticStream });
   return { write, output, setIntentHandler(handler) { intentHandler = handler; }, setNotificationHandler(handler) { notificationHandler = handler; } };
 }

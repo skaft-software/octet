@@ -156,25 +156,35 @@ pub(super) async fn transform_tool_arguments(
 
 /// Settle a resolved tool call's hooks: result replacements in order, then
 /// observers on the final result. Returns the result the model sees.
+///
+/// Result replacement runs for every resolved call, including one denied at an
+/// admission boundary: Pi observes a blocked call as an error result and its
+/// `tool_result` hook may redact it. Execution observers run only when the tool
+/// actually reached execution (`executed`), because a call denied before
+/// dispatch has no execution to observe.
 pub(super) async fn settle_tool_result_hooks(
     hooks: &[Arc<dyn ToolCallHook>],
     name: &str,
     arguments: &serde_json::Value,
-    mut result: Result<ToolOutput, ToolError>,
+    result: Result<ToolOutput, ToolError>,
     context: &ToolContext<'_>,
+    executed: bool,
 ) -> Result<ToolOutput, ToolError> {
+    let mut result = result;
     for hook in hooks {
         result = hook
             .transform_tool_result(name, arguments, result, context)
             .await;
     }
-    let (output, is_error) = match &result {
-        Ok(output) => (output.text.as_str(), output.is_error()),
-        Err(error) => (error.message.as_str(), true),
-    };
-    for hook in hooks {
-        hook.after_tool_call(name, arguments, output, is_error, context)
-            .await;
+    if executed {
+        let (output, is_error) = match &result {
+            Ok(output) => (output.text.as_str(), output.is_error()),
+            Err(error) => (error.message.as_str(), true),
+        };
+        for hook in hooks {
+            hook.after_tool_call(name, arguments, output, is_error, context)
+                .await;
+        }
     }
     result
 }

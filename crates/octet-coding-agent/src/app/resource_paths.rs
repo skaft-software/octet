@@ -6,6 +6,7 @@ use crate::extensions::resource_paths::{
 use crate::tui::theme::{OctetTheme, TerminalBackground};
 use anyhow::Context;
 use octet_agent::extension_process::ExtensionResourceDiscoveryReason as Reason;
+use octet_ai::ModelId;
 use std::path::PathBuf;
 
 /// Explicit host-side admission, never inferred from Config::mode or a manifest.
@@ -22,6 +23,8 @@ pub(crate) struct ResourcePathConsumer {
     theme_paths: Vec<PathBuf>,
     // Saved appearance before any session-only resource preference is applied.
     theme: Option<String>,
+    // Saved route before any session-only contribution is applied.
+    model: Option<ModelId>,
     // Kept independently of revoked registry descriptors, which become empty.
     pub(super) catalog_suffix: String,
     baseline_skills: Arc<dyn octet_agent::SkillRegistry>,
@@ -53,7 +56,8 @@ impl ResourcePathConsumer {
             prompt_paths: config.prompt_paths.clone(),
             theme_paths: config.theme_paths.clone(),
             theme: config.theme.clone(),
-            catalog_suffix: crate::resources::format_skills_for_prompt(&skills.descriptors()),
+            model: config.model.clone(),
+            catalog_suffix: dynamic_suffix(&[], skills.as_ref()),
             baseline_skills: skills.clone(),
             baseline_prompts: prompts.clone(),
             enabled,
@@ -68,13 +72,52 @@ impl ResourcePathConsumer {
         if !config.theme_explicit {
             config.theme = self.theme.clone();
         }
+        if !config.model_explicit {
+            config.model = self.model.clone();
+        }
     }
+}
+
+/// The session-only system-prompt suffix: contributed context files followed by
+/// the live skill catalog. Both are replaced atomically at publication.
+fn dynamic_suffix(
+    context: &[(PathBuf, String)],
+    skills: &dyn octet_agent::SkillRegistry,
+) -> String {
+    let mut suffix = String::new();
+    if !context.is_empty() {
+        let blocks = context
+            .iter()
+            .map(|(path, contents)| crate::resources::format_context_file(path, contents))
+            .collect::<Vec<_>>();
+        suffix.push_str(&crate::resources::wrap_project_context(&blocks));
+    }
+    suffix.push_str(&crate::resources::format_skills_for_prompt(
+        &skills.descriptors(),
+    ));
+    suffix
 }
 
 impl App {
     pub(crate) fn resource_paths_pending(&self) -> bool {
         self.resource_paths.enabled
             && (self.resource_paths.pending.is_some() || !self.resource_paths.guard.current())
+    }
+
+    /// Resolve one contributed Pi provider/model pair. A narrowed launch plan
+    /// may not have registered that route yet, so complete the catalog once
+    /// exactly as a model-selection surface does; an explicit invocation choice
+    /// never reaches this path.
+    fn resolve_contributed_model(&mut self, provider: &str, model: &str) -> Option<ModelId> {
+        let resolve = |catalog: &octet_ai::ModelCatalog| {
+            crate::extensions::model_control::resolve_model(catalog, provider, model)
+                .map(|model| model.spec.id.clone())
+        };
+        if let Some(id) = resolve(&self.catalog) {
+            return Some(id);
+        }
+        self.enrich_catalog().ok()?;
+        resolve(&self.catalog)
     }
     pub(crate) fn mark_resource_paths_reload(&mut self) {
         self.resource_paths.pending = Some(Reason::Reload);
@@ -135,7 +178,7 @@ impl App {
             .system
             .strip_suffix(&self.resource_paths.catalog_suffix)
             .context("resource publication requires the base skill-catalog prompt boundary")?;
-        let suffix = crate::resources::format_skills_for_prompt(&loaded.skills.descriptors());
+        let suffix = dynamic_suffix(&loaded.context, loaded.skills.as_ref());
         let system = format!("{prefix}{suffix}");
         // All fallible work is above. Registry snapshots and provider admission
         // receive the same owner/generation fence in this synchronous boundary.
@@ -152,10 +195,43 @@ impl App {
         self.config.prompt_paths = loaded.config.prompt_paths;
         self.config.theme_paths = loaded.config.theme_paths;
         self.config.theme = loaded.config.theme;
+        self.user_keybindings = loaded.keybindings;
+        let mut diagnostics = loaded.diagnostics;
+        // Session-only default route: honored only when the invocation did not
+        // choose one explicitly, and restored to the saved route on withdrawal.
+        if !self.config.model_explicit {
+            let desired = match loaded.default_model.as_ref() {
+                Some(selection) => {
+                    self.resolve_contributed_model(&selection.provider, &selection.model)
+                }
+                None => self.resource_paths.model.clone(),
+            };
+            if let Some(id) = desired {
+                if self.model.spec.id != id {
+                    if let Ok(model) = self.catalog.resolve(&id) {
+                        let reasoning = crate::app::default_reasoning_for_model(&model);
+                        match self.agent.select_model_at_idle(
+                            model.clone(),
+                            reasoning.clone(),
+                            crate::app::reasoning_label(&reasoning),
+                        ) {
+                            Ok(()) => {
+                                self.model = model;
+                                self.reasoning = reasoning;
+                            }
+                            Err(error) => diagnostics.push(format!(
+                                "warning: contributed default model {} was not selected: {error}",
+                                id.0
+                            )),
+                        }
+                    }
+                }
+            }
+        }
         self.resource_paths.catalog_suffix = suffix;
         self.resource_paths.pending = None;
         self.resource_paths.guard.publish(lease);
-        Ok((loaded.selected_theme, loaded.diagnostics))
+        Ok((loaded.selected_theme, diagnostics))
     }
 
     /// A failed phase withdraws its overlay once. It never reruns a timed-out
