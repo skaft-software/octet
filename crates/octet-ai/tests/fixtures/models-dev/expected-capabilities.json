@@ -1,0 +1,324 @@
+{
+  "anthropic/claude-next": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Next",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5.2": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Tool Model",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5.2-Fast": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Tool Model",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "deepseek/example": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Example Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "default": "high",
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": false
+  },
+  "openai/Mixed-Case": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Mixed Case",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "openai/example": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Example Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "default": "high",
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": false
+  },
+  "openai/gpt-9-preview": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "  GPT-9 Preview  ",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "openai/unnamed": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "   ",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "openrouter/vendor/model:free": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Free Model",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/qwen3.7-max": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Tool Model",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/qwen3.7-max": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Tool Model",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/qwen3.7-max": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Tool Model",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "together/example": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Example Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "default": "high",
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": false
+  },
+  "zai-coding-cn/glm-5.2": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Tool Model",
+    "reasoning": true,
+    "tool_call": true
+  },
+  "zai-coding-cn/glm-6": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Tool Model",
+    "reasoning": true,
+    "tool_call": true
+  }
+}
