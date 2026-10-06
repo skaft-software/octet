@@ -443,7 +443,7 @@ export class RemoteUI {
         surface.columns = dimension(params.columns); surface.rows = dimension(params.rows);
         surface.tui.invalidate(); surface.requestRender();
       } else if (method === 'ui/key') {
-        if (!reservedKey(params)) {
+        if (!reservedKey(params, surface.placement)) {
           if (surface.placement === 'editor') this.editorInput(surface, params);
           else surface.tui.input(keyData(params), params.kind === 'release');
         }
