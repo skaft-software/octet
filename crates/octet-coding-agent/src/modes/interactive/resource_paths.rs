@@ -95,6 +95,9 @@ where
     };
     shell.set_theme(theme);
     shell.set_runtime_config(app.config.clone());
+    shell.set_session_keybindings(&app.user_keybindings);
+    app.executable_extensions
+        .refresh_frontend_keybindings(shell);
     for diagnostic in diagnostics {
         shell.notice(diagnostic);
     }
@@ -245,5 +248,65 @@ mod tests {
             assert_eq!(entry.data["hook"], hook);
         }
         app.executable_extensions.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_interactive_publication_applies_and_withdraws_session_keybindings_and_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (mut app, process, _) = fixture(&root).await;
+        std::fs::write(
+            root.join("keybindings.json"),
+            "{\"app.exit\": [\"ctrl+q\"]}",
+        )
+        .unwrap();
+        std::fs::write(root.join("AGENTS.md"), "SESSION-CONTEXT-SENTINEL\n").unwrap();
+        std::fs::write(
+            root.join("reply.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "skill_paths": [root.join("skills")],
+                "prompt_paths": [root.join("prompts")],
+                "theme_paths": [root.join("themes")],
+                "keybindings_paths": [root.join("keybindings.json")],
+                "context_paths": [root.join("AGENTS.md")],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        refresh_resource_paths(&mut app, &mut shell, &mut input)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.user_keybindings.get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()])
+        );
+        assert_eq!(
+            shell.extension_keybindings().get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()]),
+            "the live input owner must dispatch the contributed binding"
+        );
+        assert!(app
+            .agent
+            .system_prompt()
+            .contains("SESSION-CONTEXT-SENTINEL"));
+        // Withdrawal restores the user's own map and the baseline prompt.
+        std::fs::write(root.join("reply.json"), "{}").unwrap();
+        app.mark_resource_paths_reload();
+        refresh_resource_paths(&mut app, &mut shell, &mut input)
+            .await
+            .unwrap();
+        assert!(app.user_keybindings.is_empty());
+        assert_ne!(
+            shell.extension_keybindings().get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()]),
+            "a withdrawn session override must not survive"
+        );
+        assert!(!app
+            .agent
+            .system_prompt()
+            .contains("SESSION-CONTEXT-SENTINEL"));
+        process.shutdown().await;
     }
 }
