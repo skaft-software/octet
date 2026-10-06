@@ -1373,8 +1373,8 @@ class DynamicToolTests(unittest.TestCase):
 
 
 class ToolResultValidationTests(unittest.TestCase):
-    def test_api_0_2_rejects_host_invalid_result_envelopes(self):
-        extension = Extension(api_version="0.2", stderr=io.StringIO())
+    def _assert_invalid_result_envelopes(self, extension, initialize, api, version):
+        """Every refused envelope message names the API the author declared."""
 
         @extension.tool(name="invalid", description="Return an invalid envelope")
         def invalid(args):
@@ -1398,19 +1398,19 @@ class ToolResultValidationTests(unittest.TestCase):
             raise AssertionError(f"unexpected test case: {kind}")
 
         host = RunningExtension(extension)
-        host.start(initialize_v02(tools=["invalid"]))
+        host.start(initialize(tools=["invalid"]))
         cases = {
-            "none": "must not be empty",
-            "empty": "must not be empty",
-            "too_many": "exceeds 256 parts",
-            "media_only": "requires an explicit text part",
+            "none": f"{api} tool content must not be empty",
+            "empty": f"{api} tool content must not be empty",
+            "too_many": f"{api} tool content exceeds 256 parts",
+            "media_only": f"{api} tool content requires an explicit text part",
             "unknown_part": "unknown text content fields",
-            "unknown_result": "unknown API 0.2 tool result fields",
+            "unknown_result": f"unknown {api} tool result fields",
             "structured_without_schema": "requires a declared output_schema",
             "invalid_is_error": "must be a boolean",
         }
         for request_id, (kind, message) in enumerate(cases.items(), start=40):
-            with self.subTest(kind=kind):
+            with self.subTest(version=version, kind=kind):
                 host.reader.feed(
                     rpc_request(
                         request_id,
@@ -1424,6 +1424,20 @@ class ToolResultValidationTests(unittest.TestCase):
                 self.assertEqual(reply["error"]["code"], -32603)
                 self.assertIn(message, reply["error"]["message"])
         host.shutdown()
+
+    def test_api_0_2_rejects_host_invalid_result_envelopes(self):
+        extension = Extension(api_version="0.2", stderr=io.StringIO())
+        self._assert_invalid_result_envelopes(extension, initialize_v02, "API 0.2", "0.2")
+
+    def test_api_0_4_rejects_host_invalid_result_envelopes(self):
+        def initialize_v04(*, tools=None):
+            request = initialize_v02(tools=tools)
+            request["params"]["api_version"] = "0.4"
+            request["params"]["protocol"]["version"] = "0.4"
+            return request
+
+        extension = Extension(api_version="0.4", stderr=io.StringIO())
+        self._assert_invalid_result_envelopes(extension, initialize_v04, "API 0.4", "0.4")
 
     def test_output_schema_allows_error_without_structured_content(self):
         extension = Extension(api_version="0.2", stderr=io.StringIO())

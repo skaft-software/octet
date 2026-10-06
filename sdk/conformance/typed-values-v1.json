@@ -1,0 +1,56 @@
+{
+  "profile": "octet.typed-values.v1",
+  "cases": [
+    {
+      "id": "record",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "enabled": {"type": "boolean"},
+          "samples": {"type": "array", "items": {"type": "number"}},
+          "note": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null}
+        },
+        "required": ["name", "enabled", "samples"],
+        "additionalProperties": false
+      },
+      "valid": [
+        {"name": "λ😀", "enabled": true, "samples": [0.5, -1.25]},
+        {"name": "", "enabled": false, "samples": [], "note": null},
+        {"name": "typed", "enabled": true, "samples": [1], "note": "present"}
+      ],
+      "invalid": [
+        {"enabled": true, "samples": []},
+        {"name": 1, "enabled": true, "samples": []},
+        {"name": "x", "enabled": 1, "samples": []},
+        {"name": "x", "enabled": true, "samples": [true]},
+        {"name": "x", "enabled": true, "samples": [], "note": 7},
+        {"name": "x", "enabled": true, "samples": [], "extra": "refuse"}
+      ]
+    }
+  ],
+  "diagnostics": {
+    "valid": [
+      {"severity": "error", "code": "solver.nonconvergent", "message": "Operating point did not converge."},
+      {
+        "severity": "warning",
+        "code": "netlist.floating_node",
+        "message": "Node has no DC path to ground.",
+        "primary": {
+          "source": {"kind": "workspace", "path": "power/buck.cir", "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+          "span": {"start_byte": 12, "end_byte": 18}
+        },
+        "related": [],
+        "fixes": [],
+        "attachments": [{"kind": "blob", "id": "b_fixture", "label": "Iteration trace"}]
+      }
+    ],
+    "invalid": [
+      {"severity": "fatal", "code": "solver.failed", "message": "Failure"},
+      {"severity": "error", "code": "", "message": "Failure"},
+      {"severity": "error", "code": "solver.failed", "message": "bad\u001b[31m"},
+      {"severity": "error", "code": "solver.failed", "message": "Failure", "extra": true},
+      {"severity": "error", "code": "solver.failed", "message": "Failure", "primary": {"source": {"kind": "workspace", "path": "../outside", "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, "span": {"start_byte": 9, "end_byte": 2}}}
+    ]
+  }
+}

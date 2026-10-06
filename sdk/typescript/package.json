@@ -1,6 +1,6 @@
 {
   "name": "@skaft-software/octet-extension-api-v03",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Schema-generated canonical wire contract for octet extension API 0.3",
   "type": "module",
   "exports": {
@@ -18,7 +18,9 @@
   ],
   "scripts": {
     "test": "node tests/api_v03_conformance.mjs",
-    "test:package": "node tests/package_conformance.mjs"
+    "test:package": "node tests/package_conformance.mjs",
+    "test:process": "node --test tests/process_*.mjs",
+    "test:types": "tsc -p tsconfig.json && tsc -p tests/tsconfig.process.json"
   },
   "engines": {
     "node": ">=18"
