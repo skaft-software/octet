@@ -67,7 +67,7 @@ export function mouseModeIntent(text) {
 
 export class Transport {
   constructor(writer, { onMessage, onLost, local = false }) {
-    this.local = local; this.maxFrame = MAX_FRAME;
+    this.local = local;
     this.writer = writer;
     this.onMessage = onMessage; this.onLost = onLost;
     this.queue = []; this.bytes = 0; this.writing = false; this.closed = false;
@@ -75,11 +75,6 @@ export class Transport {
     this.buffer = Buffer.alloc(0);
     this.idleWaiters = [];
     this.transfers = new Map(); this.transferId = 0; this.transferBytes = 0;
-  }
-  setFrameLimit(bytes) {
-    if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_FRAME) invalid('selected physical frame bound');
-    this.maxFrame = bytes;
-    this.worker?.postMessage({ kind: 'frame-limit', bytes });
   }
   start(input = process.stdin) {
     if (!this.local && input === process.stdin) { this.startWorker(); return; }
@@ -93,13 +88,13 @@ export class Transport {
         let at;
         while ((at = this.buffer.indexOf(10)) !== -1) {
           const line = this.buffer.subarray(0, at); this.buffer = this.buffer.subarray(at + 1);
-          if (line.length > this.maxFrame) throw rpcError(-32602, 'bounds_exceeded input frame');
+          if (line.length > MAX_FRAME) throw rpcError(-32602, 'bounds_exceeded input frame');
           const message = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line));
           this.validate(message);
           if (!message.method) this.response(message);
           else Promise.resolve(this.receive(message)).catch(error => this.fail(error));
         }
-        if (this.buffer.length > this.maxFrame) throw rpcError(-32602, 'bounds_exceeded partial input frame');
+        if (this.buffer.length > MAX_FRAME) throw rpcError(-32602, 'bounds_exceeded partial input frame');
       } catch (error) { this.fail(error); }
     });
   }
@@ -128,7 +123,7 @@ export class Transport {
   send(message, coalesceKey) {
     if (this.closed) return Promise.reject(rpcError(-32002, 'transport closed'));
     const line = JSON.stringify(message) + '\n', size = Buffer.byteLength(line);
-    if (size - 1 > this.maxFrame) return Promise.reject(rpcError(-32602, 'bounds_exceeded output frame'));
+    if (size - 1 > MAX_FRAME) return Promise.reject(rpcError(-32602, 'bounds_exceeded output frame'));
     if (this.worker) return this.transfer({ kind: 'send', message, key: coalesceKey }, size);
     return new Promise((resolve, reject) => {
       if (coalesceKey) {
@@ -267,7 +262,7 @@ export class Transport {
     if (Atomics.load(this.syncHeader, 0) === 1) throw rpcError(-32012, 'synchronous request already in flight');
     const id = `pi:${++this.childId}`, message = { jsonrpc: '2.0', id, method, params };
     const size = Buffer.byteLength(JSON.stringify(message));
-    if (size > this.maxFrame) throw rpcError(-32602, 'bounds_exceeded output frame');
+    if (size > MAX_FRAME) throw rpcError(-32602, 'bounds_exceeded output frame');
     if (this.transfers.size >= MAX_QUEUE || this.transferBytes + size > MAX_QUEUE_BYTES) throw rpcError(-32012, 'bounds_exceeded worker transfer queue');
     this.syncIds.add(id);
     Atomics.store(this.syncHeader, 2, 0);
@@ -284,7 +279,7 @@ export class Transport {
       }
     }
     const length = Atomics.load(this.syncHeader, 1), status = Atomics.load(this.syncHeader, 0);
-    if (length < 1 || length > this.maxFrame) { const error = rpcError(-32600, 'invalid synchronous response length'); this.fail(error); throw error; }
+    if (length < 1 || length > MAX_FRAME) { const error = rpcError(-32600, 'invalid synchronous response length'); this.fail(error); throw error; }
     const reply = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(this.syncBuffer, 16, length)));
     Atomics.store(this.syncHeader, 0, 0);
     if (status === 3) { const error = rpcError(reply.code, `session append outcome unknown: ${reply.message}`); this.fail(error); throw error; }

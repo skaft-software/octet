@@ -74,11 +74,11 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
   function request(method, params) { const id = next++; send({ jsonrpc: '2.0', id, method, params }); return { id, response: wait(f => f.id === id && !f.method) }; }
   function context(extra = {}) { return { workspace: options.cwd || root, resource_owner: owner, host: { ...host, ...extra } }; }
   return { child, send, wait, request, context, seen, metadata, stderr: () => stderr,
-    async init(features = ['remote_ui', 'request_progress', 'composer', 'editor_handoff', 'session_entries', 'lifecycle_events', 'lifecycle_events_v2', 'shortcuts', 'message_injection', 'active_tools', 'input_transform_v1'], protocol = {}) {
+    async init(features = ['remote_ui', 'request_progress', 'composer', 'editor_handoff', 'session_entries', 'lifecycle_events', 'lifecycle_events_v2', 'shortcuts', 'message_injection', 'active_tools', 'input_transform_v1']) {
       const result = await request('initialize', { api_version: '0.4', workspace: options.cwd || root, host,
         contributes: { tools: metadata.tools.map(t => t.name), commands: metadata.commands.map(c => c.name), hooks: metadata.hooks, tool_renderers: metadata.tool_renderers, shortcuts: metadata.shortcuts },
         flag_values: [{ name: 'test-option', value: 'host-value' }],
-        protocol: { version: '0.4', required_features: ['request_cancellation', 'content_parts'], optional_features: features, limits: { max_concurrent_requests: 8 }, ...protocol },
+        protocol: { version: '0.4', required_features: ['request_cancellation', 'content_parts'], optional_features: features, limits: { max_concurrent_requests: 8 } },
       }).response;
       assert.ok(result.result, JSON.stringify(result)); return result.result;
     },

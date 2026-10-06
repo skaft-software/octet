@@ -40,7 +40,7 @@ pub(crate) struct LinkedSessionInvocation {
     process: ExtensionProcess,
     connection: Arc<ProcessConnection>,
     bound: Arc<BoundLeaf>,
-    snapshot: InvocationSnapshot,
+    snapshot: serde_json::Value,
 }
 
 impl SessionDriverRoute {
@@ -203,19 +203,12 @@ impl SessionDriver {
         // Capture a fresh complete immutable invocation view from the sole
         // writer. Parent and nested callbacks share the committed grant chain,
         // not a head/count heuristic or a second writer.
-        let current = lock_std_mutex(&active.lease.bound.current_grant)
-            .clone()
-            .ok_or("session driver successor unavailable")?;
-        let snapshot =
-            InvocationSnapshot::capture(&connection, session, &active.binding.namespace, &current)
-                .map_err(|_| "session driver snapshot unavailable")?;
-        if let InvocationSnapshot::Chunked(view) = &snapshot {
-            active
-                .lease
-                .bound
-                .view_revision
-                .store(view.descriptor.view_revision, Ordering::Release);
-        }
+        let snapshot = session_snapshot(
+            session,
+            &active.binding.namespace,
+            connection.max_message_bytes(),
+        )
+        .map_err(|_| "session driver snapshot unavailable")?;
         Ok(LinkedSessionInvocation {
             process: process.clone(),
             connection,
@@ -275,7 +268,7 @@ impl LinkedSessionInvocation {
         params["session_leaf"] = serde_json::to_value(current).map_err(|_| {
             ExtensionRuntimeError::Protocol("linked session grant unavailable".into())
         })?;
-        let _staged = self.snapshot.attach(&self.connection, &mut params)?;
+        merge_session_snapshot(&mut params["context"]["host"], &self.snapshot);
         self.process
             .request_typed_on_connection(
                 self.connection,
