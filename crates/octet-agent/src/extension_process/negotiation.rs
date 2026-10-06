@@ -364,9 +364,17 @@ pub(super) fn negotiate_contributions_with_host_services(
             if manifest.api_version == EXTENSION_API_VERSION_0_4 && offered_host_services.remote_ui
             {
                 allowed.insert(EXTENSION_FEATURE_REMOTE_UI);
+                allowed.insert(EXTENSION_FEATURE_TERMINAL_INPUT_INTERCEPT);
                 if offered_host_services.transcript_render {
                     allowed.insert(EXTENSION_FEATURE_TRANSCRIPT_RENDER);
                 }
+            }
+            if features.contains(EXTENSION_FEATURE_TERMINAL_INPUT_INTERCEPT)
+                && !features.contains(EXTENSION_FEATURE_REMOTE_UI)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "terminal_input_intercept_v1 requires remote_ui".into(),
+                ));
             }
             if features.contains(EXTENSION_FEATURE_TRANSCRIPT_RENDER)
                 && !features.contains(EXTENSION_FEATURE_REMOTE_UI)

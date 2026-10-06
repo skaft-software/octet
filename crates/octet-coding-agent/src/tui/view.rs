@@ -3597,6 +3597,7 @@ pub struct InteractiveShell {
     /// Shared with the one input stream: while set, the host reads no raw bytes
     /// because an extension grant owns the terminal.
     terminal_ceded: Arc<AtomicBool>,
+    terminal_interceptors: crate::tui::terminal::InputInterceptors,
     /// Exact display discovery/configuration roots, retained by the input owner
     /// only; never cloned into renderer publications.
     runtime_config: Option<Config>,
@@ -3673,6 +3674,7 @@ impl InteractiveShell {
             remote_mouse_capture: false,
             remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
+            terminal_interceptors: Default::default(),
             runtime_config: None,
             base_user_bindings,
             session_keybindings: std::collections::BTreeMap::new(),
@@ -3749,6 +3751,7 @@ impl InteractiveShell {
             remote_mouse_capture: false,
             remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
+            terminal_interceptors: Default::default(),
             // Renderer tests must never report to a real Herdr pane, even when
             // the test process inherits one.
             runtime_config: None,
@@ -3814,6 +3817,11 @@ impl InteractiveShell {
             );
         }));
         (shell, gate)
+    }
+
+    /// The pre-native input lane shared by this shell and its input stream.
+    pub(crate) fn terminal_input_interceptors(&self) -> crate::tui::terminal::InputInterceptors {
+        self.terminal_interceptors.clone()
     }
 
     /// The shared parking flag for the host's one input stream.

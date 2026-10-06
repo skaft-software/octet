@@ -173,6 +173,18 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   synchronous durable receipt (see below). Raw assistant/system message injection
   remains unsupported; custom transcript presentation has its own negotiated gate
   described below.
+- `ctx.ui.onTerminalInput` registers a real pre-native listener: the host asks
+the adapter before native handling, listeners run synchronously in registration
+order over the raw terminal spelling, and a listener can consume input
+(`{consume:true}`, including an empty replacement) or replace it (`{data}`).
+The whole chain is bounded to 50 ms per event; a listener that does not answer
+is latched off (with one bounded diagnostic) and that event is delivered
+unchanged, so a stuck factory cannot freeze typing. A listener that throws is
+reported once and keeps its subscription, and the original input still reaches
+the host. Ctrl+G/Ctrl+D stay host-owned, and input beyond the existing
+256-byte wire bound bypasses the chain. See
+[`docs/pi-extension-api.md`](../../docs/pi-extension-api.md) row 23 for the
+deliberate differences from Pi's unbounded, blocking chain.
 - `ctx.ui.custom`, footer/header/widget/editor factories, safe component focus,
   input listeners and overlay composition. Custom factories receive a read-only
   snapshot of the actual native keybindings, including user overrides and reloads;
@@ -512,7 +524,9 @@ their timers; Rust remains the restoration authority.
 
 Presses reconstruct legacy raw keys; modifiers/repeats/releases reconstruct Kitty
 sequences (including original Doom's `wantsKeyRelease`). Ctrl+G and Ctrl+D remain
-host-reserved. `ui/mouse` reconstructs SGR mouse input. The original drawing
+host-reserved; `onTerminalInput` listeners never see those two keystrokes and a
+listener that returns immediately does not observe a protocol reply as input.
+`ui/mouse` reconstructs SGR mouse input. The original drawing
 extension's exact known `1000/1002/1006` enable/disable writes are interpreted
 **only as capture intent** before `ui/open {mouse_capture:true}`; no raw escape is
 written to a terminal. A single complete OSC 777 desktop-notification write is
