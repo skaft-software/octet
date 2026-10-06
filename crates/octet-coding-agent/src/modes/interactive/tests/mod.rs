@@ -38,6 +38,7 @@ mod pi_exec_contract_tests;
 mod pi_helper_import_tests;
 mod pi_messages_tests;
 mod pi_model_provider_tests;
+mod pi_native_editor_service_tests;
 mod pi_original_clm_tests;
 mod pi_renderers_tests;
 mod pi_session_replacement_tests;
