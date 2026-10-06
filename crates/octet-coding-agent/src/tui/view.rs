@@ -3673,6 +3673,8 @@ impl InteractiveShell {
 
         let bindings = crate::tui::keymap::keybindings::KeybindingsManager::for_user();
         let base_user_bindings = bindings.user_bindings().clone();
+        let terminal_interceptors = crate::tui::terminal::InputInterceptors::default();
+        terminal_interceptors.set_host_policy(composer_slot::host_input_policy(&state, &bindings));
         Ok(Self {
             input_dispatch: input_dispatch::InputDispatch::new(bindings),
             tui: None,
@@ -3684,7 +3686,7 @@ impl InteractiveShell {
             remote_mouse_capture: false,
             remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
-            terminal_interceptors: Default::default(),
+            terminal_interceptors,
             runtime_config: None,
             base_user_bindings,
             session_keybindings: std::collections::BTreeMap::new(),
@@ -3726,6 +3728,7 @@ impl InteractiveShell {
         self.base_user_bindings = bindings.user_bindings().clone();
         self.session_keybindings.clear();
         self.input_dispatch.bindings = bindings;
+        self.refresh_terminal_input_policy();
     }
 
     #[cfg(test)]
@@ -3750,6 +3753,8 @@ impl InteractiveShell {
         tui.start();
         let bindings = crate::tui::keymap::keybindings::KeybindingsManager::current_platform();
         let base_user_bindings = bindings.user_bindings().clone();
+        let terminal_interceptors = crate::tui::terminal::InputInterceptors::default();
+        terminal_interceptors.set_host_policy(composer_slot::host_input_policy(&state, &bindings));
         Self {
             input_dispatch: input_dispatch::InputDispatch::new(bindings),
             tui: Some(tui),
@@ -3761,7 +3766,7 @@ impl InteractiveShell {
             remote_mouse_capture: false,
             remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
-            terminal_interceptors: Default::default(),
+            terminal_interceptors,
             // Renderer tests must never report to a real Herdr pane, even when
             // the test process inherits one.
             runtime_config: None,
@@ -3829,7 +3834,15 @@ impl InteractiveShell {
         (shell, gate)
     }
 
-    /// The pre-native input lane shared by this shell and its input stream.
+    fn refresh_terminal_input_policy(&self) {
+        self.terminal_interceptors
+            .set_host_policy(composer_slot::host_input_policy(
+                &self.state,
+                &self.input_dispatch.bindings,
+            ));
+    }
+
+    /// The input-consumer lane after native reserved actions and the slash popup.
     pub(crate) fn terminal_input_interceptors(&self) -> crate::tui::terminal::InputInterceptors {
         self.terminal_interceptors.clone()
     }

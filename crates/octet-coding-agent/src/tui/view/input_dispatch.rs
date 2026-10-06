@@ -163,6 +163,7 @@ impl InteractiveShell {
             merged.insert(id.clone(), keys.clone());
         }
         if self.input_dispatch.bindings.user_bindings() == &merged {
+            self.refresh_terminal_input_policy();
             return;
         }
         self.input_dispatch.bindings.set_user_bindings(merged);
@@ -172,6 +173,7 @@ impl InteractiveShell {
             mailbox.editor_resync = mailbox.editor_resync.saturating_add(1);
         }
         self.input_dispatch.jump_forward = None;
+        self.refresh_terminal_input_policy();
     }
 
     /// Ordered, available model ids supplied by the App's scoped catalog. A

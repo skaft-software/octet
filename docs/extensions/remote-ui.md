@@ -257,8 +257,9 @@ in the composer, native application and popup bindings remain authoritative.
 
 `terminal_input_intercept_v1` is an optional API `0.4` feature offered only with
 `remote_ui` and a bound frontend. A frontend that negotiates it asks each
-intercepting extension about one input event **before** native handling, so a Pi
-extension's `onTerminalInput` listeners see the keystrokes the terminal produced:
+intercepting extension about one editor input event after the host-reserved grammar
+and open native slash popup, but **before** the slot editor. A Pi extension's
+`onTerminalInput` listeners see the spelling the terminal produced:
 
 ```json
 {"jsonrpc":"2.0","id":"input-1","method":"ui/terminal-input/intercept",
@@ -284,8 +285,12 @@ input events:
   the budget expires, so an unresponsive extension cannot freeze typing. It may
   then stop asking that process until reload, and it reports one bounded
   diagnostic. Throwing handlers are reported without losing their subscription.
-- The host's own rescue keys (`Ctrl+G`) and coordinated shutdown (`Ctrl+D`) never
-  enter this lane: host authority over rescue and exit is not delegated.
+- Native reserved actions (including submit, busy steering, follow-up, clear,
+  close and live user keybinding overrides), open slash-menu keys and an active
+  native transcript-search query bypass the lane. The stream consults the same
+  read-only host policy as the composer slot; it does not dispatch native actions.
+  `Ctrl+G` bypasses consumers only as fullscreen rescue; in the composer it remains
+  ordinary consumer/editor input. `Ctrl+D` always remains coordinated shutdown.
 - Only the raw spelling of decoded input is offered. Host-derived events (resize,
   focus, terminal replies, Tern protocol input) have no terminal bytes and stay
   out of the lane. Unix input is decoded by octet's single byte decoder, so the

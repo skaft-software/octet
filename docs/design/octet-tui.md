@@ -530,8 +530,12 @@ separate fullscreen placement and Ctrl+G rescue; editor mounts never do.
 
 The input policy resolves native reserved actions and user keybinding precedence,
 then the open native slash popup, before the slot editor receives editing input.
-Terminal consumers belong between host policy and the editor, not ahead of
-submit/cancel/close. Command registration combines native commands and executable
+Terminal consumers run between host policy and the editor, not ahead of
+submit/cancel/close. The one raw-input stream probes the same read-only grammar
+against current shell state and resolved bindings, including session overrides
+and reloads; it never performs action dispatch. Native transcript search owns its
+query while open. Ctrl+G is reserved only for fullscreen rescue, not while an
+editor occupies the composer slot. Command registration combines native commands and executable
 extension contributions (including Pi); native names retain precedence and
 later collisions receive the owner's namespace. Public names are translated back
 to registered names only at the owner-fenced command dispatcher.

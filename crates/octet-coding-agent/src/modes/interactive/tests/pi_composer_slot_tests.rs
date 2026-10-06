@@ -24,8 +24,11 @@ export default pi => {
   }) + '\n')});
   pi.registerCommand('fixture-command', {handler: () => {}});
   pi.registerCommand('retire-editor', {handler: (_args, ctx) => ctx.ui.setEditorComponent(undefined)});
-  pi.registerCommand('listen-all', {handler: (_args, ctx) => ctx.ui.onTerminalInput(() => ({consume: true}))});
-  pi.registerCommand('seed-slot', {handler: (args, ctx) => ctx.ui.setEditorText(args || 'host draft')});
+  pi.registerCommand('listen-all', {handler: (_args, ctx) => ctx.ui.onTerminalInput(data => {
+    appendFileSync(TRACE, JSON.stringify({input: data}) + '\n'); return {consume: true};
+  })});
+  pi.registerCommand('seed-slot', {handler: (_, ctx) => ctx.ui.setEditorText('host draft')});
+  pi.registerCommand('seed-slash', {handler: (_, ctx) => ctx.ui.setEditorText('/fixture-comm')});
   pi.registerCommand('shared', {handler: () => {}});
   pi.on('session_start', (_, ctx) => {
     ctx.ui.setEditorComponent((t, theme, keys) => editor = new SlotEditor(t, theme, keys));
@@ -297,13 +300,16 @@ async fn native_pi_custom_editor_ctrl_g_never_unmounts_the_composer_slot() {
 
     // A genuine full-screen extension view keeps its explicit rescue.
     let factory = r#"
-export default pi => pi.registerCommand('fullscreen', {handler: async (_, ctx) => {
+export default pi => {
+  pi.registerCommand('listen', {handler: (_, ctx) => ctx.ui.onTerminalInput(() => ({consume: true}))});
+  pi.registerCommand('fullscreen', {handler: async (_, ctx) => {
   await ctx.ui.custom((tui, theme, keys, done) => ({
     render: () => ['NATIVE-FULLSCREEN-VIEW'],
     handleInput: () => {},
     invalidate: () => {},
   }));
-}});
+  }});
+};
 "#;
     let (_directory, mut app, mut shell) = {
         let (directory, mut app, mut shell) =
@@ -320,15 +326,13 @@ export default pi => pi.registerCommand('fullscreen', {handler: async (_, ctx) =
         (directory, app, shell)
     };
     shell.set_size(96, 24);
+    command(&mut app, &mut shell, "listen").await.unwrap();
     command(&mut app, &mut shell, "fullscreen").await.unwrap();
     pump_until(&mut app, &mut shell, |frame| {
         frame.contains("NATIVE-FULLSCREEN-VIEW")
     })
     .await;
-    let mut input = scripted(vec![
-        (100, key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
-        (300, key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
-    ]);
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"x\x07\x04");
     let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
         .await
         .next_idle(&mut input)
@@ -689,14 +693,14 @@ async fn native_pi_custom_editor_buffer_is_bounded_and_retirement_discards_it() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_custom_editor_host_keys_precede_terminal_consumers() {
-    let (_directory, mut app, mut shell) = live_slot_app().await;
+    let (directory, mut app, mut shell) = live_slot_app().await;
     pump_until(&mut app, &mut shell, |frame| {
         frame.contains("NATIVE-SLOT-EDITOR")
     })
     .await;
     command(&mut app, &mut shell, "listen-all").await.unwrap();
     command(&mut app, &mut shell, "seed-slot").await.unwrap();
-    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\r");
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"x\x07\r");
     let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
         .await
         .next_idle(&mut input)
@@ -705,5 +709,156 @@ async fn native_pi_custom_editor_host_keys_precede_terminal_consumers() {
         matches!(idle, Idle::Submit(input) if input.display_text == "host draft"),
         "a terminal consumer swallowed host submit"
     );
+    pump_until(&mut app, &mut shell, |frame| !frame.contains("host draft")).await;
+
+    command(&mut app, &mut shell, "seed-slash").await.unwrap();
+    pump_until(&mut app, &mut shell, |frame| frame.contains("navigate")).await;
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\t\x1b[Z");
+    assert!(matches!(
+        idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+            .await
+            .next_idle(&mut input)
+            .await,
+        Idle::CycleThinking
+    ));
+    assert_eq!(
+        shell.pending(),
+        "/fixture-command ",
+        "native slash completion precedes consumers"
+    );
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\x03\x1b[Z");
+    assert!(matches!(
+        idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+            .await
+            .next_idle(&mut input)
+            .await,
+        Idle::CycleThinking
+    ));
+    assert!(
+        shell.pending().is_empty(),
+        "native clear precedes consumers"
+    );
+    pump_until(&mut app, &mut shell, |frame| !frame.contains("/model")).await;
+
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("tui.input.submit".into(), vec!["alt+s".into()]);
+    shell.set_session_keybindings(&overrides);
+    command(&mut app, &mut shell, "seed-slot").await.unwrap();
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\x1b[115;3u");
+    assert!(
+        matches!(idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+        .await.next_idle(&mut input).await, Idle::Submit(input) if input.display_text == "host draft"),
+        "the host's live user override precedes consumers"
+    );
+    pump_until(&mut app, &mut shell, |frame| !frame.contains("host draft")).await;
+    command(&mut app, &mut shell, "seed-slot").await.unwrap();
+    // Native transcript search owns its query, not the slot or raw consumers.
+    // Ctrl+C closes that query without discarding the slot's original draft.
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\x1b[102;6uquery\x03\x1b[Z");
+    assert!(matches!(
+        idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+            .await
+            .next_idle(&mut input)
+            .await,
+        Idle::CycleThinking
+    ));
+    assert_eq!(shell.pending(), "host draft");
+    assert!(!shell.transcript_search_active());
+    let inputs: Vec<serde_json::Value> =
+        std::fs::read_to_string(directory.path().join("trace.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(
+        inputs,
+        [
+            serde_json::json!({"input": "x"}),
+            serde_json::json!({"input": "\u{7}"})
+        ],
+        "only ordinary editing reaches the consumer"
+    );
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\x04");
+    assert!(matches!(
+        idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+            .await
+            .next_idle(&mut input)
+            .await,
+        Idle::Quit
+    ));
+    assert!(
+        shell.close_requested(),
+        "coordinated close precedes consumers"
+    );
     app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_busy_admission_precedes_terminal_consumers() {
+    use super::support::{scripted_agent_with_delay, test_run_inspection};
+    for (bytes, follow_up) in [(b"\r".as_slice(), false), (b"\x13".as_slice(), true)] {
+        let (_directory, mut app, mut shell) = live_slot_app().await;
+        pump_until(&mut app, &mut shell, |frame| {
+            frame.contains("NATIVE-SLOT-EDITOR")
+        })
+        .await;
+        command(&mut app, &mut shell, "listen-all").await.unwrap();
+        command(&mut app, &mut shell, "seed-slot").await.unwrap();
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_millis(500)).await;
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut input = super::pi_ui_contract_tests::raw_input(&shell, bytes);
+        let mut ticker = tokio::time::interval(Duration::from_millis(5));
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut VecDeque::new(),
+                &mut false,
+                None,
+                None,
+                &mut app.executable_extensions,
+                &mut false,
+                test_run_inspection(),
+                &mut None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(run);
+        let context = format!("{:?}", agent.session().context().unwrap());
+        if follow_up {
+            assert_eq!(shell.queued_follow_up_len(), 1);
+            assert!(
+                !context.contains("host draft"),
+                "follow-up leaked to the active provider"
+            );
+        } else {
+            assert!(
+                context.contains("host draft"),
+                "native steering was swallowed by the terminal consumer: {context}"
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                app.executable_extensions.drain_events_for_shell(&mut shell);
+                if shell.extension_editor_snapshot().text.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("accepted editor did not clear after admission");
+        assert!(shell.pending().is_empty());
+        app.executable_extensions.shutdown().await;
+    }
 }

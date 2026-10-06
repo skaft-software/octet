@@ -159,17 +159,18 @@ Header/footer/widgets are distinct generic host placements. The original footer
 receives secret-free host model/session/context snapshots instead of fabricated
 usage or OAuth data. Unavailable capabilities fail explicitly. Custom editor
 state uses the host composer handoff rather than a separate agent input loop.
-`Ctrl+G` rescues a focused component; `Ctrl+D` remains host-owned shutdown.
-`onTerminalInput` listeners run before native handling over the raw terminal
-spelling, in registration order, and may consume or replace one event. The whole
-chain is bounded to 50 ms per event: a listener that stops answering is latched
-off and its input is delivered unchanged, because Pi would block typing
-indefinitely. Those two host keys and input past the 256-byte wire bound stay
-native. Settings-only standard Pi editors (no inherited editor-method overrides) keep
-octet's native editor and slash menu. Their prompt history seeds the native
-composer through bounded, owner-fenced `composer/history`; native prompts remain
-newer and the current draft is unchanged. Custom behavior still mounts remotely.
-Border-color translation for settings-only editors is not yet implemented.
+Every custom editor occupies the composer slot, leaving native transcript,
+chrome and the single slash popup visible. `Ctrl+G` rescues only explicit fullscreen
+views; it never unmounts an editor. `Ctrl+D` remains host-owned shutdown.
+`onTerminalInput` listeners run after native reserved actions, the open slash popup
+and native search-query ownership, but before the slot editor, in registration
+order over the raw terminal spelling. They may consume or replace one event. The
+whole chain is bounded to 50 ms per event: a listener that stops answering is
+latched off and its input is delivered unchanged, because Pi would block typing
+indefinitely. Input past the 256-byte wire bound bypasses the chain. Editor
+submissions use native idle/busy admission; refusals preserve component paste and
+undo state. Pi's Editor still runs extension-side in this phase; the native-backed
+Editor facade and full upstream Editor parity remain unimplemented.
 
 Raw extension terminal writes are not allowed into frames. The adapter recognizes
 allowlisted mouse-mode writes as capture intent and bounded complete OSC 777
@@ -213,12 +214,13 @@ drawing, the powerline footer, and terminal restoration on macOS. That run
 observed an 88.1 ms first frame, a 270.0 ms Doom open, 31 frames/sec while turning,
 and a 26.5 ms close. These are one-run observations, not a Pi speed comparison.
 
-Fresh native rainbow-editor acceptance passes both paced input and burst input
-without a grace period. The probe verifies the host mount acknowledgement,
-matching Ctrl+G retirement, complete native draft in newer editable frames,
-resize and Ctrl+D terminal restoration. This closes that original draft-loss
-regression, not arbitrary-editor or full Pi parity. Private patches and the wider
-extension corpus remain unqualified.
+Historical rainbow-editor probes verified paced/burst recovery through Ctrl+G
+retirement before the composer-slot architecture. They do not qualify the current
+editor contract: Ctrl+G now retains the slot. Use `scripts/test-pi-composer-slot.py`
+with reviewed unchanged footer/custom-editor factories to check one draft, one
+native slash popup, Ctrl+G retention, native clear, resize and Ctrl+D restoration.
+Arbitrary-editor, upstream Editor parity and the wider extension corpus remain
+unqualified.
 
 The original Anthropic-attribution provider remains blocked: builtin provider
 inheritance is unsupported, and its direct HTTP callback requires a raw OAuth
