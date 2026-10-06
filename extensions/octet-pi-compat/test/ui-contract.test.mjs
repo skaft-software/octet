@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { dialogAPI, editorAPI, BorderedLoader, DynamicBorder, getSettingsListTheme, keyHint } from '../lib/ui-api.mjs';
+import { dialogAPI, editorAPI, BorderedLoader, DynamicBorder, getSettingsListTheme } from '../lib/ui-api.mjs';
+import { keyHint } from '../lib/keybinding-hints.mjs';
 import { RemoteUI, safeLines } from '../lib/remote-ui.mjs';
 import { theme } from '../lib/theme.mjs';
 import { getAutocompleteProvider, retireAutocomplete } from '../lib/completions.mjs';
