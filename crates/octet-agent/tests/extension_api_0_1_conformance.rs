@@ -21,7 +21,7 @@ use octet_agent::{
     CancellationToken, DiscoveredExtension, ExtensionActivation, ExtensionConfirmationResponse,
     ExtensionEvent, ExtensionHook, ExtensionHostState, ExtensionManifest, ExtensionProcess,
     ExtensionRuntimeConfig, ExtensionRuntimeError, ExtensionSource, ExtensionTrust, SandboxConfig,
-    ToolCallHook, ToolContext, ToolProgressSink, EXTENSION_API_VERSION_0_1,
+    ToolCallHook, ToolContext, ToolOutput, ToolProgressSink, EXTENSION_API_VERSION_0_1,
     EXTENSION_MANIFEST_FILENAME,
 };
 use pretty_assertions::assert_eq;
@@ -135,18 +135,23 @@ confirmations = true
         cancellation: CancellationToken::default(),
     };
     let tool_arguments = json!({"path": "README.md"});
-    ToolCallHook::before_tool_call(&process, "read", &tool_arguments, &tool_context)
-        .await
-        .expect("before_tool_call");
-    ToolCallHook::after_tool_call(
+    // An executable extension's tool hooks are delivered by the argument /
+    // result transform boundary, which is where the production turn loop
+    // runs a process's `before_tool_call` and `after_tool_call` wire hooks.
+    let replacement =
+        ToolCallHook::transform_tool_call(&process, "read", &tool_arguments, &tool_context)
+            .await
+            .expect("before_tool_call");
+    assert_eq!(replacement, None, "fixture returns no argument replacement");
+    ToolCallHook::transform_tool_result(
         &process,
         "read",
         &tool_arguments,
-        "file contents",
-        false,
+        Ok(ToolOutput::new("file contents")),
         &tool_context,
     )
-    .await;
+    .await
+    .expect("after_tool_call");
 
     let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
         .await
@@ -234,6 +239,9 @@ confirmations = true
         "model": "local/model",
         "reasoning": {"effort": "high"},
         "active_skills": [],
+        // The host reports explicit null for an observation it does not have,
+        // so a stale cached context usage is cleared rather than reused.
+        "context_usage": null,
     });
     let tool_wire_context = json!({
         "workspace": temp.path(),
@@ -245,7 +253,12 @@ confirmations = true
         hook_frame(
             2,
             "before_tool_call",
-            json!({"name": "read", "arguments": {"path": "README.md"}}),
+            json!({
+                "name": "read",
+                "arguments": {"path": "README.md"},
+                "tool_call_id": null,
+                "parent_tool_call_id": null,
+            }),
             tool_wire_context.clone(),
         )
     );
@@ -257,8 +270,11 @@ confirmations = true
             json!({
                 "name": "read",
                 "arguments": {"path": "README.md"},
+                "tool_call_id": null,
+                "parent_tool_call_id": null,
                 "output": "file contents",
                 "is_error": false,
+                "pi_content": [{"type": "text", "text": "file contents"}],
             }),
             tool_wire_context,
         )

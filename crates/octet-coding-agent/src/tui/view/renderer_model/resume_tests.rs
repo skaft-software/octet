@@ -26,7 +26,7 @@ fn resolved_shell_initialization_and_publication_have_exact_theme_work() {
 
     for revision in 0..32 {
         semantic.render_revision = revision;
-        semantic.editor.set_text(&format!("draft {revision}"));
+        semantic.editor.set_text(format!("draft {revision}"));
         let model = RenderModel::capture(&mut semantic);
         assert_eq!(
             take_theme_work(),

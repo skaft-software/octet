@@ -1029,7 +1029,7 @@ fn native_path_completion_inserts_real_workspace_path_without_media_admission() 
     assert!(!pty
         .nodes
         .values()
-        .any(|node| node["p"]["role"] == "omp.user"));
+        .any(|node| node["p"]["role"] == "octet.user"));
     pty.close();
 }
 
@@ -1556,7 +1556,7 @@ fn native_resumed_forked_startup_and_fork_picker_preserve_user_history() {
         assert_eq!(
             pty.nodes
                 .values()
-                .filter(|node| node["p"]["role"] == "omp.user")
+                .filter(|node| node["p"]["role"] == "octet.user")
                 .count(),
             2
         );
@@ -2067,7 +2067,7 @@ fn native_loopback_stream_reasoning_markdown_working_finalization_and_draft_are_
     assert!(pty
         .nodes
         .values()
-        .any(|node| node["p"]["role"] == "omp.user"));
+        .any(|node| node["p"]["role"] == "octet.user"));
     pty.send("unsent draft 🦀".as_bytes());
     pty.wait(|pty| pty.draft() == "unsent draft 🦀");
     let caret = pty.cursor();
