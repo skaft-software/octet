@@ -84,7 +84,7 @@ export class Runtime {
     this.issues = new ExtensionIssues(this);
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map(); this.failedFactories = new Set();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
-    this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null;
+    this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null; this.autocompleteStarted = false; this.autocompleteSettle = null;
     this.entrypoints = [];
     this.uninstallChildren = installChildRuntime(this);
     bindHostTheme(this);
@@ -412,16 +412,47 @@ export class Runtime {
   reportStartupIssues() { this.issues.startup(); }
   // Late renderer registrations are still inert without the native consumer.
   reportInertRenderers() { this.issues.reportInertRenderers(); }
-  registerAutocomplete() {
-    if (!this.features.has('autocomplete') || !this.commands.size) return;
-    // This process-scoped request MUST follow the initialize reply: the host
-    // admits the chain only after startup and its interactive drain are live.
-    this.autocompleteRegistration = this.transport.request('ui/autocomplete/register', { revision: 1 }).then(result => {
+  /// The one process-owned completion chain. It must exist before the
+  /// initialize reply write can settle: the host may read that line and query
+  /// completions immediately, and those queries await this promise. The
+  /// registration request itself still follows the reply, because the host
+  /// resolves the negotiated `autocomplete` feature from it.
+  ensureAutocompleteChain() {
+    if (!this.autocompleteRegistration) {
+      this.autocompleteRegistration = new Promise((resolve, reject) => { this.autocompleteSettle = { resolve, reject }; });
+      // A chain nobody queries yet must not surface as an unhandled rejection;
+      // waiting queries still observe the real failure.
+      this.autocompleteRegistration.catch(() => {});
+    }
+    return this.autocompleteRegistration;
+  }
+  /// Called before the initialize reply is written, so no completion query can
+  /// see a missing chain while that reply is in flight.
+  armAutocomplete() {
+    if (this.autocompleteStarted || !this.features.has('autocomplete') || !this.commands.size) return this.autocompleteRegistration;
+    return this.ensureAutocompleteChain();
+  }
+  /// Start the chain once the reply (or a dynamic provider) has made it legal.
+  /// `contribution` covers a component-only provider in a command-less process.
+  registerAutocomplete(contribution = false) {
+    if (this.autocompleteStarted || !this.features.has('autocomplete') || !(contribution || this.commands.size)) return this.autocompleteRegistration;
+    this.autocompleteStarted = true;
+    const chain = this.ensureAutocompleteChain();
+    const request = this.transport.request('ui/autocomplete/register', { revision: 1 }).then(result => {
       fields(result, ['accepted'], 'autocomplete registration acknowledgement');
       if (typeof result.accepted !== 'boolean') invalid('autocomplete registration accepted must be boolean');
       if (!result.accepted) unsupported('command completions', 'host refused autocomplete registration');
+      this.autocompleteSettle?.resolve(result);
+      this.autocompleteSettle = null;
     });
-    this.autocompleteRegistration.catch(error => this.backgroundError(error));
+    // One failure path for a rejected transport and for a refused or malformed
+    // admission: the waiting queries see it, and the process reports it once.
+    request.catch(error => {
+      this.autocompleteSettle?.reject(error);
+      this.autocompleteSettle = null;
+      this.backgroundError(error);
+    });
+    return chain;
   }
   bind(params, store, { foreground = store.method === 'hook/run' && params.hook === 'session_start', requireLeaf, preparationHead } = {}) {
     const context = params.context || {};
@@ -782,6 +813,10 @@ export class Runtime {
     try {
       const result = await this.scope.run(store, () => this.dispatch(message, store));
       store.controller.signal.throwIfAborted();
+      // Arm the chain before this reply's write settles. The host may query
+      // completions the moment it reads the line, and nothing here orders that
+      // inbound request after the write callback.
+      if (message.method === 'initialize') this.armAutocomplete();
       if (!this.stopping) {
         await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
         settlementError = undefined;

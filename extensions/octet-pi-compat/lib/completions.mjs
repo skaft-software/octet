@@ -147,14 +147,10 @@ export function addAutocompleteProvider(runtime, store, factory) {
   chains.set(store.state, { entries, provider });
   const editor = runtime.ui.activeEditor(store);
   if (editor?.component) runtime.scope.run(editor.store, () => editor.component.setAutocompleteProvider?.(getAutocompleteProvider(runtime, editor.store)));
-  if (!runtime.autocompleteRegistration) {
+  if (!runtime.autocompleteStarted) {
     // A dynamic provider may be the first completion contribution. Initialization
     // has already settled; this remains a process-owned registration, never a fake parent.
-    runtime.autocompleteRegistration = runtime.transport.request('ui/autocomplete/register', { revision: 1 }).then(result => {
-      fields(result, ['accepted'], 'autocomplete registration acknowledgement');
-      if (typeof result.accepted !== 'boolean') invalid('autocomplete registration accepted must be boolean');
-      if (!result.accepted) unsupported('autocomplete providers', 'host refused autocomplete registration');
-    });
+    runtime.registerAutocomplete(true);
   }
   runtime.track(runtime.autocompleteRegistration, store);
 }
@@ -209,7 +205,10 @@ export function retireAutocomplete(state) {
 
 export async function commandCompletions(runtime, params, store) {
   runtime.require('autocomplete');
-  if (!runtime.autocompleteRegistration) unsupported('command completions', 'no registered completion chain');
+  // The chain is armed before initialize settles; a query that still finds none
+  // starts it here, which stays after the reply on the wire.
+  const registration = runtime.autocompleteRegistration ?? runtime.registerAutocomplete();
+  if (!registration) unsupported('command completions', 'no registered completion chain');
   const snapshot = autocompleteSnapshot(params);
   const state = runtime.foreground, chain = state && chains.get(state);
   const provider = chain?.provider ?? baseProvider(runtime);
@@ -227,7 +226,7 @@ export async function commandCompletions(runtime, params, store) {
     }
   };
   try {
-    await cancellable(runtime.autocompleteRegistration, store.controller.signal); live();
+    await cancellable(registration, store.controller.signal); live();
     const scope = { ...store, ...(state ? { state } : {}) };
     // Native requests do not carry natural/forced trigger information. In
     // particular, do not reinterpret every native query as Pi's forced-file Tab.
