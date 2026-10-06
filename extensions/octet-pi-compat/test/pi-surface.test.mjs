@@ -62,8 +62,9 @@ test('facade: an undefined member is absent, an assignment is refused', () => {
   assert.equal(event.sessionFile, undefined);
 });
 
-test('ctx is a facade: optional members are absent while refusing operations still throw', () => {
+test('ctx is a facade: optional members are absent while refusing operations still throw', t => {
   const runtime = new Runtime({ extensions: [] }, {});
+  t.after(() => runtime.uninstallChildren());
   const state = { owner, alive: true, workspace: '/native-workspace', host: { session_id: 's', session_entries: [], session_branch: [], statuses: new Map() } };
   const store = { id: 1, state, controller: new AbortController() };
   runtime.foreground = state;
@@ -74,4 +75,22 @@ test('ctx is a facade: optional members are absent while refusing operations sti
   assert.throws(() => ctx.abort(), /unsupported_feature ctx.abort/);
   assert.throws(() => ctx.shutdown(), /unsupported_feature ctx.shutdown/);
   assert.throws(() => ctx.ui.onTerminalInput(), /unsupported_feature terminal_input_intercept_v1/);
+});
+
+test('footer data is a read-only facade whose optional private mutators are absent', async t => {
+  const runtime = new Runtime({extensions: []}, {});
+  t.after(() => runtime.uninstallChildren());
+  const state = {owner, alive: true, workspace: root, host: {}, statuses: new Map([['fixture', 'ready']]), uiQueues: new Map()};
+  const store = {id: 1, state, controller: new AbortController(), pending: new Set(), errors: []};
+  runtime.foreground = state; runtime.features.add('remote_ui');
+  runtime.ui.mount = async (_store, _placement, _title, make) => make({}, {});
+  const ctx = createContext(runtime, store);
+  await ctx.ui.setFooter((_tui, _theme, data) => {
+    assert.equal(data.setExtensionStatus, undefined);
+    assert.equal(data.clearExtensionStatuses, undefined);
+    assert.equal(typeof data.onBranchChange, 'function');
+    assert.deepEqual(data.getExtensionStatuses(), state.statuses);
+    assert.throws(() => { data.setExtensionStatus = () => {}; }, /unsupported_feature/);
+    return {render: () => [], invalidate() {}};
+  });
 });

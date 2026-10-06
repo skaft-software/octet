@@ -45,3 +45,29 @@ test('an immediate post-initialize query waits for registration even before the 
     prefix: '/complete', items: [{value: '/complete ', label: 'complete', description: 'Complete'}],
   });
 });
+
+test('post-initialize dispatch cannot overtake startup issues while the writer receipt is pending', async t => {
+  let release;
+  const writer = new Promise(resolve => { release = resolve; });
+  const order = [];
+  const runtime = Object.assign(Object.create(Runtime.prototype), {
+    active: new Map(), scope: new AsyncLocalStorage(), maxConcurrent: 8,
+    features: new Set(), commands: new Map(), foreground: null,
+    async dispatch(message) { order.push(message.method); return {}; },
+    reportStartupIssues() { order.push('issues'); },
+    transport: {
+      send(frame) { order.push(`reply:${frame.id}`); return frame.id === 1 ? writer : Promise.resolve(); },
+      settleParent() {},
+    },
+  });
+  const initialize = runtime.receive({id: 1, method: 'initialize', params: {}});
+  let command;
+  t.after(async () => { release(); await Promise.all([initialize, command]); });
+  await new Promise(setImmediate);
+  command = runtime.receive({id: 2, method: 'command/execute', params: {}});
+  await new Promise(setImmediate);
+  assert.deepEqual(order, ['initialize', 'reply:1']);
+  release();
+  await Promise.all([initialize, command]);
+  assert.deepEqual(order, ['initialize', 'reply:1', 'issues', 'command/execute', 'reply:2']);
+});

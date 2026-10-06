@@ -186,3 +186,46 @@ test('routed transport requires the paired offer and exact profile', async t => 
   await assert.rejects(peer.init(features, { limits: { max_concurrent_requests: 1, max_message_bytes: 1048576 }, session_snapshot_transport_v1: profile }), /paired session transport/);
   await peer.close();
 });
+
+
+test('a live editor mount keeps its invocation view across newer publication and uses the published view after settlement', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'session-editor-view-'));
+  const entry = fixture(directory, `import { CustomEditor } from '@earendil-works/pi-coding-agent';
+export default pi => pi.on('session_start', (_, ctx) => {
+  ctx.ui.setEditorComponent((tui, theme, keys) => new class extends CustomEditor {
+    render(width) { return [...super.render(width), 'view:' + ctx.sessionManager.getBranch().length]; }
+  }(tui, theme, keys));
+});`);
+  const peer = launch(t, [entry], {hold: ['ui/open']});
+  await peer.init([...features, 'remote_ui', 'composer'], offer);
+  const snapshot = (entries, revision) => {
+    const bytes = Buffer.from(JSON.stringify(history(entries)));
+    return {bytes, descriptor: {transfer_id: hash(`editor:${revision}`), kind: 'history', owner,
+      view_revision: revision, head: entries.at(-1)?.id ?? null, bytes: bytes.length,
+      sha256: hash(bytes), entry_count: entries.length, branch_count: entries.length, preparation: null}};
+  };
+  const initial = snapshot([message('old', null, 'initial')], 1);
+  const start = peer.request('hook/run', {hook: 'session_start', payload: {binding: owner},
+    context: peer.context({session_view_revision: 1, session_entries: null, session_branch: null}),
+    session_snapshot: initial.descriptor});
+  await serve(peer, new Map([[initial.descriptor.transfer_id, initial.bytes]]), initial.descriptor.transfer_id);
+  const open = await peer.wait(f => f.method === 'ui/open');
+  peer.notify('context/updated', {resource_owner: owner, host: {session_view_revision: 2,
+    session_entries: null, session_branch: null}});
+  peer.send({jsonrpc: '2.0', id: open.id, result: {columns: 80, rows: 24, editor_mount_id: 'view-editor'}});
+  const response = await start.response;
+  assert.ok(response.result, JSON.stringify(response));
+  await peer.wait(f => f.method === 'ui/frame' && f.params.lines.includes('view:1'));
+
+  // A resize paints after the originating invocation has settled, while the
+  // newest owner publication is still being transferred. It must not retire
+  // the editor just because its retained callback cannot yet read history.
+  peer.notify('ui/resize', {surface_id: open.params.surface_id, columns: 81, rows: 24});
+  const next = snapshot([message('a', null, 'new'), message('b', 'a', 'newer')], 2);
+  const publication = peer.request('session/snapshot/prepare', {resource_owner: owner,
+    snapshot: next.descriptor, host: {session_view_revision: 2}});
+  await serve(peer, new Map([[next.descriptor.transfer_id, next.bytes]]), next.descriptor.transfer_id);
+  assert.ok((await publication.response).result);
+  await peer.wait(f => f.method === 'ui/frame' && f.params.lines.includes('view:2'));
+  await peer.close();
+});
