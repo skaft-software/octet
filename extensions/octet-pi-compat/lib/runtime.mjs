@@ -30,7 +30,7 @@ import { ExtensionIssues } from './issues.mjs';
 import { installHostKeybindings } from './keybindings.mjs';
 import { bindHostTheme, nativeTheme } from './theme.mjs';
 
-const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active']);
+const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select']);
 const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
@@ -427,14 +427,30 @@ export class Runtime {
       for (const waiter of this.foregroundWaiters) waiter(state);
     }
   }
-  bindReplacement(context, store) {
-    const previous = store.state.owner, next = context?.resource_owner;
-    ownerKey(next);
-    if (next.extension_instance_id !== previous.extension_instance_id || next.process_generation !== previous.process_generation || next.session_id === previous.session_id) invalid('replacement receipt owner');
-    const fresh = { ...store };
+  prepareSessionReplacement(store) {
+    // Admission belongs before session/create: its native lifecycle retires the
+    // old session before returning the setup receipt. Only this live command's
+    // one-shot continuation survives; no retained context gains new authority.
     this.assertOwner(store);
-    this.bind({ context }, fresh, { foreground: true });
-    return fresh;
+    const previous = store.state;
+    const liveCommand = () => {
+      store.controller.signal.throwIfAborted();
+      if (this.stopping || store.method !== 'command/execute' || !store.live || this.active.get(store.id)?.controller !== store.controller) throw rpcError(-32002, 'not_foreground_owner replacement requires its live command');
+    };
+    liveCommand();
+    let consumed = false;
+    return (context, sessionId) => {
+      liveCommand();
+      if (consumed || store.state !== previous || this.foreground !== previous) throw rpcError(-32002, 'not_foreground_owner replacement continuation retired');
+      consumed = true;
+      const next = context?.resource_owner;
+      ownerKey(next);
+      if (next.extension_instance_id !== previous.owner.extension_instance_id || next.process_generation !== previous.owner.process_generation || next.session_id === previous.owner.session_id) invalid('replacement receipt owner');
+      if (context.host?.session_id !== sessionId) invalid('setup replacement session id');
+      const fresh = { ...store };
+      this.bind({ context }, fresh, { foreground: true });
+      return fresh;
+    };
   }
   // Resolves once the host binds the session that replaced the active one.
   foregroundFor(sessionId, signal) {
@@ -539,9 +555,15 @@ export class Runtime {
       ...(changed.has('isError') ? { is_error: event.isError } : {}),
     };
   }
-  queued(store, work) {
+  queued(store, work, { holdOnCancel = false } = {}) {
     if (++this.hookQueued > 128) { this.hookQueued--; throw rpcError(-32012, 'bounds_exceeded ordered hook queue'); }
-    const result = this.hookTail.then(() => { store.controller.signal.throwIfAborted(); return cancellable(Promise.resolve().then(work), store.controller.signal); });
+    const running = this.hookTail.then(() => { store.controller.signal.throwIfAborted(); return Promise.resolve().then(work); });
+    const raced = cancellable(running, store.controller.signal);
+    const result = holdOnCancel ? raced.catch(async error => {
+      if (!store.controller.signal.aborted) throw error;
+      try { await running; } catch { /* Preserve cancellation after the callback settles. */ }
+      throw error;
+    }) : raced;
     this.hookTail = result.catch(() => {});
     return result.finally(() => { this.hookQueued--; });
   }
@@ -628,7 +650,7 @@ export class Runtime {
       const replaced = toolInput !== undefined && disposition.action === 'continue' && !isDeepStrictEqual(toolInput, payload.arguments ?? {});
       return { disposition, context: [], notifications: [], ...(customMessages.length ? { custom_messages: customMessages } : {}), ...(systemPrompt === undefined || systemPrompt === payload.system_prompt ? {} : { system_prompt: systemPrompt }),
         ...(replaced ? { arguments: plainJSON(toolInput, 'tool arguments', 1048576) } : {}), ...(store.toolTermination === undefined ? {} : { terminate: store.toolTermination }) };
-    });
+    }, { holdOnCancel: true });
     if (message.method === 'tool/render') {
       const tool = this.tools.get(p.name); if (!tool) invalid('unknown renderer');
       const components = [];

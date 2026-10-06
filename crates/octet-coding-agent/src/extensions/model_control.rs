@@ -12,13 +12,7 @@ pub(crate) fn apply_idle_model_control(
     app.synchronize_extension_provider_catalog();
     let (model, level) = match operation {
         ExtensionModelControl::Model { provider, id } => {
-            let model = app.catalog.models().find_map(|spec| {
-                let model = app.catalog.resolve(&spec.id).ok()?;
-                (model.spec.api_name == *id
-                    && pi_provider_id(&model) == *provider
-                    && model.endpoint.auth.is_configured())
-                .then_some(model)
-            });
+            let model = resolve_model(&app.catalog, provider, id);
             let Some(model) = model else {
                 return Ok(serde_json::json!({
                     "selected": false,
@@ -65,6 +59,17 @@ pub(crate) fn apply_idle_model_control(
         "reasoning": portable,
         "context_usage": context_usage(app.agent.session(), &app.model),
     }))
+}
+
+/// Resolve only configured native routes; Pi names never create endpoints.
+pub(crate) fn resolve_model(catalog: &ModelCatalog, provider: &str, id: &str) -> Option<Model> {
+    catalog.models().find_map(|spec| {
+        let model = catalog.resolve(&spec.id).ok()?;
+        (model.spec.api_name == id
+            && pi_provider_id(&model) == provider
+            && model.endpoint.auth.is_configured())
+        .then_some(model)
+    })
 }
 
 /// Measured context facts for the committed selection, never a token estimate.

@@ -1320,6 +1320,8 @@ pub(crate) struct ShellState {
     // Immutable queue roots make render publication O(1), including payloads.
     // A queue mutation copies only Arc handles, never other accepted messages.
     steering_queue: Arc<Vec<Arc<QueuedSteering>>>,
+    /// Native safe-boundary controls; presentation only, never an input owner.
+    pending_controls: Arc<Vec<String>>,
     /// Enter-submitted follow-ups remain local and editable until run settlement.
     follow_up_queue: Arc<std::collections::VecDeque<Arc<QueuedFollowUp>>>,
     /// Shared admission order across steering and follow-ups, independent of text.
@@ -1766,6 +1768,7 @@ impl ShellState {
             history_prepended: Default::default(),
             block_revisions: Default::default(),
             steering_queue: Default::default(),
+            pending_controls: Default::default(),
             follow_up_queue: Default::default(),
             next_pending_sequence: Default::default(),
             follow_up_ready: Default::default(),
@@ -5038,6 +5041,23 @@ impl InteractiveShell {
         self.state.borrow().follow_up_queue.len()
     }
 
+    /// Publish the bounded native control queue alongside pending input.
+    pub(crate) fn set_pending_controls(&mut self, controls: Vec<String>) -> bool {
+        let mut state = self.state.borrow_mut();
+        if *state.pending_controls != controls {
+            state.pending_controls = Arc::new(controls);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_pending_controls(&self) -> String {
+        let state = self.state.borrow();
+        input_overlays::render_pending_steering(&state, 200, 3).join("\n")
+    }
+
     /// Only authoritative completion or an explicit Escape dispatch arms the
     /// next queued prompt. Failure, Ctrl+C, and close never auto-retry it.
     pub fn settle_queued_follow_ups(&mut self, dispatch: bool) {
@@ -6047,6 +6067,52 @@ impl InteractiveShell {
             prefix: response.prefix,
             items: response.items,
         });
+        true
+    }
+
+    /// Cheap change counter for the live composer. Callers that only need to
+    /// notice edits avoid cloning the draft on every idle frame.
+    pub(crate) fn extension_editor_revision(&self) -> u64 {
+        self.state.borrow().editor.revision()
+    }
+
+    /// The current menu for the exact live draft, if one is displayed. Selection,
+    /// navigation and Tab acceptance all read this one fenced identity.
+    fn displayed_extension_menu(&self) -> Option<(u64, usize)> {
+        let state = self.state.borrow();
+        let overlay = state.extension_autocomplete.as_ref()?;
+        (normal_editor_focused(&state)
+            && overlay.revision == state.editor.revision()
+            && overlay.text == state.editor.text()
+            && overlay.cursor == state.editor.cursor()
+            && !overlay.items.is_empty())
+        .then_some((overlay.revision, overlay.items.len()))
+    }
+
+    /// Whether Tab belongs to the displayed extension menu instead of a fresh
+    /// query. Only a live, fenced menu can claim the key.
+    pub(crate) fn extension_autocomplete_displayed(&self) -> bool {
+        self.displayed_extension_menu().is_some()
+    }
+
+    /// Move the displayed extension choice without touching the draft. The
+    /// menu keeps its own selection; the composer cursor never becomes a
+    /// second, invisible selector. Returns whether the key belonged to it.
+    pub(crate) fn move_extension_autocomplete_selection(&mut self, forward: bool) -> bool {
+        let Some((revision, items)) = self.displayed_extension_menu() else {
+            return false;
+        };
+        let mut state = self.state.borrow_mut();
+        let current = state
+            .extension_autocomplete_selection
+            .filter(|(selected, _)| *selected == revision)
+            .map_or(0, |(_, index)| index);
+        let moved = if forward {
+            (current + 1).min(items - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        state.extension_autocomplete_selection = Some((revision, moved));
         true
     }
 

@@ -180,7 +180,7 @@ impl RemoteUi {
                             "theme": shell.extension_theme_get(name.as_deref()),
                         }));
                     }
-                    Chrome::ThemeList => {
+                    Chrome::ThemeList {} => {
                         let themes = shell.extension_theme_list();
                         validate_theme_list(&themes)?;
                         return Ok(serde_json::json!({"themes": themes}));
@@ -246,7 +246,7 @@ impl RemoteUi {
                             Chrome::HiddenThinking { label } => state.hidden_thinking_label = label,
                             Chrome::Get
                             | Chrome::ThemeGet { .. }
-                            | Chrome::ThemeList
+                            | Chrome::ThemeList {}
                             | Chrome::ThemeSet { .. }
                             | Chrome::ToolsExpanded { .. }
                             | Chrome::DesktopNotification { .. } => unreachable!(),

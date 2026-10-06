@@ -455,8 +455,9 @@ impl ExecutableExtensions {
                             receiver_budget -= 1;
                             continue;
                         };
-                        let accepted = interactive
-                            && process.is_running()
+                        // Registration publishes an inert process-owned chain, not
+                        // a foreground editor lease. Only a real shell queries it.
+                        let accepted = process.is_running()
                             && process.health_snapshot().generation == generation;
                         if accepted {
                             self.autocomplete_registrations.insert(

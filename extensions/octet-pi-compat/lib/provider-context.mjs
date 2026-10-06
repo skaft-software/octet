@@ -266,7 +266,7 @@ export async function projectContext(runtime, params, store) {
   store.providerContext = true;
   const signal = store.controller.signal;
   const live = () => { signal.throwIfAborted(); runtime.assertSessionOwner(store); };
-  return cancellable(runtime.queued(store, async () => {
+  return runtime.queued(store, async () => {
     live();
     const tools = prepareToolLoadout(runtime, store, request.tools);
     if (!runtime.events.get('context')?.length && !runtime.events.get('context_with_system')?.length) return { disposition: { action: 'continue' }, context: [], notifications: [], ...(tools ? { provider_context: { messages: request.messages, system: request.system ?? null, tools } } : {}) };
@@ -281,8 +281,8 @@ export async function projectContext(runtime, params, store) {
     for (const entry of [...runtime.events.get('context') || []]) {
       live(); const child = { ...store, factory: entry.factory }, visible = messages.slice();
       let result;
-      try { result = await cancellable(runtime.scope.run(child, () => entry.handler(
-        strict({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))), signal); }
+      try { result = await runtime.scope.run(child, () => entry.handler(
+        strict({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))); }
       catch (error) {
         live(); if (Number.isInteger(error?.code)) throw error;
         runtime.reportCallbackError('context', entry.factory, error);
@@ -306,8 +306,8 @@ export async function projectContext(runtime, params, store) {
       for (const entry of [...runtime.events.get('context_with_system') || []]) {
         live(); const child = { ...store, factory: entry.factory };
         let result;
-        try { result = await cancellable(runtime.scope.run(child, () => entry.handler(
-          strict({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))), signal); }
+        try { result = await runtime.scope.run(child, () => entry.handler(
+          strict({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))); }
         catch (error) {
           live(); if (Number.isInteger(error?.code)) throw error;
           runtime.reportCallbackError('context_with_system', entry.factory, error);
@@ -337,5 +337,5 @@ export async function projectContext(runtime, params, store) {
     await cancellable(runtime.flush(store), signal); live();
     return { disposition: { action: 'continue' }, context: [], notifications: [],
       ...(JSON.stringify(messages) === original && system === originalSystem && tools === undefined ? {} : { provider_context: { messages: piToCanonical(messages), system, ...(tools === undefined ? {} : { tools }) } }) };
-  }), signal);
+  }, { holdOnCancel: true });
 }

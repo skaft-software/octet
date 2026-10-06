@@ -14,10 +14,10 @@ use octet_agent::EntryValue;
 // reachable at the path it has always used.
 pub(super) use support::terminal_theme_test_config;
 
-mod after_response_frontend_tests;
 mod active_reports_and_status_tests;
 mod active_run_commands_and_steering_tests;
 mod active_subagent_and_queued_control_tests;
+mod after_response_frontend_tests;
 mod cache_warming_tests;
 mod codex_context_window_tests;
 mod compaction_ui_pump_tests;
@@ -29,6 +29,8 @@ mod goal_command_tests;
 mod held_input_and_manual_compaction_tests;
 mod idle_shell_and_clipboard_tests;
 mod pi_baseline_contract_tests;
+mod pi_busy_controls_tests;
+mod pi_completion_tests;
 mod pi_composer_slot_tests;
 mod pi_context_contract_tests;
 mod pi_contract_support;

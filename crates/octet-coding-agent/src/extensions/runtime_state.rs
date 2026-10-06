@@ -441,6 +441,8 @@ pub(crate) struct ExtensionAutocompleteUpdate {
     pub(crate) snapshot: ShellEditorSnapshot,
     pub(crate) prefix: String,
     pub(crate) items: Vec<ShellAutocompleteItem>,
+    /// Only explicit Tab queries may fall through to native path insertion.
+    pub(super) path_fallback: bool,
 }
 
 pub struct ExtensionToolRenderUpdate {
