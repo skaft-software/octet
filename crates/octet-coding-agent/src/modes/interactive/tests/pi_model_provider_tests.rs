@@ -181,7 +181,7 @@ export default pi => {
     const scoped = ctx.scopedModels;
     const denied = action => { try { action(); return false; } catch (error) { return error.code === -32601; } };
     appendFileSync(TRACE, JSON.stringify({ model, level: pi.getThinkingLevel(), contextLevel: ctx.thinkingLevel,
-      available, scoped, keyDenied: denied(() => ctx.modelRegistry.getApiKey(model)),
+      available, scoped, usingOAuth: ctx.modelRegistry.isUsingOAuth(model), keyDenied: denied(() => ctx.modelRegistry.getApiKey(model)),
       fullInventoryDenied: denied(() => ctx.modelRegistry.getAll()) }) + '\n');
     // Mutating this snapshot must not change the next host observation.
     if (model) model.input.push('not-a-native-modality');
@@ -228,6 +228,7 @@ async fn pi_model_facts_follow_the_real_host_and_invocation_scope() {
             value["available"].as_array().unwrap().len(),
             expected_available
         );
+        assert_eq!(value["usingOAuth"], false);
         assert_eq!(value["keyDenied"], true);
         assert_eq!(value["fullInventoryDenied"], true);
         assert!(!value["model"]["input"]
