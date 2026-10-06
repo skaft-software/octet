@@ -57,11 +57,9 @@ fn initialize(version: &str, feature: bool) -> InitializeResponse {
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-            session_snapshot_transport_v1: None,
             version: version.into(),
             features,
             limits: ExtensionProtocolLimits {
-                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 4,
             },

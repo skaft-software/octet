@@ -497,28 +497,19 @@ impl ExtensionProcess {
         let execution = self.tool_execution_context(context, connection.generation);
         let routed = session_leaf::owner_routes_enabled(&read_std_lock(&connection.protocol));
         if routed {
-            // Only the actually admitted causal seam may bind the routed
-            // linked invocation: the driver proves the sole Session writer is
-            // polled while nested work awaits. A dispatch path without that
-            // seam (parallel waves, recovery probes) still runs the hook
-            // through the ordinary admitted lease, exactly like a peer that did
-            // not select the profile; nothing about the transport may turn a
-            // working hook into a refusal. Appends stay governed by the real
-            // native leaf consumer either way.
-            if let Some(route) = context.progress.session_driver() {
-                let invocation =
-                    route
-                        .prepare(self, context.resource_owner)
-                        .await
-                        .map_err(|_| {
-                            ExtensionRuntimeError::Protocol(
-                                "session hook causal driver unavailable".into(),
-                            )
-                        })?;
-                return invocation.run_hook(hook, payload, execution).await;
-            }
+            let route = context.progress.session_driver().ok_or_else(|| {
+                ExtensionRuntimeError::Protocol("session hook requires active causal driver".into())
+            })?;
+            let invocation = route
+                .prepare(self, context.resource_owner)
+                .await
+                .map_err(|_| {
+                    ExtensionRuntimeError::Protocol("session hook causal driver unavailable".into())
+                })?;
+            invocation.run_hook(hook, payload, execution).await
+        } else {
+            self.run_hook(hook, payload, execution).await
         }
-        self.run_hook(hook, payload, execution).await
     }
 
     async fn run_before_tool_call(
