@@ -872,10 +872,15 @@ export default pi => pi.registerCommand('doom', {description: 'Fixture Doom', ha
     let IdleCommandOutcome::Continue(mut app) = outcome else {
         panic!("extension command changed application");
     };
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap(),
-        "fixture arguments"
-    );
+    let trace =
+        std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap_or_else(|error| {
+            panic!(
+                "the extension command handler did not run: {error}; debug={:?}; {}",
+                shell.debug_error(),
+                app.executable_extensions.inspect_text()
+            )
+        });
+    assert_eq!(trace, "fixture arguments");
     assert_eq!(shell.debug_error(), None);
     app.executable_extensions.shutdown().await;
 }
