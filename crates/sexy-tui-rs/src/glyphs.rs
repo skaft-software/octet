@@ -75,14 +75,4 @@ impl GlyphSet {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plain_mode_never_requires_unicode_or_icon_fonts() {
-        let glyphs = GlyphSet::for_capabilities(TerminalCapabilities::plain());
-        assert_eq!(glyphs.vertical, "|");
-        assert_eq!(glyphs.branch, "|-");
-        assert!(glyphs.ellipsis.is_ascii());
-    }
-}
+mod tests;
