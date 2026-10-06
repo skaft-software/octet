@@ -319,6 +319,7 @@ const SETUP_SESSION: &str = r#"
 import { appendFileSync } from 'node:fs';
 const trace = value => appendFileSync(TRACE, JSON.stringify(value) + '\n');
 export default pi => {
+  pi.on('session_shutdown', (_event, ctx) => trace({ step: 'end-options', id: ctx.sessionManager.getSessionId() }));
   pi.on('session_before_switch', (event, ctx) => trace({ step: 'before-options', event, id: ctx.sessionManager.getSessionId() }));
   pi.on('session_start', (_event, ctx) => trace({ step: 'start-options', id: ctx.sessionManager.getSessionId(), entries: ctx.sessionManager.getEntries() }));
   pi.registerCommand('probe', { handler: async (parentSession, ctx) => {
@@ -381,6 +382,19 @@ async fn pi_new_session_parent_and_writable_setup_commit_to_the_real_replacement
         step(&trace, "before-options")["event"],
         serde_json::json!({"type":"session_before_switch","reason":"new"}),
         "{observed}"
+    );
+    assert_eq!(step(&trace, "end-options")["id"], old_id, "{observed}");
+    let ended = trace
+        .iter()
+        .position(|event| event["step"] == "end-options")
+        .unwrap();
+    let setup_started = trace
+        .iter()
+        .position(|event| event["step"] == "setup")
+        .unwrap();
+    assert!(
+        ended < setup_started,
+        "old owner must retire before setup: {observed}"
     );
     let setup = step(&trace, "setup");
     assert_eq!(setup["id"], new_id, "{observed}");
@@ -601,4 +615,174 @@ async fn pi_before_fork_cancels_before_entry_lookup() {
         serde_json::json!({"type":"session_before_fork","entryId":"not-reached","position":"at"})
     );
     assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup() {
+    use super::support::{scripted_model, text_turn, HeldApi};
+    let factory = SETUP_SESSION
+        .replace("const result = await ctx.newSession", "const replacement = ctx.newSession")
+        .replace("trace({ step: 'after-options', result });", "trace({ step: 'requested-options', id: before }); const result = await replacement; trace({ step: 'after-options', result });");
+    let (directory, mut app) = pi_app(&factory);
+    let (server, started, release) = HeldApi::start(text_turn()).await;
+    let model = scripted_model(&server.uri);
+    app.catalog
+        .register_endpoint((*model.endpoint).clone())
+        .unwrap();
+    app.catalog.register_model((*model.spec).clone()).unwrap();
+    app = rebuild_app(app, Some(model), None, None, None).unwrap();
+    app.executable_extensions
+        .activate_session_lifecycle_driver();
+    let mut shell = InteractiveShell::test_shell();
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input)
+        .await
+        .unwrap();
+    let old_path = app.agent.session().path().to_owned();
+    let old_id = session_id(app.agent.session());
+    let run_id = shell.begin_run("test");
+    let mut run = app
+        .agent
+        .prompt("finish in the original session")
+        .await
+        .unwrap();
+    shell.set_awaiting_provider(run_id);
+    // Reach an actual held provider response, not a fabricated busy shell flag.
+    tokio::pin!(started);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::select! {
+                result = &mut started => { result.unwrap(); break; }
+                event = run.next() => shell.on_run_event(run_id, &event.expect("run must remain busy")),
+            }
+        }
+    }).await.unwrap();
+    let old_busy_bytes = std::fs::read(&old_path).unwrap();
+    // A live command may outlast the boundary at which it was admitted. Drive
+    // its real native pump without lending it the Agent borrowed by this Run.
+    let mut command = app
+        .executable_extensions
+        .prepare_owned_command(
+            Some("octet-pi-compat"),
+            "probe",
+            vec![old_path.to_str().unwrap().into()],
+            false,
+            0,
+        )
+        .unwrap();
+    let dialogs = app.executable_extensions.lifecycle_snapshot();
+    {
+        let mut frontend = InteractiveExtensionConfirmations {
+            shell: &mut shell,
+            input: &mut input,
+            dialogs: &dialogs,
+        };
+        let requested = async {
+            loop {
+                if trace(&directory)
+                    .iter()
+                    .any(|event| event["step"] == "requested-options")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // Keep pumping beyond the real request dispatch and a frontend tick.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                result = command.advance(&mut app.executable_extensions, &mut frontend, true, None) => panic!("busy command handed off or settled: {:?}", result.map(|request| request.is_some())),
+                _ = requested => {}
+            }
+        }).await.unwrap();
+    }
+    assert!(shell.is_agent_run_active());
+    let busy_trace = trace(&directory);
+    assert_eq!(step(&busy_trace, "requested-options")["id"], old_id);
+    assert!(
+        !busy_trace
+            .iter()
+            .any(|event| event["step"] == "setup" || event["step"] == "before-options"),
+        "{busy_trace:#?}"
+    );
+    assert_eq!(std::fs::read(&old_path).unwrap(), old_busy_bytes);
+    release.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = run.next().await {
+            shell.on_run_event(run_id, &event);
+            if let AgentEvent::RunFinished { reason, .. } = event {
+                assert!(
+                    matches!(reason, octet_agent::FinishReason::Completed),
+                    "{reason:?}"
+                );
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(run); // Only now may the idle lifecycle owner replace the writer.
+    assert!(!shell.is_agent_run_active());
+    let settled_bytes = std::fs::read(&old_path).unwrap();
+    assert_ne!(settled_bytes, old_busy_bytes);
+    let output = tokio::time::timeout(Duration::from_secs(20), async {
+        let mut frontend = InteractiveExtensionConfirmations {
+            shell: &mut shell,
+            input: &mut input,
+            dialogs: &dialogs,
+        };
+        let failure = loop {
+            match command
+                .advance(
+                    &mut app.executable_extensions,
+                    &mut frontend,
+                    true,
+                    Some((&mut app.agent, &app.sessions)),
+                )
+                .await
+            {
+                Ok(Some(request)) => {
+                    if command
+                        .during_lifecycle(frontend.apply_lifecycle(&mut app, request))
+                        .await
+                    {
+                        command.session_replaced();
+                    }
+                }
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            }
+        };
+        command
+            .finish(&mut app.executable_extensions, &mut frontend, failure)
+            .await
+    })
+    .await
+    .unwrap();
+    let new_path = app.agent.session().path().to_owned();
+    let new_id = session_id(app.agent.session());
+    app.executable_extensions.shutdown().await;
+    let observed = trace(&directory);
+    output.unwrap_or_else(|error| panic!("{error:#}\n{observed:#?}"));
+    assert_ne!(new_id, old_id);
+    assert_eq!(step(&observed, "setup")["id"], new_id);
+    assert_eq!(step(&observed, "with-options")["id"], new_id);
+    assert_eq!(
+        step(&observed, "after-options")["result"],
+        serde_json::json!({"cancelled": false})
+    );
+    assert_eq!(
+        app.agent
+            .session()
+            .header()
+            .unwrap()
+            .parent_session
+            .as_deref(),
+        old_path.to_str()
+    );
+    assert_eq!(entries_naming(&new_path, "setup-complete").len(), 1);
+    assert_eq!(std::fs::read(&old_path).unwrap(), settled_bytes);
+    assert!(!serde_json::to_string(app.agent.session().entries())
+        .unwrap()
+        .contains("finish in the original session"));
 }
