@@ -143,10 +143,11 @@ test('completed events checkpoint final text once, including no-op/release; subm
     peer.editorKey(id, key, kind);
     const write = await peer.wait(f => f.method === 'composer/set');
     checkpoint(write, id, index, index); assert.equal(write.params.text, text);
+    assert.equal(peer.seen.some(f => f.method === 'composer/submit'), false);
     assert.equal(peer.seen.some(f => f.method === 'session/send_user_message'), false);
     ack(peer, write);
   }
-  assert.equal((await peer.wait(f => f.method === 'session/send_user_message')).params.text, 'complete');
+  assert.equal((await peer.wait(f => f.method === 'composer/submit')).params.text, 'complete');
   assert.equal(peer.seen.some(f => f.method === 'composer/set' && f.params.text === 'intermediate'), false);
   await peer.close();
 });
@@ -299,11 +300,94 @@ test('CustomEditor retains its draft until native composer admission, and follow
   assert.equal(peer.seen.some(f => f.method === 'composer/set' && f.params.text === ''), false);
   peer.send({jsonrpc: '2.0', id: submit.id, result: {accepted: false}});
   await peer.wait(frame('/model'));
-  peer.editorKey(id, 'y', 'press', ['ctrl']);
+  peer.editorKey(id, 'y', 'press', ['control']);
   const follow = await peer.wait(f => f.method === 'composer/submit');
   assert.equal(follow.params.text, '/model');
   assert.equal(follow.params.follow_up, true);
   peer.send({jsonrpc: '2.0', id: follow.id, result: {accepted: true}});
+  await peer.wait(f => f.method === 'composer/set' && f.params.text === '');
+  await peer.close();
+});
+
+for (const error of [false, true]) test(`rejected genuine Pi Editor keeps paste payloads and undo (${error ? 'RPC error' : 'native refusal'})`, async t => {
+  const entry = await fixture(t, `let editor;
+    pi.registerTool({name: 'state', description: 'inspect editor', parameters: {type: 'object'},
+      execute: async () => ({content: [{type: 'text', text: JSON.stringify({
+        text: editor.getText(), expanded: editor.getExpandedText(), pastes: [...editor.pastes], undo: editor.undoStack,
+      })}]})});
+    pi.registerCommand('paste', {handler: () => editor.handleInput('\x1b[200~' + 'paste-line\\n'.repeat(50) + '\x1b[201~')});`,
+    '(tui,theme,kb) => editor = new CustomEditor(tui,theme,kb)');
+  const peer = launch(t, [entry], { composer: 'prefix', hold: ['composer/submit'] });
+  await peer.init(); await peer.start();
+  const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
+  assert.ok((await peer.command('paste').response).result);
+  const state = async () => {
+    const reply = await peer.request('tool/call', {name: 'state', arguments: {}, context: peer.context()}).response;
+    return JSON.parse(reply.result.content[0].text);
+  };
+  const before = await state();
+  assert.ok(before.pastes.length > 0); assert.notEqual(before.text, before.expanded);
+  peer.editorKey(id, 'Enter');
+  const request = await peer.wait(f => f.method === 'composer/submit');
+  assert.equal(request.params.text, before.expanded.trim());
+  assert.deepEqual(await state(), before, 'no optimistic clearing before admission');
+  peer.send({jsonrpc: '2.0', id: request.id, ...(error ? {error: {code: -32602, message: 'admission refused'}} : {result: {accepted: false}})});
+  // A subsequent fenced no-op checkpoints only after the disposition settles.
+  peer.editorKey(id, 'ArrowLeft', 'release');
+  await peer.wait(f => f.method === 'composer/set' && f.params.editor_checkpoint.input_revision === 2);
+  assert.deepEqual(await state(), before);
+  assert.equal(peer.seen.some(f => f.method === 'ui/close'), false);
+  peer.editorKey(id, '-', 'press', ['control']); // Pi's default undo binding.
+  await peer.wait(f => f.method === 'composer/set' && f.params.editor_checkpoint.input_revision === 3);
+  assert.equal((await state()).text, 'prefix', 'undo restores the pre-paste draft');
+  await peer.close();
+});
+
+for (const accepted of [false, true]) test(`input received during admission is delivered once after ${accepted ? 'acceptance' : 'refusal'}`, async t => {
+  const peer = launch(t, [await fixture(t)], { composer: 'draft', hold: ['composer/submit'] });
+  await peer.init(); await peer.start();
+  const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
+  peer.editorKey(id, 'Enter');
+  const submit = await peer.wait(f => f.method === 'composer/submit');
+  peer.editorKey(id, 'x'); peer.editorKey(id, 'y');
+  peer.send({jsonrpc: '2.0', id: submit.id, result: {accepted}});
+  const last = await peer.wait(f => f.method === 'composer/set' && f.params.editor_checkpoint.input_revision === 3);
+  assert.equal(last.params.text, accepted ? 'xy' : 'draftxy');
+  await peer.wait(frame(accepted ? 'xy' : 'draftxy'));
+  await peer.close();
+});
+
+test('late accepted submit after native rescue cannot clear the retired editor or run its callback', async t => {
+  const peer = launch(t, [await fixture(t, '', `(tui,theme,kb) => {
+    const c = new CustomEditor(tui,theme,kb);
+    c.onSubmit = () => { throw new Error('retired submit callback ran'); }; return c;
+  }`)], {composer: 'draft', hold: ['composer/submit']});
+  await peer.init(); await peer.start();
+  const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
+  peer.editorKey(id, 'Enter');
+  const submit = await peer.wait(f => f.method === 'composer/submit');
+  peer.notify('ui/closed', {surface_id: id, reason: 'host rescue'});
+  peer.send({jsonrpc: '2.0', id: submit.id, result: {accepted: true}});
+  await peer.close();
+  assert.equal(peer.seen.some(f => f.method === 'composer/set' && f.params.text === ''), false);
+  assert.doesNotMatch(peer.stderr(), /retired submit callback ran/);
+});
+
+test('resolved submit override replaces Enter and repeat events cannot submit', async t => {
+  const peer = launch(t, [await fixture(t)], {composer: 'draft', hold: ['composer/submit']});
+  await peer.init();
+  await peer.start({keybindings: {...(await import('./helper.mjs')).host.keybindings, 'tui.input.submit': ['ctrl+x']}});
+  const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
+  peer.editorKey(id, 'Enter');
+  await peer.wait(f => f.method === 'composer/set' && f.params.editor_checkpoint.input_revision === 1);
+  assert.equal(peer.seen.some(f => f.method === 'composer/submit'), false);
+  peer.editorKey(id, 'x', 'repeat', ['control']);
+  await peer.wait(f => f.method === 'composer/set' && f.params.editor_checkpoint.input_revision === 2);
+  assert.equal(peer.seen.some(f => f.method === 'composer/submit'), false);
+  peer.editorKey(id, 'x', 'press', ['control']);
+  const submit = await peer.wait(f => f.method === 'composer/submit');
+  assert.equal(submit.params.text, 'draft');
+  peer.send({jsonrpc: '2.0', id: submit.id, result: {accepted: true}});
   await peer.wait(f => f.method === 'composer/set' && f.params.text === '');
   await peer.close();
 });

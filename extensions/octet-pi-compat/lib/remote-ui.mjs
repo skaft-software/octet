@@ -3,6 +3,7 @@ import { keyData, mouseData, reservedKey } from './keys.mjs';
 import { mouseModeIntent } from './transport.mjs';
 import { theme, hostKeybindings } from './theme.mjs';
 import { getAutocompleteProvider } from './completions.mjs';
+import { bindEditorAdmission } from './editor-admission.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 
 const CURSOR_MARKER = '\x1b_pi:c\x07';
@@ -249,15 +250,15 @@ export class RemoteUI {
   }
   async bindEditor(surface) {
     const c = surface.component, store = surface.store;
-    this.runtime.require('composer'); this.runtime.require('message_injection');
+    this.runtime.require('composer');
     if (typeof c.setText !== 'function' || typeof c.getText !== 'function') unsupported('editor component', 'requires getText/setText');
     const { text } = await this.runtime.hostCall('composer/get', {}, store);
     if (surface.closed) return;
     store.state.host.composer_text = text; c.setText(text);
     if (this.runtime.features.has('autocomplete')) c.setAutocompleteProvider?.(getAutocompleteProvider(this.runtime, store));
-    const change = c.onChange, submit = c.onSubmit;
+    const change = c.onChange;
     const editor = surface.editor = { pending: 0, mutating: 0, inputRevision: 0, checkpointRevision: 0,
-      retired: false, tail: Promise.resolve(), submissions: null };
+      retired: false, tail: Promise.resolve(), submissions: null, admitting: false, changeRevision: 0 };
     const ordered = action => {
       if (editor.pending >= 128) throw rpcError(-32012, 'bounds_exceeded editor update queue');
       editor.pending++;
@@ -289,25 +290,11 @@ export class RemoteUI {
     c.onChange = value => {
       if (surface.closed) return;
       store.state.host.composer_text = value;
+      editor.changeRevision++;
       if (!editor.mutating) editor.checkpoint();
       change?.(value);
     };
-    c.onAction?.('app.clear', () => c.setText(''));
-    c.onSubmit = value => {
-      if (surface.closed) return;
-      const send = () => ordered(async () => {
-        await this.runtime.hostCall('session/send_user_message', { text: value }, store);
-        // A callback observes host admission, never an optimistic send. It must
-        // not run after rescue/disposal, even if a late admission arrives.
-        if (surface.closed) return;
-        this.runtime.assertOwner(store);
-        return this.runtime.scope.run(store, () => submit?.(value));
-      });
-      if (editor.submissions) {
-        if (editor.submissions.length >= 128) throw rpcError(-32012, 'bounds_exceeded editor submissions');
-        editor.submissions.push(send);
-      } else { editor.checkpoint(); send(); }
-    };
+    bindEditorAdmission(this, surface, ordered);
     // Custom setText may normalize the native seed before its first frame.
     if (c.getText() !== text) await editor.checkpoint();
   }
@@ -342,7 +329,7 @@ export class RemoteUI {
           || !Number.isSafeInteger(issued.input_revision) || issued.input_revision !== previous + 1) invalid('editor input mount/revision mismatch');
       bounded(params.key, 'editor key', 32, { controls: true });
       const data = keyData(params);
-      if (!surface.ready) {
+      if (!surface.ready || editor?.admitting) {
         if (surface.initialInputs.length >= 128) throw rpcError(-32012, 'bounds_exceeded editor initial input queue');
         // Keep only bounded normalized fields, never a raw terminal byte stream,
         // arbitrary notification payload, or an acknowledged/replayed input.
@@ -351,6 +338,7 @@ export class RemoteUI {
       }
       editor.mutating++;
       editor.submissions = [];
+      editor.inputKind = params.kind ?? 'press';
       try { surface.tui.input(data, params.kind === 'release'); } finally { editor.mutating--; }
       if (!surface.closed) {
         // Intermediate onChange calls cannot acknowledge an unfinished input.
