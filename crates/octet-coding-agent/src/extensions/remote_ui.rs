@@ -1,5 +1,6 @@
 //! Foreground leases for cached API 0.4 remote components. No render RPCs.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
@@ -107,6 +108,10 @@ pub(super) struct RemoteUi {
     components: Arc<ExtensionComponentSurface>,
     next_id: u64,
     chrome: Option<ChromeLease>,
+    // Terminal input waiting for a completed editor checkpoint. These remain
+    // events for the ordinary native dispatcher, never a second submit path.
+    pending_input: VecDeque<(String, Event)>,
+    replaying_input: bool,
 }
 
 type Refusal = (ExtensionRequestFailure, String);
@@ -393,6 +398,7 @@ impl RemoteUi {
 
     fn remove(&mut self, index: usize, reason: &str, notify: bool) -> Option<String> {
         let mount = self.mounts.remove(index);
+        self.pending_input.retain(|(id, _)| id != &mount.view.id);
         Arc::make_mut(&mut self.components).remove_component(&mount.view.id);
         if notify
             && mount.process.is_running()
@@ -647,6 +653,72 @@ impl RemoteUi {
         true
     }
 
+    pub(super) fn take_ready_composer_event(&mut self) -> Option<Event> {
+        // An explicit fullscreen view owns fresh input, never a buffered
+        // composer event. Keep those events fenced to their editor mount.
+        if self
+            .mounts
+            .iter()
+            .any(|mount| mount.view.placement == ExtensionRemoteUiPlacement::Fullscreen)
+        {
+            return None;
+        }
+        let (id, _) = self.pending_input.front()?;
+        let mount = self.mounts.iter().find(|mount| &mount.view.id == id)?;
+        let editor = mount.editor.as_ref()?;
+        if editor.input_revision != editor.acknowledged_input_revision || editor.expected_clear {
+            return None;
+        }
+        self.replaying_input = true;
+        self.pending_input.pop_front().map(|(_, event)| event)
+    }
+
+    /// Preserve terminal ordering across a draft-sensitive native decision.
+    /// Buffered data stays bounded and belongs to the original editor mount.
+    fn defer_composer_event(
+        &mut self,
+        index: usize,
+        shell: &mut InteractiveShell,
+        event: &Event,
+    ) -> bool {
+        let editor = self.mounts[index].editor.as_ref().expect("editor mount");
+        let waiting =
+            editor.input_revision != editor.acknowledged_input_revision || editor.expected_clear;
+        let ordered_data = matches!(event, Event::Key(_) | Event::Paste(_));
+        let close = shell.composer_event_interrupts_input(event);
+        if !close
+            && ordered_data
+            && ((!self.pending_input.is_empty())
+                || waiting && shell.composer_event_needs_checkpoint(event))
+        {
+            let bytes = |event: &Event| match event {
+                Event::Paste(text) => text.len(),
+                _ => 0,
+            };
+            if self.pending_input.len() >= 128
+                || self
+                    .pending_input
+                    .iter()
+                    .map(|(_, event)| bytes(event))
+                    .sum::<usize>()
+                    + bytes(event)
+                    > octet_agent::extension_process::MAX_EXTENSION_COMPOSER_TEXT_BYTES
+            {
+                shell.error(
+                    "Custom editor input queue is full; this event was not admitted.".into(),
+                );
+            } else {
+                self.pending_input
+                    .push_back((self.mounts[index].view.id.clone(), event.clone()));
+            }
+            return true;
+        }
+        if close {
+            self.pending_input.clear();
+        }
+        false
+    }
+
     /// Route one terminal event to a remote surface. One terminal owner keeps a
     /// fixed order: the host's reserved grammar and slash menu run before the
     /// composer slot's editor, while an explicit full-screen extension view is
@@ -658,6 +730,7 @@ impl RemoteUi {
         event: &Event,
         active: bool,
     ) -> bool {
+        let replaying = std::mem::take(&mut self.replaying_input);
         if shell.remote_ui_input_blocked() {
             return false;
         }
@@ -675,6 +748,9 @@ impl RemoteUi {
         };
         let fullscreen =
             self.mounts[index].view.placement == ExtensionRemoteUiPlacement::Fullscreen;
+        if !fullscreen && !replaying && self.defer_composer_event(index, shell, event) {
+            return true;
+        }
         if !fullscreen && !shell.slot_editor_takes_key(event, active) {
             // Host-reserved keys, the open slash menu, and every non-key event
             // keep their native owner. The slot editor sees only the remainder.

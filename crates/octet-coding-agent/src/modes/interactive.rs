@@ -621,7 +621,11 @@ where
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
                 return Ok(Idle::Quit);
             }
-            maybe = input.next() => {
+            maybe = async {
+                if let Some(event) = executable_extensions.take_ready_composer_event(shell) {
+                    Some(Ok(event))
+                } else { input.next().await }
+            } => {
                 let event = match maybe {
                     Some(Ok(event)) => event,
                     Some(Err(error)) => return Err(error.into()),
@@ -3869,6 +3873,8 @@ where
             incoming = async {
                 if let Some(event) = clipboard_fallback.take() {
                     (Some(Ok(event)), true)
+                } else if let Some(event) = executable_extensions.take_ready_composer_event(shell) {
+                    (Some(Ok(event)), false)
                 } else {
                     (input.next().await, false)
                 }

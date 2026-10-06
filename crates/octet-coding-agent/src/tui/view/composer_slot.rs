@@ -81,6 +81,7 @@ impl InteractiveShell {
     }
 
     /// Whether a custom editor, rather than the native editor, draws the slot.
+    #[cfg(test)]
     pub(crate) fn extension_editor_owns_composer(&self) -> bool {
         self.composer_slot_mount().is_some()
     }
@@ -124,6 +125,40 @@ impl InteractiveShell {
             && !HOST_RESERVED_EDITOR_KEYS
                 .iter()
                 .any(|id| self.input_dispatch.bindings.matches(key, id))
+    }
+
+    /// Draft-sensitive native actions need the completed checkpoint, not a
+    /// partial draft from an earlier key in the same terminal read.
+    pub(crate) fn composer_event_needs_checkpoint(&self, event: &Event) -> bool {
+        let Event::Key(key) = event else {
+            return false;
+        };
+        key.kind == KeyEventKind::Press
+            && [
+                "tui.input.submit",
+                "app.message.followUp",
+                "tui.select.confirm",
+                "tui.select.up",
+                "tui.select.down",
+                "tui.select.pageUp",
+                "tui.select.pageDown",
+                "tui.input.tab",
+            ]
+            .iter()
+            .any(|id| self.input_dispatch.bindings.matches(key, id))
+    }
+
+    /// Clear/cancel/close stay immediate even while an editor ACK is pending,
+    /// including user overrides. Key releases must not discard queued input.
+    pub(crate) fn composer_event_interrupts_input(&self, event: &Event) -> bool {
+        let Event::Key(key) = event else {
+            return false;
+        };
+        key.kind == KeyEventKind::Press
+            && (crate::tui::keymap::is_close_key(key)
+                || ["app.clear", "app.interrupt", "app.exit"]
+                    .iter()
+                    .any(|id| self.input_dispatch.bindings.matches(key, id)))
     }
 
     /// Record a host decision for the slot editor's text. The extension host

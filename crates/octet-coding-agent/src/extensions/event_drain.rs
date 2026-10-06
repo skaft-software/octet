@@ -61,6 +61,16 @@ impl ExecutableExtensions {
         changed
     }
 
+    /// Re-enter the native input dispatcher only after the slot's completed
+    /// checkpoint (and any accepted host clear) has settled.
+    pub(crate) fn take_ready_composer_event(
+        &mut self,
+        shell: &mut InteractiveShell,
+    ) -> Option<Event> {
+        self.sync_remote_ui(shell);
+        self.remote_ui.take_ready_composer_event()
+    }
+
     /// Focused keys reach a remote surface only after the host's reserved
     /// grammar and open slash menu have had their chance. Reconcile before
     /// routing after every wake.

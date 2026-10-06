@@ -327,8 +327,8 @@ for (const echo of [false, true]) test(`rejected genuine Pi Editor keeps paste p
   const before = await state();
   assert.ok(before.pastes.length > 0); assert.notEqual(before.text, before.expanded);
   if (echo) {
-    peer.notify('ui/editor-text', {surface_id: id, text: before.text});
-    await peer.wait(f => f.method === 'composer/set' && f.params.text === before.text);
+    peer.notify('ui/editor-text', {surface_id: id, text: before.expanded});
+    await peer.wait(f => f.method === 'composer/set' && f.params.text === before.expanded);
   }
   assert.deepEqual(await state(), before, 'native refusal never resets draft/pastes/undo');
   // A subsequent fenced no-op keeps the same genuine component state.

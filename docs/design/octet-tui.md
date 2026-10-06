@@ -539,7 +539,11 @@ to registered names only at the owner-fenced command dispatcher.
 The extension editor acknowledges completed keys/pastes using the existing
 `composer/set` mount/input/checkpoint fence. Native admission reads the expanded
 checkpoint draft, so slash commands, busy steering and follow-ups use the ordinary
-idle/active input path. No separate reverse submission RPC remains. Host text
+idle/active input path. Draft-sensitive actions wait for all issued editor input
+and any accepted clear to be acknowledged; later keys/pastes retain terminal
+order in a mount-fenced queue (128 events, 256 KiB paste bytes). Clear, cancel and
+close remain immediate, and retirement discards the buffered events rather than
+replaying them into the replacement. No separate reverse submission RPC remains. Host text
 decisions (completion, accepted clear, restore, clipboard paste) use
 `ui/editor-text`; unchanged refused drafts do not reset paste payloads or undo.
 An empty clear receipt can finish after an admitted command opens a panel, without

@@ -184,6 +184,11 @@ reverse RPC and no custom-editor `session/send_user_message` submission path.
 Native admission reads the last acknowledged, expanded composer draft, parses
 slash commands through the same registry, steers busy Enter, and queues Ctrl+S
 follow-up. Refusal leaves the component's draft/pastes/undo untouched.
+If issued input is still unacknowledged, draft-sensitive host actions wait for its
+completed checkpoint. Later keys/pastes keep their order in a mount-bound buffer
+of at most 128 events and 256 KiB paste bytes; overflow is reported without
+admitting that event. Clear, cancel and close bypass the wait. Retirement drops
+the buffer; an explicit fullscreen view never receives buffered composer events.
 
 An accepted submission clears the native draft and sends a `ui/editor-text`
 replacement to the component. Completion and restored drafts use the same seam.

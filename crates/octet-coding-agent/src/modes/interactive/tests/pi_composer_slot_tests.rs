@@ -13,14 +13,20 @@ use super::*;
 /// command and a shared command name for the single registry.
 const SLOT_FACTORY: &str = r#"
 import { CustomEditor } from '@earendil-works/pi-coding-agent';
+import { appendFileSync } from 'node:fs';
 class SlotEditor extends CustomEditor {
   render(width) { return [...super.render(width), 'NATIVE-SLOT-EDITOR']; }
 }
 export default pi => {
+  let editor;
+  pi.registerCommand('inspect-editor', {handler: () => appendFileSync(TRACE, JSON.stringify({
+    text: editor.getText(), expanded: editor.getExpandedText(), pastes: [...editor.pastes], undo: editor.undoStack,
+  }) + '\n')});
   pi.registerCommand('fixture-command', {handler: () => {}});
+  pi.registerCommand('retire-editor', {handler: (_args, ctx) => ctx.ui.setEditorComponent(undefined)});
   pi.registerCommand('shared', {handler: () => {}});
   pi.on('session_start', (_, ctx) => {
-    ctx.ui.setEditorComponent((t, theme, keys) => new SlotEditor(t, theme, keys));
+    ctx.ui.setEditorComponent((t, theme, keys) => editor = new SlotEditor(t, theme, keys));
     ctx.ui.setFooter(() => ({render: () => ['NATIVE-SLOT-FOOTER'], invalidate() {}}));
   });
 };
@@ -82,7 +88,9 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
 
 /// Deliver events on a real timer so the production loop can drain the adapter
 /// between two keystrokes exactly as a user's typing would.
-fn scripted(events: Vec<(u64, Event)>) -> tokio_stream::wrappers::ReceiverStream<std::io::Result<Event>> {
+fn scripted(
+    events: Vec<(u64, Event)>,
+) -> tokio_stream::wrappers::ReceiverStream<std::io::Result<Event>> {
     let (sender, receiver) = tokio::sync::mpsc::channel(64);
     tokio::spawn(async move {
         for (delay_ms, event) in events {
@@ -103,15 +111,22 @@ fn scripted(events: Vec<(u64, Event)>) -> tokio_stream::wrappers::ReceiverStream
 async fn type_into_slot(app: &mut App, shell: &mut InteractiveShell, text: &str) {
     for character in text.chars() {
         assert!(app.executable_extensions.route_remote_ui_event(
-            shell, &key(KeyCode::Char(character), KeyModifiers::NONE), false));
+            shell,
+            &key(KeyCode::Char(character), KeyModifiers::NONE),
+            false
+        ));
         tokio::time::timeout(Duration::from_secs(3), async {
             let expected = format!("{}{character}", shell.extension_editor_snapshot().text);
             loop {
                 app.executable_extensions.drain_events_for_shell(shell);
-                if shell.extension_editor_snapshot().text == expected { break; }
+                if shell.extension_editor_snapshot().text == expected {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-        }).await.expect("slot checkpoint did not arrive");
+        })
+        .await
+        .expect("slot checkpoint did not arrive");
     }
 }
 
@@ -127,19 +142,25 @@ struct IdleDriver<'a> {
 }
 
 impl IdleDriver<'_> {
-    async fn next_idle(&mut self, input: &mut tokio_stream::wrappers::ReceiverStream<std::io::Result<Event>>) -> Idle {
-        tokio::time::timeout(Duration::from_secs(8), wait_for_prompt(
-            self.shell,
-            input,
-            &mut self.scroll,
-            &mut self.ticks,
-            self.extensions,
-            None,
-            &mut self.reload_tick,
-            &self.reload_watcher,
-            &mut self.reload,
-            Some(self.agent),
-        ))
+    async fn next_idle(
+        &mut self,
+        input: &mut tokio_stream::wrappers::ReceiverStream<std::io::Result<Event>>,
+    ) -> Idle {
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            wait_for_prompt(
+                self.shell,
+                input,
+                &mut self.scroll,
+                &mut self.ticks,
+                self.extensions,
+                None,
+                &mut self.reload_tick,
+                &self.reload_watcher,
+                &mut self.reload,
+                Some(self.agent),
+            ),
+        )
         .await
         .expect("custom editor idle acceptance timed out")
         .unwrap()
@@ -232,10 +253,7 @@ async fn native_pi_custom_editor_admits_commands_and_text_through_the_slot() {
             _ => panic!("slot editor bypassed native admission for {text}"),
         }
         // The draft left the slot only after native admission consumed it.
-        pump_until(&mut app, &mut shell, |frame| {
-            !frame.contains(text)
-        })
-        .await;
+        pump_until(&mut app, &mut shell, |frame| !frame.contains(text)).await;
         assert!(
             shell.extension_editor_snapshot().text.is_empty(),
             "{text} was not consumed"
@@ -286,11 +304,8 @@ export default pi => pi.registerCommand('fullscreen', {handler: async (_, ctx) =
 }});
 "#;
     let (_directory, mut app, mut shell) = {
-        let (directory, mut app, mut shell) = pi_ui_app_with_native_command(
-            factory,
-            "first-owner",
-            "shared",
-        );
+        let (directory, mut app, mut shell) =
+            pi_ui_app_with_native_command(factory, "first-owner", "shared");
         let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
         tokio::time::timeout(
             Duration::from_secs(8),
@@ -358,7 +373,8 @@ async fn native_pi_custom_editor_registry_namespaces_a_shared_command_name() {
                 .command_owner(&entry.public_name)
                 .as_deref(),
             Some(entry.owner.as_str()),
-            "{}", entry.public_name
+            "{}",
+            entry.public_name
         );
         assert_eq!(
             app.executable_extensions
@@ -370,9 +386,7 @@ async fn native_pi_custom_editor_registry_namespaces_a_shared_command_name() {
     }
     let public_name = namespaced.public_name.clone();
     type_into_slot(&mut app, &mut shell, &format!("/{public_name}")).await;
-    let mut input = scripted(vec![
-        (400, key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
-    ]);
+    let mut input = scripted(vec![(400, key(KeyCode::Char('d'), KeyModifiers::CONTROL))]);
     let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
         .await
         .next_idle(&mut input)
@@ -388,7 +402,13 @@ async fn native_pi_custom_editor_registry_namespaces_a_shared_command_name() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_custom_editor_busy_slot_steers_queues_and_keeps_refused_draft() {
     use super::support::{scripted_agent_with_delay, test_run_inspection};
-    for text in ["/model", "/fixture-command", "steer text", "follow-up text", "refused text"] {
+    for text in [
+        "/model",
+        "/fixture-command",
+        "steer text",
+        "follow-up text",
+        "refused text",
+    ] {
         let (_directory, mut app, mut shell) = live_slot_app().await;
         shell.set_size(96, 24);
         pump_until(&mut app, &mut shell, |frame| {
@@ -408,10 +428,21 @@ async fn native_pi_custom_editor_busy_slot_steers_queues_and_keeps_refused_draft
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
-        let mut input = scripted(vec![(10, key(
-            if follow_up { KeyCode::Char('s') } else { KeyCode::Enter },
-            if follow_up { KeyModifiers::CONTROL } else { KeyModifiers::NONE },
-        ))]);
+        let mut input = scripted(vec![(
+            10,
+            key(
+                if follow_up {
+                    KeyCode::Char('s')
+                } else {
+                    KeyCode::Enter
+                },
+                if follow_up {
+                    KeyModifiers::CONTROL
+                } else {
+                    KeyModifiers::NONE
+                },
+            ),
+        )]);
         let mut ticker = tokio::time::interval(Duration::from_millis(5));
         let mut pending = VecDeque::new();
         let ended = tokio::time::timeout(
@@ -440,7 +471,9 @@ async fn native_pi_custom_editor_busy_slot_steers_queues_and_keeps_refused_draft
         let context = format!("{:?}", agent.session().context().unwrap());
         match text {
             "/model" => assert!(pending.is_empty()),
-            "/fixture-command" => assert!(matches!(pending.front(), Some(PendingIdleAction::ExtensionCommand {name, ..}) if name == "fixture-command")),
+            "/fixture-command" => assert!(
+                matches!(pending.front(), Some(PendingIdleAction::ExtensionCommand {name, ..}) if name == "fixture-command")
+            ),
             "steer text" => assert!(
                 context.contains(text),
                 "busy Enter did not steer: {context}"
@@ -478,17 +511,176 @@ async fn native_pi_custom_editor_busy_slot_steers_queues_and_keeps_refused_draft
     }
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_custom_editor_burst_enter_waits_for_its_completed_checkpoint() {
     let (_directory, mut app, mut shell) = live_slot_app().await;
-    pump_until(&mut app, &mut shell, |frame| frame.contains("NATIVE-SLOT-EDITOR")).await;
-    let events = "burst prompt".chars().map(|c| (0, key(KeyCode::Char(c), KeyModifiers::NONE)))
-        .chain([(0, key(KeyCode::Enter, KeyModifiers::NONE))]).collect();
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    let events = "burst prompt"
+        .chars()
+        .map(|c| (0, key(KeyCode::Char(c), KeyModifiers::NONE)))
+        .chain([(0, key(KeyCode::Enter, KeyModifiers::NONE))])
+        .collect();
     let mut input = scripted(events);
     let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
-        .await.next_idle(&mut input).await;
-    assert!(matches!(idle, Idle::Submit(ref composed) if composed.display_text == "burst prompt"),
-        "Enter must admit its whole completed draft, never an empty or partial checkpoint");
+        .await
+        .next_idle(&mut input)
+        .await;
+    assert!(
+        matches!(idle, Idle::Submit(ref composed) if composed.display_text == "burst prompt"),
+        "Enter must admit its whole completed draft, never an empty or partial checkpoint"
+    );
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_refused_paste_retains_payload_and_undo() {
+    use super::support::{scripted_agent_with_delay, test_run_inspection};
+    let (directory, mut app, mut shell) = live_slot_app().await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    type_into_slot(&mut app, &mut shell, "prefix").await;
+    let paste = "pasted line\n".repeat(50);
+    assert!(app.executable_extensions.route_remote_ui_event(
+        &mut shell,
+        &Event::Paste(paste.clone()),
+        false
+    ));
+    let expanded = format!("prefix{paste}");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            app.executable_extensions.drain_events_for_shell(&mut shell);
+            if shell.pending() == expanded {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    command(&mut app, &mut shell, "inspect-editor")
+        .await
+        .unwrap();
+    for _ in 0..MAX_PENDING_IDLE_ACTIONS {
+        shell.queue_follow_up(ComposedInput::from_text("occupied".into()));
+    }
+    let (_server, _workspace, mut agent) =
+        scripted_agent_with_delay(Duration::from_millis(500)).await;
+    let run_id = shell.begin_run("test");
+    let mut run = agent.prompt("initial").await.unwrap();
+    shell.set_awaiting_provider(run_id);
+    let control = run.control();
+    let mut input = scripted(vec![(10, key(KeyCode::Char('s'), KeyModifiers::CONTROL))]);
+    let mut ticker = tokio::time::interval(Duration::from_millis(5));
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        drive_active_run(
+            &mut run,
+            &control,
+            &mut shell,
+            &mut input,
+            &mut ticker,
+            &mut VecDeque::new(),
+            &mut false,
+            None,
+            None,
+            &mut app.executable_extensions,
+            &mut false,
+            test_run_inspection(),
+            &mut None,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(run);
+    assert_eq!(shell.pending(), expanded);
+    command(&mut app, &mut shell, "inspect-editor")
+        .await
+        .unwrap();
+    let states: Vec<serde_json::Value> =
+        std::fs::read_to_string(directory.path().join("trace.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(states.len(), 2);
+    assert_ne!(
+        states[0]["text"], states[0]["expanded"],
+        "real compressed paste"
+    );
+    assert_eq!(
+        states[0], states[1],
+        "refusal preserves draft, payloads and undo exactly"
+    );
+    assert!(app.executable_extensions.route_remote_ui_event(
+        &mut shell,
+        &key(KeyCode::Char('-'), KeyModifiers::CONTROL),
+        false
+    ));
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("prefix") && !frame.contains("paste #")
+    })
+    .await;
+    assert_eq!(
+        shell.pending(),
+        "prefix",
+        "undo restores the pre-paste draft"
+    );
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_buffer_is_bounded_and_retirement_discards_it() {
+    let (_directory, mut app, mut shell) = live_slot_app().await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    assert!(app.executable_extensions.route_remote_ui_event(
+        &mut shell,
+        &key(KeyCode::Char('x'), KeyModifiers::NONE),
+        false
+    ));
+    assert!(app.executable_extensions.route_remote_ui_event(
+        &mut shell,
+        &key(KeyCode::Enter, KeyModifiers::NONE),
+        false
+    ));
+    assert!(
+        app.executable_extensions
+            .take_ready_composer_event(&mut shell)
+            .is_none(),
+        "Enter must wait for the outstanding input checkpoint"
+    );
+    for _ in 0..128 {
+        assert!(app.executable_extensions.route_remote_ui_event(
+            &mut shell,
+            &Event::Paste("buffered".into()),
+            false
+        ));
+    }
+    assert!(shell
+        .debug_error()
+        .as_deref()
+        .is_some_and(|error| error.contains("input queue is full")));
+    command(&mut app, &mut shell, "retire-editor")
+        .await
+        .unwrap();
+    pump_until(&mut app, &mut shell, |frame| {
+        !frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    assert!(
+        app.executable_extensions
+            .take_ready_composer_event(&mut shell)
+            .is_none(),
+        "retired input cannot submit or edit the native replacement"
+    );
+    assert_eq!(shell.pending(), "x");
     app.executable_extensions.shutdown().await;
 }
