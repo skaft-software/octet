@@ -542,6 +542,19 @@ impl RemoteUi {
             match self.mounts[index].editors.replace_composer(&text, cursor) {
                 Ok(changed) => changed,
                 Err((_, detail)) => {
+                    // The host projected its decision into the recovery mirror
+                    // before delivery. A native refusal must restore that mirror
+                    // too, before another action can admit the rejected draft.
+                    let native = self.mounts[index]
+                        .editors
+                        .composer_snapshot()
+                        .expect("bound native composer");
+                    shell.extension_set_editor_at(native.text, Some(native.cursor));
+                    self.mounts[index]
+                        .editor
+                        .as_mut()
+                        .expect("editor mount")
+                        .composer_revision = shell.extension_editor_revision();
                     shell.error(detail);
                     return;
                 }
