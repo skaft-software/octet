@@ -47,11 +47,97 @@ pub(super) fn pi_workspace_ui_app(factory: &str) -> (tempfile::TempDir, App, Int
     (directory, app, shell)
 }
 
+/// The Pi fixture plus one enabled native executable extension. The popup's
+/// single registry is only exercised when both extension kinds contribute.
+pub(super) fn pi_ui_app_with_native_command(
+    factory: &str,
+    extension: &str,
+    command: &str,
+) -> (tempfile::TempDir, App, InteractiveShell) {
+    let shell = InteractiveShell::test_shell();
+    let (directory, app) = pi_app_policy_with_frontend_and_native(
+        factory,
+        octet_agent::EffectPolicy::UnsafeHost,
+        Some(&shell),
+        false,
+        Some((extension, command)),
+    );
+    assert!(
+        app.executable_extensions.remote_ui_wake().is_some(),
+        "live shell consumer must bind before initialize"
+    );
+    (directory, app, shell)
+}
+
 fn pi_app_policy_with_frontend(
     factory: &str,
     policy: octet_agent::EffectPolicy,
     frontend: Option<&InteractiveShell>,
     workspace_only: bool,
+) -> (tempfile::TempDir, App) {
+    pi_app_policy_with_frontend_and_native(factory, policy, frontend, workspace_only, None)
+}
+
+/// A minimal API 0.1 extension that answers `command/execute` with one bounded
+/// text line. It is the native (non-Pi) half of the single command registry.
+fn write_native_command_extension(root: &std::path::Path, extension: &str, command: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = root.join(extension);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("extension.toml"),
+        format!(
+            r#"name = {extension:?}
+version = "0.1.0"
+api_version = "0.1"
+
+[entrypoint]
+command = "probe.sh"
+
+[contributes]
+commands = [{command:?}]
+"#
+        ),
+    )
+    .unwrap();
+    let fixture = directory.join("probe.sh");
+    std::fs::write(
+        &fixture,
+        format!(
+            r#"#!/bin/sh
+request_id() {{ sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }}
+IFS= read -r initialize
+id=$(printf '%s' "$initialize" | request_id)
+printf '{{"jsonrpc":"2.0","id":%s,"result":{{"api_version":"0.1","tools":[],"commands":[{{"name":{command:?},"description":"Native fixture command"}}]}}}}\n' "$id"
+while IFS= read -r request; do
+  case "$request" in
+    *'"method":"command/execute"'*)
+      id=$(printf '%s' "$request" | request_id)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"text":"native fixture ran"}}}}\n' "$id"
+      ;;
+    *'"method":"shutdown"'*)
+      id=$(printf '%s' "$request" | request_id)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fixture).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&fixture, permissions).unwrap();
+}
+
+fn pi_app_policy_with_frontend_and_native(
+    factory: &str,
+    policy: octet_agent::EffectPolicy,
+    frontend: Option<&InteractiveShell>,
+    workspace_only: bool,
+    native: Option<(&str, &str)>,
 ) -> (tempfile::TempDir, App) {
     let (directory, mut app) = crate::compaction::tests::app_for_estimate();
     if workspace_only {
@@ -95,9 +181,18 @@ fn pi_app_policy_with_frontend(
         "{}",
         String::from_utf8_lossy(&configured.stderr)
     );
+    if let Some((extension, command)) = native {
+        write_native_command_extension(&extension_root, extension, command);
+    }
     app.config.extension_paths = vec![extension_root];
     app.config.enabled_extensions = vec!["octet-pi-compat".into()];
     app.config.invocation_trusted_extensions = vec!["octet-pi-compat".into()];
+    if let Some((extension, _)) = native {
+        app.config.enabled_extensions.push(extension.into());
+        app.config
+            .invocation_trusted_extensions
+            .push(extension.into());
+    }
     app.config.workspace_trusted = true;
     app.config.mode = crate::config::Mode::Interactive;
     app.config.effect_policy = policy;
@@ -125,6 +220,16 @@ fn pi_app_policy_with_frontend(
         "{}",
         extensions.inspect_text()
     );
+    if let Some((extension, _)) = native {
+        assert!(
+            extensions
+                .summaries()
+                .iter()
+                .any(|s| s.name == extension && s.running),
+            "{}",
+            extensions.inspect_text()
+        );
+    }
     host.finalize_tool_surface();
     // Preserve the real App frontend capability through rebuild_app. Resource
     // loading is enabled only for factories that actually contribute paths.
