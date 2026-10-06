@@ -18,6 +18,13 @@
 //! slowly than that can therefore reach input. Once ESC ] 11 ; is recognized,
 //! no timer replays its body or a fragmented ST. Original events remain bounded
 //! and are replayed only on a mismatch, overflow, input error or EOF.
+//!
+//! Unix bytes are decoded here rather than by crossterm's global reader, because
+//! a Pi extension must receive the *raw* spelling the terminal produced (see
+//! [`codec`]). Every non-protocol event therefore keeps its original bytes and
+//! passes the bounded pre-native lane in [`intercept`] before any native owner
+//! sees it; ordinary octet input is unchanged because that lane is empty unless
+//! an extension bound the pre-native channel to this frontend.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -43,6 +50,16 @@ const PREFIX_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_REPLY_BYTES: usize = 128;
 // Held original events: every reply byte plus, on Windows, its key-up.
 const MAX_HELD_EVENTS: usize = MAX_REPLY_BYTES * 2;
+#[path = "terminal_input/codec.rs"]
+mod codec;
+#[path = "terminal_input/intercept.rs"]
+mod intercept;
+#[cfg(unix)]
+#[path = "terminal_input/raw.rs"]
+mod raw;
+pub use codec::Packet;
+pub(crate) use intercept::InputInterceptors;
+
 const OSC11_PREFIX: &str = "\x1b]11;";
 
 #[derive(Default)]
@@ -50,8 +67,8 @@ struct BackgroundReplies {
     pending: bool,
     prefix_updated: Option<Instant>,
     text: String,
-    held: Vec<Event>,
-    ready: VecDeque<Event>,
+    held: Vec<Packet>,
+    ready: VecDeque<Packet>,
     color: Option<RgbColor>,
     /// Key-up still owed by a Windows console for the reply's final byte.
     trailing_release: Option<(KeyCode, KeyModifiers)>,
@@ -94,8 +111,8 @@ impl BackgroundReplies {
     /// Route one event through the always-on APC/TSP filter first: terminal →
     /// program TSP messages (`ESC _ tsp;… ESC \`) are protocol traffic, never
     /// octet input. Released events continue through the OSC 11 filter.
-    fn push_filtered(&mut self, event: Event, now: Instant) {
-        for event in self.apc.push(event, now) {
+    fn push_filtered(&mut self, event: impl Into<Packet>, now: Instant) {
+        for event in self.apc.push(event.into(), now) {
             self.push(event, now);
         }
     }
@@ -114,10 +131,11 @@ impl BackgroundReplies {
         }
     }
 
-    fn push(&mut self, event: Event, now: Instant) {
+    fn push(&mut self, event: impl Into<Packet>, now: Instant) {
+        let event = event.into();
         self.expire(now);
         if let Some((code, modifiers)) = self.trailing_release.take() {
-            if matches!(&event, Event::Key(key)
+            if matches!(&event.event, Event::Key(key)
                 if key.kind == KeyEventKind::Release
                     && key.code == code
                     && key.modifiers == modifiers)
@@ -132,14 +150,14 @@ impl BackgroundReplies {
         // Resize/focus/mouse notifications can arrive between reply fragments.
         // They are not part of the byte protocol and must remain responsive.
         if matches!(
-            event,
+            event.event,
             Event::Resize(..) | Event::FocusGained | Event::FocusLost | Event::Mouse(_)
         ) {
             self.ready.push_back(event);
             return;
         }
-        let Some(fragment) = reply_fragment(&event) else {
-            if is_key_release(&event) && !self.text.is_empty() {
+        let Some(fragment) = reply_fragment(&event.event) else {
+            if is_key_release(&event.event) && !self.text.is_empty() {
                 // A Windows key-up for a held reply byte. Keep it in order so a
                 // mismatch replays exactly what arrived and a match discards it.
                 self.held.push(event);
@@ -169,7 +187,7 @@ impl BackgroundReplies {
                 self.color = Some(color);
                 self.pending = false;
                 self.clear_fragment();
-                if let Event::Key(key) = &event {
+                if let Event::Key(key) = &event.event {
                     self.trailing_release = Some((key.code, key.modifiers));
                 }
             }
@@ -193,7 +211,7 @@ impl BackgroundReplies {
 #[derive(Default)]
 struct ApcFilter {
     text: String,
-    held: Vec<Event>,
+    held: Vec<Packet>,
     active: bool,
     updated: Option<Instant>,
     discarding: bool,
@@ -220,27 +238,28 @@ impl ApcFilter {
         self.discarding || self.text.starts_with(Self::PREFIX)
     }
 
-    fn push(&mut self, event: Event, now: Instant) -> Vec<Event> {
+    fn push(&mut self, event: impl Into<Packet>, now: Instant) -> Vec<Packet> {
+        let event = event.into();
         if !self.enabled() {
             return vec![event];
         }
         if let Some((code, modifiers)) = self.trailing_release.take() {
-            if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release && key.code == code && key.modifiers == modifiers)
+            if matches!(&event.event, Event::Key(key) if key.kind == KeyEventKind::Release && key.code == code && key.modifiers == modifiers)
             {
                 return Vec::new();
             }
         }
         if !self.active {
-            if reply_fragment(&event).is_some_and(|s| s == "\x1b" || s == "\x1b_") {
+            if reply_fragment(&event.event).is_some_and(|s| s == "\x1b" || s == "\x1b_") {
                 self.active = true;
                 self.updated = Some(now);
-                self.text = reply_fragment(&event).expect("recognized opener");
+                self.text = reply_fragment(&event.event).expect("recognized opener");
                 self.held.push(event);
                 return Vec::new();
             }
             return vec![event];
         }
-        match reply_fragment(&event) {
+        match reply_fragment(&event.event) {
             Some(fragment) => {
                 self.updated = Some(now);
                 self.text.push_str(&fragment);
@@ -263,7 +282,7 @@ impl ApcFilter {
                 }
                 self.held.clear();
                 if self.text.ends_with('\x07') || self.text.ends_with("\x1b\\") {
-                    if let Event::Key(key) = event {
+                    if let Event::Key(key) = event.event {
                         self.trailing_release = Some((key.code, key.modifiers));
                     }
                     let sequence = if self.text.ends_with('\x07') {
@@ -277,6 +296,9 @@ impl ApcFilter {
                     self.reset();
                     return message
                         .and_then(|message| self.handler.as_ref()?.as_ref()(message))
+                        // Protocol traffic becomes native input; it has no
+                        // terminal spelling and must never enter the raw lane.
+                        .map(Packet::synthetic)
                         .into_iter()
                         .collect();
                 }
@@ -292,7 +314,7 @@ impl ApcFilter {
                 }
                 Vec::new()
             }
-            None if is_key_release(&event) => {
+            None if is_key_release(&event.event) => {
                 if !self.identified() {
                     self.held.push(event);
                 }
@@ -315,7 +337,7 @@ impl ApcFilter {
         self.updated = None;
     }
 
-    fn flush(&mut self) -> Vec<Event> {
+    fn flush(&mut self) -> Vec<Packet> {
         let released = if self.identified() {
             Vec::new()
         } else {
@@ -333,7 +355,7 @@ impl ApcFilter {
         }
     }
 
-    fn expire(&mut self, now: Instant) -> Vec<Event> {
+    fn expire(&mut self, now: Instant) -> Vec<Packet> {
         if self.deadline().is_some_and(|deadline| now >= deadline) {
             self.flush()
         } else {
@@ -421,6 +443,8 @@ fn candidate_status(text: &str) -> Candidate {
 /// crossterm-internal events and input on platforms without this optional wake.
 #[derive(Default)]
 pub struct ForegroundEvents {
+    #[cfg(unix)]
+    raw: raw::RawReader,
     wake: Option<Pin<Box<Sleep>>>,
     // Open/register lazily: construction must not need a tty or Tokio runtime.
     #[cfg(unix)]
@@ -519,11 +543,11 @@ impl ForegroundEvents {
 
     // The injected synchronous read keeps tests off process-global stdin and
     // crossterm state; production still has exactly one poll/read byte owner.
-    fn poll_next_with(
+    fn poll_next_with<T>(
         &mut self,
         cx: &mut Context<'_>,
-        read_event: impl FnOnce() -> io::Result<Option<Event>>,
-    ) -> Poll<Option<io::Result<Event>>> {
+        read_event: impl FnOnce() -> io::Result<Option<T>>,
+    ) -> Poll<Option<io::Result<T>>> {
         let readable = self.tty_readable(cx);
         if let Some(wake) = &mut self.wake {
             if wake.as_mut().poll(cx).is_pending() && !readable {
@@ -551,12 +575,21 @@ impl ForegroundEvents {
 }
 
 impl Stream for ForegroundEvents {
-    type Item = io::Result<Event>;
+    type Item = io::Result<Packet>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.get_mut().poll_next_with(cx, || {
+        let this = self.get_mut();
+        #[cfg(unix)]
+        {
+            let mut raw = std::mem::take(&mut this.raw);
+            let result = this.poll_next_with(cx, || raw.read());
+            this.raw = raw;
+            result
+        }
+        #[cfg(not(unix))]
+        this.poll_next_with(cx, || {
             if crossterm::event::poll(Duration::from_millis(1))? {
-                crossterm::event::read().map(Some)
+                crossterm::event::read().map(|event| Some(event.into()))
             } else {
                 Ok(None)
             }
@@ -577,6 +610,7 @@ pub struct TerminalInput<S = ForegroundEvents> {
     timer_deadline: Option<Instant>,
     ended: bool,
     input_error: Option<io::Error>,
+    intercept: intercept::PendingInput,
     /// Set by the shell while an extension grant holds the raw terminal. While
     /// set the stream never polls its source, so a ceded byte stays with the
     /// child that owns `/dev/tty` instead of being stolen by the host.
@@ -585,7 +619,19 @@ pub struct TerminalInput<S = ForegroundEvents> {
 
 impl TerminalInput {
     pub fn new() -> Self {
-        Self::from_stream(ForegroundEvents::default())
+        Self::from_source(ForegroundEvents::default())
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn from_terminal_file(file: std::fs::File) -> Self {
+        let notifier =
+            AsyncFd::with_interest(OwnedFd::from(file.try_clone().unwrap()), Interest::READABLE)
+                .unwrap();
+        Self::from_source(ForegroundEvents {
+            raw: raw::RawReader::from_file(file),
+            tty: std::sync::OnceLock::from(Some(notifier)),
+            ..Default::default()
+        })
     }
 }
 
@@ -596,7 +642,18 @@ impl Default for TerminalInput {
 }
 
 impl<S> TerminalInput<S> {
-    pub fn from_stream(source: S) -> Self {
+    /// Build the input owner over an injected event source. Production always
+    /// uses [`Self::new`]; this is the test seam that lets one test drive the
+    /// real stream with a synthetic source of plain crossterm events.
+    #[cfg(test)]
+    pub fn from_stream(source: S) -> Self
+    where
+        S: Stream<Item = io::Result<Event>>,
+    {
+        Self::from_source(source)
+    }
+
+    fn from_source(source: S) -> Self {
         Self {
             source,
             replies: BackgroundReplies::default(),
@@ -604,8 +661,14 @@ impl<S> TerminalInput<S> {
             timer_deadline: None,
             ended: false,
             input_error: None,
+            intercept: intercept::PendingInput::default(),
             ceded: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn with_interceptors(mut self, handle: InputInterceptors) -> Self {
+        self.intercept.handle = handle;
+        self
     }
 
     /// Route decoded native protocol messages without giving up stdin ownership.
@@ -628,7 +691,7 @@ impl<S> TerminalInput<S> {
     }
 }
 
-impl<S: Stream<Item = io::Result<Event>> + Unpin> TerminalInput<S> {
+impl<E: Into<Packet>, S: Stream<Item = io::Result<E>> + Unpin> TerminalInput<S> {
     /// The probe and interactive frontend share a stream from the outset. This
     /// replaces the synchronous raw-stdin read/handoff, which lost typing and
     /// raced crossterm when Auto was selected after startup.
@@ -681,7 +744,7 @@ impl<S: Stream<Item = io::Result<Event>> + Unpin> TerminalInput<S> {
     }
 }
 
-impl<S: Stream<Item = io::Result<Event>> + Unpin> Stream for TerminalInput<S> {
+impl<E: Into<Packet>, S: Stream<Item = io::Result<E>> + Unpin> Stream for TerminalInput<S> {
     type Item = io::Result<Event>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -696,9 +759,18 @@ impl<S: Stream<Item = io::Result<Event>> + Unpin> Stream for TerminalInput<S> {
         // The state and timer belong to the stream, not next()'s future. A
         // select! cancellation or an input-owner change cannot lose a prefix.
         for _ in 0..256 {
+            // The pre-native lane holds at most one event and everything
+            // behind it stays ordered: a queued reply is delivered before the
+            // next raw event is admitted.
+            match this.intercept.poll(cx) {
+                Some(Poll::Ready(event)) => return Poll::Ready(Some(Ok(event))),
+                Some(Poll::Pending) => return Poll::Pending,
+                None => {}
+            }
             this.replies.expire(Instant::now());
-            if let Some(event) = this.replies.ready.pop_front() {
-                return Poll::Ready(Some(Ok(event)));
+            if let Some(packet) = this.replies.ready.pop_front() {
+                this.intercept.start(packet);
+                continue;
             }
             if let Some(error) = this.input_error.take() {
                 return Poll::Ready(Some(Err(error)));
@@ -1069,7 +1141,10 @@ mod tests {
                 let escape = key(KeyCode::Esc, KeyModifiers::NONE);
                 replies.push(escape.clone(), start);
                 replies.expire(start + PREFIX_AMBIGUITY_TIMEOUT);
-                assert_eq!(replies.ready.pop_front(), Some(escape.clone()));
+                assert_eq!(
+                    replies.ready.pop_front().map(|packet| packet.event),
+                    Some(escape.clone())
+                );
                 let typed = decoded("typed before a very late reply", false);
                 for event in &typed {
                     replies.push(event.clone(), start + delay);
@@ -1130,7 +1205,10 @@ mod tests {
         ];
         for event in &input {
             replies.push(event.clone(), start + Duration::from_secs(6));
-            assert_eq!(replies.ready.pop_front(), Some(event.clone()));
+            assert_eq!(
+                replies.ready.pop_front().map(|packet| packet.event),
+                Some(event.clone())
+            );
         }
         for event in decoded("1e1e/1e1e/1e1e\x1b\\", true) {
             replies.push(event, start + Duration::from_secs(7));
@@ -1151,7 +1229,10 @@ mod tests {
         let escape = key(KeyCode::Esc, KeyModifiers::NONE);
         replies.push(escape.clone(), start);
         replies.expire(start + PREFIX_AMBIGUITY_TIMEOUT);
-        assert_eq!(replies.ready.pop_front(), Some(escape));
+        assert_eq!(
+            replies.ready.pop_front().map(|packet| packet.event),
+            Some(escape)
+        );
         let typed = decoded("]11;rgb:1e1e/1e1e/1e1e", false);
         for event in &typed {
             replies.push(event.clone(), start + Duration::from_secs(1));

@@ -113,7 +113,7 @@ target/debug/deps/octet_sdk-<hash> <module>:: --test-threads=2
 | `pi_tool_hooks_tests` | 15/15 |
 | `pi_tools_surface_tests` | 5/5: authoritative catalogs/selection, late registration, startup ordering, headless exactly-once startup and failed-worker admission refusal |
 | `resource_paths::pi_app_tests` | 4/4: startup/reload, recoverable callback error, failed mutation and imported default theme |
-| `pi_ui_contract_tests` | 7/7, including overlays, dialog keys/countdowns, editor identity and terminal admission |
+| `pi_ui_contract_tests` | 10/10, including overlays, dialog keys/countdowns, editor identity, terminal admission and the pre-native input lane (consume/transform/pass-through, consume-all with host-reserved `Ctrl+D`, hung-handler fail-open) |
 | `mcp_native_tests` | 3/3: valid isolated config, real registration/call/replacement/removal/cleanup, headless startup and missing-resident refusal |
 | `pi_original_clm_tests` | ignored |
 
@@ -128,6 +128,14 @@ members of a ledger row or the original extension corpus.
   Both existing frontend pumps now settle pending starts first, without loading
   resources or changing the theme. Worker/deadline/owner failures propagate;
   ordinary callback diagnostics retain their existing handling.
+- Pi `onTerminalInput`: the adapter previously refused it and the host had only an
+  observer-only notification. Unix input is now decoded by octet itself so every
+  non-protocol event keeps the exact bytes the terminal produced, and the
+  frontend hands that spelling to the negotiated `terminal_input_intercept_v1`
+  lane before remote UI, panels, search, keymaps or the composer see it. The
+  adapter keeps Pi's live `Set` ordering (consume, replace, deduplicate identity,
+  drop removed listeners, ignore promises) under a 50 ms whole-chain budget with
+  a latched-off circuit breaker and one bounded diagnostic per owner.
 - `artifact/publish` acknowledgement: the host returns `{artifact_id}` (protocol
   reference), the adapter read `id`. Every Pi image failed on the real host while
   synthetic-host tests passed because they replied `{id}`. Fixed both.
