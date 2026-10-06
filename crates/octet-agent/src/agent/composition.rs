@@ -235,7 +235,7 @@ impl CompositionDispatcher {
         id: &octet_ai::ToolCallId,
         context: &ToolContext<'_>,
     ) -> (Result<ToolOutput, ToolError>, Option<ToolPolicyDecision>) {
-        let (result, mut decision) = async {
+        let (result, mut decision, executed) = async {
             let admission = reserve_tool_effect(
                 &self.broker,
                 tool,
@@ -256,7 +256,7 @@ impl CompositionDispatcher {
             } = match admission {
                 Ok(admission) => admission,
                 Err(ToolEffectAdmissionError { error, decision }) => {
-                    return (Err(error), Some(decision));
+                    return (Err(error), Some(decision), false);
                 }
             };
             for hook in &self.hooks {
@@ -267,11 +267,11 @@ impl CompositionDispatcher {
                 {
                     let (error, decision) =
                         secondary_hook_denial(&self.sandbox, &self.broker, Some(effect));
-                    return (Err(error), Some(decision));
+                    return (Err(error), Some(decision), false);
                 }
             }
             if context.cancellation.is_cancelled() {
-                return (Err(cancelled_tool_error()), None);
+                return (Err(cancelled_tool_error()), None, false);
             }
             let receipt = match reservation.commit(&intent) {
                 Ok(receipt) => receipt,
@@ -282,7 +282,7 @@ impl CompositionDispatcher {
                         effect,
                         &error,
                     );
-                    return (Err(error), Some(decision));
+                    return (Err(error), Some(decision), false);
                 }
             };
             let decision = Some(policy_decision(
@@ -304,10 +304,12 @@ impl CompositionDispatcher {
                     );
                 }
             }
-            (result, decision)
+            (result, decision, true)
         }
         .await;
-        let result = settle_tool_result_hooks(&self.hooks, name, &arguments, result, context).await;
+        let result =
+            settle_tool_result_hooks(&self.hooks, name, &arguments, result, context, executed)
+                .await;
         apply_execution_policy_denial(&mut decision, &result);
         (result, decision)
     }

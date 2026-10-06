@@ -2686,7 +2686,7 @@ impl Agent {
                                             Some(decision);
                                         break 'dispatch session_driver.drive(settle_tool_result_hooks(
                                             &tool_call_hooks, &call.name, &original_hook_arguments,
-                                            Err(error), &tool_ctx,
+                                            Err(error), &tool_ctx, false,
                                         ), session, &abort.cancellation).await
                                             .unwrap_or_else(|error| Err(ToolError::new(error)));
                                     }
@@ -2956,12 +2956,18 @@ impl Agent {
                                     notify_observers(&observers, &ev);
                                     yield ev;
                                 }
+                                // Execution observers see only calls that reached
+                                // the tool boundary; a call denied at admission
+                                // still resolves its result transformations.
+                                let executed =
+                                    started_at.load(Ordering::Acquire) != u64::MAX;
                                 session_driver.drive(settle_tool_result_hooks(
                                     &tool_call_hooks,
                                     &call.name,
                                     &hook_arguments,
                                     result,
                                     &tool_ctx,
+                                    executed,
                                 ), session, &abort.cancellation)
                                 .await.unwrap_or_else(|error| Err(ToolError::new(error)))
                             }

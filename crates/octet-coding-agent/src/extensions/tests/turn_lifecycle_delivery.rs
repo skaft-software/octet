@@ -297,6 +297,9 @@ hooks = ["before_prompt", "after_response"]
             "model": null,
             "reasoning": null,
             "active_skills": [],
+            // The host reports an absent observation as explicit null so a
+            // stale cached context usage is cleared rather than reused.
+            "context_usage": null,
         },
     });
     assert_eq!(

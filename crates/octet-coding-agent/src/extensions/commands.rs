@@ -166,6 +166,10 @@ impl ExecutableExtensions {
 
     /// Worker controls remain a runtime slash surface; extension setup stays
     /// in `/extensions`. Only the live first-party owner can advertise it.
+    ///
+    /// Test-only observation surface: the tests below assert that only the
+    /// live first-party owner is advertised, while production slash completion
+    /// lists extension commands from `command_suggestions_with_usage`.
     #[cfg(test)]
     pub(crate) fn tui_command_suggestions(&self) -> Vec<(String, String)> {
         self.processes

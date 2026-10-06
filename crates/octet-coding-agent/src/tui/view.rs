@@ -3610,6 +3610,13 @@ pub struct InteractiveShell {
     /// Exact display discovery/configuration roots, retained by the input owner
     /// only; never cloned into renderer publications.
     runtime_config: Option<Config>,
+    /// The user's own keybinding file, captured at construction and refreshed
+    /// by an explicit reload. Session-only overrides contributed by a live
+    /// resource binding are layered on top and can be withdrawn without losing
+    /// the user's file.
+    base_user_bindings: std::collections::BTreeMap<String, Vec<String>>,
+    /// Live session-only overrides, re-layered over the user's file on reload.
+    session_keybindings: std::collections::BTreeMap<String, Vec<String>>,
     theme_preview: Option<(OctetTheme, Option<usize>)>,
     extension_themes: RefCell<Option<Vec<(String, OctetTheme)>>>,
     /// Best-effort Herdr pane lifecycle reporting. Inert outside Herdr.
@@ -3663,10 +3670,10 @@ impl InteractiveShell {
                 )
             })?;
 
+        let bindings = crate::tui::keymap::keybindings::KeybindingsManager::for_user();
+        let base_user_bindings = bindings.user_bindings().clone();
         Ok(Self {
-            input_dispatch: input_dispatch::InputDispatch::new(
-                crate::tui::keymap::keybindings::KeybindingsManager::for_user(),
-            ),
+            input_dispatch: input_dispatch::InputDispatch::new(bindings),
             tui: None,
             state,
             size,
@@ -3677,6 +3684,8 @@ impl InteractiveShell {
             remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             runtime_config: None,
+            base_user_bindings,
+            session_keybindings: std::collections::BTreeMap::new(),
             theme_preview: None,
             extension_themes: RefCell::new(None),
             herdr: crate::herdr::PaneReporter::detect(),
@@ -3712,6 +3721,8 @@ impl InteractiveShell {
         &mut self,
         bindings: crate::tui::keymap::keybindings::KeybindingsManager,
     ) {
+        self.base_user_bindings = bindings.user_bindings().clone();
+        self.session_keybindings.clear();
         self.input_dispatch.bindings = bindings;
     }
 
@@ -3735,10 +3746,10 @@ impl InteractiveShell {
         let mut tui = TUI::new(Box::new(TestTerminal { size: size.clone() }));
         tui.add_child(Box::new(ShellComponent::new(state.clone(), false)));
         tui.start();
+        let bindings = crate::tui::keymap::keybindings::KeybindingsManager::current_platform();
+        let base_user_bindings = bindings.user_bindings().clone();
         Self {
-            input_dispatch: input_dispatch::InputDispatch::new(
-                crate::tui::keymap::keybindings::KeybindingsManager::current_platform(),
-            ),
+            input_dispatch: input_dispatch::InputDispatch::new(bindings),
             tui: Some(tui),
             state,
             size,
@@ -3751,6 +3762,8 @@ impl InteractiveShell {
             // Renderer tests must never report to a real Herdr pane, even when
             // the test process inherits one.
             runtime_config: None,
+            base_user_bindings,
+            session_keybindings: std::collections::BTreeMap::new(),
             theme_preview: None,
             extension_themes: RefCell::new(None),
             herdr: crate::herdr::PaneReporter::disabled(),

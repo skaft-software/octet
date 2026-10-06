@@ -136,9 +136,36 @@ impl InteractiveShell {
     }
 
     /// Reload only the user-owned keybinding file. No project input policy or
-    /// executable resource is loaded here.
+    /// executable resource is loaded here. A live session overlay is re-layered
+    /// over the reloaded file instead of being silently replaced by it.
     pub fn reload_keybindings(&mut self) {
         self.input_dispatch.bindings.reload();
+        self.base_user_bindings = self.input_dispatch.bindings.user_bindings().clone();
+        self.publish_keybindings();
+    }
+
+    /// Layer session-only keybinding overrides over the user's own file. An
+    /// empty overlay restores exactly the user's file, and the captured base
+    /// map is never mutated by an extension.
+    pub fn set_session_keybindings(
+        &mut self,
+        overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    ) {
+        self.session_keybindings = overrides.clone();
+        self.publish_keybindings();
+    }
+
+    /// Recompute the effective input policy from the captured user file plus
+    /// the live session overlay, and publish it to the native mailbox.
+    fn publish_keybindings(&mut self) {
+        let mut merged = self.base_user_bindings.clone();
+        for (id, keys) in &self.session_keybindings {
+            merged.insert(id.clone(), keys.clone());
+        }
+        if self.input_dispatch.bindings.user_bindings() == &merged {
+            return;
+        }
+        self.input_dispatch.bindings.set_user_bindings(merged);
         {
             let mut mailbox = self.state.native().lock().expect("native mailbox poisoned");
             mailbox.bindings = Some(self.input_dispatch.bindings.clone());
@@ -612,9 +639,53 @@ mod tests {
     fn configure(shell: &mut InteractiveShell, json: &str) -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("keybindings.json"), json).unwrap();
-        shell.input_dispatch.bindings =
-            KeybindingsManager::create(directory.path(), "linux", false);
+        shell.test_set_keybindings(KeybindingsManager::create(directory.path(), "linux", false));
         directory
+    }
+
+    #[test]
+    fn session_keybinding_overlay_survives_a_user_file_reload_and_withdraws_cleanly() {
+        let mut shell = InteractiveShell::test_shell();
+        let directory = configure(&mut shell, r#"{"tui.editor.undo":"ctrl+z"}"#);
+        let mut overlay = std::collections::BTreeMap::new();
+        overlay.insert("app.exit".to_owned(), vec!["ctrl+q".to_owned()]);
+        shell.set_session_keybindings(&overlay);
+        assert_eq!(
+            shell.extension_keybindings().get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()])
+        );
+        // The user edits their own file, then reloads: the reloaded file and the
+        // live session overlay both stay effective.
+        std::fs::write(
+            directory.path().join("keybindings.json"),
+            r#"{"tui.editor.undo":[]}"#,
+        )
+        .unwrap();
+        shell.reload_keybindings();
+        assert_eq!(
+            shell.extension_keybindings().get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()]),
+            "reload must not drop the session overlay"
+        );
+        assert!(!shell
+            .input_dispatch
+            .bindings
+            .matches_key_id("ctrl+z", "tui.editor.undo"));
+        // Withdrawal removes only the session overlay; the reloaded file stays.
+        shell.set_session_keybindings(&std::collections::BTreeMap::new());
+        assert_ne!(
+            shell.extension_keybindings().get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()])
+        );
+        assert!(!shell
+            .input_dispatch
+            .bindings
+            .matches_key_id("ctrl+z", "tui.editor.undo"));
+        assert_eq!(
+            shell.input_dispatch.bindings.get_keys("app.exit"),
+            &["ctrl+d".to_owned()],
+            "withdrawal restores the built-in binding"
+        );
     }
 
     #[test]

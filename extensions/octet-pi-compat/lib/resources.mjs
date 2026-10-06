@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bounded, invalid, ownerKey, rpcError, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
+import { discoverPiSetup, resolveThemeFile, themeCandidates } from './pi-setup.mjs';
 
 const pathFields = { skillPaths: 'skill_paths', promptPaths: 'prompt_paths', themePaths: 'theme_paths' };
 function record(value, allowed, label) {
@@ -56,6 +57,47 @@ function appendPaths(paths, contribution, budget) {
     }
   }
 }
+
+// Mirror mode: a reviewed opt-in activates the equivalents of this machine's Pi
+// 1.0.2 setup. Discovery is read-only and bounded; the native host still owns
+// admission, parsing, precedence and publication.
+function appendMirrorPaths(runtime, paths, budget) {
+  const setup = discoverPiSetup({ agentDir: runtime.config.pi_agent_dir, env: process.env, cwd: budget.cwd });
+  for (const diagnostic of setup.diagnostics.slice(0, 32)) runtime.diagnostic(`mirror ${diagnostic}`);
+  // Theme roots are flattened to individual palettes: a directory plus the
+  // exact selected file would register one name twice, and the exact file must
+  // be an entry for `default_theme` admission.
+  const themeFiles = themeCandidates(setup.themesPaths, setup.diagnostics);
+  // The native reply has one bounded path budget shared by every kind. Keeping
+  // the first entries with an explicit diagnostic beats failing the whole
+  // discovery pass on a very large Pi setup.
+  const remaining = Math.max(0, 64 - budget.count);
+  const candidates = [
+    ...setup.skillsPaths.map(value => ['skillPaths', value]),
+    ...setup.promptsPaths.map(value => ['promptPaths', value]),
+    ...themeFiles.map(value => ['themePaths', value]),
+  ];
+  const kept = { skillPaths: [], promptPaths: [], themePaths: [] };
+  for (const [kind, value] of candidates.slice(0, remaining)) kept[kind].push(value);
+  if (candidates.length > remaining) {
+    runtime.diagnostic(`mirror Pi setup has ${candidates.length} resources; only ${remaining} fit the native resource budget and the rest were not mirrored`);
+  }
+  appendPaths(paths, kept, budget);
+  // Pi's selected palette becomes the session-only native preference; the
+  // native loader still parses and admits it.
+  const theme = resolveThemeFile(themeFiles, setup.defaultTheme, setup.diagnostics);
+  if (theme) {
+    const preferred = normalizeResourcePath(theme, budget.cwd);
+    if (paths.theme_paths.includes(preferred)) paths.default_theme = preferred;
+    else runtime.diagnostic(`mirror theme ${theme} exceeded the resource path budget; no native preference`);
+  } else if (setup.defaultTheme) {
+    runtime.diagnostic(`mirror theme ${setup.defaultTheme} was not found in the Pi setup; no native preference`);
+  }
+  if (setup.keybindingsPath) paths.keybindings_paths = [normalizeResourcePath(setup.keybindingsPath, budget.cwd)];
+  if (setup.contextPath) paths.context_paths = [normalizeResourcePath(setup.contextPath, budget.cwd)];
+  if (setup.defaultModel) paths.default_model = setup.defaultModel;
+}
+
 async function cancellable(promise, signal) {
   signal.throwIfAborted();
   let abort;
@@ -84,6 +126,10 @@ export async function discoverResources(runtime, params, store) {
   return cancellable(runtime.queued(store, async () => {
     live();
     const paths = { skill_paths: [], prompt_paths: [], theme_paths: [] }, budget = { cwd, count: 0, bytes: 0 };
+    // Mirror mode: a reviewed opt-in activates the equivalents of this machine's
+    // Pi 1.0.2 setup. Discovery is read-only and bounded; the native host still
+    // owns admission, parsing, precedence and publication.
+    if (runtime.mirrorPiSetup) appendMirrorPaths(runtime, paths, budget);
     // Reviewed import snapshots use the same native owner/trust/retirement
     // gates as factory resources. This preference never writes host settings.
     appendPaths(paths, { themePaths: runtime.config.pi_theme_paths }, budget);
@@ -96,7 +142,7 @@ export async function discoverResources(runtime, params, store) {
     for (const entry of [...runtime.events.get('resources_discover') || []]) {
       live();
       const child = { ...store, factory: entry.factory };
-      const provenance = `resources_discover factory ${runtime.config.extensions[entry.factory]}`;
+      const provenance = `resources_discover factory ${runtime.entrypoint(entry.factory)}`;
       let contribution;
       try {
         contribution = await cancellable(runtime.scope.run(child, () => entry.handler(

@@ -465,11 +465,7 @@ fn compose_instructions_at(config: &Config, global: &Path) -> anyhow::Result<Str
                 );
             }
             crate::output::routine_diagnostic(format!("context: loaded {}", path.display()));
-            context.push(format!(
-                "<project_instructions path=\"{}\">\n{}\n</project_instructions>",
-                xml_attribute(&prompt_path(path)),
-                contents
-            ));
+            context.push(format_context_file(path, &contents));
         }
         Ok(())
     };
@@ -482,11 +478,28 @@ fn compose_instructions_at(config: &Config, global: &Path) -> anyhow::Result<Str
     if context.is_empty() {
         Ok(base)
     } else {
-        Ok(format!(
-            "{base}\n\n<project_context>\n{}\n</project_context>",
-            context.join("\n\n")
-        ))
+        Ok(format!("{base}{}", wrap_project_context(&context)))
     }
+}
+
+/// Render one context file exactly like the native composition, with an escaped
+/// path attribute. Shared with session-only extension context contributions so
+/// both surfaces compose identically.
+pub(crate) fn format_context_file(path: &Path, contents: &str) -> String {
+    format!(
+        "<project_instructions path=\"{}\">\n{}\n</project_instructions>",
+        xml_attribute(&prompt_path(path)),
+        contents
+    )
+}
+
+/// Wrap already-rendered context blocks in the native `<project_context>`
+/// section, including its leading separator.
+pub(crate) fn wrap_project_context(blocks: &[String]) -> String {
+    format!(
+        "\n\n<project_context>\n{}\n</project_context>",
+        blocks.join("\n\n")
+    )
 }
 
 /// Compose global then workspace-root-to-leaf AGENTS.md instructions.
