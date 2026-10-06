@@ -31,7 +31,7 @@ function piHome(root) {
     defaultModel: 'pi-mirror-model',
     defaultThinkingLevel: 'high',
     theme: 'pi-setup-theme',
-    extensions: [join(agent, 'elsewhere/extra.ts')],
+    extensions: [join(agent, 'elsewhere/extra.ts'), join(agent, 'extensions/one.mjs')],
   }));
   put(join(agent, 'extensions/one.mjs'), 'export default pi => pi.registerCommand("one", {handler(){}});');
   put(join(agent, 'extensions/two.mjs'), 'export default pi => pi.registerCommand("two", {handler(){}});');

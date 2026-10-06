@@ -68,11 +68,21 @@ function appendMirrorPaths(runtime, paths, budget) {
   // exact selected file would register one name twice, and the exact file must
   // be an entry for `default_theme` admission.
   const themeFiles = themeCandidates(setup.themesPaths, setup.diagnostics);
-  appendPaths(paths, {
-    skillPaths: setup.skillsPaths,
-    promptPaths: setup.promptsPaths,
-    themePaths: themeFiles,
-  }, budget);
+  // The native reply has one bounded path budget shared by every kind. Keeping
+  // the first entries with an explicit diagnostic beats failing the whole
+  // discovery pass on a very large Pi setup.
+  const remaining = Math.max(0, 64 - budget.count);
+  const candidates = [
+    ...setup.skillsPaths.map(value => ['skillPaths', value]),
+    ...setup.promptsPaths.map(value => ['promptPaths', value]),
+    ...themeFiles.map(value => ['themePaths', value]),
+  ];
+  const kept = { skillPaths: [], promptPaths: [], themePaths: [] };
+  for (const [kind, value] of candidates.slice(0, remaining)) kept[kind].push(value);
+  if (candidates.length > remaining) {
+    runtime.diagnostic(`mirror Pi setup has ${candidates.length} resources; only ${remaining} fit the native resource budget and the rest were not mirrored`);
+  }
+  appendPaths(paths, kept, budget);
   // Pi's selected palette becomes the session-only native preference; the
   // native loader still parses and admits it.
   const theme = resolveThemeFile(themeFiles, setup.defaultTheme, setup.diagnostics);

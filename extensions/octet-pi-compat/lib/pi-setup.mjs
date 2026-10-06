@@ -3,10 +3,11 @@
 // Mirror mode is an explicit, reviewed opt-in recorded by
 // `configure.mjs --reviewed --from-pi --mirror`: the user asks Octet to mirror
 // the Pi setup on this machine. This module only *reads* the Pi layout Pi 1.0.2
-// itself reads (settings.json, keybindings.json, models.json, AGENTS.md and the
-// standard resource directories); it never writes, installs, trusts or runs Pi
+// itself reads (settings.json, keybindings.json, AGENTS.md and the user/project
+// resource directories); it never writes, installs, trusts or runs Pi
 // package-manager code. Everything is bounded and missing/linked/oversized
-// inputs become diagnostics, never silent drops.
+// inputs become diagnostics, never silent drops. Pi's models.json HTTP provider
+// definitions are a documented non-goal; see docs/pi-compatibility.md.
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
@@ -137,6 +138,10 @@ function resourceEntries(paths, cwd, diagnostics, kind, list, seen) {
       continue;
     }
     if (stat.isSymbolicLink()) { diagnostics.push(`${kind} ${path}: symlinks are not mirrored`); continue; }
+    if (!stat.isFile() && !stat.isDirectory()) {
+      diagnostics.push(`${kind} ${path}: not a regular file or directory`);
+      continue;
+    }
     recordPath(list, seen, path, kind, diagnostics);
   }
 }
@@ -297,6 +302,9 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
   packageResources(resolvedAgentDir, setup.settings.packages, cwd, diagnostics, setup, seen);
   const projectPackages = scopeSettings[1]?.packages;
   if (projectPackages !== undefined) packageResources(resolvedAgentDir, projectPackages, cwd, diagnostics, setup, seen);
+  // One entrypoint per file, in discovery order, even when a directory and a
+  // settings/package entry name the same extension.
+  setup.extensions = [...new Set(setup.extensions)];
   if (setup.extensions.length > MAX_EXTENSIONS) {
     diagnostics.push(`Pi setup has ${setup.extensions.length} extensions; only the first ${MAX_EXTENSIONS} are mirrored`);
     setup.extensions = setup.extensions.slice(0, MAX_EXTENSIONS);
