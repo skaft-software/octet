@@ -213,6 +213,32 @@ fn direct_theme_name_loads_only_valid_selectable_files() {
 }
 
 #[tokio::test]
+async fn direct_builtin_theme_selection_matches_picker_and_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = terminal_theme_test_config(directory.path().to_owned());
+    for name in ["Still", "Cards"] {
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = EventStream::from_stream(tokio_stream::empty());
+        assert_eq!(
+            configure_terminal_theme(
+                &mut shell,
+                &mut input,
+                &mut config,
+                Some(name.to_owned()),
+                false,
+                None,
+            )
+            .await
+            .unwrap(),
+            Some(ThemeSelection::File(name.to_owned())),
+            "direct /theme {name} should select advertised built-in"
+        );
+        assert_eq!(config.theme.as_deref(), Some(name));
+        assert!(shell.theme().source_path().is_some());
+    }
+}
+
+#[tokio::test]
 async fn invalid_direct_theme_selection_keeps_current_config_and_appearance() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = terminal_theme_test_config(directory.path().to_owned());
