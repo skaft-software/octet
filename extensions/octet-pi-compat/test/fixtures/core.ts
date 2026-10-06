@@ -43,6 +43,11 @@ export default function(pi) {
         return { content: [{ type: 'text', text: `${ctx.ui.getEditorText()}|${ctx.sessionManager.getSessionName()}` }] };
       }
       if (mode === 'unsupported') ctx.ui.setTitle('cannot be honored');
+      // Print-mode behavior: presentation setters are inert headless, while a
+      // dialog and the native theme catalog still need a real frontend.
+      if (mode === 'chrome') ctx.ui.setTitle('inert headless');
+      if (mode === 'dialog') ctx.ui.custom(() => ({ render: () => [], invalidate() {} }));
+      if (mode === 'theme') ctx.ui.getAllThemes();
       if (mode === 'unsafe-output') process.stdout.write('\x1b[2J');
       if (mode === 'runtime') { const { createAgentSession } = await import('@mariozechner/pi-coding-agent'); await createAgentSession(); }
       if (mode === 'media') return { content: [{ type: 'image', data: 'xx', mimeType: 'image/png' }] };
