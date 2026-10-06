@@ -2,17 +2,17 @@
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 
-fn history(columns: u16, rows: u16) -> (PtyOctet, vt100::Parser, usize) {
+fn history(mode: MouseMode, columns: u16, rows: u16) -> (PtyOctet, vt100::Parser, usize) {
     let mut octet = PtyOctet::spawn_at(
         Path::new(env!("CARGO_BIN_EXE_octet")),
-        MouseMode::App,
+        mode,
         None,
         true,
         (columns, rows),
         (2, false, false),
         StartupFixture::MouseHistory,
     );
-    let mut parser = vt100::Parser::new(rows, columns, 0);
+    let mut parser = vt100::Parser::new(rows, columns, 1024);
     let mut consumed = 0;
     await_screen(
         &mut octet,
@@ -63,9 +63,62 @@ fn clipboard(output: &[u8]) -> Option<String> {
 }
 
 #[test]
+fn default_mouse_owner_decision_preserves_native_scrollback_and_selection() {
+    let _lock = pty_test_lock().lock().unwrap();
+    // Omit --mouse entirely: the real CLI/settings fallback must choose Auto.
+    let (mut octet, mut parser, mut consumed) = history(MouseMode::Default, 100, 24);
+    settle(&mut octet, &mut parser, &mut consumed);
+    for mode in [1000, 1002, 1003, 1006, 1007, 1015, 1016] {
+        assert!(
+            !contains_bytes(&octet.pty.output, format!("\x1b[?{mode}h").as_bytes()),
+            "default policy enabled mouse mode {mode}"
+        );
+    }
+    assert_eq!(
+        parser.screen().mouse_protocol_mode(),
+        vt100::MouseProtocolMode::None
+    );
+    assert!(!uses_alternate_screen(&octet.pty.output));
+
+    // Read/copy old text from the terminal's own saved rows, without sending
+    // pointer input to octet. This models native scrollback/selection, not an
+    // application-owned viewport or a physical client's clipboard permissions.
+    parser.set_scrollback(usize::MAX);
+    assert!(parser.screen().scrollback() > 350);
+    let row = (0..24)
+        .find(|row| row_text(&parser, *row, 100).contains("MOUSE-ROW-001"))
+        .expect("complete resumed history remains in native scrollback");
+    let selected = row_text(&parser, row, 100);
+    assert_eq!(
+        selected.trim(),
+        "1. MOUSE-ROW-001 clipboard line with unique words"
+    );
+    parser.set_scrollback(0);
+    assert!(parser.screen().contents().contains("MOUSE-END"));
+    octet.pty.write_input(b"native-draft");
+    await_screen(
+        &mut octet,
+        &mut parser,
+        &mut consumed,
+        "native-draft",
+        STARTUP_TIMEOUT,
+    );
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    for mode in [1000, 1002, 1003, 1006, 1007, 1015, 1016] {
+        assert!(!contains_bytes(
+            &capture.output,
+            format!("\x1b[?{mode}h").as_bytes()
+        ));
+    }
+    assert!(clipboard(&capture.output).is_none());
+}
+
+#[test]
 fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
     let _lock = pty_test_lock().lock().unwrap();
-    let (mut octet, mut parser, mut consumed) = history(100, 24);
+    let (mut octet, mut parser, mut consumed) = history(MouseMode::App, 100, 24);
     for mode in [1000, 1002, 1003, 1006] {
         assert!(contains_bytes(
             &octet.pty.output,
@@ -171,7 +224,7 @@ fn wrapped_multirow_copy(octet: &mut PtyOctet, parser: &mut vt100::Parser, consu
 fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
     let _lock = pty_test_lock().lock().unwrap();
     for (columns, rows) in [(137, 48), (80, 24), (46, 12)] {
-        let (mut octet, mut parser, mut consumed) = history(columns, rows);
+        let (mut octet, mut parser, mut consumed) = history(MouseMode::App, columns, rows);
         octet.pty.write_input(b"draft-private");
         await_screen(
             &mut octet,

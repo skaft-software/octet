@@ -651,8 +651,8 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn mouse_mode_defaults_to_the_fullscreen_viewport() {
-        assert_eq!(MouseMode::default(), MouseMode::App);
+    fn mouse_mode_owner_decision_defaults_to_auto() {
+        assert_eq!(MouseMode::default(), MouseMode::Auto);
         assert_eq!(MouseMode::parse("app").unwrap(), MouseMode::App);
         assert_eq!(MouseMode::parse("terminal").unwrap(), MouseMode::Terminal);
         assert_eq!(MouseMode::parse("off").unwrap(), MouseMode::Off);
