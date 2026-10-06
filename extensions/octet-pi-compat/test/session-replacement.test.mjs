@@ -70,6 +70,7 @@ function receiptMethods(receipt) {
   const bindings = [];
   const runtime = {
     assertOwner: () => {}, require: () => {}, track: p => p,
+    sessionFacts: runtimeStore => runtimeStore.state.host,
     prepareSessionReplacement: () => () => assert.fail('cancelled setup must not bind'),
     hostCall: async () => receipt,
     foregroundFor: async id => { bindings.push(id); return { owner: { ...owner, session_id: 'fresh-owner' } }; },
@@ -118,6 +119,7 @@ function setupReceipts() {
   const runtime = {
     namespace: 'octet-pi-compat', active: new Map([[store.id, store]]),
     assertOwner: s => { assert.equal(s.state.alive, true); }, require: () => {}, track: p => p,
+    sessionFacts: runtimeStore => runtimeStore.state.host,
     scope: { run: (_store, callback) => callback() },
     foregroundFor: () => assert.fail('setup must bind its native creation receipt'),
     prepareSessionReplacement(original) { return value => { assert.deepEqual(value.resource_owner, next); original.state.alive = false; return { ...original, state }; }; },
@@ -194,6 +196,7 @@ async function beforeReplacement(hook, payload, handlers) {
   const store = { method: 'hook/run', controller: new AbortController(), state: { owner, host } };
   const runtime = {
     metadata: () => ({ hooks: [hook] }), bind: () => {}, assertOwner: () => {}, assertSessionOwner: () => {},
+    sessionFacts: runtimeStore => runtimeStore.state.host,
     queued: (_store, callback) => callback(), scope: { run: (_store, callback) => callback() },
     events: new Map([[hook, handlers.map(handler => ({ factory: 0, handler }))]]), flush: async () => {},
   };
