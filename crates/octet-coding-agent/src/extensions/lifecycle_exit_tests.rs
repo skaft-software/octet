@@ -187,12 +187,11 @@ async fn python_runtime_setup_activates_extension_and_registers_its_tool() {
     let python_runtime = local_python_runtime(&f);
     // Cold start: the local fixture runtime has not been provisioned yet.
     std::fs::remove_file(format!("{}.ready", f.log.display())).unwrap();
-    assert!(
-        f.extensions
-            .activate_python_extension_with_runtime("lifecycle-exit-probe", python_runtime.clone())
-            .await
-            .is_err()
-    );
+    assert!(f
+        .extensions
+        .activate_python_extension_with_runtime("lifecycle-exit-probe", python_runtime.clone())
+        .await
+        .is_err());
     // `/extensions setup <name>` published the verified runtime. Activation in
     // the same session must register the tool instead of requiring a restart.
     std::fs::write(format!("{}.ready", f.log.display()), b"ready").unwrap();
@@ -201,15 +200,14 @@ async fn python_runtime_setup_activates_extension_and_registers_its_tool() {
         .await
         .unwrap();
 
-    assert!(
-        f.extensions
-            .tool_host
-            .as_ref()
-            .unwrap()
-            .tool_definitions()
-            .iter()
-            .any(|definition| definition.name == "probe")
-    );
+    assert!(f
+        .extensions
+        .tool_host
+        .as_ref()
+        .unwrap()
+        .tool_definitions()
+        .iter()
+        .any(|definition| definition.name == "probe"));
     let process = f.extensions.processes.last().unwrap().clone();
     assert!(process.is_running());
     let result = process
@@ -340,11 +338,9 @@ async fn session_end_reverse_ui_receives_a_terminal_reply_before_shutdown() {
         response["error"]["code"],
         ExtensionRequestFailure::NotForegroundOwner.code()
     );
-    assert!(
-        response["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("not applied")
-    );
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not applied"));
     assert!(!wire.iter().any(|entry| entry.get("cancelled").is_some()));
 }

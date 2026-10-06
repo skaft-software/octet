@@ -1231,7 +1231,7 @@ impl ExecutableExtensions {
             Result<octet_agent::extension_process::ExtensionReloadReport, String>,
         )>,
     > + Send
-    + 'static {
+           + 'static {
         self.resource_paths_epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.cancel_background_work();

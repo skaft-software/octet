@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use fs2::FileExt as _;
@@ -1096,11 +1096,9 @@ mod tests {
                 assert_eq!(asset.digest.len(), 64);
                 assert!(asset.digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
                 assert!(asset.bytes > 20_000_000 && asset.bytes < MAX_ARCHIVE_BYTES);
-                assert!(
-                    asset
-                        .url()
-                        .contains("/20261003/cpython-3.12.15%2B20261003-")
-                );
+                assert!(asset
+                    .url()
+                    .contains("/20261003/cpython-3.12.15%2B20261003-"));
                 assert!(!asset.url().contains("latest"));
             }
         }
@@ -1169,12 +1167,10 @@ mod tests {
         assert_eq!(inventory(&runtime, None).unwrap().len(), 4);
         for name in ["bin/python3", "bin/python3.12", "bin/python"] {
             let path = runtime.join(name);
-            assert!(
-                !std::fs::symlink_metadata(&path)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
-            );
+            assert!(!std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink());
             assert_eq!(std::fs::read(path).unwrap(), b"verified fixture bytes");
         }
         assert_eq!(
