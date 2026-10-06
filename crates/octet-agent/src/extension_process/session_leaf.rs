@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod driver;
 mod session_operations;
+pub(super) mod transport;
 mod visible;
 
 #[cfg(all(test, unix))]
@@ -200,6 +201,7 @@ struct BoundLeaf {
     revoker: SessionLeafRevoker,
     snapshot: SessionLeafGrantSnapshot,
     current_grant: StdMutex<Option<SessionLeafGrantSnapshot>>,
+    view_revision: AtomicU64,
 }
 
 #[derive(Default)]
@@ -211,9 +213,23 @@ pub(super) struct SessionLeafMailbox {
     // Observation only, not an append grant. Keep it through connection drain
     // so an accepted reload can rebind the last host-installed immutable view.
     pub(super) mirror: StdMutex<Option<SessionMirror>>,
+    pub(super) transport: StdMutex<transport::Store>,
+    // Selected v2 profile; None derives the deterministic frame candidate for
+    // test-installed gates. One source of truth for both peers of the wire.
+    pub(super) profile: StdRwLock<Option<transport::SessionSnapshotProfile>>,
 }
 
 impl SessionLeafMailbox {
+    pub(super) fn profile(
+        &self,
+        frame: usize,
+    ) -> Result<transport::SessionSnapshotProfile, ExtensionRuntimeError> {
+        if let Some(profile) = read_std_lock(&self.profile).clone() {
+            return Ok(profile);
+        }
+        transport::SessionSnapshotProfile::for_frame(frame)
+    }
+
     pub(super) fn clear(&self) {
         for (_, bound) in lock_std_mutex(&self.bound).drain() {
             bound.revoker.revoke();
@@ -227,6 +243,7 @@ impl SessionLeafMailbox {
 
     pub(super) fn terminate_execution(&self) {
         lock_std_mutex(&self.execution_slots).clear();
+        lock_std_mutex(&self.transport).clear();
     }
 }
 
@@ -236,7 +253,64 @@ pub struct SessionLeafProcessLease {
     process: ExtensionProcess,
     connection: Arc<ProcessConnection>,
     bound: Arc<BoundLeaf>,
-    host_snapshot: Option<serde_json::Value>,
+    host_snapshot: Option<InvocationSnapshot>,
+}
+
+enum InvocationSnapshot {
+    Legacy(serde_json::Value),
+    Chunked(Arc<transport::View>),
+}
+impl InvocationSnapshot {
+    fn capture(
+        connection: &ProcessConnection,
+        session: &crate::Session,
+        namespace: &str,
+        grant: &SessionLeafGrantSnapshot,
+    ) -> Result<Self, ExtensionRuntimeError> {
+        if owner_routes_enabled(&read_std_lock(&connection.protocol)) {
+            let profile = connection.session_profile()?;
+            let preparation = transport::Preparation {
+                activation_epoch: grant.activation_epoch,
+                operation_id: grant.operation_id.clone(),
+                tool_generation: 0,
+                head: grant.expected_head.clone(),
+            };
+            let view = lock_std_mutex(&connection.session_leaf.transport).history(
+                session,
+                namespace,
+                grant.owner.clone(),
+                &profile,
+                Some(preparation),
+            )?;
+            Ok(Self::Chunked(view))
+        } else {
+            session_snapshot(session, namespace, connection.max_message_bytes()).map(Self::Legacy)
+        }
+    }
+    fn attach(
+        &self,
+        connection: &ProcessConnection,
+        params: &mut serde_json::Value,
+    ) -> Result<Option<transport::Staged>, ExtensionRuntimeError> {
+        match self {
+            Self::Legacy(snapshot) => {
+                merge_session_snapshot(&mut params["context"]["host"], snapshot);
+                Ok(None)
+            }
+            Self::Chunked(view) => {
+                let mut staged = transport::stage(connection, Arc::clone(view))?;
+                if let (Some(preparation), Some(generation)) = (
+                    &mut staged.descriptor.preparation,
+                    params["payload"]["preparation"]["tool_generation"].as_u64(),
+                ) {
+                    preparation.tool_generation = generation;
+                }
+                params["session_snapshot"] = serde_json::to_value(&staged.descriptor)
+                    .map_err(|e| ExtensionRuntimeError::Protocol(e.to_string()))?;
+                Ok(Some(staged))
+            }
+        }
+    }
 }
 
 impl ExtensionProcess {
@@ -263,6 +337,9 @@ impl ExtensionProcess {
             extension_instance_id: self.inner.instance_id.clone(),
             process_generation: connection.generation,
         };
+        if owner_routes_enabled(&read_std_lock(&connection.protocol)) {
+            return transport::publish(self, connection, state, session, owner);
+        }
         let projection = if session_mirror_supported(&connection) {
             session_snapshot(
                 session,
@@ -337,6 +414,7 @@ impl ExtensionProcess {
             revoker,
             snapshot: SessionLeafGrantSnapshot::from(&grant),
             current_grant: StdMutex::new(Some(SessionLeafGrantSnapshot::from(&grant))),
+            view_revision: AtomicU64::new(0),
         });
         let mut slot = lock_std_mutex(&connection.session_leaf.bound);
         let routed = owner_routes_enabled(&read_std_lock(&connection.protocol));
@@ -385,11 +463,17 @@ impl SessionLeafProcessLease {
                 "session snapshot owner changed".into(),
             ));
         }
-        self.host_snapshot = Some(session_snapshot(
+        self.host_snapshot = Some(InvocationSnapshot::capture(
+            &self.connection,
             session,
             &self.process.descriptor().manifest.name,
-            self.connection.max_message_bytes(),
+            &self.bound.snapshot,
         )?);
+        if let Some(InvocationSnapshot::Chunked(view)) = &self.host_snapshot {
+            self.bound
+                .view_revision
+                .store(view.descriptor.view_revision, Ordering::Release);
+        }
         Ok(self)
     }
     /// Initial immutable grant snapshot for the owned hook request.
@@ -436,13 +520,14 @@ impl SessionLeafProcessLease {
         .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         params["session_leaf"] = serde_json::to_value(&self.bound.snapshot)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
-        if let Some(snapshot) = &self.host_snapshot {
-            let host = params["context"]["host"]
-                .as_object_mut()
-                .expect("execution host serializes to an object");
-            host.extend(snapshot.as_object().expect("host snapshot object").clone());
+        let _staged = self
+            .host_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.attach(&self.connection, &mut params))
+            .transpose()?;
+        if !owner_routes_enabled(&read_std_lock(&self.connection.protocol)) {
+            validate_session_snapshot_size(&params, self.connection.max_message_bytes())?;
         }
-        validate_session_snapshot_size(&params, self.connection.max_message_bytes())?;
         self.process
             .request_typed_on_connection(
                 Arc::clone(&self.connection),
@@ -493,6 +578,11 @@ pub(super) fn attach_session_mirror(
     host: &mut serde_json::Value,
     notification: bool,
 ) -> Result<(), ExtensionRuntimeError> {
+    if owner_routes_enabled(&read_std_lock(&connection.protocol)) {
+        // The current view is attached at request admission, with an ACTIVE
+        // numeric parent, never copied into this legacy host notification.
+        return Ok(());
+    }
     if !session_mirror_supported(connection) || host.get("session_entries").is_some() {
         return Ok(());
     }
@@ -830,11 +920,38 @@ pub(super) fn dispatch_append_request(
     }
     // Refuse before queue admission/claim if even the conservative complete
     // escaped receipt envelope cannot fit this physical connection's bound.
-    if !append_receipt_fits(
-        &admitted.request_id,
-        &bound.snapshot,
-        state.max_message_bytes(),
-    ) {
+    let routed = owner_routes_enabled(&read_std_lock(&state.protocol));
+    if routed
+        && !lock_std_mutex(&state.session_leaf.transport)
+            .parents
+            .get(&request.parent_request_id)
+            .is_some_and(|(owner, preparation)| {
+                owner == &admitted.owner
+                    && preparation.as_ref().is_some_and(|p| {
+                        p.activation_epoch == request.session_leaf.activation_epoch
+                            && p.operation_id == request.session_leaf.operation_id
+                    })
+            })
+    {
+        refuse_admitted_request(
+            state,
+            &admitted,
+            (
+                ExtensionRequestFailure::NotForegroundOwner,
+                "session preparation parent unavailable".into(),
+            ),
+        )?;
+        return Ok(true);
+    }
+    if !(if routed {
+        transport::receipt::fits(&request, &bound, state.max_message_bytes())
+    } else {
+        append_receipt_fits(
+            &admitted.request_id,
+            &bound.snapshot,
+            state.max_message_bytes(),
+        )
+    }) {
         refuse_admitted_request(
             state,
             &admitted,
@@ -900,6 +1017,7 @@ pub(super) fn dispatch_append_request(
     let transcript_wake = Arc::clone(&state.remote_ui);
     let transcript_enabled =
         read_std_lock(&state.protocol).supports(EXTENSION_FEATURE_TRANSCRIPT_RENDER);
+    let mailbox = Arc::clone(&state.session_leaf);
     tokio::spawn(async move {
         // Never select parent cancellation/timeout against this waiter: before
         // claim cancellation yields a definite error; after claim it must finish.
@@ -917,14 +1035,27 @@ pub(super) fn dispatch_append_request(
                         transcript_private_entry(&commit.entry, &transcript_namespace)
                     {
                         let _ = transcript_events.send(ExtensionEvent::TranscriptEntryCommitted {
-                            namespace: transcript_namespace,
+                            namespace: transcript_namespace.clone(),
                             owner: transcript_owner,
                             entry,
                         });
                         transcript_wake.wake();
                     }
                 }
-                serde_json::json!({"jsonrpc":"2.0","id":id,"result":SessionLeafAppendResult::from(commit)})
+                if routed {
+                    let previous_revision = bound.view_revision.load(Ordering::Acquire);
+                    let view_revision = lock_std_mutex(&mailbox.transport)
+                        .next_revision()
+                        .expect("admitted session revision");
+                    bound.view_revision.store(view_revision, Ordering::Release);
+                    let entry = commit.entry.clone();
+                    let previous_head = entry.parent.as_ref().map(|id| id.0.clone());
+                    serde_json::json!({"jsonrpc":"2.0","id":id,"result":transport::receipt::Receipt {
+                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace }, previous_revision, view_revision, previous_head,
+                    }})
+                } else {
+                    serde_json::json!({"jsonrpc":"2.0","id":id,"result":SessionLeafAppendResult::from(commit)})
+                }
             }
             Err(error) => {
                 let (code, message) = refusal(error);
@@ -1033,6 +1164,7 @@ mod tests {
                 revoker,
                 snapshot: SessionLeafGrantSnapshot::from(grant),
                 current_grant: StdMutex::new(Some(SessionLeafGrantSnapshot::from(grant))),
+                view_revision: AtomicU64::new(0),
             }),
         );
         super::super::tests::insert_test_parent(&state, 1, Some(binding.owner.clone()));

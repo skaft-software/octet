@@ -313,7 +313,12 @@ fn main() {
                     });
                 features.extend(selected);
                 *state.transport.lock().unwrap() = params["protocol"]["bulk_objects_v1"].clone();
-                state.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"api_version":"0.4","tools":tools,"protocol":{"version":"0.4","features":features,"limits":params["protocol"]["limits"]}}}));
+                // Echo only the limits this peer accepts. The physical frame
+                // bound and the paired session profile are host offers for a
+                // transport negotiation this fixture never selects.
+                let mut limits = params["protocol"]["limits"].clone();
+                limits.as_object_mut().unwrap().remove("max_message_bytes");
+                state.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"api_version":"0.4","tools":tools,"protocol":{"version":"0.4","features":features,"limits":limits}}}));
             }
             Some("tool/call") => {
                 let state = Arc::clone(&state);

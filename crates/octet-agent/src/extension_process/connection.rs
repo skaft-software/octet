@@ -698,6 +698,14 @@ pub(super) async fn reap_failed_extension(
 }
 
 impl ProcessConnection {
+    /// Selected v2 profile, or the deterministic frame-derived candidate for
+    /// test-installed gates. Never invents a wider frame than the connection.
+    pub(super) fn session_profile(
+        &self,
+    ) -> Result<session_leaf::transport::SessionSnapshotProfile, ExtensionRuntimeError> {
+        self.session_leaf.profile(self.max_message_bytes())
+    }
+
     pub(super) fn max_message_bytes(&self) -> usize {
         self.frame_limit.max_message_bytes()
     }
@@ -1028,6 +1036,12 @@ impl ProcessConnection {
                 &mut params,
             )?;
             let id = connection.next_id.fetch_add(1, Ordering::Relaxed);
+            let _views = session_leaf::transport::attach(
+                &connection,
+                id,
+                resource_owner.as_ref(),
+                &mut params,
+            )?;
             let message = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -1411,6 +1425,7 @@ impl ProcessConnection {
         let Some(request) = request else {
             return;
         };
+        lock_std_mutex(&self.session_leaf.transport).settle(id);
         self.pending_changed.notify_waiters();
         let _ = request
             .sender
