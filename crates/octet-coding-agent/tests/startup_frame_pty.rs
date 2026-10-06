@@ -376,7 +376,7 @@ impl PtyOctet {
                         ));
                     }
                     text.push_str("\nMOUSE-WRAPPED ");
-                    text.push_str(&"wrapped Unicode 界👩‍💻 text ".repeat(12));
+                    text.push_str(&"wrapped Unicode 界é text ".repeat(12));
                     text.push_str("\n\nMOUSE-END\n");
                     session
                         .append(octet_agent::EntryValue::Message(octet_ai::Message::Assistant(

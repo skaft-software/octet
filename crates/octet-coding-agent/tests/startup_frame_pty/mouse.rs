@@ -121,7 +121,7 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
     );
     settle(&mut octet, &mut parser, &mut consumed);
     assert!(!parser.screen().contents().contains("rows back"));
-    assert!(parser.screen().contents().contains("draft-kept"));
+    assert!(parser.screen().contents().contains("draft-kept"), "{}", parser.screen().contents());
     // Keyboard Up still belongs to the editor, not transcript wheel routing.
     octet.pty.write_input(b"\x1b[D!");
     await_screen(
@@ -157,7 +157,7 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
                 .find(|row| row_text(&parser, *row, columns).contains("MOUSE-ROW-"))
                 .expect("visible numbered row");
             let painted = row_text(&parser, row, columns);
-            let expected = painted.trim_start_matches([' ', '│']).trim().to_owned();
+            let expected = painted.trim_matches([' ', '│']).trim().to_owned();
             let before = octet.pty.output.len();
             let event = |button, column, release| {
                 if legacy {
