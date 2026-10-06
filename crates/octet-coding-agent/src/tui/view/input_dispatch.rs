@@ -161,6 +161,10 @@ impl InteractiveShell {
     /// Consume a typed slash command, but never drain a draft for a generated
     /// model/session shortcut, even when its bytes happen to match the draft.
     pub fn consume_command_text(&mut self, text: String) -> String {
+        if self.submitted_text().is_some() {
+            self.input_dispatch.generated_command = false;
+            return self.drain_editor();
+        }
         if std::mem::take(&mut self.input_dispatch.generated_command) {
             text
         } else if text == self.pending() {

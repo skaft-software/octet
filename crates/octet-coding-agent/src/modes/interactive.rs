@@ -539,7 +539,8 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
                         | PendingIdleAction::ChangeThinkingLevel(_)
                         | PendingIdleAction::ActiveThinkingSelection(_)
                 ),
-                PendingIdleAction::ChangeThinking(_) | PendingIdleAction::ChangeThinkingLevel(_)
+                PendingIdleAction::ChangeThinking(_)
+                    | PendingIdleAction::ChangeThinkingLevel(_)
                     | PendingIdleAction::ActiveThinkingSelection(_)
             )
             | (
@@ -550,8 +551,14 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
                 Some(PendingIdleAction::PersistThinkingPreference(_)),
                 PendingIdleAction::PersistThinkingPreference(_)
             )
-            | (Some(PendingIdleAction::SyncTheme(_)), PendingIdleAction::SyncTheme(_))
-            | (Some(PendingIdleAction::SyncImages(_)), PendingIdleAction::SyncImages(_))
+            | (
+                Some(PendingIdleAction::SyncTheme(_)),
+                PendingIdleAction::SyncTheme(_)
+            )
+            | (
+                Some(PendingIdleAction::SyncImages(_)),
+                PendingIdleAction::SyncImages(_)
+            )
     );
     if same_kind {
         let _ = queue.pop_back();
@@ -596,6 +603,17 @@ where
     loop {
         if shell.close_requested() {
             return Ok(Idle::Quit);
+        }
+        if let Some((_admission, action)) =
+            executable_extensions.begin_editor_submission(shell, false)
+        {
+            match action {
+                InputAction::Command(text) => {
+                    return Ok(Idle::Command(shell.consume_command_text(text)))
+                }
+                InputAction::Submit(_) => return Ok(Idle::Submit(shell.drain_composed())),
+                _ => continue,
+            }
         }
         tokio::select! {
             biased;
@@ -2356,21 +2374,60 @@ const MAX_PENDING_IDLE_ACTIONS: usize = 64;
 /// Commands with an idle-owned effect need admission before consuming the draft.
 fn active_command_needs_idle_slot(command: &Command) -> bool {
     match command {
-        Command::Login(_) | Command::Setup | Command::Logout(_) | Command::Model(Some(_))
-        | Command::Thinking(Some(_)) | Command::Compact | Command::CompactWithInstructions(_)
-        | Command::AutoCompact(_) | Command::Reload | Command::New | Command::Resume(_)
-        | Command::Fork | Command::Clone | Command::CacheWarming(Some(_)) | Command::Skills(_)
-        | Command::Unknown(_) | Command::Theme(Some(_)) | Command::Bash(_) => true,
+        Command::Login(_)
+        | Command::Setup
+        | Command::Logout(_)
+        | Command::Model(Some(_))
+        | Command::Thinking(Some(_))
+        | Command::Compact
+        | Command::CompactWithInstructions(_)
+        | Command::AutoCompact(_)
+        | Command::Reload
+        | Command::New
+        | Command::Resume(_)
+        | Command::Fork
+        | Command::Clone
+        | Command::CacheWarming(Some(_))
+        | Command::Skills(_)
+        | Command::Unknown(_)
+        | Command::Theme(Some(_))
+        | Command::Bash(_) => true,
         Command::Fast(value) => value.is_some(),
-        Command::Extensions(sub) => !matches!(sub, commands::ExtensionsSubcommand::Status | commands::ExtensionsSubcommand::Inspect { .. }),
-        Command::Settings(sub) => !matches!(sub, commands::SettingsCommand::Show | commands::SettingsCommand::Transport | commands::SettingsCommand::Padding | commands::SettingsCommand::Theme(None) | commands::SettingsCommand::Images(None)),
+        Command::Extensions(sub) => !matches!(
+            sub,
+            commands::ExtensionsSubcommand::Status | commands::ExtensionsSubcommand::Inspect { .. }
+        ),
+        Command::Settings(sub) => !matches!(
+            sub,
+            commands::SettingsCommand::Show
+                | commands::SettingsCommand::Transport
+                | commands::SettingsCommand::Padding
+                | commands::SettingsCommand::Theme(None)
+                | commands::SettingsCommand::Images(None)
+        ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
-        Command::Model(None) | Command::Thinking(None) | Command::Theme(None)
-        | Command::Verbose(_) | Command::Answer(_) | Command::Status | Command::Context
-        | Command::Help(_) | Command::Hotkeys | Command::Copy | Command::Session
-        | Command::Cost | Command::Cache | Command::CacheWarming(None) | Command::Update
-        | Command::Changelog | Command::Name(_) | Command::Export(_) | Command::Exit
-        | Command::Debug | Command::Prompt(_) | Command::Goal(_) => false,
+        Command::Model(None)
+        | Command::Thinking(None)
+        | Command::Theme(None)
+        | Command::Verbose(_)
+        | Command::Answer(_)
+        | Command::Status
+        | Command::Context
+        | Command::Help(_)
+        | Command::Hotkeys
+        | Command::Copy
+        | Command::Session
+        | Command::Cost
+        | Command::Cache
+        | Command::CacheWarming(None)
+        | Command::Update
+        | Command::Changelog
+        | Command::Name(_)
+        | Command::Export(_)
+        | Command::Exit
+        | Command::Debug
+        | Command::Prompt(_)
+        | Command::Goal(_) => false,
     }
 }
 
@@ -2456,31 +2513,60 @@ fn apply_active_theme(
     requested: Option<String>,
     queue: &mut VecDeque<PendingIdleAction>,
 ) -> anyhow::Result<()> {
-    let mut config = shell.runtime_config().cloned().context("display configuration is unavailable")?;
+    let mut config = shell
+        .runtime_config()
+        .cloned()
+        .context("display configuration is unavailable")?;
     let Some(choice) = requested else {
         let background = shell.theme().background();
-        let mut keys: Vec<_> = TerminalThemeChoice::all().into_iter().map(|choice| choice.key().to_owned()).collect();
-        let mut previews: Vec<_> = TerminalThemeChoice::all().into_iter().map(|choice| {
-            if choice == TerminalThemeChoice::Auto && TerminalThemeChoice::from_config(&config) == Some(TerminalThemeChoice::Auto) { return shell.theme(); }
-            let mut preview_config = config.clone();
-            preview_config.theme = Some(choice.key().to_owned());
-            load_theme_for_background(&preview_config, background)
-        }).collect();
-        for (_, _, key, theme) in compiled_file_theme_picker_entries(&config, background) { keys.push(key); previews.push(theme); }
-        for (key, theme) in crate::tui::theme::selectable_file_themes(&config, background) { keys.push(key); previews.push(theme); }
+        let mut keys: Vec<_> = TerminalThemeChoice::all()
+            .into_iter()
+            .map(|choice| choice.key().to_owned())
+            .collect();
+        let mut previews: Vec<_> = TerminalThemeChoice::all()
+            .into_iter()
+            .map(|choice| {
+                if choice == TerminalThemeChoice::Auto
+                    && TerminalThemeChoice::from_config(&config) == Some(TerminalThemeChoice::Auto)
+                {
+                    return shell.theme();
+                }
+                let mut preview_config = config.clone();
+                preview_config.theme = Some(choice.key().to_owned());
+                load_theme_for_background(&preview_config, background)
+            })
+            .collect();
+        for (_, _, key, theme) in compiled_file_theme_picker_entries(&config, background) {
+            keys.push(key);
+            previews.push(theme);
+        }
+        for (key, theme) in crate::tui::theme::selectable_file_themes(&config, background) {
+            keys.push(key);
+            previews.push(theme);
+        }
         let current = config.theme.as_deref().unwrap_or("auto");
-        let selected = keys.iter().position(|key| key.eq_ignore_ascii_case(current)).unwrap_or(0);
+        let selected = keys
+            .iter()
+            .position(|key| key.eq_ignore_ascii_case(current))
+            .unwrap_or(0);
         shell.open_theme_preview_panel(Panel::SelectList {
-            surface: OrdinarySurfaceMetadata::with_purpose("Theme", "Preview display; save at idle"),
+            surface: OrdinarySurfaceMetadata::with_purpose(
+                "Theme",
+                "Preview display; save at idle",
+            ),
             items: keys.clone(),
             descriptions: vec![None; keys.len()],
             selected,
             filter: String::new(),
-            action: PanelAction::SelectTheme { keys, previews: previews.into() },
+            action: PanelAction::SelectTheme {
+                keys,
+                previews: previews.into(),
+            },
         });
         return Ok(());
     };
-    let selector = TerminalThemeChoice::parse(&choice).map_or(choice.clone(), |choice| choice.key().to_owned());
+    let selector = TerminalThemeChoice::parse(&choice)
+        .map_or(choice.clone(), |choice| choice.key().to_owned());
     config.theme = Some(selector.clone());
     config.theme_explicit = true;
     // Named themes fail closed before changing the live display or its config.
@@ -2492,8 +2578,16 @@ fn apply_active_theme(
     apply_active_theme_snapshot(shell, selector, theme, queue)
 }
 
-fn apply_active_theme_snapshot(shell: &mut InteractiveShell, selector: String, theme: OctetTheme, queue: &mut VecDeque<PendingIdleAction>) -> anyhow::Result<()> {
-    let mut config = shell.runtime_config().cloned().context("display configuration is unavailable")?;
+fn apply_active_theme_snapshot(
+    shell: &mut InteractiveShell,
+    selector: String,
+    theme: OctetTheme,
+    queue: &mut VecDeque<PendingIdleAction>,
+) -> anyhow::Result<()> {
+    let mut config = shell
+        .runtime_config()
+        .cloned()
+        .context("display configuration is unavailable")?;
     config.theme = Some(selector.clone());
     config.theme_explicit = true;
     shell.set_theme(theme);
@@ -2529,7 +2623,10 @@ where
 {
     let template = matches!(&command, Command::Unknown(text)
         if shell.has_prompt_template(split_prompt_invocation(text).map_or("", |(name, _)| name)));
-    if active_command_needs_idle_slot(&command) && !template && queue.len() >= MAX_PENDING_IDLE_ACTIONS {
+    if active_command_needs_idle_slot(&command)
+        && !template
+        && queue.len() >= MAX_PENDING_IDLE_ACTIONS
+    {
         anyhow::bail!("command queue is full; retry after the idle boundary");
     }
     match command {
@@ -3746,13 +3843,22 @@ where
                 deliver_extension_messages_to_run(shell, control, &mut intents);
             }
             incoming = async {
-                if let Some(event) = clipboard_fallback.take() {
-                    (Some(Ok(event)), true)
+                if executable_extensions.has_editor_submission() {
+                    (None, false, true)
+                } else if let Some(event) = clipboard_fallback.take() {
+                    (Some(Ok(event)), true, false)
                 } else {
-                    (input.next().await, false)
+                    (input.next().await, false, false)
                 }
-            }, if input_open => {
-                let (maybe, clipboard_replay) = incoming;
+            }, if input_open || executable_extensions.has_editor_submission() => {
+                let (maybe, clipboard_replay, remote_submission) = incoming;
+                let _admission;
+                let action = if remote_submission {
+                    let Some((admission, action)) = executable_extensions.begin_editor_submission(shell, true) else { continue; };
+                    _admission = Some(admission);
+                    action
+                } else {
+                _admission = None;
                 let event = match maybe {
                     Some(Ok(event)) => event,
                     Some(Err(error)) => {
@@ -3991,7 +4097,7 @@ where
                     }
                     continue;
                 }
-                let action = match shell.translate_input(Some(event), true) {
+                match shell.translate_input(Some(event), true) {
                     InputAction::SlashMenu(action) => {
                         if shell.slash_menu(action) {
                             InputAction::Command(shell.pending())
@@ -4001,6 +4107,7 @@ where
                         }
                     }
                     action => action,
+                }
                 };
                 // These actions consume or replace the draft that admitted the
                 // read. Its eventual text must not enter the next composer.
@@ -5049,7 +5156,8 @@ where
     shell.set_theme(load_theme_for_background(&app.config, background));
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
-    app.executable_extensions.refresh_frontend_keybindings(shell);
+    app.executable_extensions
+        .refresh_frontend_keybindings(shell);
     shell.hydrate(app.agent.session())?;
     app.executable_extensions
         .activate_session_lifecycle_driver();
@@ -7723,7 +7831,12 @@ async fn apply_pending_actions(
                 let target = id.clone();
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
                 if app.model.spec.id == target {
-                    if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || crate::cli::persist_model(&target.0)).await {
+                    if let Err(error) =
+                        persist_configuration(Some(&mut app.executable_extensions), || {
+                            crate::cli::persist_model(&target.0)
+                        })
+                        .await
+                    {
                         shell.error(format!("failed to save model preference: {error}"));
                     }
                     shell.notice("model change applied at the idle boundary");
@@ -7891,16 +8004,30 @@ async fn apply_pending_actions(
             PendingIdleAction::SyncTheme(selector) => {
                 app.config.theme = Some(selector.clone());
                 app.config.theme_explicit = true;
-                if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || crate::cli::persist_theme_choice(&selector)).await {
-                    shell.error(format!("display changed, but theme preference was not saved: {error}"));
+                if let Err(error) =
+                    persist_configuration(Some(&mut app.executable_extensions), || {
+                        crate::cli::persist_theme_choice(&selector)
+                    })
+                    .await
+                {
+                    shell.error(format!(
+                        "display changed, but theme preference was not saved: {error}"
+                    ));
                 } else {
                     shell.notice("theme preference saved at the idle boundary");
                 }
             }
             PendingIdleAction::SyncImages(enabled) => {
                 app.config.show_images = enabled;
-                if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || crate::cli::persist_show_images(enabled)).await {
-                    shell.error(format!("display changed, but image preference was not saved: {error}"));
+                if let Err(error) =
+                    persist_configuration(Some(&mut app.executable_extensions), || {
+                        crate::cli::persist_show_images(enabled)
+                    })
+                    .await
+                {
+                    shell.error(format!(
+                        "display changed, but image preference was not saved: {error}"
+                    ));
                 } else {
                     shell.notice("image display preference saved at the idle boundary");
                 }

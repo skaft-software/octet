@@ -585,3 +585,72 @@ async fn remote_editor_revoke_reload_and_paste_disclose_unrecovered_input() {
         extensions.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn remote_editor_submission_fences_and_post_admission_clear_do_not_grant_panel_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    command(&mut extensions, &mut frontend, &["editor", "same"]).await;
+    input(&mut extensions, &mut frontend, 'a');
+    let (owner, checkpoint) = checkpoint(&extensions, 1, 1);
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &checkpoint, "draft".into(), &mut frontend.shell)
+        .unwrap();
+    let mut foreign = checkpoint.clone();
+    foreign.mount_id = "foreign".into();
+    assert!(extensions
+        .remote_ui
+        .validate_editor_submission(&owner, &foreign, &frontend.shell)
+        .is_err());
+    foreign = checkpoint.clone();
+    foreign.input_revision += 1;
+    assert!(extensions
+        .remote_ui
+        .validate_editor_submission(&owner, &foreign, &frontend.shell)
+        .is_err());
+    let accepted = extensions
+        .remote_ui
+        .validate_editor_submission(&owner, &checkpoint, &frontend.shell)
+        .unwrap();
+    assert!(
+        extensions
+            .remote_ui
+            .validate_editor_submission(&owner, &checkpoint, &frontend.shell)
+            .is_err(),
+        "a checkpoint cannot submit twice"
+    );
+    frontend.shell.show_overlay_text("Host panel".into());
+    let mut clear = checkpoint.clone();
+    clear.checkpoint_revision += 1;
+    assert!(
+        extensions
+            .remote_ui
+            .checkpoint_editor(&owner, &clear, String::new(), &mut frontend.shell)
+            .is_err(),
+        "unaccepted input cannot clear under a panel"
+    );
+    accepted.store(checkpoint.checkpoint_revision, Ordering::Release);
+    assert!(
+        extensions
+            .remote_ui
+            .checkpoint_editor(&owner, &clear, "overwrite".into(), &mut frontend.shell)
+            .is_err(),
+        "admission grants only a clear"
+    );
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &clear, String::new(), &mut frontend.shell)
+        .unwrap();
+    assert_eq!(frontend.shell.extension_editor_snapshot().text, "");
+    clear.checkpoint_revision += 1;
+    assert!(
+        extensions
+            .remote_ui
+            .checkpoint_editor(&owner, &clear, String::new(), &mut frontend.shell)
+            .is_err(),
+        "clear permission is one-shot"
+    );
+    extensions.shutdown().await;
+}

@@ -279,6 +279,23 @@ pub struct ComposerTextRequest {
     pub resource_owner: Option<ExtensionResourceOwner>,
 }
 
+/// Submit a fenced custom-editor draft through native composer admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposerSubmitRequest {
+    /// Original host request which mounted this editor.
+    pub parent_request_id: u64,
+    /// Expanded text, without granting attachment or file access.
+    pub text: String,
+    /// Explicit follow-up intent; ordinary submission steers during a run.
+    pub follow_up: bool,
+    /// Last acknowledged checkpoint of the submitting mount.
+    pub editor_checkpoint: ExtensionEditorCheckpoint,
+    /// Explicit owner for retained editor callbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
 /// A bounded checkpoint for one host-issued editor mount, carried by composer/set.
 /// The frontend separately validates the admitted owner, live mount and clocks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

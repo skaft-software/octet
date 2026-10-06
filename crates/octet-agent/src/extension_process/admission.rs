@@ -191,7 +191,7 @@ where
         )?;
         return Ok(None);
     }
-    let is_editor_checkpoint = method == methods::COMPOSER_SET
+    let is_editor_checkpoint = matches!(method, methods::COMPOSER_SET | methods::COMPOSER_SUBMIT)
         && params
             .get("editor_checkpoint")
             .is_some_and(|checkpoint| !checkpoint.is_null());
@@ -297,7 +297,9 @@ fn validated_editor_checkpoint(
     method: &str,
     params: &serde_json::Value,
 ) -> Option<ExtensionEditorCheckpoint> {
-    if method != methods::COMPOSER_SET || require_remote_ui(state).is_err() {
+    if !matches!(method, methods::COMPOSER_SET | methods::COMPOSER_SUBMIT)
+        || require_remote_ui(state).is_err()
+    {
         return None;
     }
     let checkpoint: ExtensionEditorCheckpoint =

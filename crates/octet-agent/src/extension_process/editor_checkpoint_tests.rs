@@ -861,3 +861,64 @@ notifications = true
         assert!(process.shutdown().await, "{mode}");
     }
 }
+
+#[test]
+fn editor_submission_retains_only_its_live_mount_and_preserves_delivery_intent() {
+    for follow_up in [false, true] {
+        let (state, mut frames, mut events) = editor_state();
+        let mut params = checkpoint_params();
+        params["follow_up"] = follow_up.into();
+        handle_protocol_line(&wave1_line(100, methods::COMPOSER_SUBMIT, params), &state).unwrap();
+        let event = events.try_recv().unwrap();
+        assert!(matches!(event, ExtensionEvent::ComposerRequested {
+            operation: ExtensionComposerOperation::Submit { follow_up: actual, text, .. }, ..
+        } if actual == follow_up && text == "complete draft 🦀"));
+        assert_eq!(
+            lock_std_mutex(&state.child_requests)[&ExtensionRequestId::Number(100)]
+                .parent_request_id,
+            0
+        );
+        settle_parent(&state);
+        assert!(
+            frames.try_recv().is_err(),
+            "normal parent success must not revoke editor admission"
+        );
+    }
+}
+
+#[test]
+fn editor_submission_requires_bounded_checkpoint_and_negotiated_remote_ui() {
+    for case in [
+        "missing-checkpoint",
+        "unknown-field",
+        "future-revision",
+        "no-remote-ui",
+    ] {
+        let (state, mut frames, mut events) = editor_state();
+        let mut params = checkpoint_params();
+        params["follow_up"] = false.into();
+        match case {
+            "missing-checkpoint" => {
+                params.as_object_mut().unwrap().remove("editor_checkpoint");
+            }
+            "unknown-field" => params["extra"] = true.into(),
+            "future-revision" => {
+                params["editor_checkpoint"]["input_revision"] = (1u64 << 53).into()
+            }
+            "no-remote-ui" => {
+                write_std_lock(&state.protocol)
+                    .features
+                    .remove(EXTENSION_FEATURE_REMOTE_UI);
+            }
+            _ => unreachable!(),
+        }
+        handle_protocol_line(&wave1_line(100, methods::COMPOSER_SUBMIT, params), &state).unwrap();
+        assert!(
+            events.try_recv().is_err(),
+            "invalid {case} must not enter native admission"
+        );
+        let response: serde_json::Value =
+            serde_json::from_slice(&frames.try_recv().unwrap().line).unwrap();
+        assert!(response.get("error").is_some(), "{case}: {response}");
+    }
+}

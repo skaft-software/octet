@@ -1,6 +1,9 @@
 //! Foreground leases for cached API 0.4 remote components. No render RPCs.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use octet_agent::extension_process::{
@@ -82,6 +85,10 @@ struct EditorRecovery {
     acknowledged_input_revision: u64,
     checkpoint_revision: u64,
     composer_revision: u64,
+    // A native command may move focus into a panel before its editor receives
+    // admission. Permit only that acknowledged draft's empty clear checkpoint.
+    accepted_submission: Arc<AtomicU64>,
+    last_submission_revision: u64,
 }
 
 impl EditorRecovery {
@@ -309,6 +316,8 @@ impl RemoteUi {
                         input_revision: 0,
                         acknowledged_input_revision: 0,
                         checkpoint_revision: 0,
+                        accepted_submission: Arc::new(AtomicU64::new(0)),
+                        last_submission_revision: 0,
                         composer_revision: shell.extension_editor_snapshot().revision,
                     });
                 let mut result = serde_json::json!({"columns": columns, "rows": rows});
@@ -415,6 +424,46 @@ impl RemoteUi {
     /// Local half of the synchronous process checkpoint commit. The caller must
     /// hold `ExtensionProcess::commit_editor_checkpoint`'s disposition through
     /// this mutation and ACK admission; never reenter process APIs here.
+    pub(super) fn validate_editor_submission(
+        &mut self,
+        owner: &ExtensionResourceOwner,
+        checkpoint: &ExtensionEditorCheckpoint,
+        shell: &InteractiveShell,
+    ) -> Result<Arc<AtomicU64>, Refusal> {
+        let invalid = |detail: &str| (ExtensionRequestFailure::InvalidRequest, detail.to_owned());
+        let mount = self
+            .mounts
+            .iter_mut()
+            .find(|mount| {
+                mount.owner == *owner
+                    && mount.surface_id == checkpoint.surface_id
+                    && mount.view.id == checkpoint.mount_id
+            })
+            .ok_or_else(|| invalid("editor submission belongs to a retired or foreign mount"))?;
+        let editor = mount
+            .editor
+            .as_mut()
+            .ok_or_else(|| invalid("submission requires an editor mount"))?;
+        let snapshot = shell.extension_editor_snapshot();
+        if !mount
+            .process
+            .remote_ui_surface_is_current(owner, &checkpoint.surface_id)
+            || shell.remote_ui_input_blocked()
+            || shell.close_requested()
+            || !snapshot.focused
+            || snapshot.revision != editor.composer_revision
+            || checkpoint.input_revision != editor.acknowledged_input_revision
+            || checkpoint.checkpoint_revision != editor.checkpoint_revision
+            || checkpoint.checkpoint_revision <= editor.last_submission_revision
+        {
+            return Err(invalid(
+                "editor submission no longer owns the acknowledged draft",
+            ));
+        }
+        editor.last_submission_revision = checkpoint.checkpoint_revision;
+        Ok(Arc::clone(&editor.accepted_submission))
+    }
+
     pub(super) fn checkpoint_editor(
         &mut self,
         owner: &ExtensionResourceOwner,
@@ -445,17 +494,27 @@ impl RemoteUi {
             ));
         }
         let snapshot = shell.extension_editor_snapshot();
-        if !snapshot.focused || snapshot.revision != editor.composer_revision {
+        let admitted_clear = text.is_empty()
+            && checkpoint.input_revision == editor.acknowledged_input_revision
+            && editor.accepted_submission.load(Ordering::Acquire) == editor.checkpoint_revision
+            && editor.checkpoint_revision != 0;
+        if (!snapshot.focused && !admitted_clear) || snapshot.revision != editor.composer_revision {
             return Err(invalid(
                 "native composer changed or has another input owner",
             ));
         }
         // The process guard excludes concurrent cancellation and retirement;
         // the same shell owner serializes rescue, local edits and focus changes.
-        let committed = shell.extension_set_editor(text);
+        let committed = if admitted_clear {
+            shell.clear_editor();
+            shell.extension_editor_snapshot()
+        } else {
+            shell.extension_set_editor(text)
+        };
         editor.composer_revision = committed.revision;
         editor.acknowledged_input_revision = checkpoint.input_revision;
         editor.checkpoint_revision = checkpoint.checkpoint_revision;
+        editor.accepted_submission.store(0, Ordering::Release);
         Ok(())
     }
 

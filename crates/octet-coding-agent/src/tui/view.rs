@@ -990,7 +990,10 @@ pub(crate) enum PanelAction {
     /// Select a thinking level.
     SelectThinking(Vec<crate::config::ThinkingLevel>),
     /// Select a terminal theme without suspending an active run.
-    SelectTheme { keys: Vec<String>, previews: Arc<[OctetTheme]> },
+    SelectTheme {
+        keys: Vec<String>,
+        previews: Arc<[OctetTheme]>,
+    },
     /// Select a reasoning execution mode.
     SelectReasoningMode(Vec<octet_ai::ReasoningMode>),
     /// Select an installed executable-extension bundle.
@@ -2004,7 +2007,10 @@ impl ShellState {
                         | TranscriptBlock::Compaction(_)
                         | TranscriptBlock::Tool(_)
                         | TranscriptBlock::Shell(_)
-                ) || self.extension_transcript.frames.contains_key(&self.transcript_commit_ids[index]))
+                ) || self
+                    .extension_transcript
+                    .frames
+                    .contains_key(&self.transcript_commit_ids[index]))
                 .then_some(index)
             })
             .collect::<Vec<_>>();
@@ -2434,7 +2440,8 @@ impl ShellState {
     }
 
     fn touch_block(&mut self, index: usize) {
-        self.extension_transcript.touch_source(self.transcript_commit_ids[index]);
+        self.extension_transcript
+            .touch_source(self.transcript_commit_ids[index]);
         self.touch_presentation_block(index);
     }
 
@@ -3572,8 +3579,12 @@ fn application_history_budget_scales_with_viewport() {
     assert_eq!(hydration_entry_budget(u16::MAX), 512);
 }
 
+mod composer_admission;
+pub(crate) use composer_admission::ComposerAdmission;
+
 /// Full-screen terminal shell. It owns all terminal I/O and no Agent state.
 pub struct InteractiveShell {
+    submitted_draft: std::rc::Rc<RefCell<Option<composer_admission::SubmittedDraft>>>,
     input_dispatch: input_dispatch::InputDispatch,
     // Production rendering runs on a dedicated OS thread. Tests keep an
     // inline TUI so they can inspect rendering deterministically without a
@@ -3646,6 +3657,7 @@ impl InteractiveShell {
             })?;
 
         Ok(Self {
+            submitted_draft: Default::default(),
             input_dispatch: input_dispatch::InputDispatch::new(
                 crate::tui::keymap::keybindings::KeybindingsManager::for_user(),
             ),
@@ -3718,6 +3730,7 @@ impl InteractiveShell {
         tui.add_child(Box::new(ShellComponent::new(state.clone(), false)));
         tui.start();
         Self {
+            submitted_draft: Default::default(),
             input_dispatch: input_dispatch::InputDispatch::new(
                 crate::tui::keymap::keybindings::KeybindingsManager::current_platform(),
             ),
@@ -4807,7 +4820,11 @@ impl InteractiveShell {
                 state.run_cost_available = true;
             }
             // Applied before the acceptance gate: see `on_run_event`.
-            AgentEvent::CustomMessageCommitted { entry_id, message, timestamp_unix_ms } => {
+            AgentEvent::CustomMessageCommitted {
+                entry_id,
+                message,
+                timestamp_unix_ms,
+            } => {
                 state.retain_custom_message(entry_id, message, Some(*timestamp_unix_ms));
             }
             AgentEvent::DelegationUpdated { .. } => {}
@@ -5124,6 +5141,9 @@ impl InteractiveShell {
         editor_display: String,
         attachments: Vec<composer::Attachment>,
     ) {
+        if self.reject_submitted_text() {
+            return;
+        }
         let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
         state.ledger.restore(attachments);
@@ -6083,20 +6103,30 @@ impl InteractiveShell {
     }
 
     pub fn pending(&self) -> String {
-        self.state.borrow().editor.text().to_owned()
+        self.submitted_text()
+            .unwrap_or_else(|| self.state.borrow().editor.text().to_owned())
     }
 
     pub(crate) fn has_prompt_template(&self, name: &str) -> bool {
-        self.state.borrow().prompt_templates.iter().any(|template| template.name == name)
+        self.state
+            .borrow()
+            .prompt_templates
+            .iter()
+            .any(|template| template.name == name)
     }
 
     pub(crate) fn prompt_templates_report(&self) -> String {
         let state = self.state.borrow();
         let mut text = String::from("Prompt templates:\n");
         for template in state.prompt_templates.iter() {
-            text.push_str(&format!("  /{} — {}\n", template.name, template.description));
+            text.push_str(&format!(
+                "  /{} — {}\n",
+                template.name, template.description
+            ));
         }
-        if state.prompt_templates.is_empty() { text.push_str("  (none discovered)"); }
+        if state.prompt_templates.is_empty() {
+            text.push_str("  (none discovered)");
+        }
         text
     }
 
@@ -6195,6 +6225,9 @@ impl InteractiveShell {
 
     /// Drain the editor and resolve chips into ordered parts.
     pub fn drain_composed(&mut self) -> ComposedInput {
+        if let Some(text) = self.consume_submitted_text() {
+            return ComposedInput::from_text(text);
+        }
         let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
         let text = state.editor.take_text();
@@ -6214,6 +6247,9 @@ impl InteractiveShell {
     /// payloads. Composition hooks run before persistence, so their failure
     /// must be observationally equivalent to a validation error.
     pub fn restore_composed(&mut self, composed: ComposedInput) {
+        if self.reject_submitted_text() {
+            return;
+        }
         let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
         let current = state.editor.take_text();
@@ -6239,6 +6275,9 @@ impl InteractiveShell {
     }
 
     pub fn drain_editor(&mut self) -> String {
+        if let Some(text) = self.consume_submitted_text() {
+            return text;
+        }
         let mut state = self.state.borrow_mut();
         let navigating_history = state.prompt_history_navigation.take().is_some();
         state.slash_selection = 0;
@@ -6988,22 +7027,35 @@ impl InteractiveShell {
     }
 
     pub(crate) fn preview_highlighted_theme(&mut self) {
-        let Some(index) = self.highlighted_panel_index() else { return; };
-        let Some((_, last)) = self.theme_preview.as_mut() else { return; };
-        if *last == Some(index) { return; }
+        let Some(index) = self.highlighted_panel_index() else {
+            return;
+        };
+        let Some((_, last)) = self.theme_preview.as_mut() else {
+            return;
+        };
+        if *last == Some(index) {
+            return;
+        }
         *last = Some(index);
         let theme = {
             let state = self.state.borrow();
             match state.panel.as_ref() {
-                Some(Panel::SelectList { action: PanelAction::SelectTheme { previews, .. }, .. }) => previews.get(index).cloned(),
+                Some(Panel::SelectList {
+                    action: PanelAction::SelectTheme { previews, .. },
+                    ..
+                }) => previews.get(index).cloned(),
                 _ => None,
             }
         };
-        if let Some(theme) = theme { self.set_theme(theme); }
+        if let Some(theme) = theme {
+            self.set_theme(theme);
+        }
     }
 
     fn restore_theme_preview(&mut self) {
-        if let Some((original, _)) = self.theme_preview.take() { self.set_theme(original); }
+        if let Some((original, _)) = self.theme_preview.take() {
+            self.set_theme(original);
+        }
     }
 
     /// Open an interactive panel.
@@ -8406,6 +8458,7 @@ mod shell_chrome {
     };
     pub(super) use super::remote_ui::shell_chrome;
 }
+mod extension_theme;
 mod startup_update;
 mod status_telemetry;
 mod surface_frame;
@@ -8422,7 +8475,6 @@ mod tern_picker;
 pub(crate) mod tern_prompt;
 mod tern_sessions;
 mod tern_theme;
-mod extension_theme;
 mod tern_welcome;
 mod tool_render;
 mod transcript_cache;

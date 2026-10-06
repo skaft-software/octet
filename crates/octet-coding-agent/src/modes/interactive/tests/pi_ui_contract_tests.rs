@@ -385,18 +385,36 @@ export default pi => {
     pi.registerCommand('seed-' + i, {handler: async (_, ctx) => { await ctx.ui.setEditorText(text); }});
 };
 "#).await;
-    for (i, text) in ["/model", "/fixture-command", "ordinary prompt"].into_iter().enumerate() {
-        command(&mut app, &mut shell, &format!("seed-{i}")).await.unwrap();
+    for (i, text) in ["/model", "/fixture-command", "ordinary prompt"]
+        .into_iter()
+        .enumerate()
+    {
+        command(&mut app, &mut shell, &format!("seed-{i}"))
+            .await
+            .unwrap();
         component_key(&mut app, &mut shell, KeyCode::Enter);
         let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
         let mut scroll = tokio::time::interval(Duration::from_millis(16));
         let mut extensions = tokio::time::interval(Duration::from_millis(10));
         let (watcher, mut reload, mut tick) = super::support::test_reload();
-        let idle = tokio::time::timeout(Duration::from_secs(5), wait_for_prompt(
-            &mut shell, &mut input, &mut scroll, &mut extensions,
-            &mut app.executable_extensions, None, &mut tick, &watcher, &mut reload,
-            Some(&mut app.agent),
-        )).await.expect("custom editor submission did not reach the native composer").unwrap();
+        let idle = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_prompt(
+                &mut shell,
+                &mut input,
+                &mut scroll,
+                &mut extensions,
+                &mut app.executable_extensions,
+                None,
+                &mut tick,
+                &watcher,
+                &mut reload,
+                Some(&mut app.agent),
+            ),
+        )
+        .await
+        .expect("custom editor submission did not reach the native composer")
+        .unwrap();
         match idle {
             Idle::Command(command) if text.starts_with('/') => assert_eq!(command, text),
             Idle::Submit(input) if !text.starts_with('/') => assert_eq!(input.display_text, text),
@@ -404,4 +422,124 @@ export default pi => {
         }
     }
     app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_busy_commands_steering_follow_up_and_refusal() {
+    use super::support::{scripted_agent_with_delay, test_run_inspection};
+    for text in [
+        "/model",
+        "/fixture-command",
+        "steer text",
+        "follow-up text",
+        "refused text",
+    ] {
+        let factory = r#"
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+export default pi => {
+  pi.on('session_start', (_, ctx) => ctx.ui.setEditorComponent((t, theme, keys) => new CustomEditor(t, theme, keys)));
+  pi.registerCommand('fixture-command', {handler: () => {}});
+  pi.registerCommand('seed', {handler: async (_, ctx) => { await ctx.ui.setEditorText(TEXT); }});
+};
+"#.replace("TEXT", &serde_json::to_string(text).unwrap());
+        let (_directory, mut app, mut shell) = live_ui_app(&factory).await;
+        command(&mut app, &mut shell, "seed").await.unwrap();
+        let follow_up = text == "follow-up text" || text == "refused text";
+        if text == "refused text" {
+            for _ in 0..MAX_PENDING_IDLE_ACTIONS {
+                shell.queue_follow_up(ComposedInput::from_text("occupied".into()));
+            }
+        }
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_millis(500)).await;
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            if follow_up {
+                KeyCode::Char('s')
+            } else {
+                KeyCode::Enter
+            },
+            if follow_up {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::NONE
+            },
+        ));
+        assert!(app
+            .executable_extensions
+            .route_remote_ui_event(&mut shell, &event));
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let mut ticker = tokio::time::interval(Duration::from_millis(5));
+        let mut pending = VecDeque::new();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(8),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut false,
+                None,
+                None,
+                &mut app.executable_extensions,
+                &mut false,
+                test_run_inspection(),
+                &mut None,
+            ),
+        )
+        .await
+        .expect("custom-editor active run stalled")
+        .unwrap();
+        drop(run);
+        assert_eq!(ended, HostRunOutcome::Completed);
+        let context = format!("{:?}", agent.session().context().unwrap());
+        match text {
+            "/model" => {
+                // RunFinished closes the live native picker. The command must
+                // neither become provider input nor a queued prompt/command.
+                assert!(pending.is_empty());
+                assert_eq!(shell.queued_follow_up_len(), 0);
+            }
+            "/fixture-command" => assert!(
+                matches!(pending.front(), Some(PendingIdleAction::ExtensionCommand {name, ..}) if name == "fixture-command")
+            ),
+            "steer text" => assert!(
+                context.contains(text),
+                "busy Enter did not steer: {context}"
+            ),
+            "follow-up text" => assert_eq!(shell.queued_follow_up_len(), 1),
+            "refused text" => assert_eq!(shell.queued_follow_up_len(), MAX_PENDING_IDLE_ACTIONS),
+            _ => unreachable!(),
+        }
+        if text != "steer text" {
+            assert!(
+                !context.contains(text),
+                "command/follow-up leaked to the active provider"
+            );
+        }
+        shell.close_panel();
+        // The clear checkpoint follows admission, not the submit keystroke.
+        if text != "refused text" {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    app.executable_extensions.drain_events_for_shell(&mut shell);
+                    if shell.extension_editor_snapshot().text.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("accepted editor did not clear after ACK");
+        } else {
+            assert_eq!(shell.extension_editor_snapshot().text, text);
+            assert!(rendered(&mut shell).await.contains(text));
+        }
+        app.executable_extensions.shutdown().await;
+    }
 }
