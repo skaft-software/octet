@@ -3,7 +3,6 @@ use super::*;
 use crate::app::App;
 use octet_agent::extension_process::ExtensionModelControl;
 
-
 pub(crate) fn apply_idle_model_control(
     app: &mut App,
     operation: &ExtensionModelControl,
