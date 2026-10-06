@@ -512,6 +512,7 @@ pub(super) async fn spawn_connection(
         && offered_host_services.remote_ui
     {
         optional_features.push(EXTENSION_FEATURE_REMOTE_UI.to_owned());
+        optional_features.push(EXTENSION_FEATURE_TERMINAL_INPUT_INTERCEPT.to_owned());
         if offered_host_services.transcript_render {
             optional_features.push(EXTENSION_FEATURE_TRANSCRIPT_RENDER.to_owned());
         }

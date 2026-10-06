@@ -246,6 +246,7 @@ export function createContext(runtime, store, replaced = false) {
     },
     ...editorAPI(runtime, store, setSlot),
     ...chromeAPI(runtime, store),
+    onTerminalInput: handler => runtime.terminalInput.add(handler, store),
     setStatus(key, text) {
       bounded(key, 'status key', 64); const state = foreground();
       if (text === undefined) state.statuses.delete(`${store.factory}:${key}`); else state.statuses.set(`${store.factory}:${key}`, bounded(text, 'status', 4096, { controls: true }));
