@@ -32,18 +32,23 @@ vocabulary that uses that hierarchy without adding a second TUI.
   backend still uses the markers to batch each frame into one flush. octet's
   composer uses a positioned hardware cursor; every renderer construction
   explicitly keeps that cursor visible.
-- Mouse reporting is disabled by default, preserving native drag selection and
-  wheel scrolling. `--mouse app` enables capture for semantic wheel navigation
-  and selection, but keyboard viewport ownership does not depend on capture.
-  Portable terminal protocols do not report a user's native scrollback offset,
-  so uncaptured wheel history remains terminal-owned.
+- `auto`, `terminal`, and `off` disable mouse reporting, preserving native drag
+  selection and wheel scrolling. `--mouse app` enables capture for semantic
+  wheel navigation and selection, but keyboard viewport ownership does not depend
+  on capture. Capture resets inherited 1016 pixel and 1007 alternate-scroll modes
+  before enabling 1000/1002/1003/1006 cell reports. Touchpad bursts retain every
+  decoded event; no second mouse parser or per-frame wheel replacement exists.
+  Portable protocols do not report a user's native scrollback offset, so
+  uncaptured wheel history remains terminal-owned.
 - Redirected, unknown, or explicitly plain terminals use the chronological
   fallback without cursor-control sequences.
-- The foreground synchronous crossterm poll remains the sole host byte reader.
-  An optional Unix readiness descriptor wakes it without reading: tty stdin is
-  duplicated close-on-exec without changing shared file-status flags; redirected
-  stdin uses a separate `/dev/tty` open. Cede and cancellation retain byte ownership.
-  A 10 ms fallback still handles signals, internal events and unsupported notifiers.
+- Unix foreground input has one synchronous byte reader and one decoder in
+  `terminal_input/{raw,codec,parse}.rs`; the parser is vendored from crossterm.
+  Windows retains crossterm's console reader. An optional Unix readiness
+  descriptor wakes input without reading: tty stdin is duplicated close-on-exec
+  without changing shared file-status flags; redirected stdin uses a separate
+  `/dev/tty` open. Cede and cancellation retain byte ownership. A 10 ms fallback
+  still handles signals, internal events and unsupported notifiers.
 - Provider, tool, and user text is sanitized before terminal output.
 - Rendering never relies on color alone; no-color and ANSI-16 paths preserve
   structure.
@@ -186,6 +191,18 @@ application-owned drag selection is available only while mouse capture is
 enabled. Terminal-owned resume eagerly loads the complete active branch;
 application-owned resume loads a bounded tail and materializes older blocks when
 semantic navigation or selection reaches them.
+
+Threaded pointer hit-testing consumes the completed renderer's bounded visible
+copy-row receipt, never the frontend's layout cache. The receipt fences source,
+size, disclosure, chrome and viewport intent, not visual-to-semantic anchor
+representation; anchor promotion without input feedback cannot invalidate the
+same painted cells. The scroll-delta fence is rebased only when semantic feedback
+is accepted, so unrelated input cannot discard a valid receipt after tail growth.
+Selection highlighting is a renderer-only inverse-video
+projection over those source offsets. A release copies only a transcript-owned
+press/drag, so chrome cannot recopy a stale selection. OSC 52 encodes once after
+bounding the UTF-8 source to 49,152 bytes, writes a BEL-terminated 64 KiB maximum
+base64 payload under the stdout lock, and leaves semantic/native copy complete.
 
 Held-key repeats are accepted only for text editing and navigation. One-shot
 actions such as submit, panel confirmation, close, abort, and reasoning/summary expansion

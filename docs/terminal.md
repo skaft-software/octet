@@ -135,6 +135,23 @@ the renderer follows the height of the content, not a fixed full-screen composer
 and footer; it loads the complete resumed branch and appends to native
 scrollback.
 
+With capture on (`--mouse app`), wheel/touchpad events scroll the transcript by
+three rows per event (Alt/Option: fifteen); bursts accumulate without changing
+composer history. Click-drag highlights transcript text without Shift. Release
+copies it, or use Ctrl+Shift+C to copy the current selection again; Ctrl+C keeps
+its draft-clear/interrupt meaning. Composer, footer and separator rows are not
+transcript text. Shift+drag remains your terminal's native selection override
+where the terminal supports it.
+
+Copy writes to an available local clipboard helper and emits OSC 52 to the
+terminal, so SSH/remote sessions can reach the client clipboard. The terminal must
+permit OSC 52; inside tmux enable `set -g set-clipboard on`. Remote transport sends
+a UTF-8-safe prefix of at most 49,152 source bytes (64 KiB base64 payload), using
+BEL termination. The retained selection and local clipboard copy are not truncated
+by that transport limit. Capture explicitly requests cell coordinates (SGR 1006),
+clearing inherited pixel reporting (1016) and alternate-scroll arrow emulation
+(1007); octet does not infer cells from pixel reports.
+
 Inline, PageUp pins the view above the tail while output grows, and shows when
 there's new output. PageDown returns to live output. Wheel history that octet doesn't capture stays with your terminal,
 because portable protocols can't report its position.

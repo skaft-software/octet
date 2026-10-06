@@ -178,6 +178,8 @@ See [Discovery and trust](resources.md).
 | Escape | Close a panel or slash popup first. Otherwise interrupt active work, then send the oldest queued follow-up after it settles (never the draft). |
 | Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty input. It never submits or interrupts. On Windows and WSL, where Windows Terminal uses Alt+arrows for panes, use Alt+Q. The queued-message hint names the key in use. |
 | Ctrl+C | Clear a draft. With no draft, abort active work. Does nothing when idle. |
+| Ctrl+Shift+C | Copy the in-app transcript selection (also copied when a drag is released). |
+| Ctrl+Shift+A | Select the semantic transcript; focused panels retain their own input. |
 | Ctrl+D | Close octet from any input, after active work and child processes are cleaned up. |
 | Ctrl+P / Ctrl+Shift+P | Cycle models within the resolved `--models` scope (or the available catalog with no scope). Backward is Alt+P on Windows and WSL. Drafts are kept. |
 | Ctrl+L | Open the model selector. |
