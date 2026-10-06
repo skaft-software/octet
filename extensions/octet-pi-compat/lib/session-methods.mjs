@@ -119,6 +119,7 @@ export function sessionMethods(runtime, store, createContext) {
     command(name);
     if (withSession !== undefined && typeof withSession !== 'function') invalid(`${name} withSession`);
     runtime.require('session_control_v1');
+    const bindSetup = setup ? runtime.prepareSessionReplacement(store) : undefined;
     const result = await runtime.track(runtime.hostCall(method, {
       resource_owner: store.state.owner, ...params,
     }, store), store);
@@ -128,10 +129,9 @@ export function sessionMethods(runtime, store, createContext) {
     bounded(result.session_id, 'replacement session id', 256);
     // Setup binds from an authenticated native creation receipt, before start
     // hooks; ordinary replacements await the real lifecycle binding as before.
-    const fresh = setup ? runtime.bindReplacement(result.context, store)
+    const fresh = setup ? bindSetup(result.context, result.session_id)
       : { ...store, state: await runtime.foregroundFor(result.session_id, store.controller.signal) };
     if (setup) {
-      if (fresh.state.host.session_id !== result.session_id) invalid('setup replacement session id');
       const writable = setupManager(runtime, fresh);
       let failed = false, error;
       try { await runtime.scope.run(fresh, () => setup(writable.manager)); }

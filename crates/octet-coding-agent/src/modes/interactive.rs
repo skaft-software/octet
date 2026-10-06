@@ -60,9 +60,9 @@ use crate::tui::pickers::{
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
-    background_from_terminal_rgb, is_reserved_theme_name, load_named_theme_for_background,
-    load_theme, load_theme_for_background, selectable_file_themes, TerminalBackground,
-    TerminalThemeChoice,
+    background_from_terminal_rgb, compiled_file_theme_name, is_reserved_theme_name,
+    load_named_theme_for_background, load_theme, load_theme_for_background, selectable_file_themes,
+    TerminalBackground, TerminalThemeChoice,
 };
 use crate::tui::view::{
     InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult, Panel, PanelAction, PanelResult,
@@ -612,6 +612,7 @@ where
     let mut cache_warming_failed = false;
     let remote_ui_wake = executable_extensions.remote_ui_wake();
     loop {
+        executable_extensions.sync_editor_autocomplete(shell);
         if shell.close_requested() {
             return Ok(Idle::Quit);
         }
@@ -3649,6 +3650,7 @@ where
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        executable_extensions.sync_editor_autocomplete(shell);
         if shell.set_pending_controls(model_controls::queue_labels(pending_actions)) {
             shell.render();
         }
@@ -10303,17 +10305,27 @@ where
     selected.map(|index| index.map(|index| choices[index].clone()))
 }
 
-fn requested_file_theme(
+/// Resolve an explicit theme name to the same choice the picker offers, so a
+/// direct `/theme <name>` and picking the row can never disagree. A compiled-in
+/// file theme is matched by its canonical built-in selector (`cards.toml` and
+/// `Cards` both mean `Cards`); anything else must be a discovered, valid file.
+/// The loaded theme is returned so confirmation installs exactly what was
+/// validated instead of re-reading the source.
+fn requested_theme_selection(
     name: &str,
     config: &Config,
     background: TerminalBackground,
-) -> Option<(String, OctetTheme)> {
+) -> Option<(ThemeSelection, OctetTheme)> {
+    if let Some(canonical) = compiled_file_theme_name(name) {
+        let theme = load_named_theme_for_background(canonical, config, background).ok()?;
+        return Some((ThemeSelection::File(canonical.to_owned()), theme));
+    }
     let theme = load_named_theme_for_background(name, config, background).ok()?;
     let name = theme.source_path()?.file_stem()?.to_str()?;
     if is_reserved_theme_name(name) || name.ends_with(".toml") {
         return None;
     }
-    Some((name.to_owned(), theme))
+    Some((ThemeSelection::File(name.to_owned()), theme))
 }
 
 async fn configure_terminal_theme<S>(
@@ -10333,11 +10345,11 @@ where
         Some(value) => {
             if let Some(choice) = TerminalThemeChoice::parse(&value) {
                 Some(ThemeSelection::Builtin(choice))
-            } else if let Some((name, theme)) =
-                requested_file_theme(&value, config, shell.theme().background())
+            } else if let Some((selection, theme)) =
+                requested_theme_selection(&value, config, shell.theme().background())
             {
                 requested_theme = Some(theme);
-                Some(ThemeSelection::File(name))
+                Some(selection)
             } else {
                 shell.error(format!(
                     "invalid theme {value:?}; use auto, light, dark, or a discovered valid theme name"

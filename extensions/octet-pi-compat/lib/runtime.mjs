@@ -439,14 +439,30 @@ export class Runtime {
       for (const waiter of this.foregroundWaiters) waiter(state);
     }
   }
-  bindReplacement(context, store) {
-    const previous = store.state.owner, next = context?.resource_owner;
-    ownerKey(next);
-    if (next.extension_instance_id !== previous.extension_instance_id || next.process_generation !== previous.process_generation || next.session_id === previous.session_id) invalid('replacement receipt owner');
-    const fresh = { ...store };
+  prepareSessionReplacement(store) {
+    // Admission belongs before session/create: its native lifecycle retires the
+    // old session before returning the setup receipt. Only this live command's
+    // one-shot continuation survives; no retained context gains new authority.
     this.assertOwner(store);
-    this.bind({ context }, fresh, { foreground: true });
-    return fresh;
+    const previous = store.state;
+    const liveCommand = () => {
+      store.controller.signal.throwIfAborted();
+      if (this.stopping || store.method !== 'command/execute' || !store.live || this.active.get(store.id)?.controller !== store.controller) throw rpcError(-32002, 'not_foreground_owner replacement requires its live command');
+    };
+    liveCommand();
+    let consumed = false;
+    return (context, sessionId) => {
+      liveCommand();
+      if (consumed || store.state !== previous || this.foreground !== previous) throw rpcError(-32002, 'not_foreground_owner replacement continuation retired');
+      consumed = true;
+      const next = context?.resource_owner;
+      ownerKey(next);
+      if (next.extension_instance_id !== previous.owner.extension_instance_id || next.process_generation !== previous.owner.process_generation || next.session_id === previous.owner.session_id) invalid('replacement receipt owner');
+      if (context.host?.session_id !== sessionId) invalid('setup replacement session id');
+      const fresh = { ...store };
+      this.bind({ context }, fresh, { foreground: true });
+      return fresh;
+    };
   }
   // Resolves once the host binds the session that replaced the active one.
   foregroundFor(sessionId, signal) {
