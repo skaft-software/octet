@@ -4778,8 +4778,11 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
         &app.reasoning,
         &app.sessions,
     );
-    app.executable_extensions
-        .refresh_pi_model_catalog(&app.catalog, app.model_scope.as_deref());
+    app.executable_extensions.refresh_pi_model_catalog(
+        &app.catalog,
+        app.model_scope.as_deref(),
+        &app.model,
+    );
     for message in app.executable_extensions.drain_events_for_shell(shell) {
         shell.notice(message);
     }

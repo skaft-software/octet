@@ -10,7 +10,8 @@
   "scripts": {
     "setup": "node setup.mjs",
     "configure": "node configure.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:editor-native": "node --test test/phase2/*.test.mjs test/upstream-editor.test.mjs test/upstream-editor-history-keybindings.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-tui": "1.0.2",

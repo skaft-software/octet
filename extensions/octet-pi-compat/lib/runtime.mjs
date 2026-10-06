@@ -823,8 +823,13 @@ export class Runtime {
     }
     const store = { id: message.id, method: message.method, hook: message.method === 'hook/run' ? message.params?.hook : undefined, controller: new AbortController(), pending: new Set(), errors: [], live: true };
     this.active.set(message.id, store);
+    if (message.method === 'initialize') this.initializationBarrier = deferred();
     let settlementError = rpcError(-32002, 'originating request did not complete');
     try {
+      // The host can send its first command before the initialize write's
+      // receipt arrives. Keep startup publication ahead of that command without
+      // waiting for reverse registrations (whose replies the host must serve).
+      if (message.method !== 'initialize') await this.initializationBarrier?.promise;
       let result = await withContextLimits(this.sessionTransport?.profile, () => this.scope.run(store, () => this.dispatch(message, store)));
       if (this.sessionTransport && store.hook === 'provider_context') result = await this.sessionTransport.projection(result, store);
       store.controller.signal.throwIfAborted();
@@ -846,6 +851,7 @@ export class Runtime {
         ...(!store.controller.signal.aborted && fallbackData(error) ? { data: fallbackData(error) } : {}),
       } });
     } finally {
+      if (message.method === 'initialize') this.initializationBarrier.resolve();
       this.sessionTransport?.settle(store, settlementError);
       store.live = false; this.active.delete(message.id); this.transport.settleParent(message.id);
       settleCompactions(this, store, settlementError);

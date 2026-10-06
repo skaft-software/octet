@@ -175,7 +175,7 @@ export function createContext(runtime, store, replaced = false) {
   const foreground = () => { runtime.assertOwner(store); return store.state; };
   const operation = (method, params, feature) => { runtime.require(feature); return runtime.track(runtime.hostCall(method, params, store), store); };
 
-  const footerData = strict({
+  const footerData = facade({
     getGitBranch: () => foreground().host.git_branch ?? gitBranch(foreground().workspace),
     getExtensionStatuses: () => new Map(foreground().statuses),
     onBranchChange(handler) {

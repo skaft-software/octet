@@ -157,7 +157,11 @@ reader, terminal renderer, or synchronous render RPC.
 
 Header/footer/widgets are distinct generic host placements. The original footer
 receives secret-free host model/session/context snapshots instead of fabricated
-usage or OAuth data. Unavailable capabilities fail explicitly. Custom editor
+usage or OAuth data. The host publishes secret-free OAuth provenance from its
+actual authentication resolver (including Codex and subscription resolvers),
+without reading or refreshing credentials. Unclassified dynamic resolvers still
+refuse that query; endpoint names never establish authentication kind.
+Unavailable capabilities fail explicitly. Custom editor
 state uses the host composer handoff rather than a separate agent input loop.
 Every custom editor occupies the composer slot, leaving native transcript,
 chrome and the single slash popup visible. `Ctrl+G` rescues only explicit fullscreen

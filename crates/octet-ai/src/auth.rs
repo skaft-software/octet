@@ -609,6 +609,15 @@ impl std::fmt::Debug for Auth {
 }
 
 impl Auth {
+    /// Secret-free authentication provenance without resolving a credential.
+    /// Dynamic resolvers that do not publish their kind remain unknown.
+    pub fn is_oauth(&self) -> Option<bool> {
+        match self {
+            Self::Dynamic(resolver) => resolver.is_oauth(),
+            _ => Some(false),
+        }
+    }
+
     /// Returns Auth::None.
     pub fn none() -> Self {
         Self::None
@@ -683,6 +692,11 @@ impl Auth {
 /// Interface for dynamic credentials resolution.
 #[async_trait::async_trait]
 pub trait CredentialResolver: Send + Sync {
+    /// Secret-free provenance, if known, without reading or refreshing tokens.
+    fn is_oauth(&self) -> Option<bool> {
+        None
+    }
+
     /// Resolves credentials for a request.
     async fn resolve(&self) -> Result<ResolvedCredential, AuthError>;
 }

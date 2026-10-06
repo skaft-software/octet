@@ -176,12 +176,18 @@ export class SessionTransport {
   // store must never inherit the previous session's facts from its parent.
   ownView(store) {
     const view = store.activation?.view ?? store.sessionView;
-    return view && ownerKey(view.descriptor.owner) === store.state.key ? view : undefined;
+    // Child contexts retain the object, not a transport lease. Once the last
+    // lease settles, retained UI callbacks must use the published owner view.
+    return view?.document !== undefined && ownerKey(view.descriptor.owner) === store.state.key ? view : undefined;
   }
   // The newest-wins revision decides between the published chunked view and an
   // admitted receipt's inline facts; equal revisions are the same document.
   publishedView(store) {
-    const view = this.ownView(store) ?? this.current.get(store.state.key)?.view;
+    // A concurrent owner publication cannot invalidate an invocation's pinned
+    // history while its native parent (including a pending UI mount) is live.
+    const own = this.ownView(store);
+    if (own) return own;
+    const view = this.current.get(store.state.key)?.view;
     const revision = store.state.host.session_view_revision;
     if (view && (!Number.isSafeInteger(revision) || view.descriptor.view_revision >= revision)) return view;
     return undefined;

@@ -269,6 +269,10 @@ fn fingerprint(credential: &str) -> String {
 
 #[async_trait]
 impl CredentialResolver for SubscriptionResolver {
+    fn is_oauth(&self) -> Option<bool> {
+        Some(true)
+    }
+
     async fn resolve(&self) -> std::result::Result<ResolvedCredential, AuthError> {
         // `AuthError` deliberately carries no detail: a token-response failure
         // can contain the credential itself. The actionable
@@ -459,6 +463,13 @@ mod tests {
 
     fn resolver(fixture: &Fixture) -> SubscriptionResolver {
         SubscriptionResolver::new(Arc::clone(&fixture.flow), fixture.store.clone())
+    }
+
+    #[test]
+    fn oauth_metadata_does_not_read_or_refresh_the_credential_store() {
+        let fixture = fixture(RefreshMode::Rotating, 60);
+        assert_eq!(resolver(&fixture).is_oauth(), Some(true));
+        assert!(fixture.store.load().unwrap().is_none());
     }
 
     /// A wiremock token endpoint that always answers with a rotated pair.

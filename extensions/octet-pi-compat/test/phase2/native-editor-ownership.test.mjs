@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Editor } from '../shims/tui.mjs';
-import { CustomEditor } from '../lib/custom-editor.mjs';
-import { Editor as PiEditor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
+import { Editor } from '../../shims/tui.mjs';
+import { CustomEditor } from '../../lib/custom-editor.mjs';
+import { Editor as PiEditor } from '../../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
 
 // This is intentionally red until phase 2 is implemented. The 193 upstream
 // cases can pass against the original Pi engine; that is not native parity.

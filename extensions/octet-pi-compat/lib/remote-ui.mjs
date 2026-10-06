@@ -368,7 +368,15 @@ export class RemoteUI {
     // Painting a frame is presentation only: it never waits on session-view
     // readiness or a publication barrier, which would delay frames under load.
     const columns = surface.columns, rows = surface.rows;
-    const lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns));
+    let lines;
+    try { lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns)); }
+    catch (error) {
+      // History-reading components cannot render a missing publication as an
+      // empty session. Retain their last frame without blocking native paint or
+      // retiring the mount; successful preparation requests another render.
+      if (error?.code === -32002 && error.message === 'session view unavailable') return;
+      throw error;
+    }
     // Capture lines and this exact barrier in the same synchronous turn. Never
     // render newer text after waiting on an older checkpoint acknowledgement.
     const checkpoint = surface.editor?.tail;
