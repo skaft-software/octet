@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! OS-boundary SIGTERM, process-tree, and terminal-restoration probes.
+
+#![cfg(unix)]
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -30,6 +30,20 @@ impl PtyOctet {
 
     fn spawn_with_args(root: &Path, extra_args: &[String]) -> Self {
         Self::spawn_with_mode(root, extra_args, true, true)
+    }
+
+    fn spawn_with_args_and_startup_trace(root: &Path, extra_args: &[String]) -> Self {
+        Self::spawn_with_mode_and_mouse_at(
+            root,
+            extra_args,
+            true,
+            true,
+            "app",
+            None,
+            None,
+            Some("auto"),
+            true,
+        )
     }
 
     fn spawn_plain_with_args(root: &Path, extra_args: &[String]) -> Self {
@@ -69,6 +83,7 @@ impl PtyOctet {
             None,
             None,
             Some("auto"),
+            false,
         )
     }
 
@@ -83,6 +98,7 @@ impl PtyOctet {
             Some(&invocation_cwd),
             None,
             Some("auto"),
+            false,
         )
     }
 
@@ -96,11 +112,12 @@ impl PtyOctet {
             Some(invocation_cwd),
             Some(command_line),
             Some("auto"),
+            false,
         )
     }
 
     fn spawn_for_theme_onboarding(root: &Path) -> Self {
-        Self::spawn_with_mode_and_mouse_at(root, &[], true, false, "app", None, None, None)
+        Self::spawn_with_mode_and_mouse_at(root, &[], true, false, "app", None, None, None, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -113,6 +130,7 @@ impl PtyOctet {
         invocation_cwd: Option<&Path>,
         command_line: Option<&str>,
         appearance: Option<&str>,
+        startup_trace: bool,
     ) -> Self {
         let home = root.join("home");
         let workspace = root.join("workspace");
@@ -223,6 +241,9 @@ impl PtyOctet {
         // onboarding probe below leaves this unset and exercises the new picker.
         if let Some(appearance) = appearance {
             command.env("OCTET_THEME", appearance);
+        }
+        if startup_trace {
+            command.env("OCTET_STARTUP_TRACE", "1");
         }
         let child = command.spawn().expect("spawn octet");
 
@@ -767,7 +788,12 @@ fn ctrl_c_stops_a_hung_explicit_extension_reload_without_freezing_input() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = tempfile::tempdir().expect("tempdir");
     let (args, reload_marker) = install_reload_probe(directory.path());
-    let mut octet = PtyOctet::spawn_with_args(directory.path(), &args);
+    let mut octet = PtyOctet::spawn_with_args_and_startup_trace(directory.path(), &args);
+    // The first frame is intentionally available before deferred extensions
+    // attach. Wait for the host's attached boundary before asking it to reload.
+    octet.wait_until(READY_DEADLINE, |output| {
+        contains_bytes(output, b"octet-startup: extensions.attached")
+    });
     octet.submit_command(b"/extensions reload");
     octet.wait_until(READY_DEADLINE, |_| reload_marker.exists());
 

@@ -14,7 +14,7 @@ use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::looks_like_diff;
 use crate::tui::theme::OctetTheme;
 
-fn reasoning_markdown_projection(source: &str) -> String {
+pub(super) fn reasoning_markdown_projection(source: &str) -> String {
     // OpenAI-style reasoning summaries can concatenate independently bolded
     // sections without whitespace: `**Plan****Verify**`. CommonMark treats the
     // middle four asterisks as literal text inside one strong span. Insert a
@@ -163,6 +163,8 @@ pub(super) struct AssistantBlock {
     /// Only the newest reasoning block advertises the global disclosure key.
     /// Older repeated hints become noise once a newer thinking event exists.
     pub(super) show_reasoning_hint: bool,
+    pub(super) extension_working: Option<super::ShellExtensionWorking>,
+    pub(super) hidden_thinking_label: Option<String>,
 }
 
 impl AssistantBlock {
@@ -180,6 +182,8 @@ impl AssistantBlock {
         metadata.reasoning_heading = self.reasoning_heading.clone();
         metadata.reasoning_heading_committed_blocks = self.reasoning_heading_committed_blocks;
         metadata.show_reasoning_hint = self.show_reasoning_hint;
+        metadata.extension_working = self.extension_working.clone();
+        metadata.hidden_thinking_label = self.hidden_thinking_label.clone();
         metadata
     }
 
@@ -190,15 +194,25 @@ impl AssistantBlock {
         reasoning: bool,
     ) {
         let finished = self.finished;
-        let mut rendered = previous
-            .map(|old| std::mem::replace(old, Self::streaming("")))
-            .unwrap_or_else(|| {
-                if reasoning {
-                    Self::streaming_reasoning("")
+        let mut rendered = match previous {
+            Some(old) => std::mem::replace(old, Self::streaming("")),
+            None if finished => {
+                let mut text = String::new();
+                source.visit_from(0, |_, segment| text.push_str(segment));
+                let mut block = if reasoning {
+                    Self::finalized_reasoning(text)
                 } else {
-                    Self::streaming("")
-                }
-            });
+                    Self::finalized(text)
+                };
+                // A skipped publication may contain many accepted segments.
+                // They have all been materialized, not just the single segment
+                // the finalized constructor uses for its own source snapshot.
+                block.render_source = source.clone();
+                block
+            }
+            None if reasoning => Self::streaming_reasoning(""),
+            None => Self::streaming(""),
+        };
         let start = rendered.render_source.len();
         source.visit_from(start, |_, segment| {
             if reasoning {
@@ -244,13 +258,19 @@ impl AssistantBlock {
             reasoning_heading: None,
             reasoning_heading_committed_blocks: 0,
             show_reasoning_hint: true,
+            extension_working: None,
+            hidden_thinking_label: None,
         }
     }
 
     pub(super) fn finalized(text: String) -> Self {
-        let mut block = Self::streaming(&text);
-        block.finish();
+        let mut block = Self::streaming("");
+        block.markdown = StreamingMarkdown::from_finalized_text(&text);
+        if !text.is_empty() {
+            block.render_source.push(Arc::from(text.as_str()));
+        }
         block.text = text;
+        block.finished = true;
         block
     }
 
@@ -268,11 +288,17 @@ impl AssistantBlock {
     }
 
     pub(super) fn finalized_reasoning(text: String) -> Self {
-        let mut block = Self::streaming_reasoning(&text);
+        let projection = reasoning_markdown_projection(&text);
+        let mut block = Self::streaming("");
+        block.markdown = StreamingMarkdown::from_finalized_text(&projection);
+        if !text.is_empty() {
+            block.render_source.push(Arc::from(text.as_str()));
+        }
+        block.text = text;
+        block.finished = true;
         // Hydrated sessions preserve reasoning text but do not currently store
         // provider-phase timing, so do not invent a duration on replay.
-        block.reasoning_started_at = None;
-        block.finish_reasoning();
+        block.refresh_reasoning_heading();
         block
     }
 
@@ -324,7 +350,13 @@ impl AssistantBlock {
     pub(super) fn copy_text(&self) -> String {
         self.copy_text
             .borrow_mut()
-            .get_or_insert_with(|| parse_markdown(self.markdown.raw_text()).plain_text())
+            .get_or_insert_with(|| {
+                if self.markdown.is_finished() {
+                    self.markdown.committed().plain_text()
+                } else {
+                    parse_markdown(self.markdown.raw_text()).plain_text()
+                }
+            })
             .clone()
     }
 
@@ -398,7 +430,7 @@ impl AssistantBlock {
         let projection = reasoning_markdown_projection(&self.text);
         if self.markdown.raw_text() != projection {
             *self.copy_text.get_mut() = None;
-            self.markdown = StreamingMarkdown::from_text(&projection);
+            self.markdown = StreamingMarkdown::from_finalized_text(&projection);
             self.reasoning_heading_committed_blocks = 0;
             self.invalidate_layout();
         }
@@ -475,7 +507,7 @@ impl AssistantBlock {
         if self.finished && background.is_some_and(|background| background != Color::Default) {
             return renderer
                 .render_on_background(
-                    &parse_markdown(self.markdown.raw_text()),
+                    self.markdown.committed(),
                     width,
                     background.expect("checked above"),
                 )
@@ -493,6 +525,96 @@ impl AssistantBlock {
 #[cfg(test)]
 mod retry_activity_tests {
     use super::*;
+
+    #[test]
+    fn finalized_blocks_and_skipped_publications_parse_each_source_once() {
+        for reasoning in [false, true] {
+            let mut source = SharedText::default();
+            for part in [
+                "**Plan**",
+                "**Verify**\n\n",
+                "[late][ref]\n\n[ref]: https://example.com\n",
+            ] {
+                source.push(Arc::from(part));
+            }
+            let mut block = AssistantBlock::streaming("");
+            block.finished = true;
+            block.materialize_source(&source, None, reasoning);
+            assert_eq!(
+                block.text,
+                "**Plan****Verify**\n\n[late][ref]\n\n[ref]: https://example.com\n"
+            );
+            let expected = if reasoning {
+                reasoning_markdown_projection(&block.text)
+            } else {
+                block.text.clone()
+            };
+            assert_eq!(block.markdown.committed(), &parse_markdown(&expected));
+            assert_eq!(block.markdown.stats().parse_passes, 1);
+            assert_eq!(block.markdown.stats().fence_scanned_bytes, 0);
+            assert_eq!(block.render_source.len(), source.len());
+            let stats = block.markdown.stats();
+            assert_eq!(block.copy_text(), parse_markdown(&expected).plain_text());
+            block.finish();
+            assert_eq!(block.markdown.stats(), stats);
+            assert!(block.reasoning_started_at.is_none());
+            assert!(block.reasoning_elapsed.is_none());
+        }
+    }
+
+    #[test]
+    fn finalized_blocks_match_streamed_canonical_render_and_copy() {
+        let theme = crate::tui::theme::test_theme();
+        let renderer = theme.rich_renderer();
+        for text in [
+            "",
+            "Unicode: e\u{301} 👩🏽‍💻 世界\n\n**Plan****Verify**",
+            "[late][ref]\n\n| a | b |\n|---|---|\n| α | `β` |\n\n[ref]: https://example.com\n",
+            "1. first\n   - nested **item**\n\n> quote\n\n```rust\nfn main() {\n\tprintln!(\"hello\");\n}\n```\n",
+            "unfinished **bold and [link\n\n```rust\nunclosed fence",
+        ] {
+            for reasoning in [false, true] {
+                let finalized = if reasoning {
+                    AssistantBlock::finalized_reasoning(text.to_owned())
+                } else {
+                    AssistantBlock::finalized(text.to_owned())
+                };
+                let mut streamed = if reasoning {
+                    AssistantBlock::streaming_reasoning("")
+                } else {
+                    AssistantBlock::streaming("")
+                };
+                for character in text.chars() {
+                    if reasoning {
+                        streamed.append_reasoning(&character.to_string());
+                    } else {
+                        streamed.append(&character.to_string());
+                    }
+                }
+                if reasoning {
+                    streamed.finish_reasoning();
+                    assert_eq!(finalized.reasoning_heading, streamed.reasoning_heading);
+                    assert!(finalized.reasoning_started_at.is_none());
+                    assert!(finalized.reasoning_elapsed.is_none());
+                } else {
+                    streamed.finish();
+                }
+                assert_eq!(finalized.text, streamed.text);
+                assert_eq!(finalized.markdown.committed(), streamed.markdown.committed());
+                assert_eq!(finalized.copy_text(), streamed.copy_text());
+                for width in [1, 37, 80] {
+                    assert_eq!(finalized.render(&renderer, &theme, width),
+                        streamed.render(&renderer, &theme, width));
+                    let background = Some(Color::Rgb(15, 25, 35));
+                    assert_eq!(finalized.render_on_surface(&renderer, &theme, width, background),
+                        streamed.render_on_surface(&renderer, &theme, width, background));
+                }
+                assert_eq!(finalized.markdown.stats().parse_passes, 1);
+                assert_eq!(finalized.markdown.stats().reparsed_bytes, finalized.markdown.raw_text().len() as u64);
+                assert_eq!(finalized.markdown.stats().fence_scanned_bytes, 0);
+            }
+        }
+    }
 
     #[test]
     fn semantic_copy_cache_is_lazy_and_invalidated_by_source_changes() {

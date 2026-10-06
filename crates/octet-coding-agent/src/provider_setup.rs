@@ -1354,6 +1354,9 @@ mod tests {
         let path = store
             .save("anthropic", "  synthetic-key\n".into(), false)
             .unwrap();
+        // Only the permission assertions below name the returned path.
+        #[cfg(not(unix))]
+        let _ = path;
         // A fresh store models the subsequent process's credential lookup.
         let restarted = api_key_store(&directory);
         assert_eq!(

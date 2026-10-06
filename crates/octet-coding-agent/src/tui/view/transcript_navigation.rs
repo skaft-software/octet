@@ -19,8 +19,9 @@ const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(1000);
 /// history remains terminal-owned until semantic navigation is requested.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TranscriptScrollbar {
-    #[default]
     Hidden,
+    /// Pi's fullscreen default: visible while scrolling, hidden after a second.
+    #[default]
     Auto,
     Always,
 }
@@ -244,6 +245,18 @@ struct NavigationFrame {
     generation: u64,
     scrollbar: Option<ScrollbarGeometry>,
     search_buttons_row: Option<usize>,
+}
+
+#[cfg(test)]
+impl TranscriptNavigation {
+    /// Test shells keep the transient scrollbar column out of row assertions;
+    /// tests about the scrollbar itself opt back in.
+    pub(super) fn without_scrollbar() -> Self {
+        Self {
+            mode: TranscriptScrollbar::Hidden,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -607,6 +620,8 @@ impl ShellState {
         } else {
             None
         };
+        // Like Pi's layout: a thin thumb, solid only while the pointer holds it.
+        let held = nav.hover || nav.drag_offset.is_some();
         if let Some(bar) = scrollbar.filter(|bar| bar.visible) {
             lines.resize_with(lines.len().max(bar.rows), String::new);
             for (row, line) in lines.iter_mut().take(bar.rows).enumerate() {
@@ -614,7 +629,8 @@ impl ShellState {
                 let padding = usize::from(bar.column).saturating_sub(visible_width(&prefix));
                 let thumb = row >= bar.thumb_top && row < bar.thumb_top + bar.thumb_rows;
                 let glyph = match (thumb, self.theme.unicode()) {
-                    (true, true) => "█",
+                    (true, true) if held => "█",
+                    (true, true) => "┃",
                     (true, false) => "#",
                     (false, true) => self.theme.glyph("vertical"),
                     (false, false) if self.theme.glyph("vertical").trim().is_empty() => " ",
@@ -951,8 +967,11 @@ impl InteractiveShell {
         if !state.application_viewport_requested {
             return false;
         }
-        let mut nav = state.transcript_navigation.borrow_mut();
-        let frame = nav.frame.filter(|frame| {
+        // Validate the retained frame before taking the mutable navigation
+        // borrow. Threaded geometry validation reads the scrollbar mode via
+        // `transcript_content_width`, which borrows this same RefCell.
+        let frame = state.transcript_navigation.borrow().frame;
+        let frame = frame.filter(|frame| {
             frame.size == state.size
                 && if state.render_threaded {
                     state
@@ -963,6 +982,7 @@ impl InteractiveShell {
                     !cache.dirty && frame.generation == cache.generation
                 }
         });
+        let mut nav = state.transcript_navigation.borrow_mut();
         let Some(frame) = frame else {
             nav.reset_pointer();
             return false;
@@ -1082,6 +1102,64 @@ mod tests {
     use crate::tui::keymap::{keybindings::KeybindingsManager, InputAction, PointerGesture};
     use crossterm::event::{KeyEvent, MouseEvent};
 
+    #[test]
+    fn unmodified_mouse_release_displacement_copies_without_a_motion_event() {
+        for with_motion in [true, false] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(80, 20);
+            shell.on_prompt_submitted("hello world");
+            shell.apply_edit(EditAction::Paste("kept draft".into()));
+            shell.state.borrow_mut().application_viewport_requested = true;
+            let rows = frame(&shell, Instant::now());
+            let (row, start) = rows
+                .iter()
+                .enumerate()
+                .find_map(|(row, line)| {
+                    let plain = strip_terminal_sequences(line);
+                    plain
+                        .find("hello world")
+                        .map(|offset| (row as u16, plain[..offset].chars().count() as u16 + 1))
+                })
+                .expect("visible semantic transcript");
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Down(MouseButton::Left), start, row),
+            );
+            if with_motion {
+                dispatch(
+                    &mut shell,
+                    mouse(MouseEventKind::Drag(MouseButton::Left), start + 4, row),
+                );
+            }
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Up(MouseButton::Left), start + 4, row),
+            );
+            assert_eq!(
+                shell.state.borrow().copy_buffer.as_deref(),
+                Some("ello"),
+                "motion={with_motion}"
+            );
+            assert_eq!(shell.pending(), "kept draft");
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Down(MouseButton::Left), start, row),
+            );
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Up(MouseButton::Left), start, row),
+            );
+            assert!(shell.state.borrow().transcript_selection.is_none());
+        }
+    }
+
+    // Pi's fullscreen chat viewport defaults to "auto": the scrollbar appears
+    // while scrolling and hides after a second.
+    #[test]
+    fn scrollbar_defaults_to_pis_transient_auto_mode() {
+        assert_eq!(TranscriptScrollbar::default(), TranscriptScrollbar::Auto);
+    }
+
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))
     }
@@ -1120,6 +1198,149 @@ mod tests {
     fn frame(shell: &InteractiveShell, now: Instant) -> Vec<String> {
         let state = shell.state.borrow();
         super::super::viewport::render_shell_viewport_at(&state, state.size.0, now)
+    }
+
+    /// A pointer gesture must copy the row it is drawn on. Row geometry comes
+    /// A pointer gesture must copy the row it is drawn on, in the viewport the
+    /// reader is looking at. Markdown layout inserts rows the semantic copy text
+    /// does not contain (a blank separator between a paragraph and the list that
+    /// follows it) and wraps prose itself, so row hit testing has to read the
+    /// painted rows rather than re-wrap the copy text.
+    #[test]
+    fn pointer_selection_copies_the_painted_row_in_wrapped_markdown() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        shell.capture_mouse = true;
+        shell.state.borrow_mut().application_viewport_requested = true;
+        shell.isolate_native_test_renderer();
+        shell.on_prompt_submitted("numbered request");
+        let mut text = String::from("U8-BEGIN\n");
+        for index in 1..=40 {
+            text.push_str(&format!(
+                "{index}. U8-LONG-{index:03} numbered line with text\n"
+            ));
+        }
+        text.push_str(&format!(
+            "\n{}",
+            "a long wrapped paragraph with unique trailing words "
+        ));
+        text.push_str(&"wrapped words ".repeat(30));
+        shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Assistant(Box::new(
+                AssistantBlock::finalized(text),
+            )));
+        shell.apply_edit(EditAction::Paste("kept draft".into()));
+        shell.render_written_test_frame();
+
+        let mut checked = 0;
+        let mut copied_rows = 0;
+        for row in 0..24 {
+            shell.render_written_test_frame();
+            let visible = shell
+                .state
+                .borrow()
+                .retained_render_geometry()
+                .expect("painted geometry")
+                .visible_lines
+                .clone();
+            let Some(line) = visible.get(row) else {
+                break;
+            };
+            let painted = strip_terminal_sequences(line).trim_end().to_owned();
+            if painted.trim().is_empty() {
+                continue;
+            }
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Down(MouseButton::Left), 0, row as u16),
+            );
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Drag(MouseButton::Left), 79, row as u16),
+            );
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Up(MouseButton::Left), 79, row as u16),
+            );
+            let copied = shell
+                .copy_selected_plain_text()
+                .unwrap_or_default()
+                .trim_end()
+                .to_owned();
+            if copied.is_empty() {
+                continue;
+            }
+            copied_rows += 1;
+            assert!(
+                painted.contains(&copied),
+                "screen row {row} painted {painted:?} but copied {copied:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 10, "only {checked} rows carried copyable text");
+        assert_eq!(copied_rows, checked);
+        assert_eq!(shell.pending(), "kept draft");
+    }
+
+    #[test]
+    fn pointer_selection_copies_the_painted_row_across_scroll_wrap_and_chrome() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 18);
+        shell.capture_mouse = true;
+        shell.state.borrow_mut().application_viewport_requested = true;
+        shell.isolate_native_test_renderer();
+        for index in 0..240 {
+            shell.notice(format!("probe row {index:03}"));
+        }
+        shell.notice(format!("wrapped {}", "wide content ".repeat(12)));
+        shell.apply_edit(EditAction::Paste("kept draft".into()));
+        let height = i16::try_from(shell.state.borrow().size.1).unwrap();
+        shell.scroll_lines(-3 * height);
+        shell.render_written_test_frame();
+
+        let (visible, capacity) = {
+            let state = shell.state.borrow();
+            let geometry = state.retained_render_geometry().expect("painted geometry");
+            (geometry.visible_lines.clone(), geometry.viewport_rows)
+        };
+        assert!(capacity > 6, "viewport too short for the probe");
+        let (row, expected) = visible
+            .iter()
+            .enumerate()
+            .take(capacity.saturating_sub(2))
+            .skip(2)
+            .find_map(|(row, line)| {
+                let plain = strip_terminal_sequences(line);
+                plain
+                    .find("probe row ")
+                    .map(|offset| (row, plain[offset..].trim_end().to_owned()))
+            })
+            .expect("a scrolled probe row in the painted viewport");
+        let next = strip_terminal_sequences(&visible[row + 1])
+            .trim_end()
+            .to_owned();
+
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, row as u16),
+        );
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 79, row as u16),
+        );
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Up(MouseButton::Left), 79, row as u16),
+        );
+        let copied = shell.copy_selected_plain_text().expect("selection copy");
+        assert_eq!(
+            copied.trim_end(),
+            expected.trim_end(),
+            "screen row {row} painted {expected:?} and the next row painted {next:?}"
+        );
+        assert_eq!(shell.pending(), "kept draft");
     }
 
     fn search_shell() -> InteractiveShell {
@@ -1475,6 +1696,32 @@ mod tests {
             .scrollbar
             .is_none());
         assert_eq!(shell.pending(), "preserved draft");
+    }
+
+    #[test]
+    fn threaded_mouse_hit_testing_does_not_reborrow_navigation() {
+        let mut shell = search_shell();
+        shell.set_transcript_scrollbar(TranscriptScrollbar::Always);
+        shell.isolate_native_test_renderer();
+        shell.render_written_test_frame();
+
+        let bar_column = {
+            let state = shell.state.borrow();
+            assert!(state.render_threaded);
+            let geometry = state
+                .retained_render_geometry()
+                .expect("the threaded renderer published current geometry");
+            let nav = state.transcript_navigation.borrow();
+            let frame = nav.frame.expect("the threaded renderer published a frame");
+            assert_eq!(geometry.generation, frame.generation);
+            frame
+                .scrollbar
+                .expect("always-visible scrollbar geometry")
+                .column
+        };
+
+        dispatch(&mut shell, mouse(MouseEventKind::Moved, bar_column, 0));
+        assert!(shell.state.borrow().transcript_navigation.borrow().hover);
     }
 
     #[test]

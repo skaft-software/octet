@@ -774,6 +774,7 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
                     text: "SECRET-RESULT".into(),
                     is_error,
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 }],
             );
@@ -799,6 +800,7 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
             text: "catalog unavailable".into(),
             is_error: true,
             duration_ms: None,
+            diff: None,
             images: Vec::new(),
         }],
     );
@@ -827,6 +829,7 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
                 text: "ordinary failure".into(),
                 is_error: true,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             },
         ],

@@ -1043,6 +1043,21 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     ),
+    // Zen publishes identifiers only. Its Mistral Large 4 route accepts
+    // Mistral's documented `reasoning_effort` values `none` and `high`, so the
+    // declaration carries the standard OpenAI Chat effort encoding with
+    // `high` as the lowest accepted effort (and therefore the default).
+    StaticModelPreset::new(
+        "mistral-large-4",
+        "Mistral Large 4",
+        Protocol::OpenAiChat,
+        524_288,
+        262_144,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_min_reasoning_effort(ReasoningEffort::High),
     StaticModelPreset::new(
         "nemotron-3-ultra-free",
         "Nemotron 3 Ultra Free",
@@ -1166,6 +1181,24 @@ pub const MISTRAL_MODELS: &[StaticModelPreset] = &[
         ReasoningEffort::High,
     )
     .with_reasoning_mode(StaticReasoningMode::MistralPrompt),
+    // Mistral Large 4 (docs card `mistral-large-4`/`mistral-large-4-0`, the
+    // "Le Chonk" release) publishes `reasoning_effort` values `none` and `high`
+    // only, and recommends `high` for reasoning: the lowest accepted effort is
+    // therefore `high`, so an untouched session selects it instead of the
+    // lowest generic level. The Mistral profile owns the `high`/`none` wire
+    // spelling and omits the field entirely when thinking is off.
+    StaticModelPreset::new(
+        "mistral-large-4",
+        "Mistral Large 4",
+        Protocol::OpenAiChat,
+        524_288,
+        262_144,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_min_reasoning_effort(ReasoningEffort::High)
+    .with_reasoning_mode(StaticReasoningMode::MistralEffort),
     StaticModelPreset::new(
         "mistral-large-latest",
         "Mistral Large",

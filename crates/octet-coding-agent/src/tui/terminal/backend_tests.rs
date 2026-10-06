@@ -26,6 +26,51 @@ fn backend_normalizes_bare_lf_without_changing_existing_crlf() {
 }
 
 #[test]
+fn normalized_frames_borrow_their_source_and_preserve_chunk_boundaries() {
+    let source = "界 👩‍💻\r\nnext\r\n";
+    let mut preceding_cr = false;
+    assert!(matches!(
+        normalize_line_endings(source, &mut preceding_cr),
+        Cow::Borrowed(_)
+    ));
+    for source in ["", source, "\n界\r\n\n👩‍💻\r\n", "a\r\nb\nc\r\n"] {
+        let mut previous = false;
+        let expected = normalize_line_endings(source, &mut previous).into_owned();
+        for split in (0..=source.len()).filter(|index| source.is_char_boundary(*index)) {
+            let mut previous = false;
+            let mut actual = normalize_line_endings(&source[..split], &mut previous).into_owned();
+            // An empty write must not lose a trailing CR from the prior chunk.
+            assert!(normalize_line_endings("", &mut previous).is_empty());
+            actual.push_str(&normalize_line_endings(&source[split..], &mut previous));
+            assert_eq!(actual, expected, "split at {split}");
+        }
+    }
+}
+
+#[test]
+fn diagnostic_payload_is_retained_only_when_logging_is_enabled() {
+    let payload = "synthetic native history\r\n".repeat(40_000);
+    let mut backend = terminal();
+    backend.write(SYNC_OUTPUT_BEGIN);
+    backend.write(&payload);
+    assert!(backend.pending_log.is_empty());
+    assert_eq!(backend.pending_log.capacity(), 0);
+    backend.write(SYNC_OUTPUT_END);
+    let expected = backend.out.clone();
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("synthetic-write.log");
+    let mut logged = terminal();
+    logged.write_log = Some(File::create(&path).unwrap());
+    logged.write(SYNC_OUTPUT_BEGIN);
+    logged.write(&payload);
+    assert!(!logged.pending_log.is_empty());
+    logged.write(SYNC_OUTPUT_END);
+    assert_eq!(logged.out, expected);
+    assert_eq!(std::fs::read(path).unwrap(), expected);
+}
+
+#[test]
 fn synchronized_frame_is_one_atomic_backend_write_even_without_csi_2026_support() {
     let mut backend = terminal();
     backend.write(SYNC_OUTPUT_BEGIN);
@@ -33,6 +78,74 @@ fn synchronized_frame_is_one_atomic_backend_write_even_without_csi_2026_support(
     assert!(backend.out.is_empty());
     backend.write(SYNC_OUTPUT_END);
     assert_eq!(backend.out, b"\x1b[?2026hframe\x1b[?2026l");
+}
+
+/// Records each sink call separately; a `Vec<u8>` would hide how many writes
+/// one frame took.
+#[derive(Default)]
+struct RecordingSink {
+    frames: Vec<Vec<u8>>,
+}
+
+impl std::io::Write for RecordingSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.frames.push(bytes.to_vec());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl FrameSink for RecordingSink {
+    fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        self.frames.push(frame.to_vec());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_multi_row_frame_reaches_the_sink_in_one_write() {
+    let mut backend = OctetTerminal {
+        out: RecordingSink::default(),
+        size: Arc::new(Mutex::new((80, 24))),
+        last_was_cr: false,
+        pending: Vec::new(),
+        pending_log: Vec::new(),
+        image_store: TerminalImageStore::default(),
+        write_log: None,
+        in_synchronized_frame_depth: 0,
+    };
+    // The shape of a differential repaint: cursor motion, per-row clears and
+    // text, emitted through many backend calls inside one frame.
+    backend.write(SYNC_OUTPUT_BEGIN);
+    Terminal::move_by(&mut backend, -3);
+    for row in 0..40 {
+        Terminal::clear_line(&mut backend);
+        backend.write(&format!("row {row} \u{2500}\u{1f600}\r\n"));
+    }
+    Terminal::hide_cursor(&mut backend);
+    assert!(
+        backend.out.frames.is_empty(),
+        "nothing may reach the terminal mid-frame"
+    );
+    backend.write(SYNC_OUTPUT_END);
+    assert_eq!(backend.out.frames.len(), 1, "one frame, one terminal write");
+    let frame = String::from_utf8(backend.out.frames.remove(0)).unwrap();
+    assert!(frame.starts_with(SYNC_OUTPUT_BEGIN));
+    assert!(frame.ends_with(SYNC_OUTPUT_END));
+    assert!(frame.contains("row 39"));
+}
+
+#[test]
+fn console_frames_convert_to_utf16_losslessly_or_not_at_all() {
+    let frame = "\x1b[2Kbox \u{2500} emoji \u{1f600}\r\n";
+    let units = frame_utf16(frame.as_bytes()).expect("UTF-8 frame");
+    assert_eq!(String::from_utf16(&units).unwrap(), frame);
+    // A non-UTF-8 batch keeps the byte-oriented writer rather than being
+    // lossily re-encoded.
+    assert!(frame_utf16(b"\xff\xfe").is_none());
 }
 
 #[test]

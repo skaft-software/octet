@@ -97,6 +97,19 @@ pub fn summarize_tool_with_workspace(
 ) -> ToolDisplay {
     match name {
         "read" => summarize_read(args, workspace),
+        "codemode" => ToolDisplay {
+            active: "running JavaScript".into(),
+            success: "ran JavaScript".into(),
+            failure: "JavaScript failed".into(),
+            compact_active: "running JavaScript".into(),
+            compact_success: "ran JavaScript".into(),
+            compact_failure: "JavaScript failed".into(),
+            plain_tag: "tool",
+            label: "codemode".into(),
+            shell_command: None,
+            changed_path: None,
+            value: Some("JavaScript".into()),
+        },
         "search" => {
             let path = display_path(string_arg(args, "path").unwrap_or("workspace"), workspace);
             let query = string_arg(args, "query").unwrap_or("pattern");

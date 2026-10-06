@@ -77,6 +77,14 @@ pub(super) fn tool_diff(panel: &ToolPanel) -> Option<String> {
 }
 
 fn compute_tool_diff(panel: &ToolPanel) -> Option<String> {
+    // Durable metadata channel wins: edit/write no longer put diffs in the
+    // result text, and that text is also replayed into model context.
+    if let Some(diff) = &panel.diff {
+        if !diff.trim().is_empty() {
+            return Some(diff.clone());
+        }
+    }
+    // Legacy sessions recorded diffs inside the result text; keep scanning.
     if looks_like_diff(&panel.output) {
         return Some(panel.output.clone());
     }
@@ -116,6 +124,10 @@ pub(crate) fn tool_display_label(name: &str) -> String {
         _ if name.starts_with("browser_") => "Browse".to_string(),
         _ if name.starts_with("ssh_") => "SSH".to_string(),
         _ => {
+            let name = name
+                .strip_prefix("computer_use_")
+                .filter(|suffix| !suffix.is_empty())
+                .unwrap_or(name);
             let mut s = name.replace('_', " ");
             if let Some(first) = s.get_mut(0..1) {
                 first.make_ascii_uppercase();

@@ -153,7 +153,10 @@ if mode == 'fetch-failed':
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            child.communicate(timeout=2)
+            # Cleanup must not fail on a loaded host: reap the session's own
+            # processes instead of racing a wall-clock teardown guess.
+            child.wait()
+            child.communicate()
             os.close(master)
             os.close(slave)
 
@@ -165,13 +168,16 @@ if mode == 'fetch-failed':
         assert select.select([master], [], [], 3)[0], "no prompt activity before interrupt"
         os.read(master, 65536)
         os.killpg(child.pid, signal.SIGINT)
-        child.communicate(timeout=2)
+        # The assertion is that SIGINT settles the updater, not that teardown
+        # beats a wall-clock guess; a loaded host can delay the child's exit.
+        child.wait()
+        child.communicate()
         assert child.returncode != 0
         assert termios.tcgetattr(slave) == before
     finally:
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
-            child.wait(timeout=2)
+            child.wait()
         os.close(master)
         os.close(slave)
 

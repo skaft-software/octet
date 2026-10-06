@@ -22,7 +22,9 @@ mod herdr;
 pub mod host;
 mod hydrate;
 mod migrate;
+mod models_dev;
 mod modes;
+mod native_editor;
 mod output;
 mod presentation;
 mod prompts;
@@ -54,6 +56,23 @@ mod update;
 
 use clap::Parser;
 
+/// Build the multi-thread runtime that the `octet` and `octet-host` binaries run on.
+///
+/// Size it to the CPUs this process may use, never below two, so that
+/// delegated agents, read waves and extension traffic can use the whole
+/// machine, and provider and control traffic still have a second worker on a
+/// single-CPU host. Blocking filesystem work stays on Tokio's blocking pool and
+/// terminal writes on `octet-tui-render`. The count is explicit so that a stray
+/// `TOKIO_WORKER_THREADS` cannot resize, or with a malformed value abort,
+/// octet's own scheduler.
+pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    let workers = std::thread::available_parallelism().map_or(2, |count| count.get().max(2));
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+}
+
 /// Run the terminal frontend with the same diagnostics and exit status as the `octet` binary.
 pub async fn run_cli() -> std::process::ExitCode {
     match run().await {
@@ -66,6 +85,11 @@ pub async fn run_cli() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Route one extension-process trace line through the terminal owner.
+fn forward_startup_trace(line: &str) {
+    crate::output::stderr_line(line);
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -81,6 +105,10 @@ async fn run() -> anyhow::Result<()> {
         let _ = std::io::stdout().flush();
         return Ok(());
     }
+    // The terminal owner routes extension-process trace lines through the same
+    // control-safe stderr boundary as its own phases. Installing the sink is
+    // itself inert: the trace stays off unless `OCTET_STARTUP_TRACE` is set.
+    octet_agent::extension_process::set_startup_trace_sink(forward_startup_trace);
     app::bootstrap::startup_phase("process.enter");
     let (mut cli, extension_flag_values, parsed_cwd) =
         if cli::uses_runtime_extension_flag_parser(&args) {
@@ -124,37 +152,14 @@ async fn run() -> anyhow::Result<()> {
     if let Some(cli::TopLevelCommand::Update { check }) = top_level_command.clone() {
         return update::run(check).await;
     }
-    #[cfg(not(feature = "serve"))]
-    if let Some(cli::TopLevelCommand::Serve {
-        no_open,
-        port,
-        web_root,
-        name,
-    }) = top_level_command.clone()
-    {
-        // The installed extension runtime owns its own launch protocol and this
-        // build cannot apply a startup session name. Fail closed instead of
-        // silently ignoring a requested name.
-        if name.is_some() {
-            anyhow::bail!(
-                "octet serve --name requires an octet build with the embedded Serve runtime ('serve' feature); this build launches the installed octet-serve extension package, which has no startup session-name option to set"
-            );
-        }
-        return extension_package::run_serve(no_open, port, web_root);
-    }
-
     let cwd = match parsed_cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir()?,
     };
-    #[cfg(feature = "serve")]
-    let is_serve = matches!(&top_level_command, Some(cli::TopLevelCommand::Serve { .. }));
-    #[cfg(not(feature = "serve"))]
-    let is_serve = false;
     let is_batch = matches!(&top_level_command, Some(cli::TopLevelCommand::Batch { .. }));
-    if !is_serve && !is_batch {
+    if !is_batch {
         // Preserve the original startup/error boundary for every terminal and
-        // non-Serve invocation.
+        // batch invocation.
         tui::terminal::install_panic_hook();
         tui::terminal::install_signal_restore()?;
     }
@@ -198,17 +203,6 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(cli::TopLevelCommand::Batch { command }) = top_level_command.clone() {
         return batch::run(command, &config).await;
-    }
-    #[cfg(feature = "serve")]
-    if let Some(cli::TopLevelCommand::Serve {
-        no_open,
-        port,
-        web_root,
-        name,
-    }) = top_level_command
-    {
-        return extensions::serve::run_with_session_name(config, port, no_open, web_root, name)
-            .await;
     }
     let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
     let interactive = matches!(config.mode, config::Mode::Interactive) && capabilities.interactive;
@@ -328,6 +322,31 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                 }
             }
         }
-        other => anyhow::bail!("unknown provider {other:?}; supported: codex, copilot, custom"),
+        // Every remaining provider is a subscription login driven by the shared
+        // framework, so one lookup covers all of them. This must stay the final
+        // arm so the explicitly named providers above keep precedence.
+        selector => {
+            let Some(flow) = auth::subscription::registry::resolve(selector) else {
+                anyhow::bail!(
+                    "unknown provider {selector:?}; supported: codex, copilot, {}, custom",
+                    supported_subscription_providers().join(", ")
+                );
+            };
+            let store = auth::subscription::store_for(&flow);
+            match command {
+                AuthCommand::Login { headless } => {
+                    auth::subscription::login::login(&flow, &store, headless).await
+                }
+                AuthCommand::Logout => auth::subscription::login::logout(&flow, &store).await,
+            }
+        }
     }
+}
+
+/// The canonical `--login` selector for every supported subscription provider.
+pub fn supported_subscription_providers() -> Vec<&'static str> {
+    auth::subscription::registry::all()
+        .iter()
+        .map(|flow| flow.login())
+        .collect()
 }
