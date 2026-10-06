@@ -15,8 +15,8 @@ REPOSITORY = ROOT.parents[1]
 
 def initialize():
     return {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "api_version": "0.4", "octet_version": "0.8.2",
-        "extension": {"name": "octet-codemode", "version": "0.8.2"},
+        "api_version": "0.4", "octet_version": "0.9.0",
+        "extension": {"name": "octet-codemode", "version": "0.9.0"},
         "flag_values": [], "protocol": {"version": "0.4",
             "required_features": ["request_cancellation", "content_parts"],
             "optional_features": ["tool_composition_v1"],
@@ -84,10 +84,10 @@ class CodemodeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             command = ["bash", str(REPOSITORY / "scripts/package-octet-extension-release.sh"),
-                       "octet-codemode", str(directory / "out"), "v0.8.2", str(ROOT)]
+                       "octet-codemode", str(directory / "out"), "v0.9.0", str(ROOT)]
             environment = {**os.environ, "SOURCE_DATE_EPOCH": "1700000000"}
             self.run_checked(command, env=environment)
-            archive = directory / "out/octet-codemode-0.8.2.tar.gz"
+            archive = directory / "out/octet-codemode-0.9.0.tar.gz"
             first = archive.read_bytes()
             self.run_checked(command, env=environment)
             self.assertEqual(archive.read_bytes(), first)

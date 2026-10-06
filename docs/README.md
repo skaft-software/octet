@@ -3,7 +3,7 @@
 octet is a fast, small coding host for cloud and local models. Extensions add
 tools and bounded, host-shaped integrations. They don't promise Pi execution
 parity or an everything-as-extension platform. These docs describe **octet
-0.8.2 candidate**, not a published release. [Installation](installation.md) separates
+0.9.0 candidate**, not a published release. [Installation](installation.md) separates
 source builds from planned publication channels.
 
 ## Getting started
@@ -74,7 +74,7 @@ source builds from planned publication channels.
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
-- Release notes: [0.8.2](releases/v0.8.2.md), [0.8.1](releases/v0.8.1.md),
+- Release notes: [0.9.0](releases/v0.9.0.md), [0.8.2](releases/v0.8.2.md), [0.8.1](releases/v0.8.1.md),
   [0.8.0](releases/v0.8.0.md), [0.7.6 hotfix](releases/v0.7.6.md),
   [0.7.5](releases/v0.7.5.md), [0.7.4 and its documentation
   correction](releases/v0.7.4.md), [0.7.3](releases/v0.7.3.md),

@@ -93,7 +93,7 @@ These hashes are change detection, not a sandbox or
 an integrity claim over an extension's entire import graph. The shipped config
 is empty and does not discover/import any Pi user installation.
 
-octet 0.8.2 is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
+octet 0.9.0 is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
 1.0.2 ships: jiti 2.7.0, `typebox` 1.3.27 and selected MIT Pi TUI 1.0.2 modules.
 Imports resolve through the same module table as Pi 1.0.2's extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`

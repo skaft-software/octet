@@ -18,15 +18,22 @@ from urllib.parse import unquote, urlsplit
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INVENTORY = "docs/package-assets.txt"
-# Workstation-specific RC evidence and internal task notes are not public docs.
-# Keep this finite: newly tracked documentation still requires inventory review.
-PRIVATE_RC_RECORDS = {
-    "docs/rc/0.8.2/README-RC.md",
-    "docs/rc/0.8.2/TERN-REDESIGN-TASK.md",
-    "docs/rc/0.8.2/UI-FIX.md",
-    "docs/rc/0.8.2/VERIFICATION.md",
-    "docs/rc/0.8.2/verification-results.json",
-}
+def private_records():
+    """The finite tracked-but-private records the inventory itself lists.
+
+    Workstation-specific RC evidence and internal task notes are not public
+    docs. Keep the list in `docs/package-assets.txt` so the producer, the
+    container staging pass and this test read one source of truth; newly
+    tracked documentation still requires explicit inventory review.
+    """
+    records = set()
+    for line in (ROOT / INVENTORY).read_text().splitlines():
+        if line.startswith("# private "):
+            records.add(line[len("# private "):])
+    return records
+
+
+PRIVATE_RC_RECORDS = private_records()
 
 
 def inventory():
@@ -115,6 +122,11 @@ def main():
         assert {p.relative_to(package).as_posix() for p in package.rglob("*") if p.is_file()} == set(files)
         for name in files:
             assert (package / name).read_bytes() == (ROOT / name).read_bytes(), name
+        # The production packager passes the real `git ls-files` listing, so
+        # tracked-but-private records must not be required in the inventory.
+        production_listing = root / "production-tracked"
+        production_listing.write_bytes(b"\0".join(name.encode() for name in sorted(tracked)) + b"\0")
+        invoke(code, source, package, production_listing)
         # Container staging uses the same finite inventory and current bytes.
         invoke("import os; os.umask(0o077)\n" + helper("scripts/build-octet-image.sh", "PYDOCS"), source)
         container = source / ".octet-package-docs"

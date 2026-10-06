@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.0] - Release candidate
 
 - Pi message observations now include user/assistant/custom payloads, accumulated
   text deltas and bounded run-local `agent_end.messages`. Final accounting/model/
@@ -146,6 +146,60 @@
   economic decisions and refresh spend; cache-miss/refresh notices are opt-in via
   `show_cache_miss_notices = true` (default false). Replaces the experimental
   synthetic-suffix warm API. Live cache-hit or savings qualification is not claimed.
+- Real-binary end-to-end regression suite (`scripts/e2e/`): one command drives the
+  published binary through disposable PTY sessions with a VT screen model and a
+  loopback mock provider, prints PASS/FAIL per check, and covers resume, long-session
+  scroll, mouse selection/OSC 52 copy, direct and picker themes, busy slash and
+  extension queueing, Enter steering, Ctrl+S follow-up, streaming typing latency,
+  and Pi compat on/off with three real matrix packages.
+- Extension command argument completions (U12). Reviewed Pi commands that register
+  `getArgumentCompletions` now activate without the host refusal, and their
+  completions appear in the composer's slash UI with bounded, cancellable results
+  that never block typing.
+- Visible safe-boundary queue for model and thinking controls (U7). Changes
+  submitted while a run or extension hook is active are shown in the UI queue and
+  applied exactly once at the next request boundary; theme changes still apply
+  immediately, and nothing mutates an in-flight request.
+- Python extension setup activation (U4). After an explicit runtime setup, the
+  extension that failed cold start is started through the normal activation path,
+  so its tools, hooks and commands register in the same session without a restart.
+- Theme, selection and clipboard acceptance repairs (U14). `/theme <built-in>`
+  resolves every advertised name through the same resolver as startup and the
+  picker, and app-owned pointer hit testing now matches the rendered viewport, so
+  drag selection copies the painted row across scroll, wrapped markdown and chrome.
+- Pi ordered-hook cancellation and session replacement (U3, U2). Ordered callbacks
+  settle before the terminal response and slot release, so a second callback cannot
+  run concurrently with a cancelled one; `ctx.newSession`/`ctx.switchSession`/fork
+  commit parent linkage and writable setup against the replacement session.
+- Release packaging: the native linux packager no longer requires tracked private
+  workstation records (`docs/rc/…`) in the public documentation inventory, with a
+  regression that runs the producer against the real tracked listing.
+- Pi setup mirroring (U16). Enabling the reviewed octet-pi-compat bridge discovers
+  the user's Pi 1.0.2 setup read-only (settings, installed extensions and packages,
+  skills, prompt templates, themes, keybindings, models and context files), activates
+  the equivalent through the adapter and native machinery, and disabling it returns
+  exactly to the Octet-only setup with no Pi residue; toggling is idempotent.
+- Checkpoint baseline repairs (U15). Inherited failures in extension hook/lifecycle
+  delivery, the MCP bridge host-access replay check, Pi session replacement,
+  activity/steering PTY contracts, headless before-prompt tool snapshots and the
+  API 0.1 conformance wire are fixed, together with the inherited dead-code and
+  collapsible-if clippy lints.
+- Large-history transport (U1). The approved session-repair.v2 chunked transport
+  replaces the legacy 512 KiB session mirror between the host and the adapter:
+  complete history travels in bounded chunks with the frame bound checked before
+  append admission, `session_owner_routes_v1` and `session_snapshot_transport_v1`
+  negotiate together, mid-transfer cancellation leaves no partial state, and
+  session-facts publication readiness never depends on the negotiated transport.
+  A routed publication only invalidates its own delivery barrier, and a
+  non-foreground owner is no longer an error.
+- Pre-native terminal input lane (U6). Pi `onTerminalInput` handlers observe raw
+  terminal input before native handling and may consume or transform it, in the
+  Pi ordering, with bounded timeout behaviour: a hung handler never freezes
+  typing, and the adapter negotiates `terminal_input_intercept_v1`.
+- Pi adapter shims and crash repairs (U13). The missing Pi 1.0.2 module surface is
+  implemented in the adapter's shims, and the extension-process crashes found by
+  the real-package matrix (for example `extension stdout closed` in
+  pi-mcp-adapter, and lens/permission-system startup refusals) are fixed.
 
 ## [0.8.2] - 2026-09-30
 

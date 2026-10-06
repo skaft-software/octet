@@ -4,6 +4,12 @@
 # Reference source is inert documentation, NOT an installed executable extension.
 # No globs/directories; add new public docs here and run scripts/test-packaged-docs.py.
 # Explicit text entries bypass extension filtering (notably Rust and TypeScript).
+# Private workstation records: tracked in Git, never inventoried or shipped.
+# private docs/rc/0.8.2/README-RC.md
+# private docs/rc/0.8.2/TERN-REDESIGN-TASK.md
+# private docs/rc/0.8.2/UI-FIX.md
+# private docs/rc/0.8.2/VERIFICATION.md
+# private docs/rc/0.8.2/verification-results.json
 text CHANGELOG.md
 text CONTRIBUTING.md
 text LICENSE
@@ -258,6 +264,7 @@ text docs/releases/v0.8.0.md
 text docs/releases/v0.8.1-rc.1.md
 text docs/releases/v0.8.1.md
 text docs/releases/v0.8.2.md
+text docs/releases/v0.9.0.md
 text docs/resources.md
 text docs/sdk.md
 text docs/session-format.md

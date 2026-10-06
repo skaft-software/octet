@@ -8,9 +8,10 @@ lane, verify it with a read-only request, and only then allow edits or commands.
 Shell commands are in `sh` blocks; text in `text` blocks is entered inside the
 interactive Octet UI, not in your shell.
 
-> **Version boundary.** This guide targets the octet 0.8.2 source candidate,
+> **Version boundary.** This guide targets the octet 0.9.0 source candidate,
 > not a published release. Use the checkout lane below; native and npm installation
-> commands become usable only after verified publication. Check `octet --version`
+> commands become usable only after verified publication, and until then they keep
+> naming the preceding 0.8.2 release. Check `octet --version`
 > and `octet --help` for the binary you will run. Source builds are not signed
 > release artifacts, and older binaries may not include these options.
 
@@ -103,7 +104,7 @@ shell command, history, or session fixture.
 
 ### Interactive setup
 
-For an unconfigured octet 0.8.2 installation, start without `--model`:
+For an unconfigured octet 0.9.0 installation, start without `--model`:
 
 ```sh
 octet --safe-mode

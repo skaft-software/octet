@@ -6,7 +6,7 @@
 
 **A high-performance coding agent.**
 
-[![Candidate: 0.8.2](https://img.shields.io/badge/candidate-0.8.2-536dfe?style=flat-square)](docs/releases/v0.8.2.md)
+[![Candidate: 0.9.0](https://img.shields.io/badge/candidate-0.9.0-536dfe?style=flat-square)](docs/releases/v0.9.0.md)
 
 octet reads code, edits files, and runs commands from your terminal. It has a
 native Rust core, supports cloud and local models, saves resumable sessions,
@@ -24,16 +24,18 @@ enabled extensions run with your operating-system permissions, and nothing asks
 first. `--safe-mode` asks before every shell call and file change, but it is an
 approval policy, not a sandbox. See [Security](SECURITY.md#permissions).
 
-This checkout is the **octet 0.8.2 candidate**, not a published release. See the
-[release notes](docs/releases/v0.8.2.md) for scope and remaining qualification.
+This checkout is the **octet 0.9.0 candidate**, not a published release. See the
+[release notes](docs/releases/v0.9.0.md) for scope and remaining qualification.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ## Install
 
-**0.8.2 is not published yet.** Use the source-build instructions below for this
+**The 0.9.0 release candidate is not published yet.** Use the source-build instructions below for this
 candidate. The native and npm commands are planned post-publication instructions,
-not currently available 0.8.2 installation channels.
+not currently available 0.9.0 installation channels. Until promotion, the public
+URLs below keep naming the preceding 0.8.2 candidate; its assets are not
+available either.
 
 **Native installer (after publication):** macOS Apple silicon/Intel and GNU/Linux
 x86-64, no Node.js required:
@@ -59,7 +61,7 @@ from the same verified release assets; see
 After approved publication, signed assets and public-install results must be
 recorded on the
 [GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.2).
-See [release notes](docs/releases/v0.8.2.md) and
+See [release notes](docs/releases/v0.9.0.md) and
 [installation](docs/installation.md) for scope, prerequisites and channel availability.
 When moving from Ygg, install octet afresh: older installations and data remain
 separate; no automatic migration is performed.

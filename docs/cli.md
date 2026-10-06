@@ -265,10 +265,10 @@ octet extension list
 ```
 
 The six executable bundles are pinned exactly to the
-running host. This checkout's source manifests require `=0.8.2`, and the
-published 0.8.0 bundles require `=0.8.0`. The [0.8.2
-candidate notes](releases/v0.8.2.md) record planned distribution and remaining
-qualification, not publication. The 0.8.2 release assets are unavailable; use
+running host. This checkout's source manifests require `=0.9.0`, and the
+published 0.8.0 bundles require `=0.8.0`. The [0.9.0
+candidate notes](releases/v0.9.0.md) record planned distribution and remaining
+qualification, not publication. The 0.9.0 release assets are unavailable; use
 reviewed source extensions or local archives until approved publication.
 Catalog installs need verified published assets that match the running host version:
 

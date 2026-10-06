@@ -13,7 +13,7 @@ native binary, including retained editable draft, resize and shutdown. Full Pi A
 parity and a startup-speed comparison are not established.
 
 The contract is **Pi 1.0.2's public extension API**, replicated under Octet's
-subprocess JSON-RPC protocol. octet 0.8.2 is pinned to exactly Pi 1.0.2: the
+subprocess JSON-RPC protocol. octet 0.9.0 is pinned to exactly Pi 1.0.2: the
 adapter ships the dependency versions Pi 1.0.2 ships (jiti 2.7.0, TypeBox
 1.3.27, pi-tui 1.0.2) and resolves imports through the same module table as Pi
 1.0.2's extension loader. The [27-row ledger](pi-extension-api.md) is the
