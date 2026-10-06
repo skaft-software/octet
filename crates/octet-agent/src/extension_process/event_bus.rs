@@ -1330,7 +1330,7 @@ command = "unused"
                 shortcuts: vec![],
                 tool_renderers: vec![],
                 protocol: Some(ExtensionProtocolResponse {
-session_snapshot_transport_v1: None,
+                    session_snapshot_transport_v1: None,
                     version: version.into(),
                     features: API_0_2_REQUIRED_FEATURES
                         .iter()
@@ -1339,7 +1339,7 @@ session_snapshot_transport_v1: None,
                         .map(str::to_owned)
                         .collect(),
                     limits: ExtensionProtocolLimits {
-max_message_bytes: None,
+                        max_message_bytes: None,
                         resource_refs_v1: None,
                         max_concurrent_requests: 1,
                     },

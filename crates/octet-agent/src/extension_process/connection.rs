@@ -1036,7 +1036,12 @@ impl ProcessConnection {
                 &mut params,
             )?;
             let id = connection.next_id.fetch_add(1, Ordering::Relaxed);
-            let _views = session_leaf::transport::attach(&connection, id, resource_owner.as_ref(), &mut params)?;
+            let _views = session_leaf::transport::attach(
+                &connection,
+                id,
+                resource_owner.as_ref(),
+                &mut params,
+            )?;
             let message = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -1089,35 +1094,35 @@ impl ProcessConnection {
                 lock_std_mutex(&connection.issued_resource_owners).insert(owner.clone());
             }
             {
-            let mut pending = lock_std_mutex(&connection.pending);
-            if routed {
-                if let Some(permit) = slot.take() {
-                    lock_std_mutex(&connection.session_leaf.execution_slots).insert(id, permit);
+                let mut pending = lock_std_mutex(&connection.pending);
+                if routed {
+                    if let Some(permit) = slot.take() {
+                        lock_std_mutex(&connection.session_leaf.execution_slots).insert(id, permit);
+                    }
                 }
-            }
-            pending.insert(
-                id,
-                PendingRequest {
-                    method: method.to_owned(),
-                    sender: reply_tx,
-                    terminal,
-                    frame_state: Arc::clone(&frame_state),
-                    cancellation_sent,
-                    progress,
-                    child_interaction_progress,
-                    resource_owner: resource_owner.clone(),
-                    last_progress_sequence: None,
-                    composition_files: Arc::new(CompositionFiles::default()),
-                    tool_call_policy_digest: (method == methods::TOOL_CALL)
-                        .then(|| {
-                            Some(tool_call_policy_digest(
-                                message["params"]["name"].as_str()?,
-                                message["params"].get("arguments")?,
-                            ))
-                        })
-                        .flatten(),
-                },
-            );
+                pending.insert(
+                    id,
+                    PendingRequest {
+                        method: method.to_owned(),
+                        sender: reply_tx,
+                        terminal,
+                        frame_state: Arc::clone(&frame_state),
+                        cancellation_sent,
+                        progress,
+                        child_interaction_progress,
+                        resource_owner: resource_owner.clone(),
+                        last_progress_sequence: None,
+                        composition_files: Arc::new(CompositionFiles::default()),
+                        tool_call_policy_digest: (method == methods::TOOL_CALL)
+                            .then(|| {
+                                Some(tool_call_policy_digest(
+                                    message["params"]["name"].as_str()?,
+                                    message["params"].get("arguments")?,
+                                ))
+                            })
+                            .flatten(),
+                    },
+                );
             }
             if let Some(request_started) = request_started {
                 let _ = request_started.send(ExtensionOperationToken {

@@ -158,7 +158,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        if session_leaf::transport::dispatch(state, object, method, params.clone())? { return Ok(()); }
+        if session_leaf::transport::dispatch(state, object, method, params.clone())? {
+            return Ok(());
+        }
         if matches!(
             method,
             methods::UI_OPEN | methods::UI_CLOSE | methods::UI_FRAME
@@ -2117,9 +2119,14 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     };
     let request = {
         let mut pending = lock_std_mutex(&state.pending);
-        if pending.get(&id).is_some_and(|p| p.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE) {
+        if pending
+            .get(&id)
+            .is_some_and(|p| p.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE)
+        {
             if let Ok(value) = &mut reply {
-                if let Err(error) = lock_std_mutex(&state.session_leaf.transport).resolve_projection(id, value) {
+                if let Err(error) =
+                    lock_std_mutex(&state.session_leaf.transport).resolve_projection(id, value)
+                {
                     reply = Err(PendingError::Protocol(error.to_string()));
                 }
             }

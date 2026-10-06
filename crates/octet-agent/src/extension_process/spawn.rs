@@ -540,7 +540,12 @@ pub(super) async fn spawn_connection(
     if let Some(profile) = &session_offer {
         optional_features.push(transport::OWNER_ROUTES.to_owned());
         optional_features.push(transport::SNAPSHOT_TRANSPORT.to_owned());
-        debug_assert_eq!(SessionSnapshotProfile::for_frame(session_offer_frame).ok().as_ref(), Some(profile));
+        debug_assert_eq!(
+            SessionSnapshotProfile::for_frame(session_offer_frame)
+                .ok()
+                .as_ref(),
+            Some(profile)
+        );
     }
 
     let api_v03_offer = (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_3)

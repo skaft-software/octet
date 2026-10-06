@@ -12,7 +12,6 @@ use serde_json::json;
 // The routed peer reads both descriptors through parent-bound chunk handles.
 const SCRIPT: &str = include_str!("driver_peer.py");
 
-
 fn peer_error(temp: &tempfile::TempDir) -> String {
     std::fs::read_to_string(temp.path().join("peer-error.txt")).unwrap_or_default()
 }
@@ -350,7 +349,11 @@ async fn two_native_owner_drivers_share_process_without_foreground_promotion() {
     let store = lock_std_mutex(&connection.session_leaf.transport);
     // The current view is the immutable publication (taken before the hook
     // append); the append advanced the activation view and its durable session.
-    assert_eq!(store.current.len(), 1, "only the published owner has a current view");
+    assert_eq!(
+        store.current.len(),
+        1,
+        "only the published owner has a current view"
+    );
     let view = store.current.get(&owner).and_then(Option::as_ref).unwrap();
     assert_eq!(view.descriptor.owner, owner);
     assert!(view.descriptor.head.is_none());

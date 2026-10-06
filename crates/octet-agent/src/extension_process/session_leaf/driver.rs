@@ -203,9 +203,19 @@ impl SessionDriver {
         // Capture a fresh complete immutable invocation view from the sole
         // writer. Parent and nested callbacks share the committed grant chain,
         // not a head/count heuristic or a second writer.
-        let current = lock_std_mutex(&active.lease.bound.current_grant).clone().ok_or("session driver successor unavailable")?;
-        let snapshot = InvocationSnapshot::capture(&connection, session, &active.binding.namespace, &current).map_err(|_| "session driver snapshot unavailable")?;
-        if let InvocationSnapshot::Chunked(view) = &snapshot { active.lease.bound.view_revision.store(view.descriptor.view_revision, Ordering::Release); }
+        let current = lock_std_mutex(&active.lease.bound.current_grant)
+            .clone()
+            .ok_or("session driver successor unavailable")?;
+        let snapshot =
+            InvocationSnapshot::capture(&connection, session, &active.binding.namespace, &current)
+                .map_err(|_| "session driver snapshot unavailable")?;
+        if let InvocationSnapshot::Chunked(view) = &snapshot {
+            active
+                .lease
+                .bound
+                .view_revision
+                .store(view.descriptor.view_revision, Ordering::Release);
+        }
         Ok(LinkedSessionInvocation {
             process: process.clone(),
             connection,

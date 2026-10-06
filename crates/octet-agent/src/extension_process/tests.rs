@@ -4,14 +4,14 @@ use tempfile::TempDir;
 
 #[path = "agent_sessions/tests.rs"]
 mod agent_sessions;
-#[path = "cache_warming_tests.rs"]
-mod cache_warming;
-#[path = "prompt_metadata_tests.rs"]
-mod prompt_metadata;
 #[path = "builtin_override_tests.rs"]
 mod builtin_overrides;
+#[path = "cache_warming_tests.rs"]
+mod cache_warming;
 #[path = "composer_history_tests.rs"]
 mod composer_history;
+#[path = "prompt_metadata_tests.rs"]
+mod prompt_metadata;
 
 const VALID_MANIFEST: &str = r#"
 name = "git-tools"
@@ -785,11 +785,11 @@ system_prompt = {system_prompt}
             tool_renderers: Vec::new(),
             shortcuts: Vec::new(),
             protocol: Some(ExtensionProtocolResponse {
-session_snapshot_transport_v1: None,
+                session_snapshot_transport_v1: None,
                 version: EXTENSION_API_VERSION_0_2.to_owned(),
                 features,
                 limits: ExtensionProtocolLimits {
-max_message_bytes: None,
+                    max_message_bytes: None,
                     resource_refs_v1: None,
                     max_concurrent_requests: 4,
                 },
@@ -3960,14 +3960,14 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
         tool_renderers: Vec::new(),
         shortcuts: manifest.contributes.shortcuts.clone(),
         protocol: Some(ExtensionProtocolResponse {
-session_snapshot_transport_v1: None,
+            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_4.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
                 .map(|feature| (*feature).to_owned())
                 .collect(),
             limits: ExtensionProtocolLimits {
-max_message_bytes: None,
+                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 4,
             },
@@ -4035,14 +4035,14 @@ shortcuts = [{ key = "ctrl+shift+p", name = "open_panel", description = "Open th
         tool_renderers: Vec::new(),
         shortcuts,
         protocol: Some(ExtensionProtocolResponse {
-session_snapshot_transport_v1: None,
+            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
                 .map(|feature| (*feature).to_owned())
                 .collect(),
             limits: ExtensionProtocolLimits {
-max_message_bytes: None,
+                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
@@ -5523,7 +5523,7 @@ command = "runtime-command-validation"
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-session_snapshot_transport_v1: None,
+            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
@@ -5532,7 +5532,7 @@ session_snapshot_transport_v1: None,
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
-max_message_bytes: None,
+                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
@@ -5587,7 +5587,7 @@ command = "agent-service"
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-session_snapshot_transport_v1: None,
+            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
@@ -5596,7 +5596,7 @@ session_snapshot_transport_v1: None,
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
-max_message_bytes: None,
+                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
@@ -5661,7 +5661,7 @@ command = "octet-subagents"
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-session_snapshot_transport_v1: None,
+            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
@@ -5670,7 +5670,7 @@ session_snapshot_transport_v1: None,
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
-max_message_bytes: None,
+                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
@@ -5763,7 +5763,7 @@ secrets = ["browser.api_token"]
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-session_snapshot_transport_v1: None,
+            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
@@ -5772,7 +5772,7 @@ session_snapshot_transport_v1: None,
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
-max_message_bytes: None,
+                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },

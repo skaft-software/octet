@@ -1,14 +1,15 @@
 //! Real native owner dispatch and the reviewed adapter; no model/network calls.
 use super::tests::Capture;
-use crate::extension_process::session_leaf::transport;
 use super::*;
+use crate::extension_process::session_leaf::transport;
 use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};
 use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningMode};
 
 async fn adapter(temp: &tempfile::TempDir) -> ExtensionProcess {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../extensions/octet-pi-compat")
-        .canonicalize().unwrap();
+        .canonicalize()
+        .unwrap();
     let factory = temp.path().join("history.mjs");
     std::fs::write(&factory, r#"
 import { writeFileSync } from 'node:fs';
@@ -33,16 +34,38 @@ export default function(pi) {
 "#).unwrap();
     let bundle = temp.path().join("octet-pi-compat");
     let output = tokio::process::Command::new("node")
-        .arg(root.join("configure.mjs")).arg("--reviewed").arg("--output")
-        .arg(&bundle).arg(&factory).env("HOME", temp.path())
-        .current_dir(temp.path()).kill_on_drop(true).output().await.unwrap();
-    assert!(output.status.success(), "adapter capture: {}", String::from_utf8_lossy(&output.stderr));
+        .arg(root.join("configure.mjs"))
+        .arg("--reviewed")
+        .arg("--output")
+        .arg(&bundle)
+        .arg(&factory)
+        .env("HOME", temp.path())
+        .current_dir(temp.path())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "adapter capture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let manifest_path = bundle.join("extension.toml");
     let manifest = ExtensionManifest::load(&manifest_path).unwrap();
-    ExtensionProcess::start(DiscoveredExtension {
-        manifest, manifest_path, source: ExtensionSource::Explicit,
-        activation: ExtensionActivation { enabled: true, trust: ExtensionTrust::Trusted },
-    }, ExtensionRuntimeConfig::new(temp.path())).await.unwrap()
+    ExtensionProcess::start(
+        DiscoveredExtension {
+            manifest,
+            manifest_path,
+            source: ExtensionSource::Explicit,
+            activation: ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        },
+        ExtensionRuntimeConfig::new(temp.path()),
+    )
+    .await
+    .unwrap()
 }
 
 async fn complete_history(count: usize, publish: bool) {
@@ -51,12 +74,22 @@ async fn complete_history(count: usize, publish: bool) {
     let process = adapter(&temp).await;
     let mut session = Session::create(temp.path().join("history.jsonl")).unwrap();
     for index in 0..count {
-        session.append(crate::session::EntryValue::Message(octet_ai::Message::User(octet_ai::UserMessage { content: vec![octet_ai::UserPart::Text(format!("{index:04}{}", "x".repeat(7996)))] }))).unwrap();
+        session
+            .append(crate::session::EntryValue::Message(
+                octet_ai::Message::User(octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text(format!(
+                        "{index:04}{}",
+                        "x".repeat(7996)
+                    ))],
+                }),
+            ))
+            .unwrap();
     }
     let mut host = ExtensionHost::new();
     process.register(&mut host);
     if publish {
-        process.set_host_state_with_session(ExtensionHostState::default(), &session)
+        process
+            .set_host_state_with_session(ExtensionHostState::default(), &session)
             .expect("complete history publication must not be a whole-frame mirror");
     }
     // A 80x8,000-character history is far larger than the legacy 512 KiB
@@ -69,27 +102,49 @@ async fn complete_history(count: usize, publish: bool) {
     let reasoning = octet_ai::select_auxiliary_reasoning(&model).unwrap();
     let client = octet_ai::AiClient::new();
     let captures = Arc::new(StdMutex::new(Vec::new()));
-    client.register_host_stream_transport(model.endpoint.id.clone(), Arc::new(Capture(captures.clone())));
+    client.register_host_stream_transport(
+        model.endpoint.id.clone(),
+        Arc::new(Capture(captures.clone())),
+    );
     let mut agent = Agent::new(AgentConfig {
-        client, model, session, extensions: host, system: "canonical system".into(),
-        sandbox: SandboxConfig::new(temp.path()), effect_broker: EffectBroker::default(),
-        max_turns: Some(1), reasoning,
-        reasoning_mode: ReasoningMode::Standard, cache_retention: CacheRetention::Short,
+        client,
+        model,
+        session,
+        extensions: host,
+        system: "canonical system".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::default(),
+        max_turns: Some(1),
+        reasoning,
+        reasoning_mode: ReasoningMode::Standard,
+        cache_retention: CacheRetention::Short,
         session_id: Some("history-acceptance".into()),
-    }).unwrap();
+    })
+    .unwrap();
     let result = agent.complete("read every history entry").await;
     assert!(process.shutdown().await);
-    assert_eq!(result.expect("owner-bound dispatch must hydrate complete history").text, "answer");
-    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(temp.path().join("history-read.json")).unwrap()).unwrap();
+    assert_eq!(
+        result
+            .expect("owner-bound dispatch must hydrate complete history")
+            .text,
+        "answer"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("history-read.json")).unwrap())
+            .unwrap();
     assert_eq!(report["count"], count + 1);
     assert_eq!(captures.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn real_adapter_complete_history_40_messages() { complete_history(40, true).await; }
+async fn real_adapter_complete_history_40_messages() {
+    complete_history(40, true).await;
+}
 
 #[tokio::test]
-async fn real_adapter_complete_history_80_messages() { complete_history(80, false).await; }
+async fn real_adapter_complete_history_80_messages() {
+    complete_history(80, false).await;
+}
 
 #[tokio::test]
 async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
@@ -98,14 +153,14 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
     let mut session = Session::create(temp.path().join("history.jsonl")).unwrap();
     for index in 0..200 {
         session
-            .append(crate::session::EntryValue::Message(octet_ai::Message::User(
-                octet_ai::UserMessage {
+            .append(crate::session::EntryValue::Message(
+                octet_ai::Message::User(octet_ai::UserMessage {
                     content: vec![octet_ai::UserPart::Text(format!(
                         "{index:04}{}",
                         "x".repeat(7996)
                     ))],
-                },
-            )))
+                }),
+            ))
             .unwrap();
     }
     let namespace = process.descriptor().manifest.name.clone();
@@ -122,15 +177,16 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
         .expect("counted publication is never a whole-frame mirror");
     let parent = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let pending = lock_std_mutex(&connection.pending);
-            if let Some(id) = pending
-                .iter()
-                .find(|(_, request)| request.method == transport::PREPARE)
-                .map(|(id, _)| *id)
-            {
+            let found = {
+                let pending = lock_std_mutex(&connection.pending);
+                pending
+                    .iter()
+                    .find(|(_, request)| request.method == transport::PREPARE)
+                    .map(|(id, _)| *id)
+            };
+            if let Some(id) = found {
                 return id;
             }
-            drop(pending);
             tokio::task::yield_now().await;
         }
     })
@@ -154,11 +210,13 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
     // reservation. The owner stays explicitly unavailable, never partial.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let transport = lock_std_mutex(&connection.session_leaf.transport);
-            if transport.in_flight(parent) == 0 && transport.retained() == (0, 0, 0) {
+            let settled = {
+                let transport = lock_std_mutex(&connection.session_leaf.transport);
+                transport.in_flight(parent) == 0 && transport.retained() == (0, 0, 0)
+            };
+            if settled {
                 return;
             }
-            drop(transport);
             tokio::task::yield_now().await;
         }
     })
@@ -180,11 +238,12 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
         .expect("bounded failfast, never truncation");
     let current = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(Some(view)) = lock_std_mutex(&connection.session_leaf.transport)
+            let published = lock_std_mutex(&connection.session_leaf.transport)
                 .current
                 .get(&owner)
                 .cloned()
-            {
+                .flatten();
+            if let Some(view) = published {
                 return view;
             }
             tokio::task::yield_now().await;
