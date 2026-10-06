@@ -32,7 +32,7 @@ import { ExtensionIssues } from './issues.mjs';
 import { installHostKeybindings } from './keybindings.mjs';
 import { bindHostTheme, nativeTheme } from './theme.mjs';
 
-const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active']);
+const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select']);
 const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
@@ -422,7 +422,7 @@ export class Runtime {
     if (!lifecycle && this.foreground && (owner.extension_instance_id !== this.foreground.owner.extension_instance_id || owner.process_generation !== this.foreground.owner.process_generation)) throw rpcError(-32002, 'not_foreground_owner process binding');
     // Commands/shortcuts are foreground actions, not a way to switch a live
     // foreground owner. Their first binding supports hosts without start hooks.
-    foreground ||= !this.sessionTransport && !this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method);
+    foreground ||= !this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method);
     if (!foreground && this.foreground && state !== this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method)) throw rpcError(-32002, 'not_foreground_owner command belongs to an inactive session');
     if (!state || !state.alive) {
       state = { key, owner: Object.freeze({ ...owner }), alive: true, workspace: context.workspace || this.workspace, host: { ...this.initialHost, ...(context.host || {}) }, statuses: new Map(), branchListeners: new Set(), uiQueues: new Map(), parent: store.id };
@@ -475,7 +475,9 @@ export class Runtime {
       const revision = params.host.session_view_revision;
       if (!Number.isSafeInteger(revision) || revision < 1) invalid('session view revision');
       this.sessionTransport.invalidate(params.resource_owner, revision);
-      return;
+      // A peer without a retained frontend has nothing left to update; the
+      // invalidation above is the whole effect of this notification for it.
+      if (!this.features.has('remote_ui')) return;
     }
     this.require('remote_ui'); const key = ownerKey(params.resource_owner), state = this.states.get(key);
     if (!state || !state.alive || state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context/updated');
