@@ -145,8 +145,11 @@ test('background cancellation leaves the foreground usable and cannot publish a 
   const pending = peer.request('hook/run', contextHook(foreign, false, { session_name: 'wait' }));
   for (let n = 0; n < 10 && !(await inspect(peer)).waiting; n++) {}
   peer.notify('$/cancelRequest', { id: pending.id });
-  assert.equal((await pending.response).error?.code, -32800);
+  let settled = false; pending.response.then(() => { settled = true; });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(settled, false, 'cancellation must retain the active slot while the callback ignores abort');
   assert.ok((await peer.request('command/execute', { name: 'release-owner', context: ownerContext(owner) }).response).result);
+  assert.equal((await pending.response).error?.code, -32800);
   assert.equal((await inspect(peer)).entries, 0);
   assert.equal(peer.seen.filter(frame => frame.id === pending.id && !frame.method).length, 1);
   await peer.close();

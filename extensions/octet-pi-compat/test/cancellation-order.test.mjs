@@ -29,11 +29,17 @@ test('cancelled ordered hook holds its queue and active slot until callback sett
     const first = runtime.receive(message(1));
     await started;
     runtime.cancel(1);
-    await first;
-    assert.equal(replies[0]?.error?.code, -32800);
+    const second = runtime.receive(message(2));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(replies.length, 0, 'cancellation must not send a terminal response while the callback is running');
     assert.equal(live, 1, 'the callback should still be running after cancellation');
+    assert.equal(runtime.active.has(1), true, 'the cancelled request must retain its active slot until the callback settles');
+    assert.equal(peak, 1, 'ordered callbacks must not overlap after cancellation');
 
-    await runtime.receive(message(2));
+    release();
+    await Promise.all([first, second]);
+    assert.equal(replies.find(reply => reply.id === 1)?.error?.code, -32800);
+    assert.equal(runtime.active.has(1), false, 'the active slot is released after callback settlement');
     assert.equal(peak, 1, 'ordered callbacks must not overlap after cancellation');
   } finally {
     release();
