@@ -188,9 +188,11 @@ pub(in crate::extension_process) fn publish(
                 Some(owner.clone()),
             )
             .await;
-        // The peer invalidated itself before this request was read, so a
-        // refused or undelivered preparation leaves it explicitly unavailable
-        // without this host discarding the newest publication it holds.
+        // The peer invalidated itself before this request was written, so a
+        // refused or undelivered preparation leaves the peer explicitly
+        // unavailable. This host keeps the newest complete publication as its
+        // own record: discarding it here would refuse later valid requests
+        // while the peer's own invalidate barrier already prevents staleness.
         let _ = result;
     });
     Ok(())

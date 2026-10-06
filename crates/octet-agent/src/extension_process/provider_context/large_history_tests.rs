@@ -68,33 +68,15 @@ export default function(pi) {
     .unwrap()
 }
 
-async fn complete_history(count: usize, publish: bool) {
-    let temp = tempfile::tempdir().unwrap();
-    // Each test process has a private manifest/env and private durable Session.
-    let process = adapter(&temp).await;
-    let mut session = Session::create(temp.path().join("history.jsonl")).unwrap();
-    for index in 0..count {
-        session
-            .append(crate::session::EntryValue::Message(
-                octet_ai::Message::User(octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text(format!(
-                        "{index:04}{}",
-                        "x".repeat(7996)
-                    ))],
-                }),
-            ))
-            .unwrap();
-    }
+/// One real Agent run over `session` with the reviewed adapter, returning the
+/// count the extension actually read through `ctx.sessionManager`.
+async fn agent_reads_all(
+    temp: &tempfile::TempDir,
+    process: &ExtensionProcess,
+    session: Session,
+) -> usize {
     let mut host = ExtensionHost::new();
     process.register(&mut host);
-    if publish {
-        process
-            .set_host_state_with_session(ExtensionHostState::default(), &session)
-            .expect("complete history publication must not be a whole-frame mirror");
-    }
-    // A 80x8,000-character history is far larger than the legacy 512 KiB
-    // mirror, so the acceptance uses a model whose real context window admits
-    // the complete transferred history rather than a raised transport cap.
     let model = ModelCatalog::builtin()
         .unwrap()
         .resolve(&ModelId("gpt-6-astra".into()))
@@ -122,18 +104,49 @@ async fn complete_history(count: usize, publish: bool) {
     })
     .unwrap();
     let result = agent.complete("read every history entry").await;
-    assert!(process.shutdown().await);
     assert_eq!(
         result
             .expect("owner-bound dispatch must hydrate complete history")
             .text,
         "answer"
     );
+    assert_eq!(captures.lock().unwrap().len(), 1);
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("history-read.json")).unwrap())
             .unwrap();
-    assert_eq!(report["count"], count + 1);
-    assert_eq!(captures.lock().unwrap().len(), 1);
+    report["count"].as_u64().unwrap() as usize
+}
+
+/// Append `count` 8,000-character user messages: each is far past the legacy
+/// 16 KiB private-entry bound and 40 of them exceed the 512 KiB mirror.
+fn append_history(session: &mut Session, count: usize) {
+    for index in 0..count {
+        session
+            .append(crate::session::EntryValue::Message(
+                octet_ai::Message::User(octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text(format!(
+                        "{index:04}{}",
+                        "x".repeat(7996)
+                    ))],
+                }),
+            ))
+            .unwrap();
+    }
+}
+
+async fn complete_history(count: usize, publish: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    // Each test process has a private manifest/env and private durable Session.
+    let process = adapter(&temp).await;
+    let mut session = Session::create(temp.path().join("history.jsonl")).unwrap();
+    append_history(&mut session, count);
+    if publish {
+        process
+            .set_host_state_with_session(ExtensionHostState::default(), &session)
+            .expect("complete history publication must not be a whole-frame mirror");
+    }
+    assert_eq!(agent_reads_all(&temp, &process, session).await, count + 1);
+    assert!(process.shutdown().await);
 }
 
 #[tokio::test]
@@ -151,18 +164,7 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
     let temp = tempfile::tempdir().unwrap();
     let process = adapter(&temp).await;
     let mut session = Session::create(temp.path().join("history.jsonl")).unwrap();
-    for index in 0..200 {
-        session
-            .append(crate::session::EntryValue::Message(
-                octet_ai::Message::User(octet_ai::UserMessage {
-                    content: vec![octet_ai::UserPart::Text(format!(
-                        "{index:04}{}",
-                        "x".repeat(7996)
-                    ))],
-                }),
-            ))
-            .unwrap();
-    }
+    append_history(&mut session, 200);
     let namespace = process.descriptor().manifest.name.clone();
     let owner = process
         .current_context_for_resource_owner(session.resource_owner_key())
@@ -206,15 +208,11 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
     .await
     .unwrap();
     connection.cancel_request(parent, "mid-transfer cancel");
-    // Cancellation settles every staged handle and releases the exact
-    // reservation. The owner stays explicitly unavailable, never partial.
+    // Cancellation settles the staged handle: no transfer of that publication
+    // stays readable, and nothing partial is retained for the owner.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let settled = {
-                let transport = lock_std_mutex(&connection.session_leaf.transport);
-                transport.in_flight(parent) == 0 && transport.retained() == (0, 0, 0)
-            };
-            if settled {
+            if lock_std_mutex(&connection.session_leaf.transport).in_flight(parent) == 0 {
                 return;
             }
             tokio::task::yield_now().await;
@@ -222,13 +220,41 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
     })
     .await
     .unwrap();
-    assert!(
-        lock_std_mutex(&connection.session_leaf.transport)
-            .current
-            .get(&owner)
-            .is_some_and(Option::is_none),
-        "a failed preparation publishes unavailable, never a previous or partial view"
-    );
+    let reference = {
+        let mut store = lock_std_mutex(&connection.session_leaf.transport);
+        let revision = store.next_revision().unwrap();
+        store
+            .history(
+                &session,
+                &namespace,
+                owner.clone(),
+                &profile,
+                None,
+                revision,
+            )
+            .unwrap()
+    };
+    {
+        let transport = lock_std_mutex(&connection.session_leaf.transport);
+        // Exactly one host publication is retained (this reference), so the
+        // cancelled transfer left no duplicated or partial reservation.
+        assert_eq!(
+            transport.retained().2,
+            2,
+            "one held publication plus the reference"
+        );
+        assert_eq!(
+            transport.retained().0,
+            reference.descriptor.bytes * 2,
+            "no partial bytes are retained for the cancelled publication"
+        );
+        let held = transport.current.get(&owner).and_then(Option::as_ref);
+        if let Some(held) = held {
+            assert_eq!(held.descriptor.bytes, reference.descriptor.bytes);
+            assert_eq!(held.descriptor.sha256, reference.descriptor.sha256);
+            assert_eq!(held.descriptor.entry_count, session.entries().len());
+        }
+    }
     // The same complete document still publishes exactly on the next attempt.
     let reference = {
         let mut store = lock_std_mutex(&connection.session_leaf.transport);
@@ -267,5 +293,8 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
     assert_eq!(current.descriptor.entry_count, session.entries().len());
     assert_eq!(current.descriptor.branch_count, session.entries().len());
     drop(reference);
-    assert!(process.shutdown().await);
+    // The cancelled transfer left the session complete and readable through
+    // the real adapter: a later hook still reads every entry.
+    let read = agent_reads_all(&temp, &process, session).await;
+    assert_eq!(read, 201);
 }
