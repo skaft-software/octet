@@ -93,9 +93,16 @@ pub enum ExtensionsSubcommand {
     Status,
     Reload,
     /// Explicit host-owned bootstrap of a selected trusted Python runtime.
-    Setup { extension: String },
-    Inspect { reference: String },
-    Action { extension: String, action: String },
+    Setup {
+        extension: String,
+    },
+    Inspect {
+        reference: String,
+    },
+    Action {
+        extension: String,
+        action: String,
+    },
 }
 
 /// Subcommands for the `/goal` slash command.
