@@ -18,6 +18,17 @@ pub enum ExtensionResourceDiscoveryReason {
     Reload,
 }
 
+/// One session-only default route selection reported by a resource contributor.
+/// The product still resolves it against its own catalog and admission rules.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionDefaultModel {
+    /// Pi-style provider id (for example `deepseek`).
+    pub provider: String,
+    /// Model id within that provider (for example `deepseek-v4-pro`).
+    pub model: String,
+}
+
 /// Absolute, temporary roots. The product still owns filesystem authorization,
 /// format parsing, precedence, diagnostics and publication of the new snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +47,18 @@ pub struct ExtensionResourcePaths {
     /// theme_paths; host parsing, trust and explicit selections remain authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_theme: Option<String>,
+    /// Native keybinding JSON files whose overrides apply only while this
+    /// resource binding is live. The product owns schema validation and merging.
+    #[serde(default)]
+    pub keybindings_paths: Vec<String>,
+    /// Context/instruction Markdown files composed into this session's system
+    /// prompt only while the resource binding is live.
+    #[serde(default)]
+    pub context_paths: Vec<String>,
+    /// Optional session-only default model selection. Honored only when the
+    /// invocation has no explicit model choice; never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<ExtensionDefaultModel>,
 }
 
 impl ExtensionResourcePaths {
@@ -55,7 +78,9 @@ impl ExtensionResourcePaths {
             .skill_paths
             .iter()
             .chain(&self.prompt_paths)
-            .chain(&self.theme_paths);
+            .chain(&self.theme_paths)
+            .chain(&self.keybindings_paths)
+            .chain(&self.context_paths);
         let mut count = 0;
         let mut bytes = 0;
         for path in all {
@@ -73,6 +98,18 @@ impl ExtensionResourcePaths {
             {
                 return Err(ExtensionRuntimeError::Protocol(
                     "invalid or over-budget resource_paths_v1 paths".into(),
+                ));
+            }
+        }
+        if let Some(selection) = &self.default_model {
+            let bounded = |value: &str| {
+                !value.is_empty()
+                    && value.len() <= 256
+                    && !value.chars().any(char::is_control)
+            };
+            if !bounded(&selection.provider) || !bounded(&selection.model) {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "invalid resource_paths_v1 default_model".into(),
                 ));
             }
         }

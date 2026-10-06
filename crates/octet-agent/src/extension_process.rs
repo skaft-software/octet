@@ -126,7 +126,8 @@ mod session_control;
 use self::model_control::dispatch_model_control;
 pub use self::model_control::{ExtensionModelControl, PiProviderModelMetadata};
 pub use resource_paths::{
-    ExtensionResourceDiscoveryReason, ExtensionResourcePaths, EXTENSION_FEATURE_RESOURCE_PATHS,
+    ExtensionDefaultModel, ExtensionResourceDiscoveryReason, ExtensionResourcePaths,
+    EXTENSION_FEATURE_RESOURCE_PATHS,
 };
 use session_control::{dispatch_session_compaction, dispatch_session_control};
 pub use session_control::{

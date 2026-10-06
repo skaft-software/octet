@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bounded, invalid, ownerKey, rpcError, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
+import { discoverPiSetup, resolveThemeFile } from './pi-setup.mjs';
 
 const pathFields = { skillPaths: 'skill_paths', promptPaths: 'prompt_paths', themePaths: 'theme_paths' };
 function record(value, allowed, label) {
@@ -84,6 +85,29 @@ export async function discoverResources(runtime, params, store) {
   return cancellable(runtime.queued(store, async () => {
     live();
     const paths = { skill_paths: [], prompt_paths: [], theme_paths: [] }, budget = { cwd, count: 0, bytes: 0 };
+    // Mirror mode: a reviewed opt-in activates the equivalents of this machine's
+    // Pi 1.0.2 setup. Discovery is read-only and bounded; the native host still
+    // owns admission, parsing, precedence and publication.
+    if (runtime.mirrorPiSetup) {
+      const setup = discoverPiSetup({ agentDir: runtime.config.pi_agent_dir, env: process.env, cwd });
+      for (const diagnostic of setup.diagnostics.slice(0, 32)) runtime.diagnostic(`mirror ${diagnostic}`);
+      appendPaths(paths, { skillPaths: setup.skillsPaths, promptPaths: setup.promptsPaths, themePaths: setup.themesPaths }, budget);
+      // Pi's selected palette becomes the session-only native preference; the
+      // native loader still parses and admits it. The exact file must also be a
+      // contributed entry, not just a member of a contributed directory.
+      const theme = resolveThemeFile(paths.theme_paths, setup.defaultTheme, setup.diagnostics);
+      if (theme) {
+        appendPaths(paths, { themePaths: [theme] }, budget);
+        const preferred = normalizeResourcePath(theme, cwd);
+        if (paths.theme_paths.includes(preferred)) paths.default_theme = preferred;
+        else runtime.diagnostic(`mirror theme ${theme} exceeded the resource path budget; no native preference`);
+      } else if (setup.defaultTheme) {
+        runtime.diagnostic(`mirror theme ${setup.defaultTheme} was not found in the Pi setup; no native preference`);
+      }
+      if (setup.keybindingsPath) paths.keybindings_paths = [normalizeResourcePath(setup.keybindingsPath, cwd)];
+      if (setup.contextPath) paths.context_paths = [normalizeResourcePath(setup.contextPath, cwd)];
+      if (setup.defaultModel) paths.default_model = setup.defaultModel;
+    }
     // Reviewed import snapshots use the same native owner/trust/retirement
     // gates as factory resources. This preference never writes host settings.
     appendPaths(paths, { themePaths: runtime.config.pi_theme_paths }, budget);
@@ -96,7 +120,7 @@ export async function discoverResources(runtime, params, store) {
     for (const entry of [...runtime.events.get('resources_discover') || []]) {
       live();
       const child = { ...store, factory: entry.factory };
-      const provenance = `resources_discover factory ${runtime.config.extensions[entry.factory]}`;
+      const provenance = `resources_discover factory ${runtime.entrypoint(entry.factory)}`;
       let contribution;
       try {
         contribution = await cancellable(runtime.scope.run(child, () => entry.handler(

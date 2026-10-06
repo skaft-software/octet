@@ -506,6 +506,9 @@ pub struct App {
     pub reasoning_mode: ReasoningMode,
     pub system: String,
     pub system_tokens: u64,
+    /// Session-only keybinding overrides contributed by enabled extensions with
+    /// the live resource binding. Never persisted; cleared on withdrawal.
+    pub user_keybindings: std::collections::BTreeMap<String, Vec<String>>,
     pub skills: Arc<dyn octet_agent::skills::SkillRegistry>,
     pub prompts: Arc<PromptRegistry>,
     pub executable_extensions: crate::extensions::ExecutableExtensions,

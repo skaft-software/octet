@@ -3,6 +3,23 @@ use super::*;
 use crate::app::App;
 use octet_agent::extension_process::ExtensionModelControl;
 
+/// Resolve one Pi-style provider/model pair to the exact configured native
+/// route. Used by both live Pi model control and session-only resource
+/// discovery, so both surfaces accept and refuse the same selections.
+pub(crate) fn resolve_pi_model(
+    catalog: &octet_ai::ModelCatalog,
+    provider: &str,
+    id: &str,
+) -> Option<octet_ai::Model> {
+    catalog.models().find_map(|spec| {
+        let model = catalog.resolve(&spec.id).ok()?;
+        (model.spec.api_name == id
+            && pi_provider_id(&model) == provider
+            && model.endpoint.auth.is_configured())
+        .then_some(model)
+    })
+}
+
 pub(crate) fn apply_idle_model_control(
     app: &mut App,
     operation: &ExtensionModelControl,
@@ -12,14 +29,7 @@ pub(crate) fn apply_idle_model_control(
     app.synchronize_extension_provider_catalog();
     let (model, level) = match operation {
         ExtensionModelControl::Model { provider, id } => {
-            let model = app.catalog.models().find_map(|spec| {
-                let model = app.catalog.resolve(&spec.id).ok()?;
-                (model.spec.api_name == *id
-                    && pi_provider_id(&model) == *provider
-                    && model.endpoint.auth.is_configured())
-                .then_some(model)
-            });
-            let Some(model) = model else {
+            let Some(model) = resolve_pi_model(&app.catalog, provider, id) else {
                 return Ok(serde_json::json!({
                     "selected": false,
                     "context_usage": context_usage(app.agent.session(), &app.model),

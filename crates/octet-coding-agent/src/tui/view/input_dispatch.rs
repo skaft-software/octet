@@ -147,6 +147,29 @@ impl InteractiveShell {
         self.input_dispatch.jump_forward = None;
     }
 
+    /// Layer session-only keybinding overrides over the user's own file. An
+    /// empty overlay restores exactly the user's file, and the captured base
+    /// map is never mutated by an extension.
+    pub fn set_session_keybindings(
+        &mut self,
+        overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    ) {
+        let mut merged = self.base_user_bindings.clone();
+        for (id, keys) in overrides {
+            merged.insert(id.clone(), keys.clone());
+        }
+        if self.input_dispatch.bindings.user_bindings() == &merged {
+            return;
+        }
+        self.input_dispatch.bindings.set_user_bindings(merged);
+        {
+            let mut mailbox = self.state.native().lock().expect("native mailbox poisoned");
+            mailbox.bindings = Some(self.input_dispatch.bindings.clone());
+            mailbox.editor_resync = mailbox.editor_resync.saturating_add(1);
+        }
+        self.input_dispatch.jump_forward = None;
+    }
+
     /// Ordered, available model ids supplied by the App's scoped catalog. A
     /// cycle returns an ordinary command, never mutates the active Run's model.
     pub fn set_model_cycle(&mut self, models: Vec<String>) {

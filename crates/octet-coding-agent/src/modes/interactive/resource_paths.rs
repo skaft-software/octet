@@ -95,6 +95,8 @@ where
     };
     shell.set_theme(theme);
     shell.set_runtime_config(app.config.clone());
+    shell.set_session_keybindings(&app.user_keybindings);
+    app.executable_extensions.refresh_frontend_keybindings(shell);
     for diagnostic in diagnostics {
         shell.notice(diagnostic);
     }
