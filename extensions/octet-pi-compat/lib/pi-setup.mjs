@@ -180,6 +180,11 @@ function packageResources(agentDir, packages, cwd, diagnostics, setup) {
       for (const kind of RESOURCE_KINDS) resourceEntries([join(root, kind)], cwd, diagnostics, `${source} ${kind}`, setup[`${kind}Paths`], setup.seen);
       extensionEntries([join(root, 'extensions')], cwd, diagnostics, `${source} extensions`, setup.extensions);
     }
+    const declared = packageManifestResources(root, source, diagnostics);
+    if (autoload && declared) {
+      for (const kind of RESOURCE_KINDS) if (declared[kind]) resourceEntries(declared[kind], cwd, diagnostics, `${source} ${kind}`, setup[`${kind}Paths`], setup.seen);
+      if (declared.extensions) extensionEntries(declared.extensions, cwd, diagnostics, `${source} extensions`, setup.extensions);
+    }
     for (const [field, kind] of [['extensions', 'extensions'], ['skills', 'skills'], ['prompts', 'prompts'], ['themes', 'themes']]) {
       const values = filters[field];
       if (values === undefined) continue;
@@ -206,6 +211,29 @@ function settingsPathList(settings, key, diagnostics) {
     return [];
   }
   return value;
+}
+
+// Pi's package manifest resources (`package.json` `pi` field) plus the
+// conventional directories. Explicit entries are package-relative paths.
+function packageManifestResources(root, source, diagnostics) {
+  const manifest = readJson(join(root, 'package.json'), `package ${source} package.json`, diagnostics, 256 * 1024);
+  const pi = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest.pi : undefined;
+  if (pi === undefined) return undefined;
+  if (!pi || typeof pi !== 'object' || Array.isArray(pi)) {
+    diagnostics.push(`package ${source}: package.json pi field must be an object; skipped`);
+    return undefined;
+  }
+  const resources = {};
+  for (const kind of ['extensions', ...RESOURCE_KINDS]) {
+    const value = pi[kind];
+    if (value === undefined) continue;
+    if (!Array.isArray(value) || value.some(entry => typeof entry !== 'string')) {
+      diagnostics.push(`package ${source} pi.${kind} must be an array of relative paths; skipped`);
+      continue;
+    }
+    resources[kind] = value.map(entry => entry.endsWith('/**') ? resolve(root, entry.slice(0, -3)) : resolve(root, entry));
+  }
+  return Object.keys(resources).length ? resources : undefined;
 }
 
 /// Discover one machine's Pi setup. Pure read-only filesystem discovery with
@@ -247,13 +275,28 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
   // Standard user resource directories first, then settings entries, then
   // packages: the native resolver owns final precedence, so order here is the
   // mirror's declaration order, not a replacement for native later-wins.
-  for (const kind of RESOURCE_KINDS) resourceEntries([join(resolvedAgentDir, kind)], cwd, diagnostics, kind, setup[`${kind}Paths`], setup.seen);
-  for (const kind of RESOURCE_KINDS) {
-    resourceEntries(settingsPathList(setup.settings, kind, diagnostics), cwd, diagnostics, kind, setup[`${kind}Paths`], setup.seen);
+  const scopes = [resolvedAgentDir, join(cwd, '.pi')];
+  const scopeSettings = [setup.settings];
+  const projectSettings = readJson(join(cwd, '.pi', 'settings.json'), 'project settings.json', diagnostics);
+  if (projectSettings !== undefined) {
+    if (projectSettings === null || typeof projectSettings !== 'object' || Array.isArray(projectSettings)) {
+      diagnostics.push('project settings.json: expected a JSON object; ignored');
+    } else {
+      scopeSettings.push(projectSettings);
+    }
   }
-  extensionEntries([join(resolvedAgentDir, 'extensions')], cwd, diagnostics, 'extensions', setup.extensions);
-  extensionEntries(settingsPathList(setup.settings, 'extensions', diagnostics), cwd, diagnostics, 'extensions', setup.extensions);
+  for (const scope of scopes) {
+    const settings = scope === resolvedAgentDir ? scopeSettings[0] : scopeSettings[1] ?? {};
+    for (const kind of RESOURCE_KINDS) resourceEntries([join(scope, kind)], cwd, diagnostics, kind, setup[`${kind}Paths`], setup.seen);
+    for (const kind of RESOURCE_KINDS) {
+      resourceEntries(settingsPathList(settings, kind, diagnostics), cwd, diagnostics, kind, setup[`${kind}Paths`], setup.seen);
+    }
+    extensionEntries([join(scope, 'extensions')], cwd, diagnostics, 'extensions', setup.extensions);
+    extensionEntries(settingsPathList(settings, 'extensions', diagnostics), cwd, diagnostics, 'extensions', setup.extensions);
+  }
   packageResources(resolvedAgentDir, setup.settings.packages, cwd, diagnostics, setup);
+  const projectPackages = scopeSettings[1]?.packages;
+  if (projectPackages !== undefined) packageResources(resolvedAgentDir, projectPackages, cwd, diagnostics, setup);
   if (setup.extensions.length > MAX_EXTENSIONS) {
     diagnostics.push(`Pi setup has ${setup.extensions.length} extensions; only the first ${MAX_EXTENSIONS} are mirrored`);
     setup.extensions = setup.extensions.slice(0, MAX_EXTENSIONS);

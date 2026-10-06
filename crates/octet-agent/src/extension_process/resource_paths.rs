@@ -320,4 +320,61 @@ mod tests {
         };
         assert!(paths.validate().is_err());
     }
+
+    #[test]
+    fn session_only_keybindings_context_and_default_model_validate_and_share_the_path_budget() {
+        let theme = format!("{}/theme.json", root());
+        let valid = ExtensionResourcePaths {
+            theme_paths: vec![theme.clone()],
+            default_theme: Some(theme),
+            keybindings_paths: vec![format!("{}/keybindings.json", root())],
+            context_paths: vec![format!("{}/AGENTS.md", root())],
+            default_model: Some(ExtensionDefaultModel {
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(valid.validate().is_ok());
+        // Every path kind shares one bound; the new kinds cannot bypass it.
+        let oversized = ExtensionResourcePaths {
+            skill_paths: vec![format!("{}/skill", root()); 63],
+            keybindings_paths: vec![format!("{}/keybindings.json", root())],
+            context_paths: vec![format!("{}/AGENTS.md", root())],
+            ..Default::default()
+        };
+        assert!(oversized.validate().is_err());
+        for paths in [
+            ExtensionResourcePaths {
+                keybindings_paths: vec![format!("{}/../escape.json", root())],
+                ..Default::default()
+            },
+            ExtensionResourcePaths {
+                context_paths: vec!["relative/AGENTS.md".into()],
+                ..Default::default()
+            },
+        ] {
+            assert!(paths.validate().is_err());
+        }
+        for selection in [
+            ExtensionDefaultModel {
+                provider: String::new(),
+                model: "deepseek-v4-pro".into(),
+            },
+            ExtensionDefaultModel {
+                provider: "deepseek".into(),
+                model: "x".repeat(257),
+            },
+            ExtensionDefaultModel {
+                provider: "deep\nseek".into(),
+                model: "deepseek-v4-pro".into(),
+            },
+        ] {
+            let paths = ExtensionResourcePaths {
+                default_model: Some(selection),
+                ..Default::default()
+            };
+            assert!(paths.validate().is_err());
+        }
+    }
 }

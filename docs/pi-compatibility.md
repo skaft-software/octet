@@ -63,6 +63,44 @@ native theme changes are not yet synchronized to those components. Missing
 packages are not installed. The Pi install location is recorded, so a different
 HOME at runtime does not hide it. A Pi upgrade requires reconfiguration.
 
+<a id="mirror-your-pi-setup"></a>
+
+### Mirror your Pi setup
+
+To have an enabled `octet-pi-compat` activate this machine's Pi setup instead of
+one frozen import, configure the reviewed mirror opt-in once:
+
+```bash
+node configure.mjs --reviewed --from-pi --mirror \
+  --output "$HOME/.octet/pi-import/octet-pi-compat"
+octet --extension-dir "$HOME/.octet/pi-import" --enable-extension octet-pi-compat
+```
+
+`--mirror` records the opt-in (the Pi agent directory and one advertised hook
+set) rather than capturing the current entrypoints. At session startup the
+adapter discovers the Pi setup **read-only** and activates its equivalents
+through Octet's native machinery: the enabled Pi factories load through the
+adapter, and Pi skills, prompt templates, themes, `keybindings.json`, the global
+context file and the selected model become native session resources. Discovery
+is bounded; missing, linked, oversized or pattern-filtered inputs are reported,
+never guessed at, and packages are only used if they are already installed —
+nothing is written to `~/.pi` or `~/.octet`.
+
+Everything the mirror contributes is session state owned by the process that
+enabled the extension, so disabling `octet-pi-compat` returns exactly to the
+user's Octet-only setup, and re-enabling or `/reload` is idempotent. Mirror mode
+runs the Pi setup's enabled factories with your OS permissions whenever the
+extension starts, so it is the same explicit-review decision as `--from-pi`.
+The mapping is item-by-item: Pi `settings.json` (theme, default
+provider/model, package/resource path lists), the user and project
+`extensions|skills|prompts|themes` directories, installed managed npm package
+resources, `keybindings.json` and the global context file. Deliberate
+boundaries: Pi `models.json` HTTP providers and Pi `defaultThinkingLevel` are
+not applied, Pi resource pattern filters are refused with a diagnostic, and
+`auth.json`, sessions and trust state are never read. Mirror mode refuses a
+factory that needs a hook outside the advertised set instead of silently
+leaving it inert.
+
 After matching release assets are published, `octet extension install octet-pi-compat`
 installs the adapter with its locked npm dependencies. Run its
 `~/.octet/extensions/octet-pi-compat/configure.mjs` with the same arguments above.
