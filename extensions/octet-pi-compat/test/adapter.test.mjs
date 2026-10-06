@@ -101,9 +101,12 @@ test('unsupported options/results and unnegotiated child calls never silently di
   const peer = launch(t); await peer.init(); await peer.start();
   for (const [mode, reason] of [['unsafe-output', /direct terminal control/], ['runtime', /unsupported_feature agent_sessions: feature was not negotiated/], ['media', /unsupported_feature artifacts/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
 });
-test('native chrome refuses calls without a negotiated UI consumer', async t => {
-  const peer = launch(t); await peer.init([]);
-  assert.match((await peer.call('unsupported').response).error.message, /unsupported_feature remote_ui/);
+test('headless chrome setters are inert; dialogs and theme catalogs still refuse', async t => {
+  const peer = launch(t); await peer.init([]); await peer.start();
+  // Pi's print mode has a UI context whose presentation setters do nothing.
+  assert.ok((await peer.call('chrome').response).result);
+  assert.match((await peer.call('dialog').response).error.message, /unsupported_feature remote_ui/);
+  assert.match((await peer.call('theme').response).error.message, /unsupported_feature ctx\.ui\.theme/);
 });
 test('shared events preserve synchronous object/function identity across multiple unchanged factories', async t => {
   const dir = await temporary(t), a = join(dir, 'a.ts'), b = join(dir, 'b.ts');

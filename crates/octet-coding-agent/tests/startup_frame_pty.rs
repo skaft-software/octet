@@ -63,15 +63,17 @@ fn pty_test_lock() -> &'static Mutex<()> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MouseMode {
+    Default,
     Auto,
     App,
 }
 
 impl MouseMode {
-    const fn as_arg(self) -> &'static str {
+    const fn as_arg(self) -> Option<&'static str> {
         match self {
-            Self::Auto => "auto",
-            Self::App => "app",
+            Self::Default => None,
+            Self::Auto => Some("auto"),
+            Self::App => Some("app"),
         }
     }
 }
@@ -426,8 +428,6 @@ impl PtyOctet {
                 } else {
                     "always"
                 },
-                "--mouse",
-                mode.as_arg(),
                 "--workspace",
             ])
             .arg(&workspace)
@@ -446,6 +446,9 @@ impl PtyOctet {
             .stdout(stdout)
             .stderr(stderr);
 
+        if let Some(mode) = mode.as_arg() {
+            command.args(["--mouse", mode]);
+        }
         match fixture {
             StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model, _) => {
                 command.args(["--model", &format!("custom/{model}")]);
@@ -689,7 +692,7 @@ impl PrimaryTrace {
     fn normalized(&self) -> String {
         format!(
             "mode={}\nstartup.clear_screen={}\nstartup.first_full_frame.synchronized={}\nstartup.first_full_frame.stale_rows={}\nstartup.ready_frame.stale_rows={}\nresize.redraw.synchronized={}\nresize.clear_screen={}\nresize.clear_saved_lines={}\nresize.stale_rows={}\nshutdown.cursor_visible={}\nshutdown.bracketed_paste_disabled={}\nshutdown.termios_restored={}\nshutdown.cursor_position_valid={}\nshutdown.mouse_restored={}\nalternate_screen.used={}\nframes.balanced={}\nmouse.capture={}\n",
-            self.mode.as_arg(),
+            self.mode.as_arg().unwrap_or("default"),
             self.startup_clear_screen,
             self.first_frame_synchronized,
             self.first_frame_stale_rows,

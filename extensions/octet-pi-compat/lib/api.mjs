@@ -184,6 +184,8 @@ export function createContext(runtime, store, replaced = false) {
     },
   }, 'footerData');
   const setSlot = (slot, placement, factory, options) => {
+    // Headless Pi has no chrome: a requested slot is simply not shown there.
+    if (!runtime.features.has('remote_ui')) { foreground(); return Promise.resolve(); }
     runtime.require('remote_ui'); foreground();
     if (factory !== undefined && typeof factory !== 'function' && !Array.isArray(factory)) invalid(`${slot} factory`);
     const action = async () => {
