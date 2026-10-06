@@ -8,7 +8,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { isAbsolute } from 'node:path';
 import { bounded, facade, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
-import { commandCompletions, retireAutocomplete } from './completions.mjs';
+import { commandCompletions, ensureCompletionChain, retireAutocomplete, startCompletionChain } from './completions.mjs';
 import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent } from './tools.mjs';
 import { discoverResources } from './resources.mjs';
 import { cancellable, projectContext } from './provider-context.mjs';
@@ -86,7 +86,7 @@ export class Runtime {
     this.issues = new ExtensionIssues(this);
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map(); this.failedFactories = new Set();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
-    this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null;
+    this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null; this.autocompleteStarted = false; this.autocompleteSettle = null;
     this.entrypoints = [];
     this.uninstallChildren = installChildRuntime(this);
     bindHostTheme(this);
@@ -424,16 +424,19 @@ export class Runtime {
   reportStartupIssues() { this.issues.startup(); }
   // Late renderer registrations are still inert without the native consumer.
   reportInertRenderers() { this.issues.reportInertRenderers(); }
-  registerAutocomplete() {
-    if (!this.features.has('autocomplete') || !this.commands.size) return;
-    // This process-scoped request MUST follow the initialize reply: the host
-    // admits the chain only after startup and its interactive drain are live.
-    this.autocompleteRegistration = this.transport.request('ui/autocomplete/register', { revision: 1 }).then(result => {
-      fields(result, ['accepted'], 'autocomplete registration acknowledgement');
-      if (typeof result.accepted !== 'boolean') invalid('autocomplete registration accepted must be boolean');
-      if (!result.accepted) unsupported('command completions', 'host refused autocomplete registration');
-    });
-    this.autocompleteRegistration.catch(error => this.backgroundError(error));
+  /// The completion chain lives in one place: `lib/completions.mjs`. These
+  /// wrappers only expose it to the initialize path and to provider admission.
+  ensureAutocompleteChain() {
+    return ensureCompletionChain(this);
+  }
+  /// Called before the initialize reply is written, so no completion query can
+  /// see a missing chain while that reply is in flight.
+  armAutocomplete() {
+    if (this.autocompleteStarted || !this.features.has('autocomplete') || !this.commands.size) return this.autocompleteRegistration;
+    return ensureCompletionChain(this);
+  }
+  registerAutocomplete(contribution = false) {
+    return startCompletionChain(this, contribution);
   }
   bind(params, store, { foreground = store.method === 'hook/run' && params.hook === 'session_start', requireLeaf, preparationHead } = {}) {
     const context = params.context || {};
@@ -825,6 +828,10 @@ export class Runtime {
       let result = await withContextLimits(this.sessionTransport?.profile, () => this.scope.run(store, () => this.dispatch(message, store)));
       if (this.sessionTransport && store.hook === 'provider_context') result = await this.sessionTransport.projection(result, store);
       store.controller.signal.throwIfAborted();
+      // Arm the chain before this reply's write settles. The host may query
+      // completions the moment it reads the line, and nothing here orders that
+      // inbound request after the write callback.
+      if (message.method === 'initialize') this.armAutocomplete();
       if (!this.stopping) {
         const reply = this.transport.send({ jsonrpc: '2.0', id: message.id, result });
         // Queue registration after the initialize reply, but install its promise
