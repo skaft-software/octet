@@ -476,6 +476,20 @@ snapshot-fenced implementation and qualification; process tests alone do not pro
 ordinary path Tab still works. Native trigger/selection behavior is not a claim to
 reproduce Pi's automatic-versus-forced-file completion UI.
 
+The native host side of this boundary is now qualified for the bounded case.
+Registration is process-owned and admitted without a foreground UI lease, so a
+captured factory activates in headless, background and later interactive states.
+The interactive input loops observe the composer and start one cancellable 500 ms
+query per live draft, so typing retires the previous request instead of queueing
+behind it; Up/Down move the displayed menu selection, Tab accepts the fenced
+choice, and only an explicit Tab can fall through to native path completion. A
+slow callback therefore cannot block typing or overwrite a newer draft. Real-package
+observation: unchanged pi-powerline-footer `cd` completions render in the composer
+(`../` Parent directory, `~/` Home directory, workspace directories, "extension
+suggestions | tab accept") and Tab inserts the selection; the previously failing
+pi-ding, pi-powerline-footer and pi-doom factories now activate with no
+`host refused autocomplete registration`.
+
 ## Remote frontend integration
 
 See `integration-contract.json` and octet's `docs/extensions/remote-ui.md`.

@@ -612,6 +612,7 @@ where
     let mut cache_warming_failed = false;
     let remote_ui_wake = executable_extensions.remote_ui_wake();
     loop {
+        executable_extensions.sync_editor_autocomplete(shell);
         if shell.close_requested() {
             return Ok(Idle::Quit);
         }
@@ -3649,6 +3650,7 @@ where
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        executable_extensions.sync_editor_autocomplete(shell);
         if shell.set_pending_controls(model_controls::queue_labels(pending_actions)) {
             shell.render();
         }
