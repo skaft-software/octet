@@ -3,14 +3,14 @@
 Compose host tools with JavaScript in Pi's **actual QuickJS/WASM runtime**:
 `@earendil-works/pi-codemode` 1.0.0 and `quickjs-wasi` 3.6.2, vendored offline
 under their MIT licenses, with runtime-component notices retained. This API `0.4`
-bundle pins octet `0.8.2` and requires
+bundle pins octet `0.9.0` and requires
 **Python 3.11+ and Node.js 22.19+** on PATH. No npm install, download, credentials,
 or setup command is needed to execute a script.
 
 ## Install and enable
 
 This bundle joins `extensions/release-catalog.txt`; its release asset is
-`octet-codemode-0.8.2.tar.gz`. Once that asset is published:
+`octet-codemode-0.9.0.tar.gz`. Once that asset is published:
 
 ```sh
 octet extension install octet-codemode

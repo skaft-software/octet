@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.0] - Release candidate
 
 - Pi message observations now include user/assistant/custom payloads, accumulated
   text deltas and bounded run-local `agent_end.messages`. Final accounting/model/

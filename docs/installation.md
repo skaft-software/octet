@@ -6,13 +6,14 @@
 
 ## Install native binaries
 
-**0.8.2 is a source candidate, not a published release.** Its GitHub tag, release
+**0.9.0 is a source release candidate, not a published release.** Its GitHub tag, release
 assets and npm packages are unavailable. Use [a checkout](#build-from-a-checkout)
 until qualification and publication are approved. The commands in the native
-and npm sections below apply only after verified publication.
+and npm sections below apply only after verified publication, and until promotion
+they keep naming the preceding 0.8.2 candidate, whose assets are also unavailable.
 
 Planned native release packages target macOS Apple silicon and Intel and GNU/Linux
-x86-64. The [v0.8.2 notes](releases/v0.8.2.md) list the candidate changes.
+x86-64. The [v0.9.0 notes](releases/v0.9.0.md) list the candidate changes.
 After publication, signed assets and public-install verification must be recorded
 on the version-pinned
 [GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.2).
@@ -103,7 +104,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets the octet 0.8.2 candidate. Check `octet --version`, and use matching
+This checkout targets the octet 0.9.0 candidate. Check `octet --version`, and use matching
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
