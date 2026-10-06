@@ -120,6 +120,16 @@ async fn native_pi_slow_completion_does_not_block_typing_or_replace_new_draft() 
     input_for(&mut app, &mut shell, None, Duration::from_secs(2)).await;
     assert_eq!(shell.pending(), "/cmd slower");
     assert!(frame(&mut shell).await.contains("CHOICE-ALPHA"));
+    // A settled query is not restarted by idle frames: the callback runs once
+    // per draft, so latency stays bounded and typing is never queued behind it.
+    let trace = directory.path().join("trace.jsonl");
+    let settled = std::fs::read_to_string(&trace).unwrap().lines().count();
+    input_for(&mut app, &mut shell, None, Duration::from_millis(700)).await;
+    assert_eq!(
+        std::fs::read_to_string(&trace).unwrap().lines().count(),
+        settled,
+        "idle frames must not restart a settled completion query"
+    );
     shell.extension_set_editor("/cmd none".into());
     input_for(&mut app, &mut shell, None, Duration::from_millis(600)).await;
     assert_eq!(

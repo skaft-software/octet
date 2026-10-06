@@ -7,6 +7,16 @@ pub(super) struct AutocompleteQuery {
     task: JoinHandle<()>,
 }
 
+/// What the input owner already inspected: the composer change counter and the
+/// admitted completion-chain count. A frame that changes neither reuses the live
+/// query instead of restarting it, so a slow callback is only cancelled by
+/// further typing and idle frames never clone the draft.
+#[derive(Default)]
+pub(super) struct AutocompleteSync {
+    revision: Option<u64>,
+    providers: usize,
+}
+
 impl ExecutableExtensions {
     pub(super) fn cancel_editor_autocomplete(&mut self) {
         if let Some(query) = self.autocomplete_query.take() {
@@ -18,6 +28,18 @@ impl ExecutableExtensions {
     /// Observe edits from either renderer without awaiting extension code. Keep
     /// one query per live draft; typing/focus/owner changes retire its RPC first.
     pub(crate) fn sync_editor_autocomplete(&mut self, shell: &InteractiveShell) {
+        // Ordinary frames resolve through these two counters alone. A fresh
+        // draft is compared in full only after the composer moved or a chain
+        // was admitted/retired (a first attempt can precede registration).
+        let revision = shell.extension_editor_revision();
+        let providers = self.autocomplete_registrations.len();
+        if self.autocomplete_sync.revision == Some(revision)
+            && self.autocomplete_sync.providers == providers
+        {
+            return;
+        }
+        self.autocomplete_sync.revision = Some(revision);
+        self.autocomplete_sync.providers = providers;
         let snapshot = shell.extension_editor_snapshot();
         if self.autocomplete_query.as_ref().is_some_and(|query| {
             query.snapshot == snapshot && self.autocomplete_fence_is_current(&query.fence)

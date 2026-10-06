@@ -327,6 +327,7 @@ pub struct ExecutableExtensions {
     // One session-owned overlay in the already admitted resident bridge.
     pi_mcp_binding: Arc<tokio::sync::Mutex<Option<mcp::PiMcpBinding>>>,
     autocomplete_query: Option<autocomplete::AutocompleteQuery>,
+    autocomplete_sync: autocomplete::AutocompleteSync,
     pending_editor_requests: VecDeque<PendingEditorRequest>,
     pending_host_requests: VecDeque<PendingHostRequest>,
     pending_session_requests: VecDeque<PendingHostRequest>,
@@ -422,6 +423,7 @@ impl Default for ExecutableExtensions {
             transcript_renderers: Default::default(),
             pi_mcp_binding: Arc::new(tokio::sync::Mutex::new(None)),
             autocomplete_query: None,
+            autocomplete_sync: Default::default(),
             pending_editor_requests: VecDeque::new(),
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),

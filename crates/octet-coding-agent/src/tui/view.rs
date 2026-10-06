@@ -6031,6 +6031,12 @@ impl InteractiveShell {
         true
     }
 
+    /// Cheap change counter for the live composer. Callers that only need to
+    /// notice edits avoid cloning the draft on every idle frame.
+    pub(crate) fn extension_editor_revision(&self) -> u64 {
+        self.state.borrow().editor.revision()
+    }
+
     /// The current menu for the exact live draft, if one is displayed. Selection,
     /// navigation and Tab acceptance all read this one fenced identity.
     fn displayed_extension_menu(&self) -> Option<(u64, usize)> {
