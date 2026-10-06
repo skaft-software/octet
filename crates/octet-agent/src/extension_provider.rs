@@ -11,6 +11,18 @@ use std::time::{Duration, Instant};
 
 use crate::extension_api_v03 as api_v03;
 
+/// Binds private HTTP hooks to one authoritative session owner before an attempt.
+/// A process implementation also pins its current connection/generation here;
+/// callbacks must never follow a reload into a different owner or generation.
+pub trait ProviderRequestHookFactory: Send + Sync {
+    /// Create the request-local hook. Failure aborts preparation, never silently
+    /// omits a declared transformation or substitutes canonical request data.
+    fn bind_provider_request_hook(
+        &self,
+        resource_owner: &str,
+    ) -> Result<Arc<dyn octet_ai::ProviderRequestHook>, octet_ai::AiError>;
+}
+
 /// Identity of the extension generation which owns a provider catalog entry.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtensionProviderOwner {
@@ -76,12 +88,17 @@ pub struct ExtensionProviderCatalogEntry {
 /// Route selected for a currently callable extension-provider model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtensionProviderRoute {
+    /// Monotonic identity of this registration/authorization revision. Even an
+    /// identical replacement or revoke/ready cycle invalidates an older route.
+    pub registration_revision: usize,
     /// Generation that owns the provider stream endpoint.
     pub owner: ExtensionProviderOwner,
     /// Secret-free provider declaration.
     pub provider: api_v03::ProviderDefinition,
     /// Selected model declaration.
     pub model: api_v03::ProviderModelDefinition,
+    /// Validated API 0.4 facts held in the native registration, never the frozen wire model.
+    pub model_metadata: Option<crate::extension_process::PiProviderModelMetadata>,
 }
 
 /// Host policy for explicit provider OAuth or credential authorization requests.
@@ -118,9 +135,11 @@ pub enum ExtensionProviderRegistryError {
 
 #[derive(Clone)]
 struct ProviderRecord {
+    revision: usize,
     owner: ExtensionProviderOwner,
     provider: api_v03::ProviderDefinition,
     models: BTreeMap<String, api_v03::ProviderModelDefinition>,
+    model_metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>,
     authorization: ExtensionProviderAuthorizationStatus,
 }
 
@@ -140,6 +159,7 @@ struct RegistryState {
 pub struct ExtensionProviderRegistry {
     state: Arc<Mutex<RegistryState>>,
     changed: Arc<Condvar>,
+    async_changed: Arc<tokio::sync::Notify>,
     authorization_policy: Option<Arc<dyn ExtensionProviderAuthorizationPolicy>>,
 }
 
@@ -176,6 +196,7 @@ impl ExtensionProviderRegistry {
         Self {
             state: Arc::new(Mutex::new(RegistryState::default())),
             changed: Arc::new(Condvar::new()),
+            async_changed: Arc::new(tokio::sync::Notify::new()),
             authorization_policy: None,
         }
     }
@@ -187,6 +208,7 @@ impl ExtensionProviderRegistry {
         Self {
             state: Arc::new(Mutex::new(RegistryState::default())),
             changed: Arc::new(Condvar::new()),
+            async_changed: Arc::new(tokio::sync::Notify::new()),
             authorization_policy: Some(authorization_policy),
         }
     }
@@ -204,7 +226,13 @@ impl ExtensionProviderRegistry {
         owner: ExtensionProviderOwner,
         request: api_v03::ProviderRegisterParams,
     ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
-        self.replace(owner, request.provider, request.models, false)
+        self.replace(
+            owner,
+            request.provider,
+            request.models,
+            false,
+            BTreeMap::new(),
+        )
     }
 
     /// Atomically replaces the complete model set for an owned provider.
@@ -217,7 +245,42 @@ impl ExtensionProviderRegistry {
         owner: ExtensionProviderOwner,
         request: api_v03::ProviderUpdateParams,
     ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
-        self.replace(owner, request.provider, request.models, true)
+        self.replace(
+            owner,
+            request.provider,
+            request.models,
+            true,
+            BTreeMap::new(),
+        )
+    }
+
+    /// Atomically publish a Pi declaration and validated sidecar in this same
+    /// native record. Generation fencing, revision and bounds are shared with
+    /// canonical providers; the API 0.3 model and generator remain untouched.
+    pub fn replace_pi_provider(
+        &self,
+        owner: ExtensionProviderOwner,
+        request: api_v03::ProviderRegisterParams,
+        metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>,
+        update: bool,
+    ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
+        if request.provider.auth.kind != "none"
+            || metadata.len() != request.models.len()
+            || request
+                .models
+                .iter()
+                .any(|model| !metadata.contains_key(&model.id))
+        {
+            return Err(ExtensionProviderRegistryError::Invalid(
+                "invalid Pi provider facts".into(),
+            ));
+        }
+        for facts in metadata.values() {
+            facts
+                .validate()
+                .map_err(ExtensionProviderRegistryError::Invalid)?;
+        }
+        self.replace(owner, request.provider, request.models, update, metadata)
     }
 
     /// Removes a provider only when it belongs to the calling generation.
@@ -242,7 +305,7 @@ impl ExtensionProviderRegistry {
         state.revision = state.revision.saturating_add(1);
         let result = catalog_result(state.revision, Vec::new(), Vec::new());
         drop(state);
-        self.changed.notify_all();
+        self.notify_changed();
         Ok(result)
     }
 
@@ -268,7 +331,7 @@ impl ExtensionProviderRegistry {
         }
         drop(state);
         if changed {
-            self.changed.notify_all();
+            self.notify_changed();
         }
     }
 
@@ -285,7 +348,7 @@ impl ExtensionProviderRegistry {
         }
         drop(state);
         if changed {
-            self.changed.notify_all();
+            self.notify_changed();
         }
     }
 
@@ -371,9 +434,11 @@ impl ExtensionProviderRegistry {
                     .models
                     .get(model_id)
                     .map(|model| ExtensionProviderRoute {
+                        registration_revision: record.revision,
                         owner: record.owner.clone(),
                         provider: record.provider.clone(),
                         model: model.clone(),
+                        model_metadata: record.model_metadata.get(model_id).cloned(),
                     })
             })?
     }
@@ -390,10 +455,32 @@ impl ExtensionProviderRegistry {
             return false;
         };
         state.initial_catalog_complete.contains(&route.owner)
+            && record.revision == route.registration_revision
             && record.owner == route.owner
             && record.authorization == ExtensionProviderAuthorizationStatus::Ready
             && record.provider == route.provider
             && record.models.get(&route.model.id) == Some(&route.model)
+            && record.model_metadata.get(&route.model.id) == route.model_metadata.as_ref()
+    }
+
+    /// Waits until this exact route is withdrawn, replaced, or deauthorized.
+    /// Register before checking activity so an idle stream cannot miss a
+    /// concurrent catalog change while waiting for its next transport event.
+    pub(crate) async fn route_invalidated(&self, route: &ExtensionProviderRoute) {
+        loop {
+            let changed = self.async_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self.route_is_active(route) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn notify_changed(&self) {
+        self.changed.notify_all();
+        self.async_changed.notify_waiters();
     }
 
     /// Changes non-secret availability after a host UI/configuration refresh.
@@ -407,6 +494,7 @@ impl ExtensionProviderRegistry {
         status: ExtensionProviderAuthorizationStatus,
     ) -> Result<(), ExtensionProviderRegistryError> {
         let mut state = lock_registry(&self.state);
+        let revision = state.revision.saturating_add(1);
         let record = state
             .providers
             .get_mut(provider_id)
@@ -417,11 +505,12 @@ impl ExtensionProviderRegistry {
         let changed = record.authorization != status;
         if changed {
             record.authorization = status;
-            state.revision = state.revision.saturating_add(1);
+            record.revision = revision;
+            state.revision = revision;
         }
         drop(state);
         if changed {
-            self.changed.notify_all();
+            self.notify_changed();
         }
         Ok(())
     }
@@ -491,6 +580,7 @@ impl ExtensionProviderRegistry {
         provider: api_v03::ProviderDefinition,
         models: Vec<api_v03::ProviderModelDefinition>,
         update_only: bool,
+        model_metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>,
     ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
         validate_provider(&provider, &models)?;
         let provider_id = provider.id.clone();
@@ -545,19 +635,22 @@ impl ExtensionProviderRegistry {
                 "provider models",
             ));
         }
+        let revision = state.revision.saturating_add(1);
         state.providers.insert(
             provider_id.clone(),
             ProviderRecord {
+                revision,
                 owner,
                 provider,
                 models: model_map,
+                model_metadata,
                 authorization,
             },
         );
-        state.revision = state.revision.saturating_add(1);
+        state.revision = revision;
         let result = catalog_result(state.revision, vec![provider_id], model_ids);
         drop(state);
-        self.changed.notify_all();
+        self.notify_changed();
         Ok(result)
     }
 }
@@ -870,6 +963,61 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn idle_route_waiters_wake_on_every_authoritative_invalidation() {
+        for mutation in ["unregister", "replace", "owner", "authorization"] {
+            let registry = ExtensionProviderRegistry::new();
+            registry
+                .register(owner(1), register_params("alpha", "alpha-model"))
+                .unwrap();
+            registry.complete_initial_catalog(&owner(1));
+            let route = registry.resolve("alpha", "alpha-model").unwrap();
+            let invalidated = registry.route_invalidated(&route);
+            tokio::pin!(invalidated);
+            assert!(futures_util::poll!(invalidated.as_mut()).is_pending());
+
+            registry
+                .register(owner(1), register_params("beta", "beta-model"))
+                .unwrap();
+            assert!(
+                futures_util::poll!(invalidated.as_mut()).is_pending(),
+                "an unrelated catalog change cannot cancel the active route"
+            );
+            match mutation {
+                "unregister" => {
+                    registry.unregister(&owner(1), "alpha").unwrap();
+                }
+                "replace" => {
+                    let request = register_params("alpha", "alpha-model");
+                    registry
+                        .update(
+                            owner(1),
+                            api_v03::ProviderUpdateParams {
+                                provider: request.provider,
+                                models: request.models,
+                            },
+                        )
+                        .unwrap();
+                }
+                "owner" => registry.remove_owner(&owner(1)),
+                "authorization" => registry
+                    .set_authorization_status(
+                        &owner(1),
+                        "alpha",
+                        ExtensionProviderAuthorizationStatus::Revoked,
+                    )
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            tokio::time::timeout(Duration::from_secs(1), invalidated)
+                .await
+                .expect("a withdrawn idle route must wake without another stream event");
+            tokio::time::timeout(Duration::from_secs(1), registry.route_invalidated(&route))
+                .await
+                .expect("a route withdrawn before listener registration must settle immediately");
+        }
+    }
+
     #[test]
     fn late_registration_after_initial_completion_is_callable_without_reload() {
         let registry = ExtensionProviderRegistry::new();
@@ -961,6 +1109,54 @@ mod tests {
             registry.resolve("fixture", "model").unwrap().owner,
             owner(1)
         );
+    }
+
+    #[test]
+    fn identical_replacement_and_authorization_aba_cannot_revive_a_route() {
+        let registry = ExtensionProviderRegistry::new();
+        registry
+            .register(owner(1), register_params("fixture", "model"))
+            .unwrap();
+        registry.complete_initial_catalog(&owner(1));
+        let original = registry.resolve("fixture", "model").unwrap();
+        registry
+            .update(
+                owner(1),
+                api_v03::ProviderUpdateParams {
+                    provider: provider(),
+                    models: vec![model()],
+                },
+            )
+            .unwrap();
+        let replacement = registry.resolve("fixture", "model").unwrap();
+        assert!(!registry.route_is_active(&original));
+        assert!(registry.route_is_active(&replacement));
+        assert_ne!(
+            original.registration_revision,
+            replacement.registration_revision
+        );
+        registry
+            .set_authorization_status(
+                &owner(1),
+                "fixture",
+                ExtensionProviderAuthorizationStatus::Revoked,
+            )
+            .unwrap();
+        registry
+            .set_authorization_status(
+                &owner(1),
+                "fixture",
+                ExtensionProviderAuthorizationStatus::Ready,
+            )
+            .unwrap();
+        assert!(!registry.route_is_active(&replacement));
+        let authorized = registry.resolve("fixture", "model").unwrap();
+        registry.unregister(&owner(1), "fixture").unwrap();
+        registry
+            .register(owner(1), register_params("fixture", "model"))
+            .unwrap();
+        assert!(!registry.route_is_active(&authorized));
+        assert!(registry.route_is_active(&registry.resolve("fixture", "model").unwrap()));
     }
 
     #[test]

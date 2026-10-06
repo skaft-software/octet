@@ -4,11 +4,18 @@
 //! service containers, or lifecycle callbacks — those can be added as new
 //! `ExtensionHost` methods later without breaking the [`Extension`] trait.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
+use crate::cache_warmer::{CacheWarmingAction, CacheWarmingDecision};
 use crate::events::AgentEvent;
+use crate::extension_operations::{
+    cursor_binding, cursor_offset, matching_slots, ApplicableOperationsPage,
+    ApplicableOperationsRequest, OperationDiscovery, OperationSelection, DISCOVERY_TOOL_NAME,
+};
+use crate::extension_process::{ExtensionProcess, ExtensionResourceOwner};
 use crate::input::UserInput;
 use crate::tool::{Tool, ToolContext, ToolError};
 use octet_ai::{Model, ModelId, Protocol, StopReason, ToolDef};
@@ -83,6 +90,20 @@ pub trait EventObserver: Send + Sync {
 /// boundary: the deterministic effect broker always runs first.
 #[async_trait::async_trait]
 pub trait ToolCallHook: Send + Sync {
+    /// Runs after argument validation and before effect admission. Returns
+    /// replacement arguments, or `None` to keep them; hooks run in order and
+    /// each sees the previous replacement. The broker then classifies and
+    /// authorizes the final arguments, and the tool receives exactly those.
+    /// Returning an error denies the call before any effect is reserved.
+    async fn transform_tool_call(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        _context: &ToolContext<'_>,
+    ) -> Result<Option<serde_json::Value>, ToolError> {
+        Ok(None)
+    }
+
     /// Runs after argument validation and effect admission, before the tool receives control.
     /// Returning an error denies the call and produces a normal tool error for
     /// the model; no side effect has occurred at this boundary.
@@ -92,6 +113,20 @@ pub trait ToolCallHook: Send + Sync {
         arguments: &serde_json::Value,
         context: &ToolContext<'_>,
     ) -> Result<(), ToolError>;
+
+    /// Runs after the tool has resolved, before observers and before the model
+    /// sees the result. Returns the result to use: hooks run in order and each
+    /// sees the previous one. Effects already happened; only what the model
+    /// sees changes. The default keeps the result.
+    async fn transform_tool_result(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        result: Result<crate::tool::ToolOutput, ToolError>,
+        _context: &ToolContext<'_>,
+    ) -> Result<crate::tool::ToolOutput, ToolError> {
+        result
+    }
 
     /// Runs after the tool has resolved. Failures here are diagnostic only:
     /// an observer cannot erase or relabel an already completed side effect.
@@ -179,6 +214,135 @@ pub enum ProviderRetryAdvice {
 pub trait ProviderRetryHook: Send + Sync {
     /// Advises on the single retry under consideration.
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice;
+}
+
+/// Read-only economics and owner identity for one due cache refresh.
+///
+/// No prompt, provider credentials, transport, or mutable session is exposed.
+#[derive(Clone, Debug)]
+pub struct CacheWarmingDecisionContext {
+    /// The host's current decision and cost estimates.
+    pub decision: CacheWarmingDecision,
+    /// Host-selected model identity, without transport configuration.
+    pub model: ModelId,
+    /// Host-derived durable session owner.
+    pub resource_owner: String,
+}
+
+/// Optional advice before each due, independently eligible cache refresh.
+///
+/// The host invokes hooks in registration order; the last returned action wins.
+/// `None`, failure, or timeout leaves the preceding decision unchanged. Advice
+/// cannot widen refresh deadlines, budgets, cancellation, or replay eligibility.
+#[async_trait::async_trait]
+pub trait CacheWarmingDecisionHook: Send + Sync {
+    /// Return `warm`, `stop`, or no opinion on this single refresh.
+    async fn cache_warming_decision(
+        &self,
+        context: &CacheWarmingDecisionContext,
+    ) -> Option<CacheWarmingAction>;
+}
+
+/// Host-derived identity for one effective provider-context preparation.
+///
+/// These values fence a projection to the session branch and advertised tool
+/// snapshot the host is preparing. They do not grant permission to mutate the
+/// session or execute a tool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderContextProjectionContext {
+    /// Durable resource owner of the request being prepared.
+    pub resource_owner: String,
+    /// Host session identity, independent of provider cache affinity.
+    pub session_id: String,
+    /// Durable active-branch anchor observed before preparation.
+    pub head: Option<crate::session::EntryId>,
+    /// Revision of the host-policed advertised tool snapshot.
+    pub tool_generation: u64,
+}
+
+/// Proposed replacement of only the model-visible context of a request.
+///
+/// The canonical session is not rewritten. Tools, route, credentials, output
+/// caps and transport configuration cannot be replaced through this value.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderContextProjection {
+    /// Complete effective message history, using canonical roles.
+    pub messages: Vec<octet_ai::Message>,
+    /// Complete effective system prompt; `None` explicitly clears it.
+    pub system: Option<String>,
+    /// Request-local declared tools. Only description changes and omissions are accepted.
+    #[serde(default)]
+    pub tools: Option<Vec<octet_ai::ToolDef>>,
+}
+
+/// Run-owned service for authoritative private session appends while a context
+/// hook is pending. Implementations own a bounded typed queue, not a writer.
+/// Dropping the service must revoke its grants and refuse all unclaimed leaves.
+/// A persistence receipt may report success only after the supplied Session
+/// has durably committed the append. This is not an event/broadcast service.
+pub trait ProviderContextSessionWait: Send {
+    /// Optional guard-owned process hook future. It must own its pinned lease
+    /// and request snapshot, never borrow the owning Session or expose a writer.
+    fn projection_future(
+        &mut self,
+        _request: &octet_ai::Request,
+        _context: &ProviderContextProjectionContext,
+    ) -> Option<
+        futures_util::future::BoxFuture<'static, Result<Option<ProviderContextProjection>, String>>,
+    > {
+        None
+    }
+
+    /// Borrow-free readiness; an empty queue must remain pending.
+    fn ready(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+    /// Consume one admitted leaf on the sole Session owner. The implementation
+    /// must validate its activation/owner/namespace/operation binding before
+    /// claiming a commit and resolve rejected leaves without reporting success.
+    fn consume_next(
+        &mut self,
+        session: &mut crate::Session,
+        context: &ProviderContextProjectionContext,
+    ) -> Result<(), String>;
+}
+
+/// Context preparation before provider planning, admission and request freeze.
+///
+/// Hooks run in registration order against the last validated effective
+/// request. `Ok(None)` leaves that request unchanged. A failure must abort
+/// preparation, not silently fall back to potentially stale canonical context.
+/// The caller owns cancellation, deadlines, request-size bounds, and canonical
+/// role/tool-pair validation before any projection reaches the next hook or
+/// provider. Persistence acknowledgements must precede activation of durable
+/// projection state; this hook does not itself supply a persistence service. The native driver may activate the optional
+/// run-owned `begin_session_wait` service; process-backed projection dispatch must
+/// use its guard-owned future instead of an unbound foreground RPC.
+#[async_trait::async_trait]
+pub trait ProviderContextHook: Send + Sync {
+    /// Activate an optional bounded append service for this exact preparation.
+    /// The host calls this synchronously before polling the hook. A process
+    /// adapter may publish its grant only after returning a real consumer here;
+    /// it must not offer synchronous append through the foreground event queue.
+    /// Pure native projection hooks need no append service.
+    /// Activation refusals may return the payload-free codes
+    /// `session_append_authority_unavailable`, `session_append_lease_busy`,
+    /// `session_append_process_retired`, `session_snapshot_too_large`, or
+    /// `session_snapshot_unavailable`. The driver redacts every other error;
+    /// arbitrary hook error strings must not become session or UI diagnostics.
+    fn begin_session_wait(
+        &self,
+        _session: &crate::Session,
+        _context: &ProviderContextProjectionContext,
+    ) -> Result<Option<Box<dyn ProviderContextSessionWait>>, String> {
+        Ok(None)
+    }
+
+    /// Propose a model-visible context without changing execution authority.
+    async fn project_context(
+        &self,
+        request: &octet_ai::Request,
+        context: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String>;
 }
 
 /// Optional API 0.4 replacement for local parent-model summarization.
@@ -451,23 +615,194 @@ pub(crate) struct RegisteredPersistenceMetadataHook {
 }
 
 #[derive(Default)]
-struct DynamicToolRegistry {
-    static_names: BTreeSet<String>,
+pub(crate) struct DynamicToolRegistry {
+    static_names: HashSet<String>,
+    // Only CoreTools marks these identities. A familiar name is not authority
+    // to replace another native/external tool or a reserved host name.
+    builtin_names: HashSet<String>,
+    overridden_tools: HashMap<String, Arc<dyn Tool>>,
     groups: Vec<DynamicToolGroup>,
     reservations: Vec<DynamicToolReservationEntry>,
+    // Updated at catalog publication/removal, never by per-tool registration.
+    dynamic_names: HashSet<String>,
+    reserved_names: HashSet<String>,
     next_reservation: u64,
     ready: bool,
     ready_changed: Arc<Notify>,
     policy: Option<ToolPolicy>,
     revision: u64,
+    // Cursor fence excludes mere projection changes, which do not mutate the
+    // eligible catalog or policy and must not invalidate another page.
+    catalog_policy_epoch: u64,
     /// `None` publishes the full host-policed surface; `Some` publishes only
     /// the intersection of these names with that surface.
     active_names: Option<BTreeSet<String>>,
+    // One bounded projection window; never an accumulating second catalog.
+    operation_selection: Option<OperationSelection>,
+}
+
+impl DynamicToolRegistry {
+    fn permits(&self, name: &str) -> bool {
+        self.policy.as_ref().is_none_or(|policy| policy(name))
+            && self
+                .active_names
+                .as_ref()
+                .is_none_or(|active| active.contains(name))
+    }
+
+    fn resource_sources(&self) -> Vec<ExtensionProcess> {
+        self.groups
+            .iter()
+            .filter_map(|group| group.resource_source.clone())
+            .collect()
+    }
+
+    pub(crate) fn discover(
+        registry: &RwLock<Self>,
+        session_id: &str,
+        request: ApplicableOperationsRequest,
+    ) -> Result<ApplicableOperationsPage, ToolError> {
+        let (revision, sources) = {
+            let mut state = registry.write().unwrap_or_else(|p| p.into_inner());
+            state.retire_closed_groups();
+            (state.catalog_policy_epoch, state.resource_sources())
+        };
+        // Never hold the catalog lock while acquiring a process connection:
+        // reload publishes the catalog while holding that connection's lock.
+        // Validate before consulting or disclosing any candidate metadata.
+        let owner = sources
+            .iter()
+            .find_map(|process| process.lookup_resource(session_id, &request.resource).ok())
+            .ok_or_else(|| {
+                ToolError::new(if request.cursor.is_some() {
+                    "catalog_changed"
+                } else {
+                    "resource_unavailable"
+                })
+            })?;
+        let mut state = registry.write().unwrap_or_else(|p| p.into_inner());
+        state.retire_closed_groups();
+        if state.catalog_policy_epoch != revision {
+            return Err(ToolError::new("catalog_changed"));
+        }
+        state.applicable_operations(owner, request)
+    }
+
+    fn applicable_operations(
+        &mut self,
+        owner: ExtensionResourceOwner,
+        request: ApplicableOperationsRequest,
+    ) -> Result<ApplicableOperationsPage, ToolError> {
+        let limit = request.limit.unwrap_or(8);
+        if !(1..=32).contains(&limit) {
+            return Err(ToolError::new("operation limit must be between 1 and 32"));
+        }
+        let binding = cursor_binding(&owner, &request.resource, self.catalog_policy_epoch);
+        let offset = cursor_offset(request.cursor.as_deref(), &binding)?;
+        let mut eligible = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.tools)
+            .filter_map(|tool| {
+                let operation = tool.operation()?;
+                let name = tool.definition().name;
+                self.permits(&name)
+                    .then(|| matching_slots(&operation, &name, &owner, &request.resource))
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        eligible.sort_by(|left, right| (&left.id, &left.path).cmp(&(&right.id, &right.path)));
+        if offset > eligible.len() {
+            return Err(ToolError::new("catalog_changed"));
+        }
+        let has_more = eligible.len().saturating_sub(offset) > limit;
+        let operations = eligible
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        self.operation_selection = Some(OperationSelection {
+            owner: owner.clone(),
+            resource: request.resource.clone(),
+            ids: operations
+                .iter()
+                .map(|operation| operation.id.clone())
+                .collect(),
+        });
+        self.revision = self.revision.saturating_add(1);
+        let next_cursor = has_more.then(|| {
+            format!(
+                "{}:{}",
+                cursor_binding(&owner, &request.resource, self.catalog_policy_epoch),
+                offset + operations.len()
+            )
+        });
+        Ok(ApplicableOperationsPage {
+            operations,
+            next_cursor,
+        })
+    }
+
+    /// Snapshot admission also observes transport death when a fleet manager,
+    /// rather than the per-process supervisor, owns restart. A candidate's
+    /// reservation survives retirement of its old generation.
+    fn retire_closed_groups(&mut self) {
+        let mut retired = false;
+        for group in &mut self.groups {
+            if group
+                .closed
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::Acquire))
+            {
+                group.tools.clear();
+                group.closed = None;
+                // Preserve this instance's resource source for a later reload,
+                // just as an explicit empty catalog does. Its old refs are fenced
+                // independently by the process generation.
+                retired = true;
+            }
+        }
+        if retired {
+            self.refresh_name_index();
+            self.revision = self.revision.saturating_add(1);
+            self.catalog_policy_epoch = self.catalog_policy_epoch.saturating_add(1);
+        }
+    }
+
+    fn refresh_name_index(&mut self) {
+        self.overridden_tools = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.tools)
+            .filter_map(|tool| {
+                let name = tool.definition().name;
+                (self.builtin_names.contains(&name) && self.static_names.contains(&name))
+                    .then(|| (name, Arc::clone(tool)))
+            })
+            .collect();
+        self.dynamic_names = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.tools)
+            .map(|tool| tool.definition().name)
+            .collect();
+        self.reserved_names = self
+            .reservations
+            .iter()
+            .flat_map(|reservation| &reservation.names)
+            .cloned()
+            .collect();
+    }
 }
 
 struct DynamicToolGroup {
     owner: String,
     tools: Vec<Arc<dyn Tool>>,
+    // Exact published generation; never a live pointer to its replacement.
+    closed: Option<Arc<AtomicBool>>,
+    // Retained even for an empty/hidden catalog so live lookup can return no
+    // matches without conflating policy invisibility with a fabricated token.
+    resource_source: Option<ExtensionProcess>,
 }
 
 struct DynamicToolReservationEntry {
@@ -487,6 +822,7 @@ struct DynamicToolReservationEntry {
 #[derive(Clone)]
 pub(crate) struct DynamicToolRegistration {
     owner: String,
+    builtin_overrides: BTreeSet<String>,
     registry: Weak<RwLock<DynamicToolRegistry>>,
 }
 
@@ -498,9 +834,37 @@ pub(crate) struct DynamicToolReservation {
     owner: String,
     registry: Weak<RwLock<DynamicToolRegistry>>,
     tools: Option<Vec<Arc<dyn Tool>>>,
+    closed: Option<Arc<AtomicBool>>,
 }
 
 impl DynamicToolRegistration {
+    pub(crate) fn resource_source(&self, process: ExtensionProcess) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut registry = registry.write().unwrap_or_else(|p| p.into_inner());
+            if let Some(group) = registry
+                .groups
+                .iter_mut()
+                .find(|group| group.owner == self.owner)
+            {
+                group.resource_source = Some(process);
+            }
+        }
+    }
+
+    /// Recheck visibility without resolving an old call to a new handler.
+    pub(crate) fn permits_operation(&self, name: &str) -> bool {
+        self.registry.upgrade().is_some_and(|registry| {
+            let registry = registry.read().unwrap_or_else(|p| p.into_inner());
+            registry.groups.iter().any(|group| {
+                group.owner == self.owner
+                    && group
+                        .tools
+                        .iter()
+                        .any(|tool| tool.definition().name == name)
+            }) && registry.permits(name)
+        })
+    }
+
     pub(crate) async fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
         let registry = self
             .registry
@@ -562,9 +926,18 @@ impl DynamicToolRegistration {
         self.reserve(tools)?.commit()
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve(
         &self,
+        tools: Vec<Arc<dyn Tool>>,
+    ) -> Result<DynamicToolReservation, String> {
+        self.reserve_for_generation(tools, None)
+    }
+
+    pub(crate) fn reserve_for_generation(
+        &self,
         mut tools: Vec<Arc<dyn Tool>>,
+        closed: Option<Arc<AtomicBool>>,
     ) -> Result<DynamicToolReservation, String> {
         let registry = self
             .registry
@@ -573,10 +946,11 @@ impl DynamicToolRegistration {
         let mut state = registry
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.retire_closed_groups();
         if let Some(policy) = &state.policy {
             tools.retain(|tool| policy(&tool.definition().name));
         }
-        validate_dynamic_catalog(&state, &self.owner, &tools)?;
+        validate_dynamic_catalog(&state, &self.owner, &tools, &self.builtin_overrides)?;
         if state
             .reservations
             .iter()
@@ -595,11 +969,13 @@ impl DynamicToolRegistration {
             owner: self.owner.clone(),
             names,
         });
+        state.refresh_name_index();
         Ok(DynamicToolReservation {
             id,
             owner: self.owner.clone(),
             registry: Arc::downgrade(&registry),
             tools: Some(tools),
+            closed,
         })
     }
 
@@ -615,8 +991,10 @@ impl DynamicToolRegistration {
         registry
             .reservations
             .retain(|reservation| reservation.owner != self.owner);
+        registry.refresh_name_index();
         if registry.groups.len() != previous_len {
             registry.revision = registry.revision.saturating_add(1);
+            registry.catalog_policy_epoch = registry.catalog_policy_epoch.saturating_add(1);
         }
         registry.revision
     }
@@ -646,6 +1024,13 @@ impl DynamicToolReservation {
         else {
             return Err("dynamic tool catalog reservation is no longer active".to_owned());
         };
+        if self
+            .closed
+            .as_ref()
+            .is_some_and(|closed| closed.load(Ordering::Acquire))
+        {
+            return Err("dynamic tool catalog generation is closed".to_owned());
+        }
         let mut tools = self
             .tools
             .take()
@@ -657,6 +1042,61 @@ impl DynamicToolReservation {
             .iter()
             .map(|tool| tool.definition().name)
             .collect::<BTreeSet<_>>();
+        let previous = registry
+            .groups
+            .iter()
+            .find(|group| group.owner == self.owner);
+        let old_names = previous
+            .map(|group| {
+                group
+                    .tools
+                    .iter()
+                    .map(|tool| tool.definition().name)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let previously_default = previous
+            .map(|group| {
+                group
+                    .tools
+                    .iter()
+                    .filter(|tool| tool.default_active())
+                    .map(|tool| tool.definition().name)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let mut active = registry.active_names.clone().unwrap_or_else(|| {
+            registry
+                .static_names
+                .iter()
+                .cloned()
+                .chain(
+                    registry
+                        .groups
+                        .iter()
+                        .flat_map(|group| group.tools.iter())
+                        .filter(|tool| tool.default_active())
+                        .map(|tool| tool.definition().name),
+                )
+                .collect()
+        });
+        for removed in old_names.difference(&published) {
+            // Removing an override restores the base under the same logical
+            // active name. Do not accidentally deactivate that builtin.
+            if !registry.builtin_names.contains(removed) {
+                active.remove(removed);
+            }
+        }
+        for tool in &tools {
+            let name = tool.definition().name;
+            if tool.default_active()
+                && !registry.builtin_names.contains(&name)
+                && !previously_default.contains(&name)
+            {
+                active.insert(name);
+            }
+        }
+        registry.active_names = Some(active);
         let revision = registry.revision.saturating_add(1);
         before_publish(revision, &published);
         if let Some(group) = registry
@@ -665,17 +1105,22 @@ impl DynamicToolReservation {
             .find(|group| group.owner == self.owner)
         {
             group.tools = tools;
+            group.closed = self.closed.take();
         } else {
             registry.groups.push(DynamicToolGroup {
                 owner: self.owner.clone(),
                 tools,
+                closed: self.closed.take(),
+                resource_source: None,
             });
             registry
                 .groups
                 .sort_by(|left, right| left.owner.cmp(&right.owner));
         }
         registry.reservations.swap_remove(index);
+        registry.refresh_name_index();
         registry.revision = revision;
+        registry.catalog_policy_epoch = registry.catalog_policy_epoch.saturating_add(1);
         Ok((registry.revision, published))
     }
 }
@@ -691,6 +1136,7 @@ impl Drop for DynamicToolReservation {
         registry
             .reservations
             .retain(|reservation| reservation.id != self.id || reservation.owner != self.owner);
+        registry.refresh_name_index();
     }
 }
 
@@ -698,6 +1144,7 @@ fn validate_dynamic_catalog(
     registry: &DynamicToolRegistry,
     owner: &str,
     tools: &[Arc<dyn Tool>],
+    builtin_overrides: &BTreeSet<String>,
 ) -> Result<(), String> {
     // Tool::definition returns an owned schema. Extract existing names once,
     // not once per candidate (which repeatedly cloned every nested schema).
@@ -720,8 +1167,10 @@ fn validate_dynamic_catalog(
         if !names.insert(name.clone()) {
             return Err(format!("dynamic tool catalog contains duplicate `{name}`"));
         }
-        if registry.static_names.contains(&name) {
-            return Err(format!("dynamic tool `{name}` conflicts with a host tool"));
+        if registry.static_names.contains(&name)
+            && !(registry.builtin_names.contains(&name) && builtin_overrides.contains(&name))
+        {
+            return Err(format!("dynamic tool `{name}` conflicts with a host tool (no reviewed builtin override grant)"));
         }
         if registered_names.contains(&name) {
             return Err(format!(
@@ -745,6 +1194,11 @@ pub struct ExtensionHost {
     pub(crate) observers: Vec<Arc<dyn EventObserver>>,
     pub(crate) tool_call_hooks: Vec<Arc<dyn ToolCallHook>>,
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
+    pub(crate) cache_warming_decision_hooks: Vec<Arc<dyn CacheWarmingDecisionHook>>,
+    pub(crate) provider_context_hooks: Vec<Arc<dyn ProviderContextHook>>,
+    pub(crate) session_operation_hooks: Vec<Arc<dyn crate::compaction::SessionOperationHook>>,
+    pub(crate) provider_request_hooks:
+        Vec<Arc<dyn crate::extension_provider::ProviderRequestHookFactory>>,
     pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub(crate) duplicate_compaction_strategy: bool,
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
@@ -760,6 +1214,10 @@ impl Default for ExtensionHost {
             observers: Vec::new(),
             tool_call_hooks: Vec::new(),
             provider_retry_hooks: Vec::new(),
+            cache_warming_decision_hooks: Vec::new(),
+            provider_context_hooks: Vec::new(),
+            session_operation_hooks: Vec::new(),
+            provider_request_hooks: Vec::new(),
             compaction_strategy: None,
             duplicate_compaction_strategy: false,
             persistence_metadata_hooks: Vec::new(),
@@ -776,7 +1234,7 @@ impl ExtensionHost {
         Self::default()
     }
 
-    /// Registers a tool. Core tools use this same method.
+    /// Registers a native tool. Only CoreTools privately marks replaceable builtins.
     ///
     /// Duplicate tool names are rejected deterministically: the first
     /// registration wins, and [`Agent::new`](crate::Agent::new) fails with
@@ -786,25 +1244,33 @@ impl ExtensionHost {
         self.tool_arc(Arc::new(tool));
     }
 
+    pub(crate) fn builtin_tool(&mut self, tool: impl Tool + 'static) {
+        self.register_tool_arc(Arc::new(tool), true);
+    }
+
     pub(crate) fn tool_arc(&mut self, tool: Arc<dyn Tool>) {
+        self.register_tool_arc(tool, false);
+    }
+
+    fn register_tool_arc(&mut self, tool: Arc<dyn Tool>, builtin: bool) {
         let name = tool.definition().name;
         let mut dynamic = self
             .dynamic_tools
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // `static_names` is the shared registry's conflict set: it also holds
+        // names reserved for later host tools and tools installed by other
+        // hosts cloned from this one (every native delegation child), so it
+        // cannot decide what this host already installed.
         if self.tools.iter().any(|t| t.definition().name == name)
-            || dynamic
-                .groups
-                .iter()
-                .flat_map(|group| &group.tools)
-                .any(|registered| registered.definition().name == name)
-            || dynamic
-                .reservations
-                .iter()
-                .any(|reservation| reservation.names.contains(&name))
+            || dynamic.dynamic_names.contains(&name)
+            || dynamic.reserved_names.contains(&name)
         {
             self.duplicate_tools.push(name);
         } else {
+            if builtin {
+                dynamic.builtin_names.insert(name.clone());
+            }
             dynamic.static_names.insert(name);
             self.tools.push(tool);
         }
@@ -819,16 +1285,7 @@ impl ExtensionHost {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for name in names {
-            if dynamic
-                .groups
-                .iter()
-                .flat_map(|group| &group.tools)
-                .any(|tool| tool.definition().name == name)
-                || dynamic
-                    .reservations
-                    .iter()
-                    .any(|reservation| reservation.names.contains(name))
-            {
+            if dynamic.dynamic_names.contains(name) || dynamic.reserved_names.contains(name) {
                 self.duplicate_tools.push(name.to_owned());
             } else {
                 dynamic.static_names.insert(name.to_owned());
@@ -842,20 +1299,28 @@ impl ExtensionHost {
         owner: impl Into<String>,
         tools: Vec<Arc<dyn Tool>>,
     ) -> Result<DynamicToolRegistration, String> {
-        self.dynamic_tools_with(owner, tools, |_, _| {})
+        self.dynamic_tools_with_authority(owner, tools, BTreeSet::new(), None, |_, _| {})
     }
 
-    pub(crate) fn dynamic_tools_with(
+    /// Host-derived, manifest-reviewed authority belongs to this exact owner,
+    /// never to a tool name or to another extension's catalog. The displaced
+    /// native implementation stays in `self.tools` for transactional restoration.
+    pub(crate) fn dynamic_tools_with_authority(
         &mut self,
         owner: impl Into<String>,
         tools: Vec<Arc<dyn Tool>>,
+        builtin_overrides: BTreeSet<String>,
+        closed: Option<Arc<AtomicBool>>,
         before_publish: impl FnOnce(u64, &BTreeSet<String>),
     ) -> Result<DynamicToolRegistration, String> {
         let registration = DynamicToolRegistration {
             owner: owner.into(),
+            builtin_overrides,
             registry: Arc::downgrade(&self.dynamic_tools),
         };
-        registration.reserve(tools)?.commit_with(before_publish)?;
+        registration
+            .reserve_for_generation(tools, closed)?
+            .commit_with(before_publish)?;
         Ok(registration)
     }
 
@@ -872,6 +1337,35 @@ impl ExtensionHost {
     /// Register a non-authoritative provider-retry advisory hook.
     pub fn provider_retry_hook(&mut self, hook: impl ProviderRetryHook + 'static) {
         self.provider_retry_hooks.push(Arc::new(hook));
+    }
+
+    /// Register cache-refresh advice in deterministic invocation order.
+    /// The last hook returning an action wins, within the host's existing limits.
+    pub fn cache_warming_decision_hook(&mut self, hook: impl CacheWarmingDecisionHook + 'static) {
+        self.cache_warming_decision_hooks.push(Arc::new(hook));
+    }
+
+    /// Register effective provider-context preparation in deterministic order.
+    ///
+    /// Registration alone does not negotiate or advertise a subprocess feature.
+    pub fn provider_context_hook(&mut self, hook: impl ProviderContextHook + 'static) {
+        self.provider_context_hooks.push(Arc::new(hook));
+    }
+
+    /// Register cancellable compaction and durable tree operation callbacks.
+    pub fn session_operation_hook(
+        &mut self,
+        hook: impl crate::compaction::SessionOperationHook + 'static,
+    ) {
+        self.session_operation_hooks.push(Arc::new(hook));
+    }
+
+    /// Register real encoded HTTP request/response hooks, bound per run owner.
+    pub fn provider_request_hook(
+        &mut self,
+        factory: impl crate::extension_provider::ProviderRequestHookFactory + 'static,
+    ) {
+        self.provider_request_hooks.push(Arc::new(factory));
     }
 
     /// Register the one active local-compaction strategy. Competing providers
@@ -930,13 +1424,16 @@ impl ExtensionHost {
             let retained = keep(&name);
             if !retained {
                 dynamic.static_names.remove(&name);
+                dynamic.builtin_names.remove(&name);
             }
             retained
         });
         for group in &mut dynamic.groups {
             group.tools.retain(|tool| keep(&tool.definition().name));
         }
+        dynamic.refresh_name_index();
         dynamic.revision = dynamic.revision.saturating_add(1);
+        dynamic.catalog_policy_epoch = dynamic.catalog_policy_epoch.saturating_add(1);
     }
 
     /// Applies the authoritative product tool policy to current and future
@@ -953,11 +1450,14 @@ impl ExtensionHost {
                 .iter()
                 .any(|tool| tool.definition().name == *name)
         });
+        dynamic.builtin_names.retain(|name| keep(name));
         for group in &mut dynamic.groups {
             group.tools.retain(|tool| keep(&tool.definition().name));
         }
+        dynamic.refresh_name_index();
         dynamic.policy = Some(keep);
         dynamic.revision = dynamic.revision.saturating_add(1);
+        dynamic.catalog_policy_epoch = dynamic.catalog_policy_epoch.saturating_add(1);
     }
 
     /// Builds a detached child host whose provider and execution surfaces are
@@ -976,6 +1476,10 @@ impl ExtensionHost {
         scoped.observers = self.observers.clone();
         scoped.tool_call_hooks = self.tool_call_hooks.clone();
         scoped.provider_retry_hooks = self.provider_retry_hooks.clone();
+        scoped.cache_warming_decision_hooks = self.cache_warming_decision_hooks.clone();
+        scoped.provider_context_hooks = self.provider_context_hooks.clone();
+        scoped.session_operation_hooks = self.session_operation_hooks.clone();
+        scoped.provider_request_hooks = self.provider_request_hooks.clone();
         scoped.compaction_strategy = self.compaction_strategy.clone();
         scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();
@@ -1018,6 +1522,7 @@ impl ExtensionHost {
             .dynamic_tools
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dynamic.retire_closed_groups();
         if let Some(names) = names {
             let policed = self.policed_tool_names_locked(&dynamic);
             let refused = names.difference(&policed).cloned().collect::<Vec<_>>();
@@ -1037,6 +1542,7 @@ impl ExtensionHost {
         }
         dynamic.active_names = names.cloned();
         dynamic.revision = dynamic.revision.saturating_add(1);
+        dynamic.catalog_policy_epoch = dynamic.catalog_policy_epoch.saturating_add(1);
         Ok(())
     }
 
@@ -1045,9 +1551,27 @@ impl ExtensionHost {
         &'a self,
         dynamic: &'a DynamicToolRegistry,
     ) -> impl Iterator<Item = &'a Arc<dyn Tool>> {
+        // Replacement occupies the builtin's original slot. All provider,
+        // direct, composition, Pi and child views consume this one projection.
         self.tools
             .iter()
-            .chain(dynamic.groups.iter().flat_map(|group| group.tools.iter()))
+            .map(move |tool| {
+                dynamic
+                    .overridden_tools
+                    .get(&tool.definition().name)
+                    .unwrap_or(tool)
+            })
+            .chain(
+                dynamic
+                    .groups
+                    .iter()
+                    .flat_map(|group| group.tools.iter())
+                    .filter(move |tool| {
+                        !dynamic
+                            .overridden_tools
+                            .contains_key(&tool.definition().name)
+                    }),
+            )
     }
 
     /// Every published tool name after product policy, ignoring any active-set
@@ -1058,6 +1582,26 @@ impl ExtensionHost {
             .collect()
     }
 
+    /// Authoritative registered/active Pi tool view, excluding product-denied tools.
+    pub fn pi_tool_snapshot(&self) -> serde_json::Value {
+        let mut dynamic = self
+            .dynamic_tools
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        dynamic.retire_closed_groups();
+        let active = dynamic.active_names.as_ref();
+        let mut names = Vec::new();
+        let tools = self.policed_tools(&dynamic).map(|tool| {
+            let definition = tool.definition();
+            if active.is_none_or(|active| active.contains(&definition.name)) { names.push(definition.name.clone()); }
+            let prompt = tool.prompt_metadata();
+            serde_json::json!({"name":definition.name,"description":definition.description,"parameters":definition.parameters,
+                "promptGuidelines":prompt.map(|prompt| prompt.guidelines),"exposure":"direct",
+                "sourceInfo":{"path":format!("<native:{}>",definition.name),"source":"native","scope":"temporary","origin":"top-level"}})
+        }).collect::<Vec<_>>();
+        serde_json::json!({"active_tools":names,"all_tools":tools})
+    }
+
     /// Every host-policed registered tool name, sorted, including names that
     /// are currently deactivated by [`Self::set_active_tools`].
     ///
@@ -1065,20 +1609,22 @@ impl ExtensionHost {
     /// here was removed by product policy or never registered, and no
     /// activation request can reintroduce it.
     pub(crate) fn policed_tool_names(&self) -> Vec<String> {
-        let dynamic = self
+        let mut dynamic = self
             .dynamic_tools
-            .read()
+            .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dynamic.retire_closed_groups();
         self.policed_tool_names_locked(&dynamic)
             .into_iter()
             .collect()
     }
 
     pub(crate) fn tool_snapshot(&self) -> (u64, Vec<Arc<dyn Tool>>) {
-        let dynamic = self
+        let mut dynamic = self
             .dynamic_tools
-            .read()
+            .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dynamic.retire_closed_groups();
         let active = dynamic.active_names.as_ref();
         let tools = self
             .policed_tools(&dynamic)
@@ -1086,6 +1632,93 @@ impl ExtensionHost {
             .cloned()
             .collect::<Vec<_>>();
         (dynamic.revision, tools)
+    }
+
+    /// Installs one host-owned discovery tool. Only negotiated resource-aware
+    /// catalogs opt into this; ordinary/Pi tools need no metadata or filtering.
+    pub fn enable_operation_discovery(&mut self) {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| tool.definition().name == DISCOVERY_TOOL_NAME)
+        {
+            self.tool(OperationDiscovery {
+                registry: Arc::downgrade(&self.dynamic_tools),
+            });
+        }
+    }
+
+    /// Validates a live reference, returns a bounded exact-match page, and
+    /// selects that page's schemas for the next model turn. Not authorization.
+    pub fn applicable_operations(
+        &self,
+        session_id: &str,
+        request: ApplicableOperationsRequest,
+    ) -> Result<ApplicableOperationsPage, ToolError> {
+        DynamicToolRegistry::discover(&self.dynamic_tools, session_id, request)
+    }
+
+    /// Provider-only projection. Registered/active tool APIs continue to use
+    /// `tool_snapshot`, including all ordinary tools and all registered names.
+    pub(crate) fn model_tool_snapshot(&self, owner: &str) -> (u64, Vec<Arc<dyn Tool>>) {
+        loop {
+            let (revision, selection, sources) = {
+                let mut dynamic = self
+                    .dynamic_tools
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner());
+                dynamic.retire_closed_groups();
+                (
+                    dynamic.revision,
+                    dynamic.operation_selection.clone(),
+                    dynamic.resource_sources(),
+                )
+            };
+            let stale = selection.as_ref().is_some_and(|selection| {
+                !sources.iter().any(|process| {
+                    process
+                        .lookup_resource(&selection.owner.session_id, &selection.resource)
+                        .is_ok()
+                })
+            });
+            let mut dynamic = self
+                .dynamic_tools
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            dynamic.retire_closed_groups();
+            if dynamic.revision != revision {
+                continue;
+            }
+            if stale {
+                dynamic.operation_selection = None;
+                dynamic.revision = dynamic.revision.saturating_add(1);
+            }
+            let tools = self
+                .policed_tools(&dynamic)
+                .filter(|tool| {
+                    let name = tool.definition().name;
+                    if !dynamic.permits(&name) {
+                        return false;
+                    }
+                    match tool.operation() {
+                        // Creation entrypoints with no resource inputs remain visible.
+                        Some(operation) if !operation.descriptor.resource_inputs.is_empty() => {
+                            dynamic
+                                .operation_selection
+                                .as_ref()
+                                .is_some_and(|selection| selection.includes(&operation, owner))
+                        }
+                        _ => true,
+                    }
+                })
+                .cloned()
+                .collect();
+            return (dynamic.revision, tools);
+        }
+    }
+
+    pub(crate) fn model_tool_definitions(&self, owner: &str) -> Vec<ToolDef> {
+        crate::tool_composition::advertised_surface(&self.model_tool_snapshot(owner).1)
     }
 
     /// Opens live extension catalog publication after all host tool names have
@@ -1107,13 +1740,13 @@ impl ExtensionHost {
 
     /// Returns the exact provider schemas currently registered, in wire order.
     pub fn tool_definitions(&self) -> Vec<ToolDef> {
-        self.tool_snapshot()
-            .1
-            .iter()
-            .map(|tool| tool.definition())
-            .collect()
+        crate::tool_composition::advertised_surface(&self.tool_snapshot().1)
     }
 }
+
+#[cfg(test)]
+#[path = "extension_builtin_override_tests.rs"]
+mod builtin_overrides;
 
 #[cfg(test)]
 mod tests {
@@ -1121,6 +1754,122 @@ mod tests {
     use crate::effect::ToolEffect;
     use crate::tool::{ToolContext, ToolError, ToolOutput};
     use octet_ai::ToolDef;
+
+    struct CacheOpinion {
+        index: usize,
+        action: Option<CacheWarmingAction>,
+        observed: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheWarmingDecisionHook for CacheOpinion {
+        async fn cache_warming_decision(
+            &self,
+            context: &CacheWarmingDecisionContext,
+        ) -> Option<CacheWarmingAction> {
+            assert_eq!(context.resource_owner, "cache-owner");
+            assert_eq!(context.model, ModelId("cache-model".into()));
+            self.observed.lock().unwrap().push(self.index);
+            self.action
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_warming_hooks_preserve_registration_order_and_child_scoping() {
+        use crate::cache_warmer::CacheWarmingPhase;
+
+        let mut host = ExtensionHost::new();
+        assert!(host.cache_warming_decision_hooks.is_empty());
+        host.tool(NamedTool("read"));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (index, action) in [
+            Some(CacheWarmingAction::Stop),
+            None,
+            Some(CacheWarmingAction::Warm),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            host.cache_warming_decision_hook(CacheOpinion {
+                index,
+                action,
+                observed: Arc::clone(&observed),
+            });
+        }
+        let cloned = host.clone();
+        let (scoped, _) = host
+            .scoped_tool_snapshot(&BTreeSet::from(["read".into()]))
+            .unwrap();
+        for inherited in [&cloned, &scoped] {
+            assert_eq!(inherited.cache_warming_decision_hooks.len(), 4);
+            for (original, inherited) in host
+                .cache_warming_decision_hooks
+                .iter()
+                .zip(&inherited.cache_warming_decision_hooks)
+            {
+                assert!(Arc::ptr_eq(original, inherited));
+            }
+        }
+        let context = CacheWarmingDecisionContext {
+            decision: CacheWarmingDecision {
+                phase: CacheWarmingPhase::Idle,
+                warm_cost_microdollars: 100,
+                miss_cost_microdollars: 1_000,
+                continuation_probability: 0.15,
+                expected_savings_microdollars: 50,
+                economics_available: true,
+                action: CacheWarmingAction::Warm,
+            },
+            model: ModelId("cache-model".into()),
+            resource_owner: "cache-owner".into(),
+        };
+        let mut action = context.decision.action;
+        for hook in &scoped.cache_warming_decision_hooks {
+            if let Some(opinion) = hook.cache_warming_decision(&context).await {
+                action = opinion;
+            }
+        }
+        assert_eq!(*observed.lock().unwrap(), [0, 1, 2, 3]);
+        assert_eq!(action, CacheWarmingAction::Warm);
+    }
+
+    struct ContextHook;
+
+    #[async_trait::async_trait]
+    impl ProviderContextHook for ContextHook {
+        async fn project_context(
+            &self,
+            _request: &octet_ai::Request,
+            _context: &ProviderContextProjectionContext,
+        ) -> Result<Option<ProviderContextProjection>, String> {
+            Err("fixture refuses an unbound preparation".into())
+        }
+    }
+
+    #[test]
+    fn provider_context_hooks_preserve_registration_order_and_child_scoping() {
+        let mut host = ExtensionHost::new();
+        assert!(host.provider_context_hooks.is_empty());
+        host.tool(NamedTool("read"));
+        for _ in 0..3 {
+            host.provider_context_hook(ContextHook);
+        }
+        let cloned = host.clone();
+        let (scoped, _) = host
+            .scoped_tool_snapshot(&BTreeSet::from(["read".into()]))
+            .unwrap();
+        for inherited in [&cloned, &scoped] {
+            assert_eq!(inherited.provider_context_hooks.len(), 3);
+            for (original, inherited) in host
+                .provider_context_hooks
+                .iter()
+                .zip(&inherited.provider_context_hooks)
+            {
+                assert!(Arc::ptr_eq(original, inherited));
+            }
+        }
+    }
 
     struct NoMetadata;
 
@@ -1220,6 +1969,42 @@ mod tests {
     }
 
     #[test]
+    fn static_duplicate_index_tracks_dynamic_removal_and_policy_filtering() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        let dynamic = host
+            .dynamic_tools("extension", vec![named_tool("search")])
+            .unwrap();
+        host.tool(NamedTool("search"));
+        assert_eq!(host.duplicate_tools, ["search"]);
+        dynamic.remove();
+        host.tool(NamedTool("search"));
+        assert_eq!(host.tools.len(), 2);
+        host.retain_tools(|name| name != "search");
+        host.tool(NamedTool("search"));
+        assert_eq!(host.tools.len(), 2);
+        assert_eq!(host.duplicate_tools, ["search"]);
+    }
+
+    #[test]
+    fn reserved_names_and_sibling_hosts_do_not_make_host_tools_duplicates() {
+        let mut host = ExtensionHost::new();
+        host.reserve_tool_names(["spawn_agent"]);
+        host.tool(NamedTool("spawn_agent"));
+        assert!(host.duplicate_tools.is_empty());
+
+        // Native delegation children are clones of one template host and so
+        // share its dynamic registry; each still installs its own tools.
+        let template = ExtensionHost::new();
+        let mut first = template.clone();
+        first.tool(NamedTool("spawn_agent"));
+        let mut second = template.clone();
+        second.tool(NamedTool("spawn_agent"));
+        assert!(second.duplicate_tools.is_empty());
+        assert_eq!(second.tools.len(), 1);
+    }
+
+    #[test]
     fn duplicate_tool_names_are_recorded() {
         let mut host = ExtensionHost::new();
         host.tool(NamedTool("read"));
@@ -1276,14 +2061,19 @@ mod tests {
                 groups: vec![DynamicToolGroup {
                     owner: "other".into(),
                     tools: tools("old"),
+                    closed: None,
+                    resource_source: None,
                 }],
                 ..DynamicToolRegistry::default()
             };
-            validate_dynamic_catalog(&registry, "new", &tools("new")).unwrap();
+            validate_dynamic_catalog(&registry, "new", &tools("new"), &BTreeSet::new()).unwrap();
             assert_eq!(definitions.load(Ordering::Relaxed), 2 * count);
-            assert!(validate_dynamic_catalog(&registry, "new", &tools("old")).is_err());
+            assert!(
+                validate_dynamic_catalog(&registry, "new", &tools("old"), &BTreeSet::new())
+                    .is_err()
+            );
             // Replacing one's own group never conflicts with its previous names.
-            validate_dynamic_catalog(&registry, "other", &tools("old")).unwrap();
+            validate_dynamic_catalog(&registry, "other", &tools("old"), &BTreeSet::new()).unwrap();
         }
     }
 
