@@ -1,9 +1,10 @@
 //! One cancellation-safe, bounded pre-native lane shared by every input consumer.
 //!
 //! Pi 1.0.2 hands each decoded key string to its live input-listener `Set` and
-//! only then to the focused component, so listeners see input first, chain in
-//! registration order, and can consume or replace it. This lane reproduces that
-//! order with one deliberate bound: a listener that does not answer inside
+//! only then to the focused component. Octet keeps the host-reserved grammar
+//! and open slash popup ahead of that chain; listeners then run in registration
+//! order and can consume or replace editor input. One deliberate bound remains:
+//! a listener that does not answer inside
 //! [`INPUT_BUDGET`] is latched off and its input is delivered unchanged, because
 //! Pi would block the input loop indefinitely and octet must never let a stuck
 //! extension freeze typing. A listener that *reports* an error is only recorded
@@ -57,11 +58,14 @@ struct Client {
     circuit: Arc<Circuit>,
 }
 
+type HostPolicy = Arc<dyn Fn(&Event) -> bool + Send + Sync>;
+
 #[derive(Default)]
 struct Bindings {
     revision: u64,
     clients: Vec<Client>,
     diagnostics: Vec<String>,
+    host_policy: Option<HostPolicy>,
 }
 
 /// Shared binding table. The frontend installs the live extension processes and
@@ -70,6 +74,16 @@ struct Bindings {
 pub(crate) struct InputInterceptors(Arc<Mutex<Bindings>>);
 
 impl InputInterceptors {
+    /// Native reserved actions and an open slash popup precede all consumers.
+    pub(crate) fn set_host_policy(&self, policy: impl Fn(&Event) -> bool + Send + Sync + 'static) {
+        self.0.lock().unwrap().host_policy = Some(Arc::new(policy));
+    }
+
+    fn host_reserves(&self, event: &Event) -> bool {
+        let policy = self.0.lock().unwrap().host_policy.clone();
+        policy.is_some_and(|policy| policy(event))
+    }
+
     /// Rebind the owner and processes, returning any diagnostics accumulated
     /// while typing. Circuits survive rebinding so a latched-off process is not
     /// retried for every keystroke; a changed owner or process set is a new
@@ -137,20 +151,14 @@ impl InputInterceptors {
         self.0.lock().unwrap().revision
     }
 
-    /// Whether one event must bypass the chain entirely.
-    ///
-    /// `Ctrl+G` rescues a mount and `Ctrl+D` is coordinated shutdown in octet;
-    /// Pi would offer both to listeners. Host authority over rescue and exit is
-    /// not delegated to a subprocess, so those two keystrokes stay native. The
-    /// existing wire bound also keeps oversized input out of the lane.
+    /// The existing wire bound keeps oversized input out of the lane.
     fn intercepted(raw: Option<&str>) -> Option<&str> {
         raw.filter(|raw| raw.len() <= MAX_EXTENSION_TERMINAL_INPUT_BYTES)
     }
 }
 
 fn is_host_reserved(event: &Event) -> bool {
-    matches!(event, Event::Key(key)
-        if key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('g' | 'd')))
+    matches!(event, Event::Key(key) if crate::tui::keymap::is_close_key(key))
 }
 
 type InputFuture = Pin<Box<dyn Future<Output = Vec<Event>> + Send>>;
@@ -169,7 +177,7 @@ impl PendingInput {
     pub(super) fn start(&mut self, packet: Packet) {
         let (revision, clients) = self.handle.active();
         self.ready_revision = revision;
-        let raw = (!is_host_reserved(&packet.event))
+        let raw = (!(is_host_reserved(&packet.event) || self.handle.host_reserves(&packet.event)))
             .then(|| InputInterceptors::intercepted(packet.raw.as_deref()))
             .flatten()
             .filter(|_| !clients.is_empty())

@@ -305,7 +305,11 @@ impl ExecutableExtensions {
     /// Answer the requests the live shell can resolve. Session-entry requests
     /// stay queued for the product loop that owns the session store.
     pub(super) fn drain_host_requests_into_shell(&mut self, shell: &mut InteractiveShell) {
-        while let Some(pending) = self.pending_host_requests.pop_front() {
+        for _ in 0..self.pending_host_requests.len() {
+            let pending = self
+                .pending_host_requests
+                .pop_front()
+                .expect("queued request");
             if let Some(notice) = pending.discard_notice() {
                 self.diagnostics.push(notice.clone());
                 shell.notice(notice);

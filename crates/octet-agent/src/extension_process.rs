@@ -75,9 +75,10 @@ use crate::extension_provider::{
 };
 use crate::extension_remote_ui::{
     ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed,
-    ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey,
-    ExtensionRemoteUiMouse, ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation,
-    ExtensionRemoteUiResize, RemoteUiChildRequest, RemoteUiMailbox, EXTENSION_FEATURE_REMOTE_UI,
+    ExtensionRemoteUiEditorText, ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification,
+    ExtensionRemoteUiKey, ExtensionRemoteUiMouse, ExtensionRemoteUiOpenRequest,
+    ExtensionRemoteUiOperation, ExtensionRemoteUiResize, RemoteUiChildRequest, RemoteUiMailbox,
+    EXTENSION_FEATURE_REMOTE_UI,
 };
 use crate::extension_secret::{ExtensionSecretBroker, ExtensionSecretRequest};
 use crate::tool::{
@@ -504,6 +505,8 @@ pub mod methods {
     pub const UI_FRAME: &str = "ui/frame";
     /// Host-to-extension focused normalized key notification.
     pub const UI_KEY: &str = "ui/key";
+    /// Host-to-extension composer-slot text replacement for a mounted editor.
+    pub const UI_EDITOR_TEXT: &str = "ui/editor-text";
     /// Host-to-extension normalized fullscreen mouse notification.
     pub const UI_MOUSE: &str = "ui/mouse";
     /// Host-to-extension surface closure notification.

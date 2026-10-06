@@ -33,6 +33,8 @@ export function mouseData({ kind, button, x, y, modifiers = [], wheel_delta = 0 
   if (modifiers.includes('control')) code |= 16;
   return `\x1b[<${code};${x + 1};${y + 1}${kind === 'release' ? 'm' : 'M'}`;
 }
-export function reservedKey({ key, modifiers = [] }) {
-  return modifiers.includes('control') && typeof key === 'string' && ['g', 'd'].includes(key.toLowerCase());
+export function reservedKey({ key, modifiers = [] }, placement) {
+  if (!modifiers.includes('control') || typeof key !== 'string') return false;
+  const normalized = key.toLowerCase();
+  return normalized === 'd' || normalized === 'g' && placement === 'fullscreen';
 }

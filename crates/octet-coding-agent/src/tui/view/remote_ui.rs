@@ -96,10 +96,10 @@ pub(super) fn shell_chrome(
         None
     };
     if let Some(editor) = editor {
+        // The composer slot renders the extension component's own rows. Octet's
+        // slash popup, queue hint and status stay in their own chrome rows
+        // around the slot; nothing here is a second full-screen owner.
         chrome.composer = rows(remote, editor, width, height, budget.saturating_sub(1));
-        chrome.suggestions.clear();
-        // Ctrl+G rescue and Ctrl+D shutdown remain host-owned keys, without
-        // adding permanent chrome to the extension's editor surface.
     }
     let mut footer_rows = if let Some(footer) = footer {
         rows(remote, footer, width, height, budget)

@@ -28,7 +28,7 @@ where
             _ = tick.tick() => { apply_extension_background(shell, &mut app.executable_extensions); request_extension_ui(shell, app); shell.render(); }
             event = input.next() => {
                 let event = match event { Some(event) => event?, None => anyhow::bail!("input closed during resource discovery") };
-                if app.executable_extensions.route_remote_ui_event(shell, &event) { continue; }
+                if app.executable_extensions.route_remote_ui_event(shell, &event, false) { continue; }
                 observe_extension_terminal_event(&mut app.executable_extensions, &event);
                 match event {
                     Event::Key(key) if is_ctrl_c(&key) => {

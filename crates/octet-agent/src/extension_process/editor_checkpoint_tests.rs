@@ -861,3 +861,34 @@ notifications = true
         assert!(process.shutdown().await, "{mode}");
     }
 }
+
+#[test]
+fn editor_submission_retains_only_its_live_mount_and_preserves_delivery_intent() {
+    // Submission is now native terminal policy, not a retained reverse RPC.
+    // Neither follow-up intent may create a second admission path.
+    for follow_up in [false, true] {
+        let (state, mut frames, mut events) = editor_state();
+        let mut params = checkpoint_params();
+        params["follow_up"] = follow_up.into();
+        handle_protocol_line(&wave1_line(100, "composer/submit", params), &state).unwrap();
+        assert!(events.try_recv().is_err());
+        let reply: serde_json::Value =
+            serde_json::from_slice(&frames.try_recv().unwrap().line).unwrap();
+        assert!(
+            reply.get("error").is_some(),
+            "removed submission RPC must be refused"
+        );
+    }
+}
+
+#[test]
+fn editor_submission_requires_bounded_checkpoint_and_negotiated_remote_ui() {
+    for params in [serde_json::json!({}), checkpoint_params()] {
+        let (state, mut frames, mut events) = editor_state();
+        handle_protocol_line(&wave1_line(100, "composer/submit", params), &state).unwrap();
+        assert!(events.try_recv().is_err());
+        let reply: serde_json::Value =
+            serde_json::from_slice(&frames.try_recv().unwrap().line).unwrap();
+        assert!(reply.get("error").is_some());
+    }
+}

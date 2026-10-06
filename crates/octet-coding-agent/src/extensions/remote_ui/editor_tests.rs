@@ -17,18 +17,14 @@ fn input(extensions: &mut ExecutableExtensions, frontend: &mut Frontend, charact
             KeyEventKind::Press,
             KeyModifiers::NONE
         ),
+        false
     ));
 }
 
-fn rescue(extensions: &mut ExecutableExtensions, frontend: &mut Frontend) {
-    assert!(extensions.route_remote_ui_event(
-        &mut frontend.shell,
-        &key(
-            KeyCode::Char('g'),
-            KeyEventKind::Press,
-            KeyModifiers::CONTROL
-        ),
-    ));
+/// The product's own teardown for a slot editor: Ctrl+G is the editor's key, so
+/// rescue is revocation of the foreground lease, not a component gesture.
+fn retire(extensions: &mut ExecutableExtensions, frontend: &mut Frontend) {
+    extensions.revoke_terminal_grant_for_shell(&mut frontend.shell, "test owner retired");
     assert!(extensions.remote_ui.is_empty());
 }
 
@@ -98,7 +94,7 @@ async fn remote_editor_wire_rescue_restores_acknowledged_draft_and_rejects_late_
     assert_eq!(delivered["params"]["editor_input"]["input_revision"], 2);
     // The extension has the next key but has deliberately NOT checkpointed it.
     // Rescue and subsequent native typing perform no await or replay.
-    rescue(&mut extensions, &mut frontend);
+    retire(&mut extensions, &mut frontend);
     assert_eq!(
         frontend.shell.extension_editor_snapshot().text,
         "acknowledged"
@@ -146,7 +142,7 @@ async fn remote_editor_replacement_cannot_inherit_a_retired_mount_checkpoint() {
         .remote_ui
         .checkpoint_editor(&owner, &old, "committed".into(), &mut frontend.shell)
         .unwrap();
-    rescue(&mut extensions, &mut frontend);
+    retire(&mut extensions, &mut frontend);
     assert!(!frontend
         .shell
         .debug_snapshot()
@@ -169,7 +165,7 @@ async fn remote_editor_replacement_cannot_inherit_a_retired_mount_checkpoint() {
         .remote_ui
         .checkpoint_editor(&owner, &new, "replacement".into(), &mut frontend.shell)
         .unwrap();
-    rescue(&mut extensions, &mut frontend);
+    retire(&mut extensions, &mut frontend);
     assert_eq!(
         frontend.shell.extension_editor_snapshot().text,
         "replacement"
@@ -245,7 +241,7 @@ async fn remote_editor_checkpoints_fence_owner_mount_revision_and_native_changes
         .remote_ui
         .checkpoint_editor(&owner, &next, "abc".into(), &mut frontend.shell,)
         .is_err());
-    rescue(&mut extensions, &mut frontend);
+    retire(&mut extensions, &mut frontend);
     assert_eq!(
         frontend.shell.extension_editor_snapshot().text,
         "new native draft"
@@ -267,6 +263,7 @@ async fn remote_editor_noop_and_release_checkpoints_are_not_lost_edit_claims() {
         assert!(extensions.route_remote_ui_event(
             &mut frontend.shell,
             &key(KeyCode::Left, kind, KeyModifiers::NONE),
+            false
         ));
     }
     let (owner, ack) = checkpoint(&extensions, 3, 1);
@@ -281,7 +278,7 @@ async fn remote_editor_noop_and_release_checkpoints_are_not_lost_edit_claims() {
         .remote_ui
         .checkpoint_editor(&owner, &timer, "timer edit".into(), &mut frontend.shell)
         .unwrap();
-    rescue(&mut extensions, &mut frontend);
+    retire(&mut extensions, &mut frontend);
     assert_eq!(
         frontend.shell.extension_editor_snapshot().text,
         "timer edit"
@@ -294,7 +291,7 @@ async fn remote_editor_noop_and_release_checkpoints_are_not_lost_edit_claims() {
 }
 
 #[tokio::test]
-async fn remote_editor_rescue_never_waits_for_an_unresponsive_extension() {
+async fn remote_editor_teardown_never_waits_for_an_unresponsive_extension() {
     let temp = tempfile::tempdir().unwrap();
     let (mut extensions, _) = fixture(&temp).await;
     let mut frontend = Frontend::new([]);
@@ -310,7 +307,7 @@ async fn remote_editor_rescue_never_waits_for_an_unresponsive_extension() {
     assert!(!temp.path().join("editor-release").exists());
     // No timeout, sleep, replay or extension response precedes restoration.
     // The extension cannot resume until this synchronous rescue returns.
-    rescue(&mut extensions, &mut frontend);
+    retire(&mut extensions, &mut frontend);
     assert_eq!(
         frontend.shell.extension_editor_snapshot().text,
         "untouched draft"
@@ -516,7 +513,7 @@ async fn remote_editor_real_queued_commit_couples_native_draft_and_exact_ack() {
             assert_eq!(after.revision, before.revision, "{mode}");
         }
         if !extensions.remote_ui.is_empty() {
-            rescue(&mut extensions, &mut frontend);
+            retire(&mut extensions, &mut frontend);
         }
         frontend.shell.extension_paste_editor("-native".into());
         let final_draft = frontend.shell.extension_editor_snapshot();
@@ -551,12 +548,13 @@ async fn remote_editor_revoke_reload_and_paste_disclose_unrecovered_input() {
         let mut frontend = Frontend::new([]);
         command(&mut extensions, &mut frontend, &["editor"]).await;
         input(&mut extensions, &mut frontend, 'a');
-        assert!(extensions
-            .route_remote_ui_event(&mut frontend.shell, &Event::Paste("not delivered".into())));
-        assert!(frontend
-            .shell
-            .debug_snapshot()
-            .contains("Paste was not delivered"));
+        assert!(extensions.route_remote_ui_event(
+            &mut frontend.shell,
+            &Event::Paste("not delivered".into()),
+            false
+        ));
+        assert_eq!(frontend.shell.pending(), "untouched draft"); // No checkpoint, no fabricated recovery.
+
         if reload {
             extensions.processes[0].reload().await.unwrap();
             extensions.drain_events_for_shell(&mut frontend.shell);
@@ -576,7 +574,7 @@ async fn remote_editor_revoke_reload_and_paste_disclose_unrecovered_input() {
         } else {
             frontend.shell.debug_snapshot()
         };
-        assert!(visible.contains("1 input events were not acknowledged"));
+        assert!(visible.contains("2 input events were not acknowledged"));
         frontend.shell.extension_paste_editor("-native".into());
         assert_eq!(
             frontend.shell.extension_editor_snapshot().text,
@@ -584,4 +582,55 @@ async fn remote_editor_revoke_reload_and_paste_disclose_unrecovered_input() {
         );
         extensions.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn remote_editor_host_clear_is_one_shot_and_never_grants_panel_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    command(&mut extensions, &mut frontend, &["editor", "same"]).await;
+    input(&mut extensions, &mut frontend, 'a');
+    let (owner, checkpoint) = checkpoint(&extensions, 1, 1);
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &checkpoint, "draft".into(), &mut frontend.shell)
+        .unwrap();
+    // The host admitted the draft and cleared the slot. The component answers
+    // the exact clear while a panel owns input.
+    let mount = extensions.remote_ui.mounts[0].view.clone();
+    frontend.shell.clear_editor();
+    extensions.remote_ui.deliver_editor_text(
+        &crate::tui::view::ComposerSlotWrite {
+            surface_id: mount.surface_id,
+            mount_id: mount.id,
+            text: None,
+            paste: false,
+        },
+        &mut frontend.shell,
+    );
+    frontend.shell.show_overlay_text("Host panel".into());
+    let mut clear = checkpoint.clone();
+    clear.checkpoint_revision += 1;
+    assert!(
+        extensions
+            .remote_ui
+            .checkpoint_editor(&owner, &clear, "overwrite".into(), &mut frontend.shell)
+            .is_err(),
+        "a host clear grants only a clear"
+    );
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &clear, String::new(), &mut frontend.shell)
+        .unwrap();
+    assert_eq!(frontend.shell.extension_editor_snapshot().text, "");
+    clear.checkpoint_revision += 1;
+    assert!(
+        extensions
+            .remote_ui
+            .checkpoint_editor(&owner, &clear, String::new(), &mut frontend.shell)
+            .is_err(),
+        "clear permission is one-shot"
+    );
+    extensions.shutdown().await;
 }

@@ -31,6 +31,7 @@ mod idle_shell_and_clipboard_tests;
 mod pi_baseline_contract_tests;
 mod pi_busy_controls_tests;
 mod pi_completion_tests;
+mod pi_composer_slot_tests;
 mod pi_context_contract_tests;
 mod pi_contract_support;
 mod pi_exec_contract_tests;

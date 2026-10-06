@@ -175,6 +175,27 @@ verify the exact returned revision pair, and publish a captured editor frame onl
 render newer text after awaiting an older checkpoint. Frame publication or
 painting alone does not establish a recovery checkpoint.
 
+### Native composer admission
+
+An editor occupies only the composer slot. Octet's terminal owner reserves
+submit/follow-up, clear, close, application bindings and its slash popup before
+routing ordinary editing keys to the component. There is no `composer/submit`
+reverse RPC and no custom-editor `session/send_user_message` submission path.
+Native admission reads the last acknowledged, expanded composer draft, parses
+slash commands through the same registry, steers busy Enter, and queues Ctrl+S
+follow-up. Refusal leaves the component's draft/pastes/undo untouched.
+If issued input is still unacknowledged, draft-sensitive host actions wait for its
+completed checkpoint. Later keys/pastes keep their order in a mount-bound buffer
+of at most 128 events and 256 KiB paste bytes; overflow is reported without
+admitting that event. Clear, cancel and close bypass the wait. Retirement drops
+the buffer; an explicit fullscreen view never receives buffered composer events.
+
+An accepted submission clears the native draft and sends a `ui/editor-text`
+replacement to the component. Completion and restored drafts use the same seam.
+The answering checkpoint is an ordinary, exact-pair `composer/set` receipt;
+only the acknowledged empty clear may answer while a command's panel owns focus.
+That receipt does not grant general panel writes.
+
 ### `composer/history` — native prompt-history seed
 
 With negotiated `composer`, an owner-scoped request may seed older native prompts:
@@ -192,9 +213,9 @@ retains the latest 100 prompts. The current draft, history navigation and native
 attachment payloads are preserved. This seed is UI-only, not session persistence
 or model context.
 
-The Pi adapter applies settings-only standard editors to this native composer
-instead of mounting a remote editor, keeping native slash completion available.
-Editors overriding inherited editor behavior still use the remote mount contract.
+Pi factories are invoked exactly once on the admitted component surface. Both
+settings-only and input/render-overriding editors occupy the composer slot;
+the native slash popup remains available around their projected rows.
 
 ## Host-to-extension notifications
 
@@ -206,6 +227,12 @@ Editors overriding inherited editor behavior still use the remote mount contract
   by open; the host issues a monotonically increasing revision starting at one
   before enqueueing each key. Press, repeat, and release all participate.
   Non-editor keys omit `editor_input`.
+- `ui/editor-text`: `{surface_id, text, paste, editor_input?}`. A bounded native
+  replacement/clear has `paste:false`; a paste has `paste:true` and the same
+  host-issued mount/input fence as a key. Paste enters the component at its
+  actual caret through bracketed-paste handling, preserving undo and payloads.
+  An unchanged replacement is an echo, not a reset. Reply with a newer ordinary
+  checkpoint before publishing the changed draft frame.
 - `ui/mouse`: `{surface_id, kind, button, x, y, modifiers, wheel_delta}`. Kinds:
   `press`, `release`, `drag`, `move`, `wheel`; buttons: `left`, `middle`, `right`,
   `none`. Coordinates are zero-based terminal cells. Positive wheel delta is
@@ -221,15 +248,18 @@ Editors overriding inherited editor behavior still use the remote mount contract
 
 Focused component keys/mouse gestures do not also edit the composer or reach
 ordinary terminal-input observers. Host confirmation/input panels retain
-priority. `Ctrl+G` is host rescue; `Ctrl+D` remains coordinated application close.
-`Escape` belongs to the focused component, so Doom can open its own menu.
+priority. `Ctrl+G` rescues only an explicit fullscreen view; it never unmounts
+an editor or its footer. `Ctrl+D` remains coordinated application close.
+`Escape` belongs to a fullscreen component, so Doom can open its own menu;
+in the composer, native application and popup bindings remain authoritative.
 
 ## Pre-native input interception
 
 `terminal_input_intercept_v1` is an optional API `0.4` feature offered only with
 `remote_ui` and a bound frontend. A frontend that negotiates it asks each
-intercepting extension about one input event **before** native handling, so a Pi
-extension's `onTerminalInput` listeners see the keystrokes the terminal produced:
+intercepting extension about one editor input event after the host-reserved grammar
+and open native slash popup, but **before** the slot editor. A Pi extension's
+`onTerminalInput` listeners see the spelling the terminal produced:
 
 ```json
 {"jsonrpc":"2.0","id":"input-1","method":"ui/terminal-input/intercept",
@@ -255,8 +285,12 @@ input events:
   the budget expires, so an unresponsive extension cannot freeze typing. It may
   then stop asking that process until reload, and it reports one bounded
   diagnostic. Throwing handlers are reported without losing their subscription.
-- The host's own rescue keys (`Ctrl+G`) and coordinated shutdown (`Ctrl+D`) never
-  enter this lane: host authority over rescue and exit is not delegated.
+- Native reserved actions (including submit, busy steering, follow-up, clear,
+  close and live user keybinding overrides), open slash-menu keys and an active
+  native transcript-search query bypass the lane. The stream consults the same
+  read-only host policy as the composer slot; it does not dispatch native actions.
+  `Ctrl+G` bypasses consumers only as fullscreen rescue; in the composer it remains
+  ordinary consumer/editor input. `Ctrl+D` always remains coordinated shutdown.
 - Only the raw spelling of decoded input is offered. Host-derived events (resize,
   focus, terminal replies, Tern protocol input) have no terminal bytes and stay
   out of the lane. Unix input is decoded by octet's single byte decoder, so the
@@ -276,7 +310,7 @@ never rendering, resizing or shutdown.
 
 ## Immediate rescue and recovery limits
 
-`Ctrl+G` retires the focused mount immediately, without waiting for a final
+`Ctrl+G` retires the focused **fullscreen** mount immediately, without waiting for a final
 checkpoint, extension response, or grace period. An unresponsive extension cannot
 hold the native composer hostage. Close, crash, reload, session replacement, and
 shutdown also discard stale mounts. Editor recovery reveals the host's last
@@ -290,8 +324,8 @@ If issued input remains unacknowledged, the host reports:
 
 `N` counts events, not lost characters: an unfinished event may be a no-op or a
 release. The host does not pretend those edits were recovered and does not replay
-raw keys. Unsupported terminal paste while an editor is mounted is explicitly
-reported rather than silently applied to the hidden native composer. On voluntary
+raw keys. Terminal/clipboard paste is fenced component input, never a silent
+write into a hidden native draft. On voluntary
 close, an extension may await accepted work before requesting `ui/close`; observed
 host rescue must instead stop queued effects and frame publication immediately.
 

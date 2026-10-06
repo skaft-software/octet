@@ -20,8 +20,20 @@ impl ExecutableExtensions {
         &mut self,
         catalog: &ModelCatalog,
         scope: Option<&[crate::cli::parity::ScopedModel]>,
+        current_model: &Model,
     ) {
         let mut available = Vec::new();
+        let mut model_auth = serde_json::Map::new();
+        let mut record_auth = |model: &Model| {
+            if let (Some(using_oauth), Some(view)) = (
+                model.endpoint.auth.is_oauth(),
+                self.provider_runtime.pi_model_view(model),
+            ) {
+                let key = serde_json::to_string(&[&view.provider, &view.id])
+                    .expect("model identity is JSON text");
+                model_auth.insert(key, serde_json::json!({"using_oauth": using_oauth}));
+            }
+        };
         let mut available_representable = true;
         for spec in catalog.models() {
             let model = match catalog.resolve(&spec.id) {
@@ -38,6 +50,7 @@ impl ExecutableExtensions {
                 available_representable = false;
                 break;
             };
+            record_auth(&model);
             available.push(view);
         }
         let mut scoped = Vec::new();
@@ -73,7 +86,10 @@ impl ExecutableExtensions {
             }
             scoped.push(value);
         }
-        let mut snapshot = serde_json::json!({});
+        // The selected native route may not belong to the credential-scoped
+        // catalog (for example a host-owned scripted provider).
+        record_auth(current_model);
+        let mut snapshot = serde_json::json!({"model_auth": model_auth});
         if available_representable {
             snapshot["available_models"] = serde_json::json!(available);
         }

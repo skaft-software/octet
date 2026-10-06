@@ -463,23 +463,10 @@ pub fn translate_with_bindings(
             }
             let follow_up = matches("app.message.followUp");
             let submit = matches("tui.input.submit");
-            // Explicit skill invocations are prompts, not local commands.
-            // During a run they must wait for idle prompt preparation to
-            // expand and validate the skill before the agent sees its text.
-            if press && (submit || follow_up) && editor_text.starts_with("/skill:") {
-                return if active {
-                    InputAction::Queue(editor_text.to_owned())
-                } else {
-                    InputAction::Submit(editor_text.to_owned())
-                };
-            }
-            if press
-                && (submit || follow_up)
-                && editor_text.starts_with('/')
-                && !editor_text.starts_with("/skill:")
-                && !crate::tui::composer::looks_like_absolute_path(editor_text)
-            {
-                return InputAction::Command(editor_text.to_owned());
+            // Empty drafts keep their existing fall-through (for example a
+            // user-bound Shift+Enter newline), exactly as before.
+            if press && (submit || follow_up) && !editor_text.is_empty() {
+                return composer_action(editor_text, active, follow_up);
             }
             if matches("tui.input.tab") && press {
                 if slash_command {
@@ -507,24 +494,6 @@ pub fn translate_with_bindings(
             ] {
                 if press && matches(id) {
                     return InputAction::Command(command.to_owned());
-                }
-            }
-            if press && !editor_text.is_empty() {
-                // The explicit, overrideable Pi follow-up binding keeps its
-                // after-run queue. Ordinary submit uses live steering instead.
-                if follow_up {
-                    return if active {
-                        InputAction::Queue(editor_text.to_owned())
-                    } else {
-                        InputAction::Submit(editor_text.to_owned())
-                    };
-                }
-                if submit {
-                    return if active {
-                        InputAction::Steer(editor_text.to_owned())
-                    } else {
-                        InputAction::Submit(editor_text.to_owned())
-                    };
                 }
             }
             if matches("tui.input.newLine") {
@@ -671,6 +640,24 @@ pub fn encode(key: &KeyEvent) -> String {
             format!("\x1b[{code}~")
         }
         _ => String::new(),
+    }
+}
+
+/// Classify the native composer's completed draft for both slot editors.
+/// Whitespace-only drafts are not admitted and leave the editor unchanged.
+pub(crate) fn composer_action(text: &str, active: bool, follow_up: bool) -> InputAction {
+    if text.trim().is_empty() {
+        return InputAction::Ignore;
+    }
+    let skill = text.starts_with("/skill:");
+    if text.starts_with('/') && !skill && !crate::tui::composer::looks_like_absolute_path(text) {
+        InputAction::Command(text.to_owned())
+    } else if !active {
+        InputAction::Submit(text.to_owned())
+    } else if follow_up || skill {
+        InputAction::Queue(text.to_owned())
+    } else {
+        InputAction::Steer(text.to_owned())
     }
 }
 

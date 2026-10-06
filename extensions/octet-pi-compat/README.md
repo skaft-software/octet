@@ -118,7 +118,7 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   `pi.events[channel]`, a later event field) without the callback failing.
   Assigning such a member is refused, because it would silently shadow the API.
   Members Pi 1.0.2 has but Octet deliberately does not honor stay explicit
-  refusing functions (`ctx.abort`, `ctx.shutdown`, `ctx.ui.onTerminalInput`,
+  refusing functions (`ctx.abort`, `ctx.shutdown`,
   `pi.events.clear`, the unemulated provider/session factories), so an
   unsupported *operation* still fails loudly. Octet-built data objects (observed
   assistant messages and their usage, native receipts, stream options) keep the
@@ -194,15 +194,16 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   synchronous durable receipt (see below). Raw assistant/system message injection
   remains unsupported; custom transcript presentation has its own negotiated gate
   described below.
-- `ctx.ui.onTerminalInput` registers a real pre-native listener: the host asks
-the adapter before native handling, listeners run synchronously in registration
+- `ctx.ui.onTerminalInput` registers a real pre-editor listener: after native
+reserved actions and the open slash popup, listeners run synchronously in registration
 order over the raw terminal spelling, and a listener can consume input
 (`{consume:true}`, including an empty replacement) or replace it (`{data}`).
 The whole chain is bounded to 50 ms per event; a listener that does not answer
 is latched off (with one bounded diagnostic) and that event is delivered
 unchanged, so a stuck factory cannot freeze typing. A listener that throws is
 reported once and keeps its subscription, and the original input still reaches
-the host. Ctrl+G/Ctrl+D stay host-owned, and input beyond the existing
+the host. Ctrl+G is reserved only for explicit fullscreen rescue, Ctrl+D stays
+host-owned, an active native search query bypasses listeners, and input beyond the existing
 256-byte wire bound bypasses the chain. See
 [`docs/pi-extension-api.md`](../../docs/pi-extension-api.md) row 23 for the
 deliberate differences from Pi's unbounded, blocking chain.
@@ -210,7 +211,9 @@ deliberate differences from Pi's unbounded, blocking chain.
   input listeners and overlay composition. Custom factories receive a read-only
   snapshot of the actual native keybindings, including user overrides and reloads;
   missing snapshots/actions refuse rather than inventing Pi defaults. Host Ctrl+D
-  and Ctrl+G remain reserved. JS components, callbacks and timers stay live in this process. Only printable text and bounded safe SGR snapshots
+  and fullscreen Ctrl+G rescue remain reserved. Editor components occupy only the
+  composer slot; native chrome and slash discovery stay visible. JS components,
+  callbacks and timers stay live in this process. Only printable text and bounded safe SGR snapshots
   cross the wire; Rust paints cached lines and never calls JS synchronously.
 - `setStatus` is local footer-provider metadata, not an assertion that every
   frontend displays ambient chrome. The compatibility palette is local, not a
@@ -564,9 +567,11 @@ owner replacement, cancellation, EOF and shutdown dispose components and revoke
 their timers; Rust remains the restoration authority.
 
 Presses reconstruct legacy raw keys; modifiers/repeats/releases reconstruct Kitty
-sequences (including original Doom's `wantsKeyRelease`). Ctrl+G and Ctrl+D remain
-host-reserved; `onTerminalInput` listeners never see those two keystrokes and a
-listener that returns immediately does not observe a protocol reply as input.
+sequences (including original Doom's `wantsKeyRelease`). Native reserved actions,
+open slash-menu keys and native search-query input bypass `onTerminalInput`.
+Ctrl+G stays host-reserved only for fullscreen rescue; in a composer slot it is
+ordinary consumer/editor input. Ctrl+D is always host-owned. A listener never
+observes a protocol reply as input.
 `ui/mouse` reconstructs SGR mouse input. The original drawing
 extension's exact known `1000/1002/1006` enable/disable writes are interpreted
 **only as capture intent** before `ui/open {mouse_capture:true}`; no raw escape is
@@ -658,13 +663,15 @@ resize, close and terminal restoration without follow-up input. Original `/draw`
 acceptance remains historical; these are observed working-tree binaries, not a
 frozen release candidate.
 
-The unchanged original rainbow editor now passes both paced input (with a grace
+Before the composer-slot change, the unchanged original rainbow editor passed
+both paced input (with a grace
 period) and strict `--burst` input (without one) on a freshly built native CLI.
 Both probes verify the host mount acknowledgement, matching Ctrl+G retirement,
 a complete native editable draft in a newer frame, a later native edit, resize
 and shutdown/terminal restoration. This closes the original immediate-rescue
 draft-loss regression, not arbitrary-editor or full Pi parity. Historical red
-burst evidence remains intact; it is not the result for this candidate.
+burst evidence remains intact. Those retirement probes do not qualify the current
+composer-slot contract, where Ctrl+G must retain the editor.
 
 The checkpoint protocol intentionally refuses historical hosts without mount/input
 fences. Recovery still exposes the last host-committed draft, not a promise that
@@ -673,11 +680,10 @@ edits. Startup/Pi runtime performance parity and Doom aspect ratio are not
 established by these editor probes.
 
 ```sh
-python3 extensions/octet-pi-compat/test/native-editor.py /absolute/octet \
-  --editor /absolute/reviewed/rainbow-editor.ts
-# Strict regression probe: rescue immediately after a complete burst-input frame.
-python3 extensions/octet-pi-compat/test/native-editor.py /absolute/octet \
-  --editor /absolute/reviewed/rainbow-editor.ts --burst
+# Current composer-slot contract: native chrome/slash popup and Ctrl+G retention.
+python3 scripts/test-pi-composer-slot.py /absolute/octet \
+  --footer /absolute/reviewed/powerline-footer/index.ts \
+  --editor /absolute/reviewed/custom-editor.ts --output /absolute/private-evidence
 # Optional offline comparison against source-extracted pure Pi 1.0.2 functions:
 PI_REFERENCE_REPO=/absolute/reviewed/pi-checkout \
   node --test extensions/octet-pi-compat/test/context.test.mjs

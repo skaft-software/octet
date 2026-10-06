@@ -621,13 +621,17 @@ where
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
                 return Ok(Idle::Quit);
             }
-            maybe = input.next() => {
+            maybe = async {
+                if let Some(event) = executable_extensions.take_ready_composer_event(shell) {
+                    Some(Ok(event))
+                } else { input.next().await }
+            } => {
                 let event = match maybe {
                     Some(Ok(event)) => event,
                     Some(Err(error)) => return Err(error.into()),
                     None => return Ok(Idle::Quit),
                 };
-                if executable_extensions.route_remote_ui_event(shell, &event) {
+                if executable_extensions.route_remote_ui_event(shell, &event, false) {
                     continue;
                 }
                 // Search owns its query before any extension or clipboard
@@ -1246,7 +1250,7 @@ where
             event = input.next(), if input_open => match event {
                 Some(Ok(event)) => {
                     if extensions.as_deref_mut().is_some_and(|extensions| {
-                        extensions.route_remote_ui_event(shell, &event)
+                        extensions.route_remote_ui_event(shell, &event, false)
                     }) {
                         continue;
                     }
@@ -1488,7 +1492,9 @@ async fn paste_clipboard_text(shell: &mut InteractiveShell, event: &Event) -> bo
     let Some(text) = clipboard_read::read_text().await else {
         return false;
     };
-    shell.apply_edit(crate::tui::keymap::EditAction::Paste(text));
+    if !shell.paste_composer_slot(text.clone()) {
+        shell.apply_edit(crate::tui::keymap::EditAction::Paste(text));
+    }
     shell.render();
     true
 }
@@ -1509,7 +1515,9 @@ fn settle_active_clipboard_read(
         return None;
     }
     if let Some(text) = text {
-        shell.apply_edit(crate::tui::keymap::EditAction::Paste(text));
+        if !shell.paste_composer_slot(text.clone()) {
+            shell.apply_edit(crate::tui::keymap::EditAction::Paste(text));
+        }
         shell.render();
         None
     } else {
@@ -3869,6 +3877,8 @@ where
             incoming = async {
                 if let Some(event) = clipboard_fallback.take() {
                     (Some(Ok(event)), true)
+                } else if let Some(event) = executable_extensions.take_ready_composer_event(shell) {
+                    (Some(Ok(event)), false)
                 } else {
                     (input.next().await, false)
                 }
@@ -3896,7 +3906,7 @@ where
                         continue;
                     }
                 };
-                if !clipboard_replay && executable_extensions.route_remote_ui_event(shell, &event) {
+                if !clipboard_replay && executable_extensions.route_remote_ui_event(shell, &event, true) {
                     continue;
                 }
                 if clipboard_replay {
@@ -4768,8 +4778,11 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
         &app.reasoning,
         &app.sessions,
     );
-    app.executable_extensions
-        .refresh_pi_model_catalog(&app.catalog, app.model_scope.as_deref());
+    app.executable_extensions.refresh_pi_model_catalog(
+        &app.catalog,
+        app.model_scope.as_deref(),
+        &app.model,
+    );
     for message in app.executable_extensions.drain_events_for_shell(shell) {
         shell.notice(message);
     }
@@ -6532,14 +6545,21 @@ where
 {
     Box::pin(async move {
         // Never reroute a queued invocation after reload/session replacement.
-        if app.executable_extensions.command_owner(&name).as_deref() != Some(owner.as_str())
-            || !native_slash_command_suggestions(&app.executable_extensions)
-                .iter()
-                .any(|(command, _)| command == &name)
-        {
+        // A collision name is public only: the extension still receives the
+        // command it registered.
+        let Some(registered) = app
+            .executable_extensions
+            .registered_command_name(&owner, &name)
+            .filter(|_| {
+                app.executable_extensions.command_owner(&name).as_deref() == Some(owner.as_str())
+                    && native_slash_command_suggestions(&app.executable_extensions)
+                        .iter()
+                        .any(|(command, _)| command == &name)
+            })
+        else {
             shell.error(format!("/{name} is unavailable; see /extensions status"));
             return Ok(());
-        }
+        };
         let dialogs = app.executable_extensions.lifecycle_snapshot();
         let result = {
             let mut confirmations = InteractiveExtensionConfirmations {
@@ -6551,7 +6571,7 @@ where
                 app,
                 &mut confirmations,
                 Some(&owner),
-                &name,
+                &registered,
                 arguments,
                 true,
                 0,

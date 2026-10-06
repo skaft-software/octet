@@ -520,3 +520,29 @@ async fn api_key_override_replaces_env_and_refuses_other_schemes() {
         ));
     }
 }
+
+#[test]
+fn oauth_provenance_is_secret_free_and_unknown_for_unclassified_resolvers() {
+    struct OAuthResolver;
+    #[async_trait::async_trait]
+    impl CredentialResolver for OAuthResolver {
+        fn is_oauth(&self) -> Option<bool> {
+            Some(true)
+        }
+        async fn resolve(&self) -> Result<ResolvedCredential, AuthError> {
+            panic!("metadata must not resolve credentials")
+        }
+    }
+    assert_eq!(Auth::none().is_oauth(), Some(false));
+    assert_eq!(Auth::bearer("private-key").is_oauth(), Some(false));
+    assert_eq!(
+        Auth::dynamic(Arc::new(OAuthResolver)).is_oauth(),
+        Some(true)
+    );
+    let unknown = Auth::dynamic(Arc::new(FakeResolver {
+        value: "private-key".into(),
+        extra: http::HeaderMap::new(),
+        fail: true,
+    }));
+    assert_eq!(unknown.is_oauth(), None);
+}

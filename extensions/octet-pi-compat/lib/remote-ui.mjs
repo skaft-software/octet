@@ -249,15 +249,29 @@ export class RemoteUI {
   }
   async bindEditor(surface) {
     const c = surface.component, store = surface.store;
-    this.runtime.require('composer'); this.runtime.require('message_injection');
+    this.runtime.require('composer');
     if (typeof c.setText !== 'function' || typeof c.getText !== 'function') unsupported('editor component', 'requires getText/setText');
     const { text } = await this.runtime.hostCall('composer/get', {}, store);
     if (surface.closed) return;
     store.state.host.composer_text = text; c.setText(text);
-    if (this.runtime.features.has('autocomplete')) c.setAutocompleteProvider?.(getAutocompleteProvider(this.runtime, store));
-    const change = c.onChange, submit = c.onSubmit;
+    if (this.runtime.features.has('autocomplete')) {
+      // Octet's slash popup is the one command registry for the composer slot:
+      // native, Octet-extension and Pi commands. Pi's own top-level list would
+      // be a second popup beside it. Argument, attachment and extension
+      // completions still come from the Pi provider.
+      const provider = getAutocompleteProvider(this.runtime, store);
+      c.setAutocompleteProvider?.({
+        ...provider,
+        getSuggestions(lines, cursorLine, cursorCol, options) {
+          const line = String(lines?.[cursorLine] ?? '').slice(0, cursorCol).trimStart();
+          if (line.startsWith('/') && !line.includes(' ')) return null;
+          return provider.getSuggestions(lines, cursorLine, cursorCol, options);
+        },
+      });
+    }
+    const change = c.onChange;
     const editor = surface.editor = { pending: 0, mutating: 0, inputRevision: 0, checkpointRevision: 0,
-      retired: false, tail: Promise.resolve(), submissions: null };
+      retired: false, tail: Promise.resolve(), changeRevision: 0 };
     const ordered = action => {
       if (editor.pending >= 128) throw rpcError(-32012, 'bounds_exceeded editor update queue');
       editor.pending++;
@@ -273,7 +287,7 @@ export class RemoteUI {
     };
     editor.checkpoint = () => {
       if (surface.closed) throw rpcError(-32002, 'editor mount retired');
-      const text = bounded(c.getText(), 'editor draft', 262144);
+      const text = bounded(c.getExpandedText?.() ?? c.getText(), 'editor draft', 262144);
       const checkpoint = { surface_id: surface.id, mount_id: surface.mountId,
         input_revision: editor.inputRevision, checkpoint_revision: ++editor.checkpointRevision };
       if (!Number.isSafeInteger(checkpoint.checkpoint_revision)) invalid('editor checkpoint revision exhausted');
@@ -286,27 +300,14 @@ export class RemoteUI {
         }
       });
     };
+    // The host owns submit, follow-up, clear and close for the composer slot;
+    // the component answers host text decisions with checkpoints only.
     c.onChange = value => {
       if (surface.closed) return;
       store.state.host.composer_text = value;
+      editor.changeRevision++;
       if (!editor.mutating) editor.checkpoint();
       change?.(value);
-    };
-    c.onAction?.('app.clear', () => c.setText(''));
-    c.onSubmit = value => {
-      if (surface.closed) return;
-      const send = () => ordered(async () => {
-        await this.runtime.hostCall('session/send_user_message', { text: value }, store);
-        // A callback observes host admission, never an optimistic send. It must
-        // not run after rescue/disposal, even if a late admission arrives.
-        if (surface.closed) return;
-        this.runtime.assertOwner(store);
-        return this.runtime.scope.run(store, () => submit?.(value));
-      });
-      if (editor.submissions) {
-        if (editor.submissions.length >= 128) throw rpcError(-32012, 'bounds_exceeded editor submissions');
-        editor.submissions.push(send);
-      } else { editor.checkpoint(); send(); }
     };
     // Custom setText may normalize the native seed before its first frame.
     if (c.getText() !== text) await editor.checkpoint();
@@ -350,26 +351,32 @@ export class RemoteUI {
         return;
       }
       editor.mutating++;
-      editor.submissions = [];
       try { surface.tui.input(data, params.kind === 'release'); } finally { editor.mutating--; }
       if (!surface.closed) {
         // Intermediate onChange calls cannot acknowledge an unfinished input.
         editor.inputRevision = issued.input_revision;
         editor.checkpoint(); // Includes cursor, consumed, no-op and release events.
-        for (const send of editor.submissions) send();
         surface.requestRender();
       }
     } catch (error) {
       this.close(surface).catch(e => this.runtime.backgroundError(e));
       throw error;
-    } finally { if (editor) editor.submissions = null; }
+    }
   }
   async push(surface) {
     if (surface.closed) return;
     // Painting a frame is presentation only: it never waits on session-view
     // readiness or a publication barrier, which would delay frames under load.
     const columns = surface.columns, rows = surface.rows;
-    const lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns));
+    let lines;
+    try { lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns)); }
+    catch (error) {
+      // History-reading components cannot render a missing publication as an
+      // empty session. Retain their last frame without blocking native paint or
+      // retiring the mount; successful preparation requests another render.
+      if (error?.code === -32002 && error.message === 'session view unavailable') return;
+      throw error;
+    }
     // Capture lines and this exact barrier in the same synchronous turn. Never
     // render newer text after waiting on an older checkpoint acknowledgement.
     const checkpoint = surface.editor?.tail;
@@ -436,10 +443,32 @@ export class RemoteUI {
         surface.columns = dimension(params.columns); surface.rows = dimension(params.rows);
         surface.tui.invalidate(); surface.requestRender();
       } else if (method === 'ui/key') {
-        if (!reservedKey(params)) {
+        if (!reservedKey(params, surface.placement)) {
           if (surface.placement === 'editor') this.editorInput(surface, params);
           else surface.tui.input(keyData(params), params.kind === 'release');
         }
+      } else if (method === 'ui/editor-text') {
+        if (surface.placement !== 'editor') invalid('ui/editor-text without an editor mount');
+        const editor = surface.editor;
+        if (!editor || surface.closed) return;
+        const text = bounded(params.text, 'editor text', 262144);
+        // The genuine component keeps pastes and undo: the host decision is a
+        // replacement, not a rebuild of local editor state.
+        editor.mutating++;
+        try { this.runtime.scope.run(surface.store, () => {
+          // A refused native admission re-offers the unchanged draft. Do not
+          // reset the component's paste ledger, cursor or undo for that echo.
+          if (params.paste) {
+            const issued = params.editor_input;
+            fields(issued, ['mount_id', 'input_revision'], 'editor_input');
+            if (issued.mount_id !== surface.mountId || issued.input_revision !== editor.inputRevision + 1) invalid('editor paste mount/revision mismatch');
+            surface.component.handleInput('\x1b[200~' + text + '\x1b[201~');
+            editor.inputRevision = issued.input_revision;
+          } else if ((surface.component.getExpandedText?.() ?? surface.component.getText()) !== text) surface.component.setText(text);
+        }); }
+        finally { editor.mutating--; }
+        editor.checkpoint();
+        surface.requestRender();
       } else if (method === 'ui/mouse') {
         if (!surface.ready) return; // No component input before capture admission.
         if (!surface.admittedMouseCapture) invalid('ui/mouse without capture');
