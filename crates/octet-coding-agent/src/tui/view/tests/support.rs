@@ -186,6 +186,8 @@ pub(super) fn emulated_shell_with_mode(
             remote_keyboard_events: false,
             terminal_ceded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             runtime_config: None,
+            base_user_bindings: std::collections::BTreeMap::new(),
+            session_keybindings: std::collections::BTreeMap::new(),
             theme_preview: None,
             extension_themes: RefCell::new(None),
             herdr: crate::herdr::PaneReporter::disabled(),

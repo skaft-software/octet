@@ -9,6 +9,7 @@ import { hookEvents } from './lib/api.mjs';
 import { BUILTIN_TOOL_NAMES } from './lib/tools.mjs';
 import { locateInstalledPi } from './lib/installed-pi.mjs';
 import { PI_VERSION } from './lib/pi-modules.mjs';
+import { discoverPiSetup } from './lib/pi-setup.mjs';
 import { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } from './lib/theme-import.mjs';
 
 // Importing a factory executes arbitrary user code. Never perform implicit
@@ -96,6 +97,53 @@ export function configure({ output, extensions, reviewed, overwrite = false, rou
   writeFileSync(join(output, 'bridge.json'), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   writeFileSync(join(output, 'extension.toml'), manifest, { mode: 0o600 });
   return { output, registrations };
+}
+
+// Mirror mode: one reviewed `--from-pi --mirror` opt-in. The generated bridge
+// carries no frozen entrypoint list, entrypoint hashes or registration catalog;
+// the adapter rediscovers this machine's Pi setup at startup and reports the
+// actual catalogs through the host's dynamic-negotiation features. Nothing here
+// writes the Pi setup, the octet configuration or the extension list.
+const providerWireHooks = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']);
+export const MIRROR_SUBSCRIBED_HOOKS = Object.freeze([...new Set(Object.values(hookEvents))]
+  .filter(hook => !providerWireHooks.has(hook)).sort());
+
+export function configureMirror({ output, reviewed, overwrite = false, cwd = process.cwd(), env = process.env, log = console.log }) {
+  if (!reviewed) throw new Error('Mirroring your Pi setup runs its enabled factories with your permissions; pass --reviewed to accept');
+  output = resolve(output);
+  if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
+  for (const name of ['extension.toml', 'bridge.json']) if (!overwrite && existsSync(join(output, name))) throw new Error(`${name} exists; use --overwrite after reviewing the changed mirror`);
+  checkThemeImportOutput(output, overwrite);
+  const agentDir = resolve(env.OCTET_PI_AGENT_DIR || env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'));
+  const setup = discoverPiSetup({ agentDir, env, cwd });
+  const config = {
+    mirror_pi_setup: true,
+    pi_agent_dir: agentDir,
+    extensions: [],
+    subscribed_hooks: MIRROR_SUBSCRIBED_HOOKS,
+  };
+  const runner = join(root, 'runner.mjs');
+  const quoted = value => JSON.stringify(value);
+  const list = values => `[${values.map(quoted).join(', ')}]`;
+  const manifest = [
+    'name = "octet-pi-compat"', 'version = "0.1.0"', 'api_version = "0.4"',
+    'description = "Reviewed Pi setup mirror; Rust owns the agent and terminal"', '',
+    '[entrypoint]', `command = ${quoted(realpathSync(process.execPath))}`,
+    `args = ${list([runner, '--config', join(output, 'bridge.json')])}`, '',
+    '# The enabled Pi setup factories run with normal OS authority. Declarations are consent metadata, not a sandbox.',
+    '[capabilities]', 'filesystem = "unrestricted"', 'process = true', 'network = true',
+    'system_prompt = true', '',
+    '[contributes]', 'tools = []', 'commands = []',
+    `hooks = ${list(MIRROR_SUBSCRIBED_HOOKS)}`, 'tool_renderers = []',
+    'notifications = true', 'confirmations = true', 'providers = true', '',
+  ].join('\n');
+  mkdirSync(output, { recursive: true, mode: 0o700 });
+  writeFileSync(join(output, 'bridge.json'), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  writeFileSync(join(output, 'extension.toml'), manifest, { mode: 0o600 });
+  for (const message of setup.diagnostics.slice(0, 32)) log(`  ${message}`);
+  log(`  Mirrored Pi setup at ${agentDir}: ${setup.extensions.length} extensions, ${setup.skillsPaths.length} skill paths, ${setup.promptsPaths.length} prompt paths, ${setup.themesPaths.length} theme paths`);
+  log(`  Selected palette: ${setup.defaultTheme ?? 'none'}; keybindings: ${setup.keybindingsPath ? 'yes' : 'no'}; model: ${setup.defaultModel ? `${setup.defaultModel.provider}/${setup.defaultModel.model}` : 'none'}`);
+  return { output, setup, config };
 }
 // The user's enabled Pi extensions, resolved by the installed Pi 1.0.2's own
 // package manager exactly as Pi would load them. Read-only: settings are
@@ -191,7 +239,10 @@ const label = entry => {
 };
 
 // One step from an installed Pi 1.0.2 setup to a configured bridge.
-export async function configureFromPi({ output, reviewed, overwrite = false, cwd = process.cwd(), env = process.env, log = console.log }) {
+export async function configureFromPi({ output, reviewed, overwrite = false, cwd = process.cwd(), env = process.env, log = console.log, mirror = false }) {
+  // Mirror mode records the reviewed opt-in instead of freezing a capture: the
+  // adapter rediscovers this machine's Pi setup at startup.
+  if (mirror) return configureMirror({ output, reviewed, overwrite, cwd, env, log });
   if (!reviewed) throw new Error('Loading your Pi extensions runs their code with your permissions, as in Pi; pass --reviewed to accept');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
@@ -233,18 +284,21 @@ export async function configureFromPi({ output, reviewed, overwrite = false, cwd
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const args = process.argv.slice(2), extensions = []; let output, reviewed = false, overwrite = false, fromPi = false;
+    const args = process.argv.slice(2), extensions = []; let output, reviewed = false, overwrite = false, fromPi = false, mirror = false;
     for (let i = 0; i < args.length; i++) {
       if (args[i] === '--output') output = args[++i];
       else if (args[i] === '--reviewed') reviewed = true;
       else if (args[i] === '--overwrite') overwrite = true;
       else if (args[i] === '--from-pi') fromPi = true;
+      else if (args[i] === '--mirror') mirror = true;
       else if (args[i].startsWith('-')) throw new Error(`unknown configure option ${args[i]}`);
       else extensions.push(args[i]);
     }
-    if (!output) throw new Error('Usage: node configure.mjs --reviewed --output /absolute/extensions/octet-pi-compat (--from-pi | <entry.ts>...)');
+    if (!output) throw new Error('Usage: node configure.mjs --reviewed --output /absolute/extensions/octet-pi-compat (--from-pi [--mirror] | <entry.ts>...)');
     if (fromPi && extensions.length) throw new Error('--from-pi reads your Pi setup; do not also list entrypoints');
-    const result = fromPi ? await configureFromPi({ output, reviewed, overwrite }) : configure({ output, extensions, reviewed, overwrite });
-    console.log(`Configured ${result.registrations.commands.length} commands, ${result.registrations.tools.length} tools in ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
+    if (mirror && !fromPi) throw new Error('--mirror reads your Pi setup; it requires --from-pi');
+    const result = fromPi ? await configureFromPi({ output, reviewed, overwrite, mirror }) : configure({ output, extensions, reviewed, overwrite });
+    if (mirror) console.log(`Mirrored your Pi setup into ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
+    else console.log(`Configured ${result.registrations.commands.length} commands, ${result.registrations.tools.length} tools in ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

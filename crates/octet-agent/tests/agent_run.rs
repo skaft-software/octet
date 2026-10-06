@@ -6093,12 +6093,28 @@ impl ToolCallHook for AdmissionHookProbe {
 struct DenyingAdmissionHook {
     before: Arc<AtomicUsize>,
     after: Arc<AtomicUsize>,
+    transformed_results: Arc<AtomicUsize>,
 }
 
 const HOOK_DENIAL_SECRET: &str = "secondary-hook-secret-marker";
 
 #[async_trait::async_trait]
 impl ToolCallHook for DenyingAdmissionHook {
+    async fn transform_tool_result(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        result: Result<ToolOutput, ToolError>,
+        _context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        assert_eq!(
+            result.as_ref().unwrap_err().message,
+            "tool call denied by host policy"
+        );
+        self.transformed_results.fetch_add(1, Ordering::SeqCst);
+        result
+    }
+
     async fn before_tool_call(
         &self,
         _name: &str,
@@ -6156,9 +6172,11 @@ async fn assert_secondary_hook_denials(parallel: bool) {
         },
         executions: Arc::clone(&executions),
     });
+    let transformed_results = Arc::new(AtomicUsize::new(0));
     extensions.tool_call_hook(DenyingAdmissionHook {
         before: Arc::clone(&before),
         after: Arc::clone(&after),
+        transformed_results: Arc::clone(&transformed_results),
     });
     let mut agent = Agent::new(AgentConfig {
         client: AiClient::new(),
@@ -6223,6 +6241,9 @@ async fn assert_secondary_hook_denials(parallel: bool) {
             .unwrap();
         assert!(started < decided && decided < finished);
     }
+    // Result transformations observe policy denials, but execution observers
+    // must not invent tool executions for calls rejected at admission.
+    assert_eq!(transformed_results.load(Ordering::SeqCst), calls.len());
     assert_eq!(before.load(Ordering::SeqCst), calls.len());
     assert_eq!(after.load(Ordering::SeqCst), 0);
     assert_eq!(executions.load(Ordering::SeqCst), 0);

@@ -14,6 +14,8 @@ enum PathKind {
     Skill,
     Prompt,
     Theme,
+    Keybindings,
+    Context,
 }
 
 const MAX_DISCOVERY_PROCESSES: usize = 16;
@@ -119,8 +121,8 @@ impl ExecutableExtensions {
                             paths,
                         });
                     }
-                    Err(_) => batch.diagnostics.push(format!(
-                        "warning: {}: resources_discover failed; no paths admitted",
+                    Err(error) => batch.diagnostics.push(format!(
+                        "warning: {}: resources_discover failed; no paths admitted: {error}",
                         process.descriptor().manifest.name
                     )),
                 }
@@ -172,6 +174,9 @@ impl ResourceLoader {
             skills,
             prompts,
             selected_theme,
+            keybindings: std::collections::BTreeMap::new(),
+            context: Vec::new(),
+            default_model: None,
             diagnostics: vec![diagnostic],
         })
     }
@@ -195,6 +200,12 @@ impl ResourceLoader {
         config.prompt_paths.clear();
         config.theme_paths.clear();
         let mut default_themes = Vec::new();
+        let mut keybindings_paths: Vec<PathBuf> = Vec::new();
+        let mut context_paths: Vec<PathBuf> = Vec::new();
+        // Session-only kinds have no persisted configuration to defer to, so
+        // nothing outside discovery can grant them a workspace path.
+        let no_explicit: Vec<PathBuf> = Vec::new();
+        let mut default_model = None;
         let mut fences = Vec::new();
         for contribution in batch.contributions {
             let process = contribution.process;
@@ -231,6 +242,18 @@ impl ResourceLoader {
                     &base.theme_paths,
                     PathKind::Theme,
                 ),
+                (
+                    &contribution.paths.keybindings_paths,
+                    &mut keybindings_paths,
+                    &no_explicit,
+                    PathKind::Keybindings,
+                ),
+                (
+                    &contribution.paths.context_paths,
+                    &mut context_paths,
+                    &no_explicit,
+                    PathKind::Context,
+                ),
             ] {
                 for path in paths {
                     match admit_path(Path::new(path), base, explicit, kind) {
@@ -242,6 +265,12 @@ impl ResourceLoader {
                         )),
                     }
                 }
+            }
+            // A session-only default route is a preference, not a grant: the
+            // first contributor that names one wins, and the product still
+            // resolves it against its own catalog.
+            if default_model.is_none() {
+                default_model = contribution.paths.default_model.clone();
             }
             if let Some(preferred) = contribution.paths.default_theme {
                 let path = PathBuf::from(preferred);
@@ -338,6 +367,41 @@ impl ResourceLoader {
                 }
             }
         }
+        // Session-only keybinding overlays: Pi-shaped JSON, parsed by the
+        // native ported loader. Later contributions win per action, matching the
+        // native later-root precedence used for the other resource kinds.
+        let mut keybindings = std::collections::BTreeMap::new();
+        for path in &keybindings_paths {
+            let Some(raw) = crate::tui::keymap::keybindings::load_raw_config(path) else {
+                diagnostics.push(format!(
+                    "warning: keybinding overlay {} was not admitted",
+                    path.display()
+                ));
+                continue;
+            };
+            let (migrated, _) = crate::tui::keymap::keybindings::migrate_keybindings_config(&raw);
+            for (id, keys) in crate::tui::keymap::keybindings::to_keybindings_config(&migrated) {
+                keybindings.insert(id, keys);
+            }
+        }
+        // Session-only global context files: bounded regular-file reads, composed
+        // into the system prompt by the resource publication boundary.
+        let mut context = Vec::new();
+        for path in &context_paths {
+            match octet_agent::secure_fs::read_regular_file_bounded(path, 256 * 1024) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(contents) => context.push((path.clone(), contents)),
+                    Err(_) => diagnostics.push(format!(
+                        "warning: context file {} is not valid UTF-8",
+                        path.display()
+                    )),
+                },
+                Err(error) => diagnostics.push(format!(
+                    "warning: context file {} was not admitted: {error}",
+                    path.display()
+                )),
+            }
+        }
         // Source retirement during filesystem work cannot publish stale roots.
         anyhow::ensure!(
             fences
@@ -353,6 +417,9 @@ impl ResourceLoader {
             skills,
             prompts,
             selected_theme,
+            keybindings,
+            context,
+            default_model,
             diagnostics,
         })
     }
@@ -367,6 +434,12 @@ pub(crate) struct LoadedResourcePaths {
     pub(crate) skills: Arc<dyn SkillRegistry>,
     pub(crate) prompts: Arc<crate::prompts::PromptRegistry>,
     pub(crate) selected_theme: crate::tui::theme::OctetTheme,
+    /// Session-only keybinding overrides contributed with these roots.
+    pub(crate) keybindings: std::collections::BTreeMap<String, Vec<String>>,
+    /// Session-only context files, in contribution order.
+    pub(crate) context: Vec<(PathBuf, String)>,
+    /// First contributed Pi-shaped default route, unresolved.
+    pub(crate) default_model: Option<octet_agent::extension_process::ExtensionDefaultModel>,
     pub(crate) diagnostics: Vec<String>,
 }
 
@@ -427,6 +500,8 @@ fn admit_path(
                 PathKind::Skill => extension == Some("md"),
                 PathKind::Prompt => matches!(extension, Some("md" | "toml")),
                 PathKind::Theme => matches!(extension, Some("toml" | "json")),
+                PathKind::Keybindings => extension == Some("json"),
+                PathKind::Context => extension == Some("md"),
             },
             "unsupported resource format"
         );
@@ -441,5 +516,8 @@ pub(crate) mod consumer_tests;
 #[cfg(all(test, unix))]
 #[path = "resource_paths/pi_app_tests.rs"]
 mod pi_app_tests;
+#[cfg(all(test, unix))]
+#[path = "resource_paths/pi_setup_tests.rs"]
+mod pi_setup_tests;
 #[cfg(all(test, unix))]
 mod tests;

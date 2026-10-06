@@ -892,7 +892,7 @@ fn real_activity_wait_pty_contract() {
 }
 
 #[test]
-fn real_queued_input_escape_dispatch_and_option_up_edit_pty_contract() {
+fn real_queued_steering_interrupt_keeps_entries_recallable_pty_contract() {
     let _guard = pty_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -903,14 +903,29 @@ fn real_queued_input_escape_dispatch_and_option_up_edit_pty_contract() {
     await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
     candidate.pty.write_input(b"queue fixture initial\r");
     api.wait_for_request(&mut candidate, 1);
+
+    // Enter steers into the active run. The held response keeps its model
+    // boundary unreachable, so both entries stay queued.
     candidate.pty.write_input(b"QUEUE-FIRST\rQUEUE-ORIGINAL\r");
-    await_screen(&mut candidate, &mut parser, &mut consumed, "2 queued");
+    await_screen(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "Steering · 2 queued",
+    );
     candidate.pty.write_input(b"\x1b[1;3A"); // Option/Alt+Up, not an editor arrow.
-    await_screen(&mut candidate, &mut parser, &mut consumed, "QUEUE-ORIGINAL");
+    await_composer_text(&mut candidate, &mut parser, &mut consumed, "QUEUE-ORIGINAL");
+    // Re-steer an edit and keep a local draft that no path may submit.
     candidate
         .pty
         .write_input(b"\x03QUEUE-EDITED\rDRAFT-NEVER-SUBMIT");
     await_screen(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "Steering · 2 queued",
+    );
+    await_composer_text(
         &mut candidate,
         &mut parser,
         &mut consumed,
@@ -919,49 +934,42 @@ fn real_queued_input_escape_dispatch_and_option_up_edit_pty_contract() {
     assert_eq!(
         api.count.load(Ordering::SeqCst),
         1,
-        "queue editing must not send"
+        "editing queued steering must not send"
     );
+
+    // Escape interrupts. The model never claimed the queued steering, so it
+    // returns to the composer with the untouched draft; nothing is submitted.
     candidate.pty.write_input(b"\x1b");
     await_screen(&mut candidate, &mut parser, &mut consumed, "interrupted");
-    // The serial fixture must release its cancelled socket before accepting
-    // the next one. The real frontend has already settled cancellation.
     api.release_response();
-    api.wait_for_request(&mut candidate, 2);
-    {
-        let bodies = api.bodies.lock().unwrap();
-        let request = String::from_utf8_lossy(&bodies[1]);
-        assert!(request.contains("QUEUE-FIRST"), "{request}");
-        assert!(!request.contains("QUEUE-ORIGINAL"), "{request}");
-        assert!(
-            !request.contains("QUEUE-EDITED"),
-            "FIFO dispatch: {request}"
-        );
-        assert!(!request.contains("DRAFT-NEVER-SUBMIT"), "{request}");
-    }
-    api.release_response();
-    api.wait_for_request(&mut candidate, 3);
-    {
-        let bodies = api.bodies.lock().unwrap();
-        let request = String::from_utf8_lossy(&bodies[2]);
-        assert!(request.contains("QUEUE-EDITED"), "{request}");
-        assert!(!request.contains("QUEUE-ORIGINAL"), "{request}");
-        assert!(!request.contains("DRAFT-NEVER-SUBMIT"), "{request}");
-    }
-    await_screen(
+    candidate.pty.drain_for(Duration::from_millis(400));
+    assert_eq!(
+        api.count.load(Ordering::SeqCst),
+        1,
+        "interrupted steering must not be submitted automatically"
+    );
+    await_composer_text(
         &mut candidate,
         &mut parser,
         &mut consumed,
         "DRAFT-NEVER-SUBMIT",
     );
-    candidate.pty.write_input(b"\x03\x03"); // clear draft, then plain cancellation
-    candidate.pty.drain_for(Duration::from_millis(250));
-    api.release_response();
+    let screen = parser.screen().contents();
+    assert!(
+        screen.contains("QUEUE-FIRST") && screen.contains("QUEUE-EDITED"),
+        "undelivered steering must return to the composer: {screen}"
+    );
+    assert_eq!(
+        api.count.load(Ordering::SeqCst),
+        1,
+        "restored steering must not be submitted with the draft"
+    );
     candidate.shutdown();
-    assert_eq!(api.count.load(Ordering::SeqCst), 3);
+    assert_eq!(api.count.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn real_queued_steering_option_up_edit_pty_contract() {
+fn real_queued_follow_up_option_up_edit_and_settled_dispatch_pty_contract() {
     let _guard = pty_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -973,10 +981,10 @@ fn real_queued_steering_option_up_edit_pty_contract() {
     candidate.pty.write_input(b"steering fixture initial\r");
     api.wait_for_request(&mut candidate, 1);
 
-    // Ctrl+S admits steering to the active run, unlike the Enter follow-ups
-    // covered above. The held response keeps its model boundary unreachable.
+    // Ctrl+S queues an editable follow-up for after the run; the held response
+    // keeps the run active so the entry stays local.
     candidate.pty.write_input(b"STEER-ORIGINAL\x13");
-    await_screen(&mut candidate, &mut parser, &mut consumed, "Steering");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "Follow-up");
     let edit_hint = if cfg!(target_os = "macos") {
         "(option+↑ to edit)"
     } else {
@@ -999,7 +1007,7 @@ fn real_queued_steering_option_up_edit_pty_contract() {
     await_composer_text(&mut candidate, &mut parser, &mut consumed, "STEER-ORIGINAL");
     assert!(
         !parser.screen().contents().contains(edit_hint),
-        "recalled steering must leave the pending queue: {}",
+        "recalled follow-up must leave the pending queue: {}",
         parser.screen().contents()
     );
     candidate
@@ -1055,9 +1063,20 @@ fn real_queued_steering_option_up_edit_pty_contract() {
     }
     let mut sessions = Vec::new();
     collect_sessions(&candidate._root.path().join("sessions"), &mut sessions);
-    assert_eq!(sessions.len(), 1, "steering must stay in the same session");
-    let session = fs::read_to_string(&sessions[0]).expect("persisted steering session");
-    assert_eq!(session.matches("STEER-EDITED").count(), 1, "{session}");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "the follow-up must stay in the same session"
+    );
+    let session = fs::read_to_string(&sessions[0]).expect("persisted follow-up session");
+    // The persisted user row carries both the display label and the model
+    // text, so count the model content and prove the recalled original and
+    // drafts never reached the session.
+    assert_eq!(
+        session.matches("\"Text\":\"STEER-EDITED\"").count(),
+        1,
+        "{session}"
+    );
     assert!(!session.contains("STEER-ORIGINAL"), "{session}");
     assert!(!session.contains("PROTECTED-DRAFT"), "{session}");
     assert!(!session.contains("DRAFT-NEVER-SUBMIT"), "{session}");
