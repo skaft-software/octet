@@ -249,8 +249,8 @@ pub struct Cli {
     /// Opt in to bounded inline tool-result images on compatible interactive terminals.
     #[arg(long = "show-images")]
     pub show_images: bool,
-    /// Mouse ownership: auto/terminal/off preserve native gestures; app
-    /// captures wheel scrolling and drag selection for the semantic viewport.
+    /// Mouse ownership (default: auto): auto/terminal/off preserve native gestures;
+    /// app opts into wheel scrolling and drag selection for the semantic viewport.
     #[arg(long, value_name = "MODE")]
     pub mouse: Option<String>,
     /// Tern Surface Protocol rendering: auto negotiates native surfaces inside
@@ -1474,6 +1474,7 @@ fn build_config_with_global_path_and_diagnostics(
         Some(value) => ColorMode::parse(value)?,
         None => ColorMode::Auto,
     };
+    // Resolve the shared default only after explicit CLI/settings choices.
     let mouse = match cli.mouse.as_deref().or(values.mouse.as_deref()) {
         Some(value) => config::MouseMode::parse(value)?,
         None => config::MouseMode::default(),

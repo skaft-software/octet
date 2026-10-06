@@ -23,7 +23,7 @@ defaults that aren't listed here aren't guessed.
 | `--mode rpc` | Pi-compatible JSONL automation. Can't be combined with `--print`. Separate from [native-host protocol 1](sdk.md) and extension API 0.4. [Limits](terminal.md#choose-a-frontend). |
 | `--plain` | Chronological output, no cursor control. |
 | `--color VALUE` | Color mode, such as `auto`. Terminal capability fallbacks still apply. |
-| `--mouse auto\|terminal\|off\|app` | Default `app`: the fullscreen viewport, which captures the mouse. `auto`, `terminal` and `off` stay inline in native scrollback. |
+| `--mouse auto\|terminal\|off\|app` | Default `auto`: native scrollback and selection without mouse capture. Explicit `app` opts into in-app wheel scrolling and drag selection. |
 | `--tern auto\|on\|off` | Default `auto`: octet draws native Tern surfaces only inside a Tern pane. `on` forces negotiation anywhere, `off` always uses the terminal renderer. |
 | `--show-reasoning` | Show reasoning instead of the collapsed default. |
 | `--show-images` | Show tool-result images inline on compatible terminals. Off by default. It isn't upload permission or attachment consent. [Behavior](terminal.md#tool-evidence-and-worker-activity). |
