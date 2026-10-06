@@ -24,6 +24,8 @@ export default pi => {
   }) + '\n')});
   pi.registerCommand('fixture-command', {handler: () => {}});
   pi.registerCommand('retire-editor', {handler: (_args, ctx) => ctx.ui.setEditorComponent(undefined)});
+  pi.registerCommand('listen-all', {handler: (_args, ctx) => ctx.ui.onTerminalInput(() => ({consume: true}))});
+  pi.registerCommand('seed-slot', {handler: (args, ctx) => ctx.ui.setEditorText(args || 'host draft')});
   pi.registerCommand('shared', {handler: () => {}});
   pi.on('session_start', (_, ctx) => {
     ctx.ui.setEditorComponent((t, theme, keys) => editor = new SlotEditor(t, theme, keys));
@@ -142,10 +144,10 @@ struct IdleDriver<'a> {
 }
 
 impl IdleDriver<'_> {
-    async fn next_idle(
-        &mut self,
-        input: &mut tokio_stream::wrappers::ReceiverStream<std::io::Result<Event>>,
-    ) -> Idle {
+    async fn next_idle<S>(&mut self, input: &mut S) -> Idle
+    where
+        S: Stream<Item = std::io::Result<Event>> + Unpin,
+    {
         tokio::time::timeout(
             Duration::from_secs(8),
             wait_for_prompt(
@@ -682,5 +684,26 @@ async fn native_pi_custom_editor_buffer_is_bounded_and_retirement_discards_it() 
         "retired input cannot submit or edit the native replacement"
     );
     assert_eq!(shell.pending(), "x");
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_host_keys_precede_terminal_consumers() {
+    let (_directory, mut app, mut shell) = live_slot_app().await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    command(&mut app, &mut shell, "listen-all").await.unwrap();
+    command(&mut app, &mut shell, "seed-slot").await.unwrap();
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\r");
+    let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+        .await
+        .next_idle(&mut input)
+        .await;
+    assert!(
+        matches!(idle, Idle::Submit(input) if input.display_text == "host draft"),
+        "a terminal consumer swallowed host submit"
+    );
     app.executable_extensions.shutdown().await;
 }

@@ -460,7 +460,7 @@ export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
 
 // Feed bytes to the production foreground reader/decoder, not reconstructed
 // crossterm keys or a handwritten protocol peer. The same owner serves all UI.
-fn raw_input(shell: &InteractiveShell, bytes: &[u8]) -> EventStream {
+pub(super) fn raw_input(shell: &InteractiveShell, bytes: &[u8]) -> EventStream {
     use std::io::Write;
     use std::os::fd::OwnedFd;
     let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
