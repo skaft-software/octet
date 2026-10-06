@@ -9,6 +9,8 @@ use super::*;
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_policy_real_bridge_obeys_host_access_without_replaying_calls() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let temp = tempfile::tempdir().unwrap();
     let package = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../extensions/octet-mcp")
@@ -37,6 +39,9 @@ async fn mcp_policy_real_bridge_obeys_host_access_without_replaying_calls() {
         .unwrap(),
     )
     .unwrap();
+    // The bridge refuses a group- or world-writable configuration, so the
+    // fixture must create a private file rather than inherit a permissive umask.
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut manifest =
         ExtensionManifest::parse(&std::fs::read_to_string(package.join("extension.toml")).unwrap())
             .unwrap();
