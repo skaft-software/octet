@@ -25,7 +25,10 @@ Every check spawns the **real binary** on a disposable PTY (120x40, `xterm-256co
 store, and extension directory. The PTY is observed through a bounded VT model
 (`vt.py`: cursor addressing, erase/insert/delete, scroll regions, 24-bit SGR, OSC 52
 clipboard, alternate screen, mouse modes). Input is sent as a terminal would send it,
-including SGR mouse press/drag/release.
+including SGR mouse press/drag/release. The suite only ever signals processes it
+forked itself: each session starts in its own session (`start_new_session`) and
+shutdown targets that child's own process group under a liveness guard — never a
+name or pattern match, `pkill` or `killall`.
 
 A **mock provider** (`provider.py`) implements an OpenAI-compatible
 `/v1/models` + `/v1/chat/completions` endpoint on loopback. No credentials, network,
