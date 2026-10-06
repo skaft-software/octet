@@ -570,8 +570,6 @@ impl ExecutableExtensions {
         }));
         true
     }
-
-
 }
 
 /// The transport request owns its process and cancellation/accounting lifetime.
