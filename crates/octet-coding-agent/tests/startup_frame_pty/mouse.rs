@@ -1,4 +1,4 @@
-//! Raw bytes -> the sole crossterm decoder -> real shell -> emitted VT/OSC 52.
+//! Raw bytes -> octet's sole input decoder -> real shell -> emitted VT/OSC 52.
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -88,7 +88,7 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
         STARTUP_TIMEOUT,
     );
 
-    // Repeated identical events, larger than crossterm's 1024-byte read, with
+    // Repeated identical events in one touchpad-sized burst, including
     // Shift/Ctrl modifiers; no per-frame event loss or composer history moves.
     let mut up = Vec::new();
     for index in 0..96 {
@@ -142,6 +142,31 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
     assert!(capture.termios_restored);
 }
 
+fn wrapped_multirow_copy(octet: &mut PtyOctet, parser: &mut vt100::Parser, consumed: &mut usize) {
+    settle(octet, parser, consumed);
+    let row = (0..16)
+        .find(|row| row_text(parser, *row, 80).contains("MOUSE-WRAPPED"))
+        .unwrap();
+    let first = row_text(parser, row, 80);
+    let second = row_text(parser, row + 1, 80);
+    assert!(second.contains('界'));
+    let expected = format!("{} {}", first.trim(), second.trim());
+    let before = octet.pty.output.len();
+    octet.pty.write_input(&sgr(0, 0, row, false));
+    octet.pty.write_input(&sgr(32, 79, row + 1, false));
+    settle(octet, parser, consumed);
+    assert!((0..80).any(|col| parser.screen().cell(row + 1, col).unwrap().inverse()));
+    octet.pty.write_input(&sgr(0, 79, row + 1, true));
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        clipboard(&bytes[before..]).is_some()
+    });
+    assert_eq!(
+        clipboard(&octet.pty.output[before..]).as_deref(),
+        Some(expected.as_str())
+    );
+    settle(octet, parser, consumed);
+}
+
 #[test]
 fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
     let _lock = pty_test_lock().lock().unwrap();
@@ -155,6 +180,9 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
             "draft-private",
             STARTUP_TIMEOUT,
         );
+        if columns == 80 {
+            wrapped_multirow_copy(&mut octet, &mut parser, &mut consumed);
+        }
         // Resume, PageUp and PageDown must leave pointer coordinates aligned.
         octet.pty.write_input(b"\x1b[5~\x1b[6~");
         octet.pty.write_input(&sgr(64, 20, 3, false).repeat(4));
@@ -194,6 +222,16 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
                 format!("\x1b]52;c;{}\x07", STANDARD.encode(&expected)).as_bytes()
             ));
             assert!(highlighted, "drag lacks highlight");
+            // The explicit selection-copy key uses the same remote transport.
+            let before = octet.pty.output.len();
+            octet.pty.write_input(b"\x1b[99;6u");
+            octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                clipboard(&bytes[before..]).is_some()
+            });
+            assert_eq!(
+                clipboard(&octet.pty.output[before..]).as_deref(),
+                Some(expected.as_str())
+            );
             settle(&mut octet, &mut parser, &mut consumed);
         }
         // A press originating in composer/footer must never acquire transcript.
