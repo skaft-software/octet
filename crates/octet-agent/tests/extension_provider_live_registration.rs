@@ -1,6 +1,3 @@
-#![cfg(unix)]
-#![allow(missing_docs)]
-
 //! Late API 0.3 provider registrations must take effect in the running process
 //! generation.
 //!
@@ -9,6 +6,7 @@
 //! catalog completed. Those reverse requests arrive on the always-running
 //! protocol reader, so the registry must reflect them immediately: no `/reload`,
 //! no second `providers/complete`, and no process generation change.
+#![cfg(unix)]
 
 use std::sync::Arc;
 use std::time::Duration;
