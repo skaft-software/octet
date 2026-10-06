@@ -176,6 +176,9 @@ pub(super) struct OfferedHostServices {
     pub(super) session_compaction: bool,
     pub(super) approvals: bool,
     pub(super) secrets: bool,
+    /// Effective physical frame offered for the paired session-repair.v2
+    /// profile; zero means the pair is not offered this process.
+    pub(super) max_message_bytes: usize,
 }
 
 /// Outcome of a successful extension reload.
