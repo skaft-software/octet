@@ -156,7 +156,7 @@ impl BackgroundReplies {
             self.ready.push_back(event);
             return;
         }
-        let Some(fragment) = reply_fragment(&event.event) else {
+        let Some(fragment) = reply_fragment(&event) else {
             if is_key_release(&event.event) && !self.text.is_empty() {
                 // A Windows key-up for a held reply byte. Keep it in order so a
                 // mismatch replays exactly what arrived and a match discards it.
@@ -176,7 +176,7 @@ impl BackgroundReplies {
             return;
         };
         let mut candidate = self.text.clone();
-        candidate.push_str(&fragment);
+        candidate.push_str(fragment);
         match candidate_status(&candidate) {
             Candidate::Prefix => {
                 self.text = candidate;
@@ -194,8 +194,8 @@ impl BackgroundReplies {
             Candidate::NotReply => {
                 self.replay();
                 // A mismatch may itself begin a new reply (e.g. Esc, Alt+]).
-                if matches!(candidate_status(&fragment), Candidate::Prefix) {
-                    self.text = fragment;
+                if matches!(candidate_status(fragment), Candidate::Prefix) {
+                    self.text = fragment.to_owned();
                     self.held.push(event);
                     self.prefix_updated = Some(now);
                 } else {
@@ -250,19 +250,21 @@ impl ApcFilter {
             }
         }
         if !self.active {
-            if reply_fragment(&event.event).is_some_and(|s| s == "\x1b" || s == "\x1b_") {
+            if reply_fragment(&event).is_some_and(|s| s == "\x1b" || s == "\x1b_") {
                 self.active = true;
                 self.updated = Some(now);
-                self.text = reply_fragment(&event.event).expect("recognized opener");
+                self.text = reply_fragment(&event)
+                    .expect("recognized opener")
+                    .to_owned();
                 self.held.push(event);
                 return Vec::new();
             }
             return vec![event];
         }
-        match reply_fragment(&event.event) {
+        match reply_fragment(&event) {
             Some(fragment) => {
                 self.updated = Some(now);
-                self.text.push_str(&fragment);
+                self.text.push_str(fragment);
                 if !self.identified() {
                     self.held.push(event.clone());
                 }
@@ -368,29 +370,28 @@ fn is_key_release(event: &Event) -> bool {
     matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
 }
 
-// Do not turn paste text, enhanced key releases/repeats, or arbitrary shortcuts
-// into protocol bytes. These are exactly the legacy key forms emitted by
-// crossterm's Unix parser (plus literal control characters on other platforms).
-fn reply_fragment(event: &Event) -> Option<String> {
-    let Event::Key(key) = event else {
-        return None;
-    };
-    if key.kind != KeyEventKind::Press {
+/// One reply-byte fragment, or `None` when this packet is not part of the reply
+/// byte protocol.
+///
+/// The decoder already produced the terminal's own bytes, so this classifies
+/// them instead of rebuilding them from a key event: only a key press whose
+/// spelling is a single text character or one of the legacy escape forms can be
+/// reply payload. Console records (no byte stream) arrive with the same fields
+/// filled from [`codec::legacy_spelling`], so both platforms share one path.
+fn reply_fragment(packet: &Packet) -> Option<&str> {
+    if matches!(&packet.event, Event::Key(key) if key.kind != KeyEventKind::Press) {
         return None;
     }
-    match (key.code, key.modifiers) {
-        (KeyCode::Esc, KeyModifiers::NONE) => Some("\x1b".into()),
-        (KeyCode::Char(']'), KeyModifiers::ALT) => Some("\x1b]".into()),
-        // APC opener (`ESC _`), the prefix of a Tern Surface Protocol message.
-        (KeyCode::Char('_'), KeyModifiers::ALT) => Some("\x1b_".into()),
-        (KeyCode::Char('\\'), KeyModifiers::ALT) => Some("\x1b\\".into()),
-        (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some("\x07".into()),
-        (KeyCode::Char(character), modifiers)
-            if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
-        {
-            Some(character.to_string())
+    let raw = packet.raw.as_deref()?;
+    match raw {
+        "\x1b" | "\x1b]" | "\x1b_" | "\x1b\\" | "\x07" => Some(raw),
+        _ => {
+            let mut characters = raw.chars();
+            match (characters.next(), characters.next()) {
+                (Some(character), None) if !character.is_control() => Some(raw),
+                _ => None,
+            }
         }
-        _ => None,
     }
 }
 
@@ -819,27 +820,19 @@ mod tests {
         Event::Key(KeyEvent::new(code, modifiers))
     }
 
-    // Model the real crossterm parser at arbitrary read boundaries. The PTY
-    // lane below separately verifies these assumptions against actual bytes.
+    // Drive the production decoder at arbitrary read boundaries instead of a
+    // second hand-written model of it: one contiguous read when `split_escapes`
+    // is false, one byte per read when a fragmented sequence is under test. The
+    // PTY lane below separately verifies the reader against actual bytes.
     fn decoded(bytes: &str, split_escapes: bool) -> Vec<Event> {
+        let mut decoder = codec::Decoder::default();
         let mut events = Vec::new();
-        let mut chars = bytes.chars().peekable();
-        while let Some(character) = chars.next() {
-            events.push(match character {
-                '\x1b' if !split_escapes && matches!(chars.peek(), Some(']' | '\\')) => {
-                    key(KeyCode::Char(chars.next().unwrap()), KeyModifiers::ALT)
-                }
-                '\x1b' => key(KeyCode::Esc, KeyModifiers::NONE),
-                '\x07' => key(KeyCode::Char('g'), KeyModifiers::CONTROL),
-                character => key(
-                    KeyCode::Char(character),
-                    if character.is_uppercase() {
-                        KeyModifiers::SHIFT
-                    } else {
-                        KeyModifiers::NONE
-                    },
-                ),
-            });
+        let raw = bytes.as_bytes();
+        for (index, byte) in raw.iter().enumerate() {
+            let more = !split_escapes && index + 1 < raw.len();
+            if let Some(packet) = decoder.push(*byte, more).unwrap() {
+                events.push(packet.event);
+            }
         }
         events
     }

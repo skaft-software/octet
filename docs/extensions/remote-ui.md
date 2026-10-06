@@ -259,8 +259,11 @@ input events:
   enter this lane: host authority over rescue and exit is not delegated.
 - Only the raw spelling of decoded input is offered. Host-derived events (resize,
   focus, terminal replies, Tern protocol input) have no terminal bytes and stay
-  out of the lane. On Windows, where octet receives console key records instead of
-  bytes, the spelling is the host's console encoding.
+  out of the lane. Unix input is decoded by octet's single byte decoder, so the
+  spelling is exactly what the terminal sent; on Windows, where octet receives
+  console key records instead of bytes, a key carries the console's legacy
+  spelling when one exists (text, `Esc`, `Alt+]`, `Alt+_`, `Alt+\\`, `Ctrl+G`) and
+  keys without one stay native rather than gaining an invented spelling.
 - The request is deliberately **not** owner-routed: it carries
   `resource_owner` as an ordinary parameter, because a listener that only
   decides how one keystroke is dispatched must not acquire session-view or

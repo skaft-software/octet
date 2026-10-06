@@ -1,6 +1,6 @@
 //! Byte provenance for Unix input and a console-event encoding on Windows.
 use super::*;
-use crossterm::event::{KeyEvent, KeyboardEnhancementFlags};
+use crossterm::event::KeyboardEnhancementFlags;
 
 #[path = "parse.rs"]
 mod parse;
@@ -33,9 +33,42 @@ impl Packet {
 }
 
 impl From<Event> for Packet {
+    /// Console key records and synthesized events have no byte stream, so they
+    /// carry the legacy spelling a terminal reply can be made of. This is the
+    /// one key→bytes table; Unix input never comes through here, because the
+    /// decoder in this module already produced the terminal's real bytes.
     fn from(event: Event) -> Self {
-        let raw = console_data(&event);
+        let raw = legacy_spelling(&event);
         Self { event, raw }
+    }
+}
+
+/// Legacy key spelling for a record without byte provenance.
+///
+/// Do not turn paste text, enhanced key releases/repeats, or arbitrary shortcuts
+/// into protocol bytes. These are exactly the legacy key forms the reply filters
+/// must recognize (plus literal control characters on other platforms); a key
+/// with no legacy spelling has no spelling at all rather than an invented one.
+fn legacy_spelling(event: &Event) -> Option<String> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, KeyModifiers::NONE) => Some("\x1b".into()),
+        (KeyCode::Char(']'), KeyModifiers::ALT) => Some("\x1b]".into()),
+        // APC opener (`ESC _`), the prefix of a Tern Surface Protocol message.
+        (KeyCode::Char('_'), KeyModifiers::ALT) => Some("\x1b_".into()),
+        (KeyCode::Char('\\'), KeyModifiers::ALT) => Some("\x1b\\".into()),
+        (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some("\x07".into()),
+        (KeyCode::Char(character), modifiers)
+            if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+        {
+            Some(character.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -44,66 +77,6 @@ impl PartialEq<Event> for Packet {
     fn eq(&self, other: &Event) -> bool {
         self.event == *other
     }
-}
-
-fn console_data(event: &Event) -> Option<String> {
-    let key = match event {
-        Event::Paste(text) => return Some(format!("\x1b[200~{text}\x1b[201~")),
-        Event::Key(key) => key,
-        _ => return None,
-    };
-    let KeyEvent {
-        code,
-        modifiers,
-        kind,
-        ..
-    } = *key;
-    let point = match code {
-        KeyCode::Char(c) => u32::from(c),
-        KeyCode::Enter => 13,
-        KeyCode::Tab | KeyCode::BackTab => 9,
-        KeyCode::Backspace => 127,
-        KeyCode::Esc => 27,
-        KeyCode::Insert => 57348,
-        KeyCode::Delete => 57349,
-        KeyCode::Left => 57350,
-        KeyCode::Right => 57351,
-        KeyCode::Up => 57352,
-        KeyCode::Down => 57353,
-        KeyCode::PageUp => 57354,
-        KeyCode::PageDown => 57355,
-        KeyCode::Home => 57356,
-        KeyCode::End => 57357,
-        KeyCode::F(n) => 57363 + u32::from(n),
-        _ => return None,
-    };
-    if kind == KeyEventKind::Press && code != KeyCode::BackTab {
-        if modifiers.is_empty()
-            || modifiers == KeyModifiers::SHIFT && matches!(code, KeyCode::Char(_))
-        {
-            if let Some(c) = char::from_u32(point).filter(|_| point < 57344) {
-                return Some(c.to_string());
-            }
-        }
-        if modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('a'..='z' | ' ')) {
-            return Some(
-                char::from_u32(if point == 32 { 0 } else { point & 31 })
-                    .unwrap()
-                    .to_string(),
-            );
-        }
-    }
-    let mask = 1
-        + u8::from(modifiers.contains(KeyModifiers::SHIFT) || code == KeyCode::BackTab)
-        + 2 * u8::from(modifiers.contains(KeyModifiers::ALT))
-        + 4 * u8::from(modifiers.contains(KeyModifiers::CONTROL))
-        + 8 * u8::from(modifiers.contains(KeyModifiers::SUPER));
-    let kind = match kind {
-        KeyEventKind::Press => 1,
-        KeyEventKind::Repeat => 2,
-        KeyEventKind::Release => 3,
-    };
-    Some(format!("\x1b[{point};{mask}:{kind}u"))
 }
 
 #[derive(Default)]
@@ -169,6 +142,7 @@ pub(super) fn replacement(data: &str) -> io::Result<Vec<Event>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyEvent;
 
     fn events(data: &str) -> Vec<Event> {
         replacement(data).expect("admitted replacement")
@@ -205,6 +179,35 @@ mod tests {
         ] {
             assert!(replacement(data).is_err(), "admitted {data:?}");
         }
+    }
+
+    #[test]
+    fn console_records_carry_only_spellings_a_terminal_actually_sends() {
+        let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+        // Records without a byte stream get the legacy forms a reply can be made
+        // of, and nothing is invented for keys the console protocol has no byte
+        // spelling for: the Unix decoder is the only bytes↔events mapping.
+        for (event, expected) in [
+            (key(KeyCode::Char('a'), KeyModifiers::NONE), Some("a")),
+            (key(KeyCode::Char('A'), KeyModifiers::SHIFT), Some("A")),
+            (key(KeyCode::Esc, KeyModifiers::NONE), Some("\x1b")),
+            (key(KeyCode::Char(']'), KeyModifiers::ALT), Some("\x1b]")),
+            (key(KeyCode::Char('g'), KeyModifiers::CONTROL), Some("\x07")),
+            (key(KeyCode::Enter, KeyModifiers::NONE), None),
+            (key(KeyCode::Up, KeyModifiers::NONE), None),
+            (key(KeyCode::Char('c'), KeyModifiers::CONTROL), None),
+            (key(KeyCode::Backspace, KeyModifiers::NONE), None),
+            (Event::Paste("text".into()), None),
+        ] {
+            let packet: Packet = event.clone().into();
+            assert_eq!(packet.raw.as_deref(), expected, "{event:?}");
+        }
+        let release = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        assert_eq!(Packet::from(release).raw, None);
     }
 
     #[test]
