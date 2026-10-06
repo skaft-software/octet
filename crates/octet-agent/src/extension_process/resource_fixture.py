@@ -176,11 +176,7 @@ for line in sys.stdin:
         protocol = message['params']['protocol']
         transport = protocol.get('bulk_objects_v1')
         features = json.load(open('features.json')) if os.path.exists('features.json') else ['resource_refs_v1', 'operation_descriptors_v1']
-        limits = dict(protocol['limits'])
-        # Echo only the limits this peer accepts. The physical frame bound and
-        # the paired session profile are offers for a transport it never selects.
-        limits.pop('max_message_bytes', None)
-        send(dict(jsonrpc='2.0', id=message['id'], result=dict(api_version='0.4', tools=tools, protocol=dict(version='0.4', features=protocol['required_features'] + features, limits=limits))))
+        send(dict(jsonrpc='2.0', id=message['id'], result=dict(api_version='0.4', tools=tools, protocol=dict(version='0.4', features=protocol['required_features'] + features, limits=protocol['limits']))))
     elif method == 'tool/call':
         threading.Thread(target=call, args=(message,), daemon=True).start()
     elif method == 'fixture/malformed':

@@ -1,4 +1,3 @@
-import { withContextLimits } from './context-limits.mjs';
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { bounded, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
@@ -278,13 +277,13 @@ export function createContext(runtime, store, replaced = false) {
   // Lazy translation: a UI/resource-only factory must not fail merely because
   // an unrelated native history contains media this Pi message profile cannot map.
   const sessionState = () => {
-    const state = current(), host = runtime.sessionTransport ? runtime.sessionTransport.host(store) : state.host;
+    const state = current(), host = state.host;
     // Native invalidation clears the entire mirror. A null history is not an
     // empty session and cannot leave old headers/labels visible after failure.
     if (host.session_entries === null || host.session_branch === null) unsupported('ctx.sessionManager', 'native session view unavailable');
-    return { ...state, host };
+    return state;
   };
-  const sessionEntries = key => withContextLimits(runtime.sessionTransport?.profile, () => translateSessionEntries(snapshot(sessionState().host, key, `ctx.sessionManager.${key}`), runtime.namespace));
+  const sessionEntries = key => translateSessionEntries(snapshot(sessionState().host, key, `ctx.sessionManager.${key}`), runtime.namespace);
   const sessionManager = strict({
     getCwd: () => sessionState().workspace,
     getSessionId: () => sessionState().host.session_id ?? undefined,
@@ -301,10 +300,10 @@ export function createContext(runtime, store, replaced = false) {
       }
       return branch.reverse();
     },
-    getLeafEntry: () => sessionEntries('session_entries').find(entry => entry.id === sessionState().host.session_leaf_id),
+    getLeafEntry: () => sessionEntries('session_entries').find(entry => entry.id === current().host.session_leaf_id),
     getLabel: id => snapshot(sessionState().host, 'session_labels', 'ctx.sessionManager.getLabel')[id],
-    buildContextEntries: () => buildContextEntries(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
-    buildSessionProjection: () => buildSessionProjection(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
+    buildContextEntries: () => buildContextEntries(sessionEntries('session_entries'), current().host.session_leaf_id),
+    buildSessionProjection: () => buildSessionProjection(sessionEntries('session_entries'), current().host.session_leaf_id),
     getTree: () => {
       const entries = sessionEntries('session_entries'), labels = snapshot(sessionState().host, 'session_labels', 'ctx.sessionManager.getTree');
       const nodes = new Map(entries.map(entry => [entry.id, { entry, children: [], label: labels[entry.id], labelTimestamp: undefined }])), roots = [];
