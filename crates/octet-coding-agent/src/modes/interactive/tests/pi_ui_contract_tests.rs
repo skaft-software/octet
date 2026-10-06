@@ -1,6 +1,7 @@
 //! Real Rust shell + reviewed adapter acceptance for Pi dialogs and editor API.
 #![cfg(unix)]
 use super::pi_contract_support::{command, pi_ui_app};
+use super::support::test_reload;
 use super::*;
 
 // Execute the production resource/session-start phase under its sole native
@@ -371,5 +372,27 @@ export default function(pi) {
         "native loader default was not restored: {reset}"
     );
     shell.interrupt_run(run);
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_terminal_input_consumes_transforms_and_passes_before_composer() {
+    let (_directory, mut app, mut shell) = live_ui_app(r#"
+export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
+  ctx.ui.onTerminalInput(data => data === 'x' ? {consume: true} : data === 'a' ? {data: 'b'} : undefined);
+  ctx.ui.onTerminalInput(data => data === 'b' ? {data: 'Z'} : undefined);
+}});
+"#).await;
+    command(&mut app, &mut shell, "listen").await.unwrap();
+    let mut input = tokio_stream::iter("xaq".chars().map(|c| Ok(Event::Key(
+        crossterm::event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+    ))));
+    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+    let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+    let (watcher, mut reload, mut reload_tick) = test_reload();
+    wait_for_prompt(&mut shell, &mut input, &mut scroll_tick, &mut extension_tick,
+        &mut app.executable_extensions, None, &mut reload_tick, &watcher, &mut reload, None)
+        .await.unwrap();
+    assert_eq!(shell.extension_editor_snapshot().text, "Zq");
     app.executable_extensions.shutdown().await;
 }
