@@ -10110,13 +10110,13 @@ fn explicit_terminal_background_override() -> bool {
         .unwrap_or(false)
 }
 
-async fn apply_detected_terminal_background<S>(
+async fn apply_detected_terminal_background<S, E: Into<crate::tui::terminal::InputPacket>>(
     shell: &mut InteractiveShell,
     input: &mut EventStream<S>,
     config: &crate::config::Config,
 ) -> bool
 where
-    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    S: Stream<Item = std::io::Result<E>> + Unpin,
 {
     apply_detected_terminal_background_with_timeout(
         shell,
@@ -10127,14 +10127,17 @@ where
     .await
 }
 
-async fn apply_detected_terminal_background_with_timeout<S>(
+async fn apply_detected_terminal_background_with_timeout<
+    S,
+    E: Into<crate::tui::terminal::InputPacket>,
+>(
     shell: &mut InteractiveShell,
     input: &mut EventStream<S>,
     config: &crate::config::Config,
     timeout: Duration,
 ) -> bool
 where
-    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    S: Stream<Item = std::io::Result<E>> + Unpin,
 {
     if explicit_terminal_background_override()
         || TerminalThemeChoice::from_config(config)
@@ -10356,7 +10359,7 @@ fn requested_theme_selection(
     Some((ThemeSelection::File(name.to_owned()), theme))
 }
 
-async fn configure_terminal_theme<S>(
+async fn configure_terminal_theme<S, E: Into<crate::tui::terminal::InputPacket>>(
     shell: &mut InteractiveShell,
     input: &mut EventStream<S>,
     config: &mut Config,
@@ -10365,7 +10368,7 @@ async fn configure_terminal_theme<S>(
     extensions: Option<&mut crate::extensions::ExecutableExtensions>,
 ) -> anyhow::Result<Option<ThemeSelection>>
 where
-    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    S: Stream<Item = std::io::Result<E>> + Unpin,
 {
     let used_picker = requested.is_none();
     let mut requested_theme = None;
@@ -11266,6 +11269,7 @@ async fn run_interactive_once(
     // six hours; later catalog builds and lookups use it once cached.
     tokio::spawn(crate::models_dev::refresh(config.offline));
     let mut input = EventStream::new()
+        .with_interceptors(shell.terminal_input_interceptors())
         .with_cede_flag(shell.terminal_input_parking())
         .with_tern_handler(shell.tern_input_handler());
     if crate::cli::should_offer_theme_onboarding(&config)

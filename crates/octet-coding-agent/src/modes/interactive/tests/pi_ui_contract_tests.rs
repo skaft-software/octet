@@ -1,6 +1,7 @@
 //! Real Rust shell + reviewed adapter acceptance for Pi dialogs and editor API.
 #![cfg(unix)]
 use super::pi_contract_support::{command, pi_ui_app};
+use super::support::test_reload;
 use super::*;
 
 // Execute the production resource/session-start phase under its sole native
@@ -427,6 +428,87 @@ export default pi => {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_terminal_input_consumes_transforms_and_passes_before_composer() {
+    let (_directory, mut app, mut shell) = live_ui_app(r#"
+export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
+  ctx.ui.onTerminalInput(data => data === 'x' ? {consume: true} : data === 'a' ? {data: 'b'} : undefined);
+  ctx.ui.onTerminalInput(data => data === 'b' ? {data: 'Z'} : data === '\x1bOA' ? {data: '^'} : undefined);
+}});
+"#).await;
+    command(&mut app, &mut shell, "listen").await.unwrap();
+    let mut input = raw_input(&shell, b"xaq\x1bOA\x04");
+    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+    let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+    let (watcher, mut reload, mut reload_tick) = test_reload();
+    wait_for_prompt(
+        &mut shell,
+        &mut input,
+        &mut scroll_tick,
+        &mut extension_tick,
+        &mut app.executable_extensions,
+        None,
+        &mut reload_tick,
+        &watcher,
+        &mut reload,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(shell.extension_editor_snapshot().text, "Zq^");
+    app.executable_extensions.shutdown().await;
+}
+
+// Feed bytes to the production foreground reader/decoder, not reconstructed
+// crossterm keys or a handwritten protocol peer. The same owner serves all UI.
+fn raw_input(shell: &InteractiveShell, bytes: &[u8]) -> EventStream {
+    use std::io::Write;
+    use std::os::fd::OwnedFd;
+    let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+    reader.set_nonblocking(true).unwrap();
+    writer.write_all(bytes).unwrap();
+    EventStream::from_terminal_file(std::fs::File::from(OwnedFd::from(reader)))
+        .with_interceptors(shell.terminal_input_interceptors())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_terminal_input_hung_handler_fails_open_once_without_freezing_typing() {
+    let (_directory, mut app, mut shell) = live_ui_app(
+        r#"
+export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
+  ctx.ui.onTerminalInput(() => { while (true) {} });
+}});
+"#,
+    )
+    .await;
+    command(&mut app, &mut shell, "listen").await.unwrap();
+    let draft = "hanging handler must not slow subsequent typing";
+    let mut input = raw_input(&shell, format!("{draft}\x04").as_bytes());
+    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+    let mut extension_tick = tokio::time::interval(Duration::from_millis(10));
+    let (watcher, mut reload, mut reload_tick) = test_reload();
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        wait_for_prompt(
+            &mut shell,
+            &mut input,
+            &mut scroll_tick,
+            &mut extension_tick,
+            &mut app.executable_extensions,
+            None,
+            &mut reload_tick,
+            &watcher,
+            &mut reload,
+            None,
+        ),
+    )
+    .await
+    .expect("hung extension froze native input")
+    .unwrap();
+    assert_eq!(shell.extension_editor_snapshot().text, draft);
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_custom_editor_busy_commands_steering_follow_up_and_refusal() {
     use super::support::{scripted_agent_with_delay, test_run_inspection};
     for text in [
@@ -542,4 +624,42 @@ export default pi => {
         }
         app.executable_extensions.shutdown().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_terminal_input_consume_all_leaves_composer_empty_but_not_host_rescue() {
+    let (_directory, mut app, mut shell) = live_ui_app(
+        r#"
+export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
+  ctx.ui.onTerminalInput(() => ({consume: true}));
+}});
+"#,
+    )
+    .await;
+    command(&mut app, &mut shell, "listen").await.unwrap();
+    let mut input = raw_input(&shell, b"typed text is consumed\x1bOA\x04");
+    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+    let mut extension_tick = tokio::time::interval(Duration::from_millis(10));
+    let (watcher, mut reload, mut reload_tick) = test_reload();
+    let idle = tokio::time::timeout(
+        Duration::from_secs(8),
+        wait_for_prompt(
+            &mut shell,
+            &mut input,
+            &mut scroll_tick,
+            &mut extension_tick,
+            &mut app.executable_extensions,
+            None,
+            &mut reload_tick,
+            &watcher,
+            &mut reload,
+            None,
+        ),
+    )
+    .await
+    .expect("consuming extension stalled the input owner")
+    .unwrap();
+    assert!(matches!(idle, Idle::Quit), "Ctrl+D must remain host-owned");
+    assert_eq!(shell.extension_editor_snapshot().text, "");
+    app.executable_extensions.shutdown().await;
 }

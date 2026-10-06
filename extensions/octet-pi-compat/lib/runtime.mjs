@@ -29,10 +29,11 @@ import { emulatedPiAliases, typeboxAliases } from './pi-modules.mjs';
 import { discoverPiSetup } from './pi-setup.mjs';
 import { ExtensionIssues } from './issues.mjs';
 import { installHostKeybindings } from './keybindings.mjs';
+import { TerminalInputListeners } from './terminal-input.mjs';
 import { bindHostTheme, nativeTheme } from './theme.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select']);
-const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
+const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'terminal_input_intercept_v1', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -78,6 +79,7 @@ export class Runtime {
   constructor(config, transport) {
     this.config = config; this.transport = transport;
     this.scope = new AsyncLocalStorage(); this.tools = new Map(); this.commands = new Map(); this.shortcuts = new Map(); this.flags = new Map(); this.events = new Map();
+    this.terminalInput = new TerminalInputListeners(this);
     this.bus = new SharedBus(this); this.ui = new RemoteUI(this); this.transcript = new TranscriptRenderers(this); this.timers = new Timers(this);
     this.issues = new ExtensionIssues(this);
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map(); this.failedFactories = new Set();
@@ -339,7 +341,7 @@ export class Runtime {
     this.features = new Set([...required, ...(params.protocol.optional_features || [])].filter(f => supportedFeatures.has(f)));
     for (const f of ['request_cancellation', 'content_parts']) this.require(f);
     if (this.features.has('session_compaction_v1')) this.require('session_control_v1');
-    if (this.features.has('transcript_render_v1')) this.require('remote_ui');
+    if (this.features.has('transcript_render_v1') || this.features.has('terminal_input_intercept_v1')) this.require('remote_ui');
     const builtinOverrides = params.capabilities?.builtin_tool_overrides === undefined ? [] : params.capabilities.builtin_tool_overrides;
     if (!Array.isArray(builtinOverrides) || builtinOverrides.length > BUILTIN_TOOL_NAMES.length
         || new Set(builtinOverrides).size !== builtinOverrides.length
@@ -508,7 +510,7 @@ export class Runtime {
   async retire(state) {
     cancelProviderStream(this, undefined, state);
     this.transcript.retire(state);
-    state.alive = false; retireMcpSession(state); retireAutocomplete(state); retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
+    state.alive = false; this.terminalInput.retire(state); retireMcpSession(state); retireAutocomplete(state); retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
     // Session-scoped hooks are cancelled on their own owner retirement, never
     // another hook's private binding. Replacement commands retain their parent.
     for (const store of this.active.values()) if (store.state === state && (store.resourceDiscovery || store.providerContext || store.method === 'hook/run' && !['session_start', 'session_end'].includes(store.hook))) store.controller.abort(cancelled());
@@ -612,6 +614,7 @@ export class Runtime {
     const p = message.params;
     if (message.method === 'initialize') return this.initialize(p, store);
     if (!this.initialized) invalid('not initialized');
+    if (message.method === 'ui/terminal-input/intercept') return this.terminalInput.dispatch(p, store);
     if (message.method === 'provider/stream') return prepareProviderStream(this, p, store);
     if (message.method === 'ui/autocomplete/complete') return commandCompletions(this, p, store);
     if (message.method === 'hook/run' && p.hook === 'resources_discover') return discoverResources(this, p, store);

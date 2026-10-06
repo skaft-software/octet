@@ -107,6 +107,8 @@ mod model_control;
 mod negotiation;
 mod presentation;
 mod process_api;
+mod terminal_input;
+pub use terminal_input::EXTENSION_FEATURE_TERMINAL_INPUT_INTERCEPT;
 mod transcript_render;
 pub use transcript_render::{
     transcript_private_entry, TranscriptInvalidation, TranscriptRenderContent,

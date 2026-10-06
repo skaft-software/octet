@@ -101,6 +101,11 @@ impl ExecutableExtensions {
         self.drain_host_requests_into_shell(shell);
         self.reconcile_terminal_grant_for_shell(shell);
         self.sync_remote_ui(shell);
+        self.diagnostics.extend(
+            shell
+                .terminal_input_interceptors()
+                .bind(&self.processes, self.resource_owner.as_deref()),
+        );
         self.sync_transcript_renderers(shell);
         messages
     }

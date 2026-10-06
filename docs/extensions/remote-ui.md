@@ -253,6 +253,56 @@ an editor or its footer. `Ctrl+D` remains coordinated application close.
 `Escape` belongs to a fullscreen component, so Doom can open its own menu;
 in the composer, native application and popup bindings remain authoritative.
 
+## Pre-native input interception
+
+`terminal_input_intercept_v1` is an optional API `0.4` feature offered only with
+`remote_ui` and a bound frontend. A frontend that negotiates it asks each
+intercepting extension about one input event **before** native handling, so a Pi
+extension's `onTerminalInput` listeners see the keystrokes the terminal produced:
+
+```json
+{"jsonrpc":"2.0","id":"input-1","method":"ui/terminal-input/intercept",
+ "params":{"data":"\u001bOA","resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"demo","process_generation":1}}}
+```
+
+The reply is the whole replacement string, decoded by the host into ordinary
+input events:
+
+```json
+{"jsonrpc":"2.0","id":"input-1","result":{"data":""}}
+```
+
+- `data` in either direction is at most 256 UTF-8 bytes, the existing terminal
+  input bound; larger input bypasses the chain and stays native. Escape bytes are
+  legitimate here (they are the input), so this one string is exempt from the
+  usual control-free rule.
+- An empty reply consumes the event. A reply that is not a complete, decodable
+  input sequence — a partial escape, a malformed sequence, or a terminal *reply*
+  such as a cursor-position or device-attributes report — is refused; the host
+  never turns protocol traffic into user input.
+- The frontend times the whole chain and delivers the original event unchanged if
+  the budget expires, so an unresponsive extension cannot freeze typing. It may
+  then stop asking that process until reload, and it reports one bounded
+  diagnostic. Throwing handlers are reported without losing their subscription.
+- The host's own rescue keys (`Ctrl+G`) and coordinated shutdown (`Ctrl+D`) never
+  enter this lane: host authority over rescue and exit is not delegated.
+- Only the raw spelling of decoded input is offered. Host-derived events (resize,
+  focus, terminal replies, Tern protocol input) have no terminal bytes and stay
+  out of the lane. Unix input is decoded by octet's single byte decoder, so the
+  spelling is exactly what the terminal sent; on Windows, where octet receives
+  console key records instead of bytes, a key carries the console's legacy
+  spelling when one exists (text, `Esc`, `Alt+]`, `Alt+_`, `Alt+\\`, `Ctrl+G`) and
+  keys without one stay native rather than gaining an invented spelling.
+- The request is deliberately **not** owner-routed: it carries
+  `resource_owner` as an ordinary parameter, because a listener that only
+  decides how one keystroke is dispatched must not acquire session-view or
+  history-transport work. The frontend still validates the owner (and its
+  liveness) on both sides.
+
+This is a frontend-owned ordering guarantee, not an extension-scheduled hook: the
+request is answered while the user is typing, and a slow reply delays only input,
+never rendering, resizing or shutdown.
+
 ## Immediate rescue and recovery limits
 
 `Ctrl+G` retires the focused **fullscreen** mount immediately, without waiting for a final

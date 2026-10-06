@@ -31,6 +31,7 @@ impl SyntheticEvents {
                 events: ForegroundEvents {
                     wake: None,
                     tty: std::sync::OnceLock::from(Some(notifier)),
+                    ..Default::default()
                 },
                 reader,
                 source_polls: 0,
