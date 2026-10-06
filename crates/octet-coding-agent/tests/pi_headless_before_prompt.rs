@@ -154,9 +154,19 @@ export default pi => {{
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Pi extensions skipped (1)"));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Pi callback skipped: turn_start"));
-        assert!(!String::from_utf8_lossy(&output.stderr).contains("private callback details"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("[Extension issues]") && stderr.contains("optional.mjs"),
+            "the skipped factory must be reported with its path: {stderr}"
+        );
+        assert!(
+            stderr.contains("turn_start callback failed and was skipped"),
+            "the failing callback must be reported with its event: {stderr}"
+        );
+        assert!(
+            !stderr.contains("private callback details"),
+            "callback exceptions must stay redacted: {stderr}"
+        );
         assert_eq!(
             std::fs::read_to_string(workspace.join("turn-start-survived.txt")).unwrap(),
             "continued"
