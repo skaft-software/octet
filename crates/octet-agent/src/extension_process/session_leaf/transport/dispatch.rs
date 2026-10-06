@@ -115,8 +115,10 @@ pub(in crate::extension_process) fn publish(
         if !store.current.contains_key(&owner) && store.current.len() >= profile.owner_views {
             return Err(unavailable());
         }
+        // Reserve the exact published revision before advertising anything, so
+        // the barrier and the document it announces can never disagree.
+        let revision = store.next_revision()?;
         store.current.insert(owner.clone(), None);
-        let revision = store.revision + 1;
         // Publish the newest-wins unavailable barrier even if encoding fails.
         // No UI/foreground authority is needed for read-only owner invalidation.
         if !connection.queue_notification(methods::CONTEXT_UPDATED, json!({"resource_owner":owner,"host":{
@@ -128,15 +130,52 @@ pub(in crate::extension_process) fn publish(
             owner.clone(),
             &profile,
             None,
+            revision,
         );
         if let Ok(view) = &result {
             store.current.insert(owner.clone(), Some(Arc::clone(view)));
         }
         result
     };
-    process.set_host_state_on_connection(state.clone(), Arc::clone(&connection), true, true, None);
     let view = result?;
+    // Identity is transport-independent: the paired profile keeps the exact
+    // owner fence and the same counted session facts in the mirror slot that
+    // admitted setup/replacement receipts read synchronously, while hooks and
+    // reads travel through parent-bound chunk handles. No legacy whole-frame
+    // legacy snapshot is built for it.
+    let facts = super::host_facts(&view)?;
+    let (changed, retired_owner) = {
+        let mut slot = lock_std_mutex(&connection.session_leaf.mirror);
+        let mirror = SessionMirror {
+            owner: owner.clone(),
+            value: Some(facts),
+        };
+        let changed = slot.as_ref() != Some(&mirror);
+        let retired_owner = slot
+            .as_ref()
+            .filter(|previous| previous.owner.session_id != owner.session_id)
+            .map(|previous| previous.owner.session_id.clone());
+        *slot = Some(mirror);
+        (changed, retired_owner)
+    };
+    process.set_host_state_on_connection(
+        state.clone(),
+        Arc::clone(&connection),
+        changed,
+        true,
+        retired_owner,
+    );
     let staged = stage(&connection, Arc::clone(&view))?;
+    if !lock_std_mutex(&connection.session_leaf.transport)
+        .current
+        .get(&owner)
+        .and_then(Option::as_ref)
+        .is_some_and(|current| Arc::ptr_eq(current, &view))
+    {
+        // A newer publication superseded this document before it was sent: the
+        // peer is already invalidated and the newest publication prepares.
+        return Ok(());
+    }
     let process = process.clone();
     tokio::spawn(async move {
         let descriptor = &staged.descriptor;
@@ -149,18 +188,10 @@ pub(in crate::extension_process) fn publish(
                 Some(owner.clone()),
             )
             .await;
-        let accepted = result.is_ok_and(|v| v == json!({"accepted":true,"transfer_id":descriptor.transfer_id,"view_revision":descriptor.view_revision,"head":descriptor.head,"sha256":descriptor.sha256}));
-        if !accepted {
-            let mut store = lock_std_mutex(&connection.session_leaf.transport);
-            if store
-                .current
-                .get(&owner)
-                .and_then(Option::as_ref)
-                .is_some_and(|current| Arc::ptr_eq(current, &view))
-            {
-                store.current.insert(owner, None);
-            }
-        }
+        // The peer invalidated itself before this request was read, so a
+        // refused or undelivered preparation leaves it explicitly unavailable
+        // without this host discarding the newest publication it holds.
+        let _ = result;
     });
     Ok(())
 }

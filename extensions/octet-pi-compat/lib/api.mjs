@@ -277,7 +277,7 @@ export function createContext(runtime, store, replaced = false) {
   // Lazy translation: a UI/resource-only factory must not fail merely because
   // an unrelated native history contains media this Pi message profile cannot map.
   const sessionState = () => {
-    const state = current(), host = runtime.sessionTransport ? runtime.sessionTransport.host(store) : state.host;
+    const state = current(), host = runtime.sessionFacts(store);
     // Native invalidation clears the entire mirror. A null history is not an
     // empty session and cannot leave old headers/labels visible after failure.
     if (host.session_entries === null || host.session_branch === null) unsupported('ctx.sessionManager', 'native session view unavailable');

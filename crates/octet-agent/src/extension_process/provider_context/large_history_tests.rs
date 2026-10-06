@@ -230,9 +230,20 @@ async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
         "a failed preparation publishes unavailable, never a previous or partial view"
     );
     // The same complete document still publishes exactly on the next attempt.
-    let reference = lock_std_mutex(&connection.session_leaf.transport)
-        .history(&session, &namespace, owner.clone(), &profile, None)
-        .unwrap();
+    let reference = {
+        let mut store = lock_std_mutex(&connection.session_leaf.transport);
+        let revision = store.next_revision().unwrap();
+        store
+            .history(
+                &session,
+                &namespace,
+                owner.clone(),
+                &profile,
+                None,
+                revision,
+            )
+            .unwrap()
+    };
     process
         .set_host_state_with_session(ExtensionHostState::default(), &session)
         .expect("bounded failfast, never truncation");

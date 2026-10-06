@@ -166,6 +166,9 @@ impl Store {
         })
     }
 
+    /// Encode one complete history document at an already reserved revision.
+    /// The caller allocates the revision first so a newest-wins barrier can
+    /// never advertise a revision newer than the document it announces.
     pub(in crate::extension_process) fn history(
         &mut self,
         session: &crate::Session,
@@ -173,8 +176,17 @@ impl Store {
         owner: ExtensionResourceOwner,
         profile: &SessionSnapshotProfile,
         preparation: Option<Preparation>,
+        revision: u64,
     ) -> Result<Arc<View>, ExtensionRuntimeError> {
-        history::encode(self, session, namespace, owner, profile, preparation)
+        history::encode(
+            self,
+            session,
+            namespace,
+            owner,
+            profile,
+            preparation,
+            revision,
+        )
     }
 
     pub(in crate::extension_process) fn invocation(
@@ -401,6 +413,42 @@ impl Store {
         result["provider_context"] = value;
         Ok(())
     }
+}
+
+/// The legacy-shaped session facts an admitted setup/replacement receipt
+/// carries: same records as the counted document, branch expanded to entries.
+/// One representation of history; only the delivery channel differs.
+pub(in crate::extension_process) fn host_facts(
+    view: &View,
+) -> Result<Value, ExtensionRuntimeError> {
+    let document: Value = serde_json::from_slice(&view.bytes).map_err(|_| unavailable())?;
+    let entries = document.get("entries").cloned().ok_or_else(unavailable)?;
+    let mut by_id = HashMap::new();
+    for entry in entries.as_array().into_iter().flatten() {
+        if let Some(id) = entry.get("id").and_then(Value::as_str) {
+            by_id.insert(id.to_owned(), entry.clone());
+        }
+    }
+    let branch = document
+        .get("branch_ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str().and_then(|id| by_id.get(id)).cloned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let header = document.get("header").cloned().unwrap_or(Value::Null);
+    Ok(json!({
+        "session_entries": entries,
+        "session_branch": branch,
+        "session_leaf_id": document.get("head").cloned().unwrap_or(Value::Null),
+        "session_file": document.get("file").cloned().unwrap_or(Value::Null),
+        // An absent native header is an explicit null, never an empty object.
+        "session_header": if header.as_object().is_some_and(|object| object.is_empty()) { Value::Null } else { header },
+        "session_labels": document.get("labels").cloned().unwrap_or(Value::Null),
+        "session_view_revision": view.descriptor.view_revision,
+    }))
 }
 
 fn new_token() -> Result<String, ExtensionRuntimeError> {

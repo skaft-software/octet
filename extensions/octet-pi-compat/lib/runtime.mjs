@@ -464,6 +464,12 @@ export class Runtime {
       return fresh;
     };
   }
+  // Session facts for one bound store. The negotiated history transport only
+  // overlays the fields it delivers (entries, branch, leaf, file, header,
+  // labels); it never changes the owner or who is foreground.
+  sessionFacts(store) {
+    return this.sessionTransport ? this.sessionTransport.host(store) : store.state.host;
+  }
   // Resolves once the host binds the session that replaced the active one.
   foregroundFor(sessionId, signal) {
     signal.throwIfAborted();

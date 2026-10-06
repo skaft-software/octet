@@ -74,8 +74,8 @@ pub(super) fn encode(
     owner: ExtensionResourceOwner,
     profile: &SessionSnapshotProfile,
     preparation: Option<Preparation>,
+    revision: u64,
 ) -> Result<Arc<View>, ExtensionRuntimeError> {
-    let revision = store.next_revision()?;
     let mut branch_count = 0usize;
     let mut cursor = session.head_ref();
     while let Some(id) = cursor {

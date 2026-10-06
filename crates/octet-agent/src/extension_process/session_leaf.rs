@@ -275,13 +275,18 @@ impl InvocationSnapshot {
                 tool_generation: 0,
                 head: grant.expected_head.clone(),
             };
-            let view = lock_std_mutex(&connection.session_leaf.transport).history(
-                session,
-                namespace,
-                grant.owner.clone(),
-                &profile,
-                Some(preparation),
-            )?;
+            let view = {
+                let mut store = lock_std_mutex(&connection.session_leaf.transport);
+                let revision = store.next_revision()?;
+                store.history(
+                    session,
+                    namespace,
+                    grant.owner.clone(),
+                    &profile,
+                    Some(preparation),
+                    revision,
+                )?
+            };
             Ok(Self::Chunked(view))
         } else {
             session_snapshot(session, namespace, connection.max_message_bytes()).map(Self::Legacy)
@@ -572,6 +577,34 @@ fn merge_session_snapshot(host: &mut serde_json::Value, snapshot: &serde_json::V
 /// Attach only the view installed for this exact connection and native owner.
 /// The private leaf path already carries a newer invocation snapshot and must
 /// not have it overwritten by the last frontend boundary's cached observation.
+/// Merge the routed owner's last published session facts into an admitted
+/// setup/replacement receipt. Identity comes from the owner fence; a stale or
+/// foreign owner is refused rather than served from another session.
+pub(in crate::extension_process) fn merge_routed_session_facts(
+    connection: &ProcessConnection,
+    owner: &ExtensionResourceOwner,
+    host: &mut serde_json::Value,
+) -> Result<(), ExtensionRuntimeError> {
+    let slot = lock_std_mutex(&connection.session_leaf.mirror);
+    let Some(mirror) = slot.as_ref() else {
+        return Err(ExtensionRuntimeError::Protocol(
+            "session setup facts unavailable; no stale session facts".into(),
+        ));
+    };
+    if &mirror.owner != owner || owner.process_generation != connection.generation {
+        return Err(ExtensionRuntimeError::Protocol(
+            "session setup facts owner changed".into(),
+        ));
+    }
+    let Some(facts) = &mirror.value else {
+        return Err(ExtensionRuntimeError::Protocol(
+            "session setup facts unavailable; no stale session facts".into(),
+        ));
+    };
+    merge_session_snapshot(host, facts);
+    Ok(())
+}
+
 pub(super) fn attach_session_mirror(
     connection: &ProcessConnection,
     owner: &ExtensionResourceOwner,

@@ -36,7 +36,11 @@ impl ExtensionProcess {
         }
         let mut context = serde_json::to_value(context)
             .map_err(|e| ExtensionRuntimeError::Protocol(e.to_string()))?;
-        session_leaf::attach_session_mirror(&connection, owner, &mut context["host"], false)?;
+        if session_leaf::owner_routes_enabled(&read_std_lock(&connection.protocol)) {
+            session_leaf::merge_routed_session_facts(&connection, owner, &mut context["host"])?;
+        } else {
+            session_leaf::attach_session_mirror(&connection, owner, &mut context["host"], false)?;
+        }
         Ok(context)
     }
 }
