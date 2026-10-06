@@ -2,7 +2,7 @@ import { contextBytes, contextItems } from './context-limits.mjs';
 // Pi context ordering/custom-message conversion follows pinned Pi 1.0
 // cd32f7725fdbddbaecdff5b1e68491563394e0ca (runner.ts/messages.ts), MIT LICENSE.pi.
 // Canonical request projection only: never mutate tools, routing or the Session.
-import { bounded, fields, invalid, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { prepareToolLoadout } from './tools.mjs';
 
@@ -283,7 +283,7 @@ export async function projectContext(runtime, params, store) {
       live(); const child = { ...store, factory: entry.factory }, visible = messages.slice();
       let result;
       try { result = await runtime.scope.run(child, () => entry.handler(
-        strict({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))); }
+        facade({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))); }
       catch (error) {
         live(); if (Number.isInteger(error?.code)) throw error;
         runtime.reportCallbackError('context', entry.factory, error);
@@ -308,7 +308,7 @@ export async function projectContext(runtime, params, store) {
         live(); const child = { ...store, factory: entry.factory };
         let result;
         try { result = await runtime.scope.run(child, () => entry.handler(
-          strict({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))); }
+          facade({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))); }
         catch (error) {
           live(); if (Number.isInteger(error?.code)) throw error;
           runtime.reportCallbackError('context_with_system', entry.factory, error);

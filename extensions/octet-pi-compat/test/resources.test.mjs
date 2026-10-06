@@ -115,7 +115,7 @@ test('resources: ordinary callback failures are diagnosed with factory provenanc
   assert.doesNotMatch(diagnostic.params.message, /ordinary discovery callback failure/);
   assert.deepEqual(labels(await state(peer)), ['first', 'middle', 'last']);
   await set(peer, { mode: 'unsupported' });
-  assert.match((await discover(peer).response).error.message, /unsupported_feature ctx.unimplementedContextMethod/);
+  assert.match((await discover(peer).response).error.message, /unsupported_feature ctx.abort/);
   assert.deepEqual(labels(await state(peer)), ['first']); await peer.close();
 });
 

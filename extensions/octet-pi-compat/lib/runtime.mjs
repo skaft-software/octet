@@ -6,7 +6,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { isAbsolute } from 'node:path';
-import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions, retireAutocomplete } from './completions.mjs';
 import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent } from './tools.mjs';
@@ -52,8 +52,11 @@ class SharedBus {
       const off = () => { const i = entries.indexOf(entry); if (i >= 0) entries.splice(i, 1); };
       entry.off = off; return off;
     };
-    return strict({
+    return facade({
       on: (topic, handler) => on(topic, handler), once: (topic, handler) => on(topic, handler, true),
+      // Pi's bus clears every listener process-wide; this bus is shared by all
+      // reviewed factories, so one factory cannot retire another's listeners.
+      clear() { unsupported('pi.events.clear', 'the shared bus is retired per owner, never cleared process-wide'); },
       off: (topic, handler) => { for (const entry of [...(this.listeners.get(topic) || [])]) if (entry.handler === handler && entry.factory === factory) entry.off(); },
       emit: (topic, data) => {
         this.runtime.assertFactory(factory);
@@ -710,7 +713,7 @@ export class Runtime {
           : p.hook === 'after_tool_call' ? { type: event, toolName: payload.name, input: payload.arguments, content: [{ type: 'text', text: payload.output }], isError: payload.is_error }
           // Pi's session_start always has a reason; a host that gives none is
           // starting this process's session, which Pi calls "startup".
-          : strict({ type: event, ...(event === 'session_start' && payload.reason === undefined ? { reason: 'startup' } : {}), ...payload }, `${event} event`);
+          : facade({ type: event, ...(event === 'session_start' && payload.reason === undefined ? { reason: 'startup' } : {}), ...payload }, `${event} event`);
         disposition = await this.runEvent(event, value, store, { veto: p.hook === 'before_tool_call' });
         if (disposition.action === 'deny') break;
       }
@@ -779,7 +782,7 @@ export class Runtime {
         await this.scope.run(store, () => handler.definition.handler(createContext(this, store)));
       } else {
         if (runMessageMethods.has(message.method)) await handleRunMessage(this, message.method, p, store);
-        else await this.runEvent(event, strict({ type: event, ...p }, `${event} event`), store);
+        else await this.runEvent(event, facade({ type: event, ...p }, `${event} event`), store);
         const following = followingEvents[message.method];
         if (following) await this.runEvent(following, { type: following }, store);
       }

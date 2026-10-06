@@ -1,7 +1,7 @@
 import { withContextLimits } from './context-limits.mjs';
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { bounded, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
 import { contextTheme } from './theme.mjs';
 import { exec } from './exec.mjs';
 import { mcpAPI } from './mcp.mjs';
@@ -206,7 +206,7 @@ export function createContext(runtime, store, replaced = false) {
     runtime.track(mounting, store);
     return Promise.all([mounting, result]).then(([, value]) => value);
   };
-  const ui = strict({
+  const ui = facade({
     theme: contextTheme(runtime, store),
     notify(message, type = 'info') {
       foreground(); store.controller.signal.throwIfAborted();
@@ -224,6 +224,7 @@ export function createContext(runtime, store, replaced = false) {
       },
     }),
     custom,
+    onTerminalInput() { unsupported('ctx.ui.onTerminalInput', 'raw terminal key listening is not part of the host remote-UI contract'); },
 
     async editor(title, prefill = '') {
       bounded(title, 'editor title', 128); bounded(prefill, 'editor prefill', 262144);
@@ -323,7 +324,7 @@ export function createContext(runtime, store, replaced = false) {
     },
     getEntry: id => sessionEntries('session_entries').find(entry => entry.id === id),
   }, 'ctx.sessionManager');
-  return strict({
+  return facade({
     get cwd() { return current().workspace; },
     get sessionId() { return current().host.session_id ?? undefined; },
     get mode() { return contextFacts(runtime, store).mode; },
@@ -356,6 +357,7 @@ export function createContext(runtime, store, replaced = false) {
     },
     compact: options => requestCompaction(runtime, store, options),
     abort() { unsupported('ctx.abort', 'host wire has no root-run abort contract'); },
+    shutdown() { unsupported('ctx.shutdown', 'the extension process is host-owned; request shutdown through the host'); },
     ...sessionMethods(runtime, store, createContext),
     ...(replaced ? {
       sendMessage: (message, options) => operation('session/send_message', customMessageParams(message, options), 'message_injection'),
