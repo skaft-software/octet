@@ -31,12 +31,14 @@ const MAX_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
 const RECEIPT: &str = ".octet-python-runtime.json";
 const SOURCE_ARCHIVE: &str = ".octet-python-source.tar.gz";
 
+type SourceManifest = BTreeMap<String, String>;
+type SourceManifestCache = BTreeMap<String, Arc<SourceManifest>>;
+
 // Only manifests derived from digest-verified source bytes enter this cache.
 // Actual installed files are still checked on every launch; no mutable receipt
 // or filesystem pathname can authorize the source manifest.
-static SOURCE_MANIFESTS: std::sync::LazyLock<
-    std::sync::Mutex<BTreeMap<String, Arc<BTreeMap<String, String>>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+static SOURCE_MANIFESTS: std::sync::LazyLock<std::sync::Mutex<SourceManifestCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
 
 /// Host-owned private runtime location. Constructing it performs no I/O.
 /// The coding host must derive this from its authoritative user home (including
