@@ -298,6 +298,56 @@ async fn native_pi_registry_completion_cannot_survive_native_clear_or_mount_reti
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_registry_completion_refusal_preserves_native_draft_and_recovery_caret() {
+    let factory = native_composer_factory("/cmd α尾")
+        .replace(
+            "return [{value: 'alpha', label: 'CHOICE-ALPHA'}, {value: '文', label: 'CHOICE-UNICODE'}];",
+            "return [{value: '[paste #1 140000 chars]'.repeat(2), label: 'CHOICE-EXPANSION'}];",
+        )
+        .replace(
+            "setTimeout(() => { setText(",
+            "setTimeout(() => { editor.handleInput('\\x1b[200~' + 'x'.repeat(140000) + '\\x1b[201~'); setText(",
+        );
+    let (_directory, mut app, mut shell) = pi_ui_app(&factory);
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    shell.finish_startup();
+    input_for(&mut app, &mut shell, None, Duration::from_millis(800)).await;
+    assert!(frame(&mut shell).await.contains("CHOICE-EXPANSION"));
+    let before = shell.extension_editor_snapshot();
+    assert_eq!(before.text, "/cmd α尾");
+    input_events_for(
+        &mut app,
+        &mut shell,
+        vec![Ok(Event::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )))],
+        Duration::from_millis(200),
+    )
+    .await;
+    let after = shell.extension_editor_snapshot();
+    assert_eq!(
+        after.text, before.text,
+        "refused native expansion must not become the admission/recovery draft"
+    );
+    assert_eq!(after.cursor, before.cursor);
+    input_for(&mut app, &mut shell, Some("β"), Duration::from_millis(200)).await;
+    assert_eq!(
+        shell.pending(),
+        "/cmd αβ尾",
+        "the next checkpoint must retain the native caret and its live recovery revision"
+    );
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_command_registration_is_not_a_foreground_ui_request() {
     let (_directory, mut app) = pi_app(FACTORY);
     let mut notices = Vec::new();
