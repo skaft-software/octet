@@ -1,13 +1,14 @@
+import { contextBytes, historyItems } from './context-limits.mjs';
 // Translate host-owned native records; never read/write the Session JSONL here.
 import { canonicalToPi } from './provider-context.mjs';
 import { bounded, invalid, plainJSON, unsupported } from './errors.mjs';
 
 export function translateSessionEntries(entries, namespace) {
-  if (!Array.isArray(entries) || entries.length > 16384) invalid('session entries snapshot');
+  if (!Array.isArray(entries) || entries.length > historyItems()) invalid('session entries snapshot');
   const byId = new Map(entries.map(entry => [entry.id, entry]));
   if (byId.size !== entries.length) invalid('duplicate session entry id');
   return entries.map(entry => {
-    if (!entry?.value) return plainJSON(entry, 'Pi session entry', 786432);
+    if (!entry?.value) return plainJSON(entry, 'Pi session entry', contextBytes());
     const id = bounded(entry.id, 'session entry id', 256), parentId = entry.parent;
     if (parentId !== null) bounded(parentId, 'session parent id', 256);
     const base = { id, parentId };
@@ -23,7 +24,7 @@ export function translateSessionEntries(entries, namespace) {
     const custom = entry.metadata?.custom_message;
     if (custom) {
       return { ...base, type: 'custom_message', customType: bounded(custom.custom_type, 'customType', 128),
-        content: plainJSON(custom.content, 'custom message content', 786432), display: custom.display,
+        content: plainJSON(custom.content, 'custom message content', contextBytes()), display: custom.display,
         ...(Object.hasOwn(custom, 'details') ? { details: plainJSON(custom.details, 'custom message details') } : {}) };
     }
     const own = namespace && entry.metadata?.extension_metadata?.[namespace];

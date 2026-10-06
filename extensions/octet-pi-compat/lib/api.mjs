@@ -1,6 +1,7 @@
+import { withContextLimits } from './context-limits.mjs';
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { bounded, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
 import { contextTheme } from './theme.mjs';
 import { exec } from './exec.mjs';
 import { mcpAPI } from './mcp.mjs';
@@ -205,7 +206,7 @@ export function createContext(runtime, store, replaced = false) {
     runtime.track(mounting, store);
     return Promise.all([mounting, result]).then(([, value]) => value);
   };
-  const ui = strict({
+  const ui = facade({
     theme: contextTheme(runtime, store),
     notify(message, type = 'info') {
       foreground(); store.controller.signal.throwIfAborted();
@@ -223,6 +224,7 @@ export function createContext(runtime, store, replaced = false) {
       },
     }),
     custom,
+    onTerminalInput() { unsupported('ctx.ui.onTerminalInput', 'raw terminal key listening is not part of the host remote-UI contract'); },
 
     async editor(title, prefill = '') {
       bounded(title, 'editor title', 128); bounded(prefill, 'editor prefill', 262144);
@@ -277,13 +279,13 @@ export function createContext(runtime, store, replaced = false) {
   // Lazy translation: a UI/resource-only factory must not fail merely because
   // an unrelated native history contains media this Pi message profile cannot map.
   const sessionState = () => {
-    const state = current(), host = state.host;
+    const state = current(), host = runtime.sessionFacts(store);
     // Native invalidation clears the entire mirror. A null history is not an
     // empty session and cannot leave old headers/labels visible after failure.
     if (host.session_entries === null || host.session_branch === null) unsupported('ctx.sessionManager', 'native session view unavailable');
-    return state;
+    return { ...state, host };
   };
-  const sessionEntries = key => translateSessionEntries(snapshot(sessionState().host, key, `ctx.sessionManager.${key}`), runtime.namespace);
+  const sessionEntries = key => withContextLimits(runtime.sessionTransport?.profile, () => translateSessionEntries(snapshot(sessionState().host, key, `ctx.sessionManager.${key}`), runtime.namespace));
   const sessionManager = strict({
     getCwd: () => sessionState().workspace,
     getSessionId: () => sessionState().host.session_id ?? undefined,
@@ -300,10 +302,10 @@ export function createContext(runtime, store, replaced = false) {
       }
       return branch.reverse();
     },
-    getLeafEntry: () => sessionEntries('session_entries').find(entry => entry.id === current().host.session_leaf_id),
+    getLeafEntry: () => sessionEntries('session_entries').find(entry => entry.id === sessionState().host.session_leaf_id),
     getLabel: id => snapshot(sessionState().host, 'session_labels', 'ctx.sessionManager.getLabel')[id],
-    buildContextEntries: () => buildContextEntries(sessionEntries('session_entries'), current().host.session_leaf_id),
-    buildSessionProjection: () => buildSessionProjection(sessionEntries('session_entries'), current().host.session_leaf_id),
+    buildContextEntries: () => buildContextEntries(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
+    buildSessionProjection: () => buildSessionProjection(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
     getTree: () => {
       const entries = sessionEntries('session_entries'), labels = snapshot(sessionState().host, 'session_labels', 'ctx.sessionManager.getTree');
       const nodes = new Map(entries.map(entry => [entry.id, { entry, children: [], label: labels[entry.id], labelTimestamp: undefined }])), roots = [];
@@ -323,7 +325,7 @@ export function createContext(runtime, store, replaced = false) {
     },
     getEntry: id => sessionEntries('session_entries').find(entry => entry.id === id),
   }, 'ctx.sessionManager');
-  return strict({
+  return facade({
     get cwd() { return current().workspace; },
     get sessionId() { return current().host.session_id ?? undefined; },
     get mode() { return contextFacts(runtime, store).mode; },
@@ -356,6 +358,7 @@ export function createContext(runtime, store, replaced = false) {
     },
     compact: options => requestCompaction(runtime, store, options),
     abort() { unsupported('ctx.abort', 'host wire has no root-run abort contract'); },
+    shutdown() { unsupported('ctx.shutdown', 'the extension process is host-owned; request shutdown through the host'); },
     ...sessionMethods(runtime, store, createContext),
     ...(replaced ? {
       sendMessage: (message, options) => operation('session/send_message', customMessageParams(message, options), 'message_injection'),

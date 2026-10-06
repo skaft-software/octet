@@ -121,3 +121,66 @@ async fn pi_public_helpers_load_and_persist_through_the_real_host() {
         })
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_matrix_key_and_package_helpers_use_real_host_bindings() {
+    let (_directory, mut app) = pi_app(
+        r#"
+        import { existsSync } from 'node:fs';
+        import { join } from 'node:path';
+        import { getPackageDir, getReadmePath, keyText, keyHint, rawKeyHint } from '@earendil-works/pi-coding-agent';
+        export default pi => pi.registerCommand('probe', {handler() {
+          const dir = getPackageDir();
+          if (!existsSync(join(dir, 'package.json'))) throw Error('not a package root');
+          if (!existsSync(getReadmePath())) throw Error('no readme beside the package');
+          // Pi 1.0.2's own keybinding-hint helpers. This fixture's host
+          // publishes no keybinding snapshot, so a lookup must refuse instead of
+          // inventing a key, while the binding-independent form still formats.
+          if (typeof keyText !== 'function' || typeof keyHint !== 'function' || typeof rawKeyHint !== 'function') throw Error('missing hint helper');
+          if (!rawKeyHint('ctrl+x', 'close').includes('close')) throw Error('raw hint');
+          try { keyText('app.exit'); throw Error('host unexpectedly published a binding'); }
+          catch (error) { if (!/host binding not supplied/.test(error.message)) throw error; }
+          try { keyHint('app.exit', 'quit'); throw Error('host unexpectedly published a binding'); }
+          catch (error) { if (!/host binding not supplied/.test(error.message)) throw error; }
+          pi.appendEntry('matrix-helpers', {packageRoot:true, keys:true});
+        }});
+        "#,
+    );
+    let path = app.agent.session().path().to_owned();
+    let mut shell = InteractiveShell::test_shell();
+    let result = command(&mut app, &mut shell, "probe").await;
+    app.executable_extensions.shutdown().await;
+    result.unwrap();
+    let reopened = Session::open_read_only(&path).unwrap();
+    assert!(reopened.entries().iter().any(|entry| reopened
+        .extension_entry(&entry.id, "octet-pi-compat")
+        .is_some_and(|entry| entry.entry_type == "matrix-helpers")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_matrix_optional_context_and_bus_properties_are_absent() {
+    let (_directory, mut app) = pi_app(
+        r#"
+        export default pi => {
+          if (pi.events['lsp:workspace-provider'] !== undefined) throw Error('invented provider');
+          pi.registerCommand('probe', {handler(_args, ctx) {
+            if (ctx.goalStorageRoot !== undefined || 'goalStorageRoot' in ctx) throw Error('invented storage');
+            if (ctx.futurePrivateMethod?.() !== undefined) throw Error('invented method');
+            let refused = false;
+            try { ctx.abort(); } catch (e) { refused = /unsupported_feature/.test(e.message); }
+            if (!refused) throw Error('unsupported public operation must still refuse');
+            pi.appendEntry('matrix-optional', {absent:true, refused});
+          }});
+        };
+        "#,
+    );
+    let path = app.agent.session().path().to_owned();
+    let mut shell = InteractiveShell::test_shell();
+    let result = command(&mut app, &mut shell, "probe").await;
+    app.executable_extensions.shutdown().await;
+    result.unwrap();
+    let reopened = Session::open_read_only(&path).unwrap();
+    assert!(reopened.entries().iter().any(|entry| reopened
+        .extension_entry(&entry.id, "octet-pi-compat")
+        .is_some_and(|entry| entry.entry_type == "matrix-optional")));
+}

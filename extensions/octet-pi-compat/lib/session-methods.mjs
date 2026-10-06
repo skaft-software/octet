@@ -24,8 +24,11 @@ export function sessionHeader(host) {
 function setupManager(runtime, store) {
   let writable = true;
   const live = () => { runtime.assertOwner(store); store.controller.signal.throwIfAborted(); };
-  const entries = () => { live(); return translateSessionEntries(store.state.host.session_entries, runtime.namespace); };
-  const branch = (id = store.state.host.session_leaf_id) => {
+  // Session facts come from whichever transport delivers them; owner, cwd and
+  // workspace stays host-owned and reading them grants no authority.
+  const facts = () => { live(); return runtime.sessionFacts(store); };
+  const entries = () => translateSessionEntries(facts().session_entries, runtime.namespace);
+  const branch = (id = facts().session_leaf_id) => {
     const all = entries(), byId = new Map(all.map(entry => [entry.id, entry])), path = [], seen = new Set();
     while (id !== null) {
       if (seen.has(id)) invalid('cyclic session branch'); seen.add(id);
@@ -53,21 +56,21 @@ function setupManager(runtime, store) {
     const id = mutate({ kind: 'append', entry }); bounded(id, 'setup entry id', 256); return id;
   };
   const manager = strict({
-    getHeader: () => { live(); return sessionHeader(store.state.host); },
-    getSessionId: () => { live(); return store.state.host.session_id; },
-    getSessionFile: () => { live(); return store.state.host.session_file; },
-    getSessionDir: () => { live(); return dirname(store.state.host.session_file); },
+    getHeader: () => sessionHeader(facts()),
+    getSessionId: () => facts().session_id,
+    getSessionFile: () => facts().session_file,
+    getSessionDir: () => dirname(facts().session_file),
     getCwd: () => { live(); return store.state.workspace; },
-    isPersisted: () => { live(); return store.state.host.session_file !== null; },
+    isPersisted: () => facts().session_file !== null,
     getEntries: entries, getBranch: branch,
     getEntry: id => entries().find(entry => entry.id === id),
-    getLeafId: () => { live(); return store.state.host.session_leaf_id; },
-    getLeafEntry: () => entries().find(entry => entry.id === store.state.host.session_leaf_id),
+    getLeafId: () => facts().session_leaf_id,
+    getLeafEntry: () => entries().find(entry => entry.id === facts().session_leaf_id),
     getChildren: id => entries().filter(entry => entry.parentId === id),
-    getLabel: id => { live(); return store.state.host.session_labels?.[id]; },
+    getLabel: id => facts().session_labels?.[id],
     getSessionName: () => {
       const latest = entries().findLast(entry => entry.type === 'session_info');
-      return latest ? latest.name.trim() || undefined : store.state.host.session_name ?? undefined;
+      return latest ? latest.name.trim() || undefined : facts().session_name ?? undefined;
     },
     appendMessage(message) {
       const clean = plainJSON(message, 'setup message', 16384), [canonical] = piToCanonical([clean]);

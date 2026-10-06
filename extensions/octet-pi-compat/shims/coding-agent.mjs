@@ -1,5 +1,7 @@
 // Host facades and pure utilities only; never import the Pi coding-agent runtime.
 export { calculateContextTokens, estimateTokens, buildSessionContext } from '../lib/context.mjs';
+export { CURRENT_SESSION_VERSION, getPackageDir, getPackageJsonPath, getReadmePath } from '../lib/pi-config.mjs';
+export { keyHint, keyText, rawKeyHint } from '../lib/keybinding-hints.mjs';
 export { VERSION, CONFIG_DIR_NAME, getAgentDir, isToolCallEventType, isBashToolResult, isPowerShellToolResult, isReadToolResult, isEditToolResult,
   isWriteToolResult, isGrepToolResult, isFindToolResult, isLsToolResult, parseFrontmatter, stripFrontmatter,
   withFileMutationQueue, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES, formatSize, truncateHead, truncateTail,
@@ -10,7 +12,7 @@ import { theme } from '../lib/theme.mjs';
 export const defineTool = definition => definition;
 export const getEditorTheme = () => ({ borderColor: theme.borderColor, selectList: theme.selectList });
 export const getSelectListTheme = () => theme.selectList;
-export { BorderedLoader, DynamicBorder, getSettingsListTheme, keyHint } from '../lib/ui-api.mjs';
+export { BorderedLoader, DynamicBorder, getSettingsListTheme } from '../lib/ui-api.mjs';
 export const getMarkdownTheme = () => ({
   heading: text => theme.fg('mdHeading', text), link: text => theme.fg('mdLink', text), linkUrl: text => theme.fg('mdLinkUrl', text),
   code: text => theme.fg('mdCode', text), codeBlock: text => theme.fg('mdCodeBlock', text), codeBlockBorder: text => theme.fg('mdCodeBlockBorder', text),
