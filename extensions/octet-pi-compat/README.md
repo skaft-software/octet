@@ -311,6 +311,15 @@ full tree-summary preparation) remain explicit refusals, not fabricated values.
 `ctx.waitForIdle` requires a live command and negotiated `session_control_v1`, then
 awaits the actual same-session idle receipt. No hook can wait for its own run to end.
 
+`ctx.newSession({parentSession, setup, withSession})` replaces the native session
+at its idle boundary. A request made while a turn is busy waits for that turn to
+settle; it never takes its session writer. The old session's end precedes writable
+setup, and the new session's start follows setup's durable writes. Only the
+original live command can consume the host's creation receipt, with its exact
+process instance/generation and cancellation lifetime. Captured old contexts stay
+retired; the setup manager closes before `withSession`. Parent linkage is stored
+in the replacement's durable header, not inferred from a foreground UI context.
+
 `ctx.compact({customInstructions?, onComplete?, onError?})` is synchronous void.
 It requires both `session_control_v1` and `session_compaction_v1` and an opted-in
 native interactive idle driver. From a live command/tool/hook it queues locally,
@@ -466,6 +475,20 @@ Native chaining/path fallback on an empty or unclaimed result requires its own
 snapshot-fenced implementation and qualification; process tests alone do not prove
 ordinary path Tab still works. Native trigger/selection behavior is not a claim to
 reproduce Pi's automatic-versus-forced-file completion UI.
+
+The native host side of this boundary is now qualified for the bounded case.
+Registration is process-owned and admitted without a foreground UI lease, so a
+captured factory activates in headless, background and later interactive states.
+The interactive input loops observe the composer and start one cancellable 500 ms
+query per live draft, so typing retires the previous request instead of queueing
+behind it; Up/Down move the displayed menu selection, Tab accepts the fenced
+choice, and only an explicit Tab can fall through to native path completion. A
+slow callback therefore cannot block typing or overwrite a newer draft. Real-package
+observation: unchanged pi-powerline-footer `cd` completions render in the composer
+(`../` Parent directory, `~/` Home directory, workspace directories, "extension
+suggestions | tab accept") and Tab inserts the selection; the previously failing
+pi-ding, pi-powerline-footer and pi-doom factories now activate with no
+`host refused autocomplete registration`.
 
 ## Remote frontend integration
 

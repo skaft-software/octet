@@ -990,7 +990,10 @@ pub(crate) enum PanelAction {
     /// Select a thinking level.
     SelectThinking(Vec<crate::config::ThinkingLevel>),
     /// Select a terminal theme without suspending an active run.
-    SelectTheme { keys: Vec<String>, previews: Arc<[OctetTheme]> },
+    SelectTheme {
+        keys: Vec<String>,
+        previews: Arc<[OctetTheme]>,
+    },
     /// Select a reasoning execution mode.
     SelectReasoningMode(Vec<octet_ai::ReasoningMode>),
     /// Select an installed executable-extension bundle.
@@ -1317,6 +1320,8 @@ pub(crate) struct ShellState {
     // Immutable queue roots make render publication O(1), including payloads.
     // A queue mutation copies only Arc handles, never other accepted messages.
     steering_queue: Arc<Vec<Arc<QueuedSteering>>>,
+    /// Native safe-boundary controls; presentation only, never an input owner.
+    pending_controls: Arc<Vec<String>>,
     /// Enter-submitted follow-ups remain local and editable until run settlement.
     follow_up_queue: Arc<std::collections::VecDeque<Arc<QueuedFollowUp>>>,
     /// Shared admission order across steering and follow-ups, independent of text.
@@ -1759,6 +1764,7 @@ impl ShellState {
             history_prepended: Default::default(),
             block_revisions: Default::default(),
             steering_queue: Default::default(),
+            pending_controls: Default::default(),
             follow_up_queue: Default::default(),
             next_pending_sequence: Default::default(),
             follow_up_ready: Default::default(),
@@ -2004,7 +2010,10 @@ impl ShellState {
                         | TranscriptBlock::Compaction(_)
                         | TranscriptBlock::Tool(_)
                         | TranscriptBlock::Shell(_)
-                ) || self.extension_transcript.frames.contains_key(&self.transcript_commit_ids[index]))
+                ) || self
+                    .extension_transcript
+                    .frames
+                    .contains_key(&self.transcript_commit_ids[index]))
                 .then_some(index)
             })
             .collect::<Vec<_>>();
@@ -2434,7 +2443,8 @@ impl ShellState {
     }
 
     fn touch_block(&mut self, index: usize) {
-        self.extension_transcript.touch_source(self.transcript_commit_ids[index]);
+        self.extension_transcript
+            .touch_source(self.transcript_commit_ids[index]);
         self.touch_presentation_block(index);
     }
 
@@ -4807,7 +4817,11 @@ impl InteractiveShell {
                 state.run_cost_available = true;
             }
             // Applied before the acceptance gate: see `on_run_event`.
-            AgentEvent::CustomMessageCommitted { entry_id, message, timestamp_unix_ms } => {
+            AgentEvent::CustomMessageCommitted {
+                entry_id,
+                message,
+                timestamp_unix_ms,
+            } => {
                 state.retain_custom_message(entry_id, message, Some(*timestamp_unix_ms));
             }
             AgentEvent::DelegationUpdated { .. } => {}
@@ -5017,6 +5031,23 @@ impl InteractiveShell {
     /// This is the exact queue `session/send_user_message` feeds.
     pub fn queued_follow_up_len(&self) -> usize {
         self.state.borrow().follow_up_queue.len()
+    }
+
+    /// Publish the bounded native control queue alongside pending input.
+    pub(crate) fn set_pending_controls(&mut self, controls: Vec<String>) -> bool {
+        let mut state = self.state.borrow_mut();
+        if *state.pending_controls != controls {
+            state.pending_controls = Arc::new(controls);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_pending_controls(&self) -> String {
+        let state = self.state.borrow();
+        input_overlays::render_pending_steering(&state, 200, 3).join("\n")
     }
 
     /// Only authoritative completion or an explicit Escape dispatch arms the
@@ -6020,6 +6051,52 @@ impl InteractiveShell {
         true
     }
 
+    /// Cheap change counter for the live composer. Callers that only need to
+    /// notice edits avoid cloning the draft on every idle frame.
+    pub(crate) fn extension_editor_revision(&self) -> u64 {
+        self.state.borrow().editor.revision()
+    }
+
+    /// The current menu for the exact live draft, if one is displayed. Selection,
+    /// navigation and Tab acceptance all read this one fenced identity.
+    fn displayed_extension_menu(&self) -> Option<(u64, usize)> {
+        let state = self.state.borrow();
+        let overlay = state.extension_autocomplete.as_ref()?;
+        (normal_editor_focused(&state)
+            && overlay.revision == state.editor.revision()
+            && overlay.text == state.editor.text()
+            && overlay.cursor == state.editor.cursor()
+            && !overlay.items.is_empty())
+        .then_some((overlay.revision, overlay.items.len()))
+    }
+
+    /// Whether Tab belongs to the displayed extension menu instead of a fresh
+    /// query. Only a live, fenced menu can claim the key.
+    pub(crate) fn extension_autocomplete_displayed(&self) -> bool {
+        self.displayed_extension_menu().is_some()
+    }
+
+    /// Move the displayed extension choice without touching the draft. The
+    /// menu keeps its own selection; the composer cursor never becomes a
+    /// second, invisible selector. Returns whether the key belonged to it.
+    pub(crate) fn move_extension_autocomplete_selection(&mut self, forward: bool) -> bool {
+        let Some((revision, items)) = self.displayed_extension_menu() else {
+            return false;
+        };
+        let mut state = self.state.borrow_mut();
+        let current = state
+            .extension_autocomplete_selection
+            .filter(|(selected, _)| *selected == revision)
+            .map_or(0, |(_, index)| index);
+        let moved = if forward {
+            (current + 1).min(items - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        state.extension_autocomplete_selection = Some((revision, moved));
+        true
+    }
+
     /// Accept the current extension choice through a normal host editor mutation.
     /// Without a native selection, retain the first-choice keyboard default.
     pub fn accept_extension_autocomplete(&mut self) -> bool {
@@ -6087,16 +6164,25 @@ impl InteractiveShell {
     }
 
     pub(crate) fn has_prompt_template(&self, name: &str) -> bool {
-        self.state.borrow().prompt_templates.iter().any(|template| template.name == name)
+        self.state
+            .borrow()
+            .prompt_templates
+            .iter()
+            .any(|template| template.name == name)
     }
 
     pub(crate) fn prompt_templates_report(&self) -> String {
         let state = self.state.borrow();
         let mut text = String::from("Prompt templates:\n");
         for template in state.prompt_templates.iter() {
-            text.push_str(&format!("  /{} — {}\n", template.name, template.description));
+            text.push_str(&format!(
+                "  /{} — {}\n",
+                template.name, template.description
+            ));
         }
-        if state.prompt_templates.is_empty() { text.push_str("  (none discovered)"); }
+        if state.prompt_templates.is_empty() {
+            text.push_str("  (none discovered)");
+        }
         text
     }
 
@@ -6988,22 +7074,35 @@ impl InteractiveShell {
     }
 
     pub(crate) fn preview_highlighted_theme(&mut self) {
-        let Some(index) = self.highlighted_panel_index() else { return; };
-        let Some((_, last)) = self.theme_preview.as_mut() else { return; };
-        if *last == Some(index) { return; }
+        let Some(index) = self.highlighted_panel_index() else {
+            return;
+        };
+        let Some((_, last)) = self.theme_preview.as_mut() else {
+            return;
+        };
+        if *last == Some(index) {
+            return;
+        }
         *last = Some(index);
         let theme = {
             let state = self.state.borrow();
             match state.panel.as_ref() {
-                Some(Panel::SelectList { action: PanelAction::SelectTheme { previews, .. }, .. }) => previews.get(index).cloned(),
+                Some(Panel::SelectList {
+                    action: PanelAction::SelectTheme { previews, .. },
+                    ..
+                }) => previews.get(index).cloned(),
                 _ => None,
             }
         };
-        if let Some(theme) = theme { self.set_theme(theme); }
+        if let Some(theme) = theme {
+            self.set_theme(theme);
+        }
     }
 
     fn restore_theme_preview(&mut self) {
-        if let Some((original, _)) = self.theme_preview.take() { self.set_theme(original); }
+        if let Some((original, _)) = self.theme_preview.take() {
+            self.set_theme(original);
+        }
     }
 
     /// Open an interactive panel.
@@ -8406,6 +8505,7 @@ mod shell_chrome {
     };
     pub(super) use super::remote_ui::shell_chrome;
 }
+mod extension_theme;
 mod startup_update;
 mod status_telemetry;
 mod surface_frame;
@@ -8422,7 +8522,6 @@ mod tern_picker;
 pub(crate) mod tern_prompt;
 mod tern_sessions;
 mod tern_theme;
-mod extension_theme;
 mod tern_welcome;
 mod tool_render;
 mod transcript_cache;

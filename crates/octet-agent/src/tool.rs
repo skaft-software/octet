@@ -662,12 +662,17 @@ impl ToolProgressSink {
         self.composition.clone()
     }
 
-    pub(crate) fn with_session_driver(mut self, route: crate::extension_process::session_leaf::driver::SessionDriverRoute) -> Self {
+    pub(crate) fn with_session_driver(
+        mut self,
+        route: crate::extension_process::session_leaf::driver::SessionDriverRoute,
+    ) -> Self {
         self.session_driver = Some(route);
         self
     }
 
-    pub(crate) fn session_driver(&self) -> Option<crate::extension_process::session_leaf::driver::SessionDriverRoute> {
+    pub(crate) fn session_driver(
+        &self,
+    ) -> Option<crate::extension_process::session_leaf::driver::SessionDriverRoute> {
         self.session_driver.clone()
     }
 

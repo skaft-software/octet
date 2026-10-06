@@ -1154,7 +1154,11 @@ mod tests {
         );
         // Ctrl+S is the configurable follow-up action on every platform.
         assert_eq!(
-            translate_linux(Some(key(KeyCode::Char('s'), KeyModifiers::CONTROL)), false, "x"),
+            translate_linux(
+                Some(key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                false,
+                "x"
+            ),
             InputAction::Submit("x".into())
         );
         assert_eq!(

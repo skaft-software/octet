@@ -70,6 +70,7 @@ function receiptMethods(receipt) {
   const bindings = [];
   const runtime = {
     assertOwner: () => {}, require: () => {}, track: p => p,
+    prepareSessionReplacement: () => () => assert.fail('cancelled setup must not bind'),
     hostCall: async () => receipt,
     foregroundFor: async id => { bindings.push(id); return { owner: { ...owner, session_id: 'fresh-owner' } }; },
     scope: { run: (_store, callback) => callback() },
@@ -119,7 +120,7 @@ function setupReceipts() {
     assertOwner: s => { assert.equal(s.state.alive, true); }, require: () => {}, track: p => p,
     scope: { run: (_store, callback) => callback() },
     foregroundFor: () => assert.fail('setup must bind its native creation receipt'),
-    bindReplacement(value, original) { assert.deepEqual(value.resource_owner, next); original.state.alive = false; return { ...original, state }; },
+    prepareSessionReplacement(original) { return value => { assert.deepEqual(value.resource_owner, next); original.state.alive = false; return { ...original, state }; }; },
     bind(params, fresh) { assert.deepEqual(params.context.resource_owner, next); fresh.state.host = params.context.host; },
     async hostCall(method, params, parent) {
       calls.push({ method, params, parent: parent.id });
