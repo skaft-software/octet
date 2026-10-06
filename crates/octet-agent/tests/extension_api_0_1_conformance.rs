@@ -109,6 +109,7 @@ confirmations = true
             name: "Conformance".into(),
             version: Some("1.2.3".into()),
         }],
+        ..Default::default()
     };
     let mut config = ExtensionRuntimeConfig::new(temp.path());
     config.host_state = host_state.clone();
@@ -385,6 +386,7 @@ hooks = ["before_prompt"]
         pi_models: None,
         reasoning: None,
         active_skills: Vec::new(),
+        ..Default::default()
     };
     let mut config = ExtensionRuntimeConfig::new(temp.path());
     config.host_state = host_state.clone();
