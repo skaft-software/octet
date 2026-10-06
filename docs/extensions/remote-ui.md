@@ -175,6 +175,39 @@ verify the exact returned revision pair, and publish a captured editor frame onl
 render newer text after awaiting an older checkpoint. Frame publication or
 painting alone does not establish a recovery checkpoint.
 
+### `composer/submit` — native composer admission
+
+With API `0.4`, `composer` and `remote_ui`, a mounted editor submits expanded
+plain text through the native composer, **not** `session/send_user_message`:
+
+```json
+{"jsonrpc":"2.0","id":"submit-1","method":"composer/submit","params":{"parent_request_id":7,"resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"host-issued-instance","process_generation":1},"text":"/model","follow_up":false,"editor_checkpoint":{"surface_id":"demo","mount_id":"host-editor-mount","input_revision":4,"checkpoint_revision":5}}}
+```
+
+The checkpoint must already be acknowledged. The same 256 KiB plain-text bound
+applies, with no implied attachment/file authority. The input owner rechecks the
+foreground owner, live mount, exact checkpoint, native draft revision and focus.
+Normal settlement of the mounting request does not cancel this retained editor
+request; rescue, cancellation and owner replacement still revoke it.
+
+Success returns `{"accepted":true}` after native admission consumes the draft;
+`{"accepted":false}` leaves it unconsumed (for example, a full follow-up queue, a
+host panel, or an empty or whitespace-only draft, which the native composer
+never submits).
+Invalid or retired mounts receive typed errors. Local slash commands, including
+registered extension commands, use native dispatch. Ordinary busy submissions
+steer; `follow_up:true` uses the local after-run queue. Both send normally when
+idle; skill invocations retain native idle-expansion rules.
+
+Keep draft, paste payloads and undo until acceptance. Then clear locally and
+checkpoint the clear with a newer checkpoint revision. If an admitted command
+opened a native panel, the host permits only that unchanged draft's empty clear
+checkpoint despite the focus transition; this grants no general panel write
+access. The Pi adapter defers the genuine Editor's destructive `submitValue`
+until acceptance and buffers bounded subsequent input without replaying it.
+Refusal never silently falls back to message injection. Arbitrary editor objects
+must likewise avoid destroying private state before their submission is admitted.
+
 ### `composer/history` — native prompt-history seed
 
 With negotiated `composer`, an owner-scoped request may seed older native prompts:
