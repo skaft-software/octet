@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+  "products": [
+    {
+      "name": "octet-browse",
+      "repository": "https://github.com/skaft-software/octet-browse",
+      "source_path": "extensions/octet-browse",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "4e2302d22ef04275a0b065a6fd597410f2d222eb",
+      "files": 53,
+      "status": "staged",
+      "published_revision": "4e2302d22ef04275a0b065a6fd597410f2d222eb"
+    },
+    {
+      "name": "octet-computer-use",
+      "repository": "https://github.com/skaft-software/octet-computer-use",
+      "source_path": "extensions/octet-computer-use",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "0195ffcc8705a241045540c5f7fcb9551eef8ccc",
+      "files": 93,
+      "status": "staged",
+      "published_revision": "0195ffcc8705a241045540c5f7fcb9551eef8ccc"
+    },
+    {
+      "name": "octet-mcp",
+      "repository": "https://github.com/skaft-software/octet-mcp",
+      "source_path": "extensions/octet-mcp",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "5c9d7a447a152566b60da98e043d811b759b7e6f",
+      "files": 58,
+      "status": "staged",
+      "published_revision": "5c9d7a447a152566b60da98e043d811b759b7e6f"
+    },
+    {
+      "name": "octet-subagents",
+      "repository": "https://github.com/skaft-software/octet-subagents",
+      "source_path": "extensions/octet-subagents",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "6e09e62de083da2d1d09035492ad20640bab431f",
+      "files": 36,
+      "status": "staged",
+      "published_revision": "6e09e62de083da2d1d09035492ad20640bab431f"
+    },
+    {
+      "name": "octet-web-search",
+      "repository": "https://github.com/skaft-software/octet-web-search",
+      "source_path": "extensions/octet-web-search",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "6ffe9d8fc59a0799f7e377c8ed659e1c1afd2aee",
+      "files": 27,
+      "status": "staged",
+      "published_revision": "6ffe9d8fc59a0799f7e377c8ed659e1c1afd2aee"
+    },
+    {
+      "name": "octet-snap-compact",
+      "repository": "https://github.com/skaft-software/octet-snap-compact",
+      "source_path": "extensions/octet-snap-compact",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "c5363d4aa90a25dfc35868ce80fd2d4659ef1c0f",
+      "files": 8,
+      "status": "staged",
+      "published_revision": "c5363d4aa90a25dfc35868ce80fd2d4659ef1c0f"
+    },
+    {
+      "name": "octet-serve",
+      "repository": "https://github.com/skaft-software/octet-serve",
+      "source_path": "extensions/octet-serve",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "13a8503cab4cb8ed6ba0f8536d93042c55674008",
+      "files": 165,
+      "status": "staged",
+      "published_revision": "13a8503cab4cb8ed6ba0f8536d93042c55674008"
+    },
+    {
+      "name": "octet-web",
+      "repository": "https://github.com/skaft-software/octet-web",
+      "source_path": "apps/web",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "19c73691db253573a811d47d225cf6e4fbb13b26",
+      "files": 123,
+      "status": "staged",
+      "published_revision": "19c73691db253573a811d47d225cf6e4fbb13b26"
+    },
+    {
+      "name": "octet-apple-shared",
+      "repository": "https://github.com/skaft-software/octet-apple-shared",
+      "source_path": "apps/apple-shared",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "9e32eb459c96f45b5635d1193b53a52ca8a97ec2",
+      "files": 6,
+      "status": "staged",
+      "published_revision": "9e32eb459c96f45b5635d1193b53a52ca8a97ec2"
+    },
+    {
+      "name": "octet-macos",
+      "repository": "https://github.com/skaft-software/octet-macos",
+      "source_path": "apps/macos",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "30be7f16edb1530af791a38c61f0b624960a465d",
+      "files": 23,
+      "status": "staged",
+      "published_revision": "30be7f16edb1530af791a38c61f0b624960a465d"
+    },
+    {
+      "name": "octet-ios",
+      "repository": "https://github.com/skaft-software/octet-ios",
+      "source_path": "apps/ios",
+      "source_revision": "6b0717548d420909b3ee991bf940011e578b12eb",
+      "extracted_revision": "b5e447068ab86130d3e022eb2b6187edd962a2bd",
+      "files": 23,
+      "status": "staged",
+      "published_revision": "b5e447068ab86130d3e022eb2b6187edd962a2bd"
+    }
+  ]
+}

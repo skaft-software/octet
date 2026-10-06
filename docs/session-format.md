@@ -14,10 +14,12 @@ Pi session format, and octet does not import arbitrary Pi transcripts
 
 ## Record envelope
 
-Every line is a `type`-tagged object (`crates/octet-agent/src/session.rs:617`):
+Every line is a `type`-tagged object (`SessionRecord` in
+`crates/octet-agent/src/session.rs`):
 
 | `type` | Meaning |
 | --- | --- |
+| `header` | Optional immutable creation identity, workspace, timestamp and parent-session reference. Must be the first unique record; not model-visible context. |
 | `entry` | One appended conversation/config/skill entry (see below). |
 | `head` | Durable head update: current head `id` plus cumulative cost. |
 | `root_head` | Durable checkout before the first entry; later appends start a new root branch. |
@@ -36,14 +38,25 @@ damage is not confined to the tail.
 An explicit zero price is known free usage. Missing both the exact `cost` and
 legacy `cost_microdollars` fields means **unpriced**, not free, even after
 switching to a priced model. Cost scalars are only known subtotals while any
-unpriced operation or `usage_uncertainty` record remains; hard cost ceilings
-fail closed. Branch checkout does not erase session-global spending/exposure.
+unpriced operation or `usage_uncertainty` record remains. A
+`usage_uncertainty` line may carry an optional `bound` sibling of `record`:
+`{"tokens":4096,"cost_microdollars":7}`. Historical bounded records retain their
+recorded token exposure and worst-case cost (omitted when unpriced); ledger
+checks include those values alongside known usage. They do not authorize new
+inference. Current transports enforce output caps but supply no trusted
+input-token admission bound, so hard token or cost ceilings refuse new provider
+requests before dispatch. Planning estimates, prior usage and model context
+windows cannot substitute for that bound. New ambiguous attempts remain
+unbounded. Missing bounds (including older lines, unsettled native steering and
+cache warming) refuse both ceilings; a missing cost refuses the cost ceiling.
+The older reader ignores this sibling and remains fail-closed.
+Branch checkout does not erase session-global spending/exposure.
 
 ## Entries
 
 An `entry` has `id`, `parent` (`null` marks a conversation root), optional
 presentation `metadata`, optional `timestamp_unix_ms`, and a `value` object that
-is itself `type`-tagged (`crates/octet-agent/src/session.rs:479`):
+is itself `type`-tagged (`EntryValue` in `crates/octet-agent/src/session.rs`):
 
 | `value.type` | Meaning |
 | --- | --- |

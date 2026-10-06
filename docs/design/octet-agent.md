@@ -42,11 +42,12 @@ Lite, and WebSocket availability alone grant nothing. Ordinary routes retain
 synchronous tools and queued steering.
 
 - **Async tools:** only complete, durably committed calls from a wholly eligible
-  batch enter the run-owned registry (at most four). Advertised parallel tools
+  batch enter the run-owned registry (at most one read wave). Advertised parallel tools
   are still checked against exact arguments, the effect broker, and hooks.
-  Independent observations may overlap the next response; their results become
-  durable in original call order **after** that response, which did not consume
-  them. Sync, effectful, mixed, and nonparallel batches remain barriers. Hard
+  Independent observations may overlap the next response. Ready results are
+  settled durably in original call order before its immutable request snapshot;
+  unfinished jobs do not delay that snapshot and settle after the response that
+  did not consume them. Sync, effectful, mixed, and nonparallel batches remain barriers. Hard
   cumulative ceilings serialize tool accounting; pending jobs disable compaction.
   Driven terminals cancel and settle jobs; dropping a run aborts task handles.
   Unresolved async calls after a crash receive indeterminate paired errors,
@@ -205,20 +206,29 @@ Failed-attempt usage is **unknown**, not zero. Every observed accepted failure
 is durably recorded before replacement, independently of successful usage and
 session branches. HTTP 5xx and 408 responses also carry unknown usage: a gateway
 failure can hide accepted upstream work. Replay authority is not zero-billing
-evidence. Under a hard ceiling these stop after the first response; without a
-ceiling their uncertainty remains durable after recovery. Hard cumulative token/cost ceilings fail closed on outstanding
-uncertainty, including after resume or later ceiling activation. Child uncertainty
-is mirrored before its known usage subtotal. `ProviderUsageUncertain` is emitted
-on the first observed uncertainty and at run start for an already-uncertain
-session; successful turns do not clear it. Subsequent cost/token numbers are known
-subtotals, not complete totals. Context-size estimates still use successful
-provider usage, never invented failed-attempt tokens.
+evidence. A planning input estimate, prior observed usage, or models.dev context
+window does **not** establish an upper bound on provider-tokenized input. Current
+routes expose output caps but no sound enforced input admission bound. Finite
+session total-token or cost ceilings therefore fail closed **before dispatch**
+with `InputLimitUnavailable` (or `OutputLimitUnavailable` when even an output cap
+is unavailable). Uncapped execution is unchanged. Hard-ceiling generation is an
+explicitly unsupported route dimension, not a fully qualified budgeting feature.
+Each new ambiguous attempt retains **unbounded** unknown usage; successful later
+turns cannot make that earlier exposure finite. Historical bounded ledger records
+retain their accounting arithmetic but do not authorize a new finite-capped
+request. Child exposure is mirrored by agent ID,
+recording only the increase in each child's bound before its known usage subtotal.
+`ProviderUsageUncertain` is emitted on the first observed uncertainty and at
+run start for an already-uncertain session; successful turns do not clear it.
+Subsequent cost/token numbers are known subtotals, not complete totals.
+Context-size estimates still use successful provider usage, never invented
+failed-attempt tokens.
 
 Accepted OAuth rotation with indeterminate completion is not autonomously
 replayed merely to refresh credentials. Generic Connect/DNS/TLS failures have
-only the finite opening allowance, never indefinite outage waiting. Pinned Codex
-`codex-api/src/sse/responses.rs:613` skips malformed frame deserialization and
-`:489` maps malformed completed-response parsing to a retryable stream error.
+only the finite opening allowance, never indefinite outage waiting. Codex's
+Responses SSE reader (`codex-api/src/sse/responses.rs`) skips frames that fail to
+deserialize and maps a malformed completed response to a retryable stream error.
 Octet replaces the unfinished qualified request within its finite stream budget,
 recording unknown usage, rather than continuing an incompletely decoded stream.
 Post-parsing field/resource/state-machine validation remains fail-closed.
@@ -263,8 +273,13 @@ Workspace-mutation approval creates a random, short-lived capability bound to th
 Sequential, parallel, and crash-recovery dispatch all use this boundary. The
 ordered live read path intersects static `ToolConcurrency::Parallel` with exact
 host classification and explicit policy admission, admitting contiguous,
-model-ordered waves of at most four exact `Pure`, `WorkspaceRead`, or `HostRead`
-calls. `HostRead` is eligible for these live waves but remains non-replayable.
+model-ordered waves of exact `Pure`, `WorkspaceRead`, or `HostRead` calls.
+`HostRead` is eligible for these live waves but remains non-replayable. A wave
+holds one call per CPU the process may use, at least four and at most the
+32-call turn limit (`Agent::set_parallel_read_wave_width` pins it). The width
+bounds resources, not safety: classification alone admits a call to a wave, and
+every other call is a barrier, so a wider wave admits nothing a narrower one
+would refuse.
 Crash replay separately intersects `ReplaySafety::Safe` with exact host
 classification and permits only exact `Pure` and `WorkspaceRead` calls. A broker or argument denial is returned to the provider as a paired tool error before hooks or executable code; a trusted hook may veto an otherwise admitted call before dispatch.
 
@@ -293,6 +308,69 @@ Sessions are append-only JSONL records containing entries, head updates, provide
 Before every provider turn, the agent estimates the complete request and retains a fixed 16K output reserve (or a larger explicit reasoning floor). The provider-advertised maximum completion size remains the model ceiling; the individual request is clamped only to the context space remaining after input. The default compaction threshold is the full context window, so the fixed reserve is not combined with an additional percentage buffer. If a provider nevertheless ends at the output limit while emitting tools, the assistant envelope is persisted, every call is paired with a synthetic error without execution, and a corrective continuation asks the model to reissue complete arguments.
 
 Writes use an advisory exclusive lock, compare the observed file length under that lock, append complete record buffers, and call `sync_data` before updating in-memory state. Read-only inspection uses a shared lock and never repairs or truncates. Writable open performs explicit torn-tail recovery while exclusively locked. Files are `0600` on Unix and parsing is bounded by bytes and record count.
+
+## Effective provider-context preparation
+
+Native `ProviderContextHook` registrations run once, in order, against the last
+validated effective `Request` before context planning, output sizing, budget
+reservation, request freezing or a real dispatch. Their host context fences the
+Session resource owner, host session ID (not provider cache affinity), starting
+branch head and advertised tool generation. Only canonical messages and system
+prompt can be replaced; the canonical Session, provider route, credentials,
+tools and execution authority are unchanged. Complete tool-call/result pairs
+may be omitted and result text summarized; call identity, arguments, async
+execution authority, result status and unresolved calls must be preserved.
+Every intermediate request is strictly validated and bounded to 64 MiB of
+serialized canonical request. Hook errors are redacted and fail closed before
+provider I/O; ordered hooks share a five-second deadline capped by the endpoint
+timeout, with cancellation winning same-poll completion.
+
+The real preparation driver can activate a `ProviderContextSessionWait` while
+an owned hook snapshot future waits. Readiness is borrow-free; only that driver
+receives `&mut Session` to consume typed, bounded private append leaves. The
+service must revoke unclaimed leaves on drop, and a receipt can activate durable
+projection state only after a synced append. A legitimate private append freezes
+against the post-hook head and does not rerun a mutating hook merely because its
+own append advanced the branch. This native seam alone is not a Pi compatibility
+claim: a process adapter needs an authenticated direct producer and an actual
+consumer, not a foreground broadcast event or optimistic success.
+
+Optional synchronous idle Responses prewarming refuses when async projection
+hooks are registered; real inference and its exact cache refresh retain the
+validated effective request. Opaque Responses replay remains an explicit
+limitation: a changed canonical projection is refused when a hidden `input`
+window would ignore it. The host never silently drops provider replay state to
+make a projection appear to work. Effective request estimates are planning data,
+never a sound provider input upper bound: finite token/cost ceilings still refuse
+before dispatch when that authoritative bound is unavailable.
+
+## Prompt-cache warming
+
+The same session owner polls `CacheWarmer` alongside provider opening, body
+consumption and tool waits; retained hosts and delegated workers also poll its
+idle driver. Timer, advisory-hook and refresh futures live in the Agent, not a
+temporary `select!` branch, so competing input does not drop or repeat an
+accepted provider request. Real provider opens remain pinned across warming
+wakeups. Explicit cancellation synchronously drops the refresh source and durably
+records unbounded uncertainty if dispatch was possible.
+
+Each real inference captures its exact request before dispatch. A refresh
+changes only the output cap to one; generated content and calls are discarded.
+Declared retention-specific TTLs and an enforceable wire cap gate eligibility.
+The scheduler follows pi's default streaming and opt-in idle profiles,
+pre-expiry delay, fixed age horizons and expected-savings decision. Ordered,
+bounded extension advice can change the economic action, never replay safety
+or hard ceilings. Admission accounts for the concurrent real request's
+reservation; freshness is checked again before a deferred first provider poll.
+
+Successful refresh usage and exact cost are session-only ledger records plus a
+`CacheWarmed` event, never an assistant turn, context mutation or throughput
+sample. Payload-free lifecycle records retain the route, prefix anchor and
+extension-override flag. An unfinished refresh after a crash stays uncertain
+and disables auxiliary warming rather than failing an uncapped real run.
+Resume does not reconstruct a live cache/timer from history. See
+[cache warming](../cache-warming.md) for product configuration, cancellation,
+accounting and qualification limits.
 
 ## V2 task delegation
 

@@ -1,0 +1,251 @@
+{
+  "candidate_commit": null,
+  "daily_driver_mutated_by_coordinator": false,
+  "local_extension_bundles": {
+    "bundle-octet-browse": 0,
+    "bundle-octet-codemode": 0,
+    "bundle-octet-computer-use": 0,
+    "bundle-octet-mcp": 0,
+    "bundle-octet-subagents": 0,
+    "bundle-octet-web-search": 0
+  },
+  "merge_tag_publication_performed": false,
+  "paid_provider_tests_run": false,
+  "phase": "FROZEN",
+  "qualification": "blocked",
+  "results": {
+    "api-v03-final": {
+      "evidence": "evidence/api-v03-final.log",
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "status": "pass"
+    },
+    "binary-installer-final": {
+      "evidence": "evidence/binary-installer-final.log",
+      "exit": 0,
+      "log_sha256": "7cc7cfc4932387bcccaaa5383bc6ce2f03625acb544b8d41c2222e4e23fec0e6",
+      "python_tests_run": 11,
+      "status": "pass"
+    },
+    "cache-warming-isolated": {
+      "evidence": "evidence/cache-warming-isolated.log",
+      "exit": null,
+      "reason": "90-second tool deadline; no test results",
+      "status": "interrupted-during-compilation"
+    },
+    "clippy": {
+      "evidence": "evidence/clippy.log",
+      "exit": 101,
+      "log_sha256": "fe84a293ee50d7fde1f90443b472230ec5f7918487e9d2da22429978f92cc181",
+      "status": "fail"
+    },
+    "codemode-timeout-isolated": {
+      "evidence": "evidence/codemode-timeout-isolated.log",
+      "exit": 0,
+      "log_sha256": "dc2c4f71dc9993e1fa9d8a23425a6d2b8a859538cee0b075e5d16c2e8255d2af",
+      "node_counts": {
+        "cancelled": 0,
+        "fail": 0,
+        "pass": 1,
+        "skipped": 0,
+        "tests": 1
+      },
+      "status": "pass"
+    },
+    "diff-check-final": {
+      "evidence": "evidence/diff-check-final.log",
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "status": "pass"
+    },
+    "doc-tests-final": {
+      "evidence": "evidence/doc-tests-final.log",
+      "exit": 0,
+      "log_sha256": "f6257d50b6e1352dac8ba058ffe1fff0054938c0e4fad6e23bf0c35e554e5c99",
+      "reported_targets": 6,
+      "rust_counts": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 7
+      },
+      "status": "pass"
+    },
+    "embedded-docs-final": {
+      "evidence": "evidence/embedded-docs-final.log",
+      "exit": 0,
+      "log_sha256": "3a7f1a633874bc2446ba998334459c78d5a8e108af0be3720486da2af20c67d2",
+      "status": "pass"
+    },
+    "fmt-final": {
+      "evidence": "evidence/fmt-final.log",
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "status": "pass"
+    },
+    "identity-final": {
+      "evidence": "evidence/identity-final.log",
+      "exit": 0,
+      "log_sha256": "4e7c0eed1ab02246cab4b623234ec799027abb8f70b443139c1efa4874c25ed2",
+      "python_tests_run": 11,
+      "status": "pass"
+    },
+    "idle-prewarm-isolated": {
+      "evidence": "evidence/idle-prewarm-isolated.log",
+      "exit": 101,
+      "log_sha256": "e88b6b66c30ae5432e7ba948dba4fc114caf71bc9b80b00408754531a9e69251",
+      "reported_targets": 1,
+      "rust_counts": {
+        "failed": 1,
+        "ignored": 0,
+        "passed": 0
+      },
+      "status": "fail"
+    },
+    "metadata-freshness-final": {
+      "evidence": "evidence/metadata-freshness-final.log",
+      "exit": 0,
+      "log_sha256": "8a0319469717fe077957d786b6a2ba08b9dac2826c6e4c7f5f43ae77bdd8be46",
+      "status": "pass"
+    },
+    "native-smoke": {
+      "evidence": "evidence/native-smoke.exit",
+      "exit": 0,
+      "status": "pass"
+    },
+    "octet-browse-final": {
+      "evidence": "evidence/octet-browse-final.log",
+      "exit": 0,
+      "log_sha256": "4f8553d7be061149df8c795c7ea1d6e9df9f7540ba79256fa8cb047f6f07e8cd",
+      "python_skipped": 3,
+      "python_tests_run": 122,
+      "status": "pass"
+    },
+    "octet-codemode-final": {
+      "evidence": "evidence/octet-codemode-final.log",
+      "exit": 1,
+      "log_sha256": "19e082c5553c34179193af8dc738dede589134efad953279a5c825a6b972fa2e",
+      "node_counts": {
+        "cancelled": 0,
+        "fail": 1,
+        "pass": 21,
+        "skipped": 0,
+        "tests": 22
+      },
+      "python_tests_run": 5,
+      "status": "fail"
+    },
+    "octet-computer-use-final": {
+      "evidence": "evidence/octet-computer-use-final.log",
+      "exit": 0,
+      "log_sha256": "aa27921770f948de4201c4b233f083d7bb8153f608f3831daae7b57e3aa70e3c",
+      "python_skipped": 7,
+      "python_tests_run": 353,
+      "status": "pass"
+    },
+    "octet-mcp-final": {
+      "evidence": "evidence/octet-mcp-final.log",
+      "exit": 0,
+      "log_sha256": "3df03e0da8f331a76347e20c1f4c62b44b36c5881d483557d07e31a469d17139",
+      "python_tests_run": 102,
+      "status": "pass"
+    },
+    "octet-subagents-final": {
+      "evidence": "evidence/octet-subagents-final.log",
+      "exit": 0,
+      "log_sha256": "a48149090fcc4a3efd4650dd6b961d2f670bcc6b32d995174ee5c2d40f171b76",
+      "python_tests_run": 110,
+      "status": "pass"
+    },
+    "octet-web-search-final": {
+      "evidence": "evidence/octet-web-search-final.log",
+      "exit": 0,
+      "log_sha256": "f10662369364883b6cb1ec244768b74d60104cbeaae34a4f489b84ca47c826bd",
+      "python_tests_run": 54,
+      "status": "pass"
+    },
+    "packaged-docs-final": {
+      "evidence": "evidence/packaged-docs-final.log",
+      "exit": 0,
+      "log_sha256": "3a7f1a633874bc2446ba998334459c78d5a8e108af0be3720486da2af20c67d2",
+      "status": "pass"
+    },
+    "pi-final": {
+      "evidence": "evidence/pi-final.log",
+      "exit": 0,
+      "log_sha256": "4b0891edcde97d8a01378fdb8b3a6ea9303dbf7354df2dcd277ef2a18fd16b98",
+      "node_counts": {
+        "cancelled": 0,
+        "fail": 0,
+        "pass": 17,
+        "skipped": 5,
+        "tests": 22
+      },
+      "status": "pass"
+    },
+    "python-sdk-final": {
+      "evidence": "evidence/python-sdk-final.log",
+      "exit": 0,
+      "log_sha256": "11f89e3fca2fdc3fc4b37e852571efe3777fde7cba8bc701f0e71a0d402f78e7",
+      "python_skipped": 1,
+      "python_tests_run": 137,
+      "status": "pass"
+    },
+    "release-build-final": {
+      "evidence": "evidence/release-build-final.log",
+      "exit": 0,
+      "log_sha256": "a538ab8c4217c3f414df5c5b9c551a65e96b46859ef539f9f523cd2990e84358",
+      "status": "pass"
+    },
+    "release-syntax": {
+      "evidence": "evidence/release-syntax.exit",
+      "exit": 0,
+      "status": "pass"
+    },
+    "serve-tests": {
+      "evidence": "evidence/serve-tests.log",
+      "exit": 0,
+      "log_sha256": "f738e9d5dc23bf40b6ad967b2c2357f5c2a767641211442b5fa2379228ef9ff9",
+      "reported_targets": 16,
+      "rust_counts": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 298
+      },
+      "status": "pass"
+    },
+    "tooling-final": {
+      "evidence": "evidence/tooling-final.log",
+      "exit": 0,
+      "log_sha256": "9f749df4a613323e7e908f12c6ddb2d35e7c441fb1f660dd0b3b093f5c444a5f",
+      "python_tests_run": 61,
+      "status": "pass"
+    },
+    "workspace-tests-final": {
+      "evidence": "evidence/workspace-tests-final.log",
+      "exit": 101,
+      "failed_rust_tests": [
+        "abort_cancels_pending_warm_and_tool_without_blocking",
+        "completion_cancels_pending_warm_without_waiting_for_its_deadline",
+        "driven_abort_transitions_idle_mode_without_waiting_for_pending_warm",
+        "dropping_undriven_run_cancels_warm_synchronously",
+        "mode_change_reports_cancellation_write_failure_and_retains_exposure",
+        "provider_poll_abort_preempts_due_warm_in_the_same_select_poll",
+        "modes::interactive::tests::active_run_commands_and_steering_tests::changelog_startup_and_idle_skip_responses_context_prewarm"
+      ],
+      "log_sha256": "d27a59307c69b8cbbf7457321889eca36a0c2363836a4d70a5499d9642b56374",
+      "reported_targets": 99,
+      "rust_counts": {
+        "failed": 7,
+        "ignored": 5,
+        "passed": 4825
+      },
+      "status": "fail"
+    }
+  },
+  "source_tree": "a78080e39d6e17a68afd879cff43850f33ed15b5",
+  "workspace_counts": {
+    "failed": 7,
+    "ignored": 5,
+    "passed": 4825
+  }
+}
