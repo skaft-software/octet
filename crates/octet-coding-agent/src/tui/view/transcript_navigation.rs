@@ -1200,6 +1200,149 @@ mod tests {
         super::super::viewport::render_shell_viewport_at(&state, state.size.0, now)
     }
 
+    /// A pointer gesture must copy the row it is drawn on. Row geometry comes
+    /// A pointer gesture must copy the row it is drawn on, in the viewport the
+    /// reader is looking at. Markdown layout inserts rows the semantic copy text
+    /// does not contain (a blank separator between a paragraph and the list that
+    /// follows it) and wraps prose itself, so row hit testing has to read the
+    /// painted rows rather than re-wrap the copy text.
+    #[test]
+    fn pointer_selection_copies_the_painted_row_in_wrapped_markdown() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        shell.capture_mouse = true;
+        shell.state.borrow_mut().application_viewport_requested = true;
+        shell.isolate_native_test_renderer();
+        shell.on_prompt_submitted("numbered request");
+        let mut text = String::from("U8-BEGIN\n");
+        for index in 1..=40 {
+            text.push_str(&format!(
+                "{index}. U8-LONG-{index:03} numbered line with text\n"
+            ));
+        }
+        text.push_str(&format!(
+            "\n{}",
+            "a long wrapped paragraph with unique trailing words "
+        ));
+        text.push_str(&"wrapped words ".repeat(30));
+        shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Assistant(Box::new(
+                AssistantBlock::finalized(text),
+            )));
+        shell.apply_edit(EditAction::Paste("kept draft".into()));
+        shell.render_written_test_frame();
+
+        let mut checked = 0;
+        let mut copied_rows = 0;
+        for row in 0..24 {
+            shell.render_written_test_frame();
+            let visible = shell
+                .state
+                .borrow()
+                .retained_render_geometry()
+                .expect("painted geometry")
+                .visible_lines
+                .clone();
+            let Some(line) = visible.get(row) else {
+                break;
+            };
+            let painted = strip_terminal_sequences(line).trim_end().to_owned();
+            if painted.trim().is_empty() {
+                continue;
+            }
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Down(MouseButton::Left), 0, row as u16),
+            );
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Drag(MouseButton::Left), 79, row as u16),
+            );
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Up(MouseButton::Left), 79, row as u16),
+            );
+            let copied = shell
+                .copy_selected_plain_text()
+                .unwrap_or_default()
+                .trim_end()
+                .to_owned();
+            if copied.is_empty() {
+                continue;
+            }
+            copied_rows += 1;
+            assert!(
+                painted.contains(&copied),
+                "screen row {row} painted {painted:?} but copied {copied:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 10, "only {checked} rows carried copyable text");
+        assert_eq!(copied_rows, checked);
+        assert_eq!(shell.pending(), "kept draft");
+    }
+
+    #[test]
+    fn pointer_selection_copies_the_painted_row_across_scroll_wrap_and_chrome() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 18);
+        shell.capture_mouse = true;
+        shell.state.borrow_mut().application_viewport_requested = true;
+        shell.isolate_native_test_renderer();
+        for index in 0..240 {
+            shell.notice(format!("probe row {index:03}"));
+        }
+        shell.notice(format!("wrapped {}", "wide content ".repeat(12)));
+        shell.apply_edit(EditAction::Paste("kept draft".into()));
+        let height = i16::try_from(shell.state.borrow().size.1).unwrap();
+        shell.scroll_lines(-3 * height);
+        shell.render_written_test_frame();
+
+        let (visible, capacity) = {
+            let state = shell.state.borrow();
+            let geometry = state.retained_render_geometry().expect("painted geometry");
+            (geometry.visible_lines.clone(), geometry.viewport_rows)
+        };
+        assert!(capacity > 6, "viewport too short for the probe");
+        let (row, expected) = visible
+            .iter()
+            .enumerate()
+            .take(capacity.saturating_sub(2))
+            .skip(2)
+            .find_map(|(row, line)| {
+                let plain = strip_terminal_sequences(line);
+                plain
+                    .find("probe row ")
+                    .map(|offset| (row, plain[offset..].trim_end().to_owned()))
+            })
+            .expect("a scrolled probe row in the painted viewport");
+        let next = strip_terminal_sequences(&visible[row + 1])
+            .trim_end()
+            .to_owned();
+
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, row as u16),
+        );
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 79, row as u16),
+        );
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Up(MouseButton::Left), 79, row as u16),
+        );
+        let copied = shell.copy_selected_plain_text().expect("selection copy");
+        assert_eq!(
+            copied.trim_end(),
+            expected.trim_end(),
+            "screen row {row} painted {expected:?} and the next row painted {next:?}"
+        );
+        assert_eq!(shell.pending(), "kept draft");
+    }
+
     fn search_shell() -> InteractiveShell {
         let mut shell = InteractiveShell::test_shell();
         shell.set_size(80, 20);
