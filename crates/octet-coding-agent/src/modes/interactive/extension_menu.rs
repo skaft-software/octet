@@ -664,17 +664,17 @@ pub(super) async fn setup_python_runtime(
             Ok(false)
         }
         Some(Ok(_)) => {
-            let report = reload_resource_processes(app, shell, input).await?;
-            for (_, result) in report.processes {
-                if let Err(problem) = result {
-                    shell.notice_error(problem);
-                }
-            }
-            for notice in report.details.into_iter().chain(report.events) {
-                shell.notice(notice);
+            if let Err(error) = app
+                .executable_extensions
+                .activate_python_extension(extension)
+                .await
+            {
+                shell.error(format!("Python runtime is ready, but {extension} could not start: {error:#}; retry with /extensions setup {extension}"));
+                request_extension_ui(shell, app);
+                return Ok(false);
             }
             request_extension_ui(shell, app);
-            shell.notice(format!("{extension}: Python runtime provisioned; desktop driver and OS permissions are separate setup steps"));
+            shell.notice(format!("{extension}: Python runtime provisioned and extension activated; desktop driver and OS permissions are separate setup steps"));
             Ok(true)
         }
     }

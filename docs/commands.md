@@ -12,12 +12,15 @@ running it, and Enter runs the highlighted command through its normal handler.
 ```
 
 Most commands run right away. Changes to the model or session, compaction,
-reload and checkout wait until current work finishes. `/thinking` takes effect
-without interrupting on explicitly qualified Responses routes, and other routes
-change at an idle boundary. A queued effort isn't a provider acknowledgement,
-and unsupported explicit efforts are rejected. `/answer` saves a steering
-instruction and makes later requests tool-free at the next safe point, or starts
-a tool-free run when idle. It doesn't undo effects that already happened. [Run
+reload and checkout wait until current work finishes, and a change requested
+while work is active is listed in the queued-input area until it applies.
+`/thinking` takes effect without interrupting on explicitly qualified Responses
+routes, and other routes change at an idle boundary. A queued effort isn't a
+provider acknowledgement, and unsupported explicit efforts are rejected.
+Extensions queue the same way through `pi.setModel` and `pi.setThinkingLevel`.
+`/answer` saves a steering instruction and makes later requests tool-free at
+the next safe point, or starts a tool-free run when idle. It doesn't undo
+effects that already happened. [Run
 control](design/octet-agent.md#commit-and-cancellation-invariants).
 
 ## Slash commands

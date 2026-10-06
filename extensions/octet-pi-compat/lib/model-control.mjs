@@ -3,8 +3,13 @@ import { bounded, fields, invalid } from './errors.mjs';
 
 const levels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 function publish(store, result) {
-  fields(result, ['selected', 'model_view', 'reasoning', 'context_usage'], 'model selection receipt');
+  fields(result, ['selected', 'queued', 'model_view', 'reasoning', 'context_usage'], 'model selection receipt');
   if (typeof result.selected !== 'boolean') invalid('model selection receipt');
+  if (Object.hasOwn(result, 'queued')) {
+    if (result.queued !== true || result.selected !== true || Object.keys(result).length !== 2) invalid('queued model selection receipt');
+    // Admission is not application. Retained getters follow later host snapshots.
+    return true;
+  }
   if (!result.selected) return false;
   if (!levels.has(result.reasoning) || !result.model_view) invalid('model selection receipt');
   bounded(result.model_view.id, 'selected model id', 256);
@@ -43,10 +48,11 @@ export function setThinkingLevel(runtime, store, level) {
   runtime.require('session_control_v1'); runtime.assertOwner(store);
   if (!levels.has(level)) invalid('thinking level');
   store.controller.signal.throwIfAborted();
-  if (runtime.stopping || !store.live || runtime.active.get(store.id)?.controller !== store.controller) invalid('active parent required for synchronous thinking selection');
+  if (runtime.stopping || !Number.isSafeInteger(store.id) || store.id < 0) invalid('owner-bound thinking selection required');
+  const live = store.live && runtime.active.get(store.id)?.controller === store.controller;
   const result = runtime.transport.requestSync('model/select', {
     parent_request_id: store.id, resource_owner: store.state.owner,
     selection: { operation: 'thinking', level },
-  }, { parent: store.id, signal: store.controller.signal });
+  }, { parent: live ? store.id : undefined, signal: store.controller.signal });
   if (!publish(store, result)) invalid('thinking selection refused');
 }
