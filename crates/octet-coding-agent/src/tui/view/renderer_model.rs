@@ -512,6 +512,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         native_animation_viewport_top,
         history_prepended,
         steering_queue,
+        pending_controls,
         follow_up_queue,
         input_modalities,
         workspace,

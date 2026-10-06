@@ -110,7 +110,7 @@ impl App {
     /// never reaches this path.
     fn resolve_contributed_model(&mut self, provider: &str, model: &str) -> Option<ModelId> {
         let resolve = |catalog: &octet_ai::ModelCatalog| {
-            crate::extensions::model_control::resolve_pi_model(catalog, provider, model)
+            crate::extensions::model_control::resolve_model(catalog, provider, model)
                 .map(|model| model.spec.id.clone())
         };
         if let Some(id) = resolve(&self.catalog) {

@@ -4,14 +4,14 @@ use tempfile::TempDir;
 
 #[path = "agent_sessions/tests.rs"]
 mod agent_sessions;
-#[path = "cache_warming_tests.rs"]
-mod cache_warming;
-#[path = "prompt_metadata_tests.rs"]
-mod prompt_metadata;
 #[path = "builtin_override_tests.rs"]
 mod builtin_overrides;
+#[path = "cache_warming_tests.rs"]
+mod cache_warming;
 #[path = "composer_history_tests.rs"]
 mod composer_history;
+#[path = "prompt_metadata_tests.rs"]
+mod prompt_metadata;
 
 const VALID_MANIFEST: &str = r#"
 name = "git-tools"

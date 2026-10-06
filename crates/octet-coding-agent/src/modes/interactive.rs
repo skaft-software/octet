@@ -70,6 +70,7 @@ use crate::tui::view::{
 };
 
 mod extension_menu;
+mod model_controls;
 mod onboarding;
 
 use extension_menu::{
@@ -472,6 +473,16 @@ pub enum PendingIdleAction {
     Setup,
     Logout(Option<String>),
     ChangeModel(ModelId),
+    /// Accepted from the original issued extension owner, rechecked at idle.
+    ExtensionModelControl {
+        owner: octet_agent::extension_process::ExtensionResourceOwner,
+        selection: octet_agent::extension_process::ExtensionModelControl,
+    },
+    ExtensionActiveThinking {
+        owner: octet_agent::extension_process::ExtensionResourceOwner,
+        level: String,
+        reasoning: ReasoningConfig,
+    },
     Fast(bool),
     CacheWarming(octet_agent::CacheWarmMode),
     /// Preference is already saved and sent to the active session owner.
@@ -539,7 +550,8 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
                         | PendingIdleAction::ChangeThinkingLevel(_)
                         | PendingIdleAction::ActiveThinkingSelection(_)
                 ),
-                PendingIdleAction::ChangeThinking(_) | PendingIdleAction::ChangeThinkingLevel(_)
+                PendingIdleAction::ChangeThinking(_)
+                    | PendingIdleAction::ChangeThinkingLevel(_)
                     | PendingIdleAction::ActiveThinkingSelection(_)
             )
             | (
@@ -550,8 +562,14 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
                 Some(PendingIdleAction::PersistThinkingPreference(_)),
                 PendingIdleAction::PersistThinkingPreference(_)
             )
-            | (Some(PendingIdleAction::SyncTheme(_)), PendingIdleAction::SyncTheme(_))
-            | (Some(PendingIdleAction::SyncImages(_)), PendingIdleAction::SyncImages(_))
+            | (
+                Some(PendingIdleAction::SyncTheme(_)),
+                PendingIdleAction::SyncTheme(_)
+            )
+            | (
+                Some(PendingIdleAction::SyncImages(_)),
+                PendingIdleAction::SyncImages(_)
+            )
     );
     if same_kind {
         let _ = queue.pop_back();
@@ -2356,21 +2374,60 @@ const MAX_PENDING_IDLE_ACTIONS: usize = 64;
 /// Commands with an idle-owned effect need admission before consuming the draft.
 fn active_command_needs_idle_slot(command: &Command) -> bool {
     match command {
-        Command::Login(_) | Command::Setup | Command::Logout(_) | Command::Model(Some(_))
-        | Command::Thinking(Some(_)) | Command::Compact | Command::CompactWithInstructions(_)
-        | Command::AutoCompact(_) | Command::Reload | Command::New | Command::Resume(_)
-        | Command::Fork | Command::Clone | Command::CacheWarming(Some(_)) | Command::Skills(_)
-        | Command::Unknown(_) | Command::Theme(Some(_)) | Command::Bash(_) => true,
+        Command::Login(_)
+        | Command::Setup
+        | Command::Logout(_)
+        | Command::Model(Some(_))
+        | Command::Thinking(Some(_))
+        | Command::Compact
+        | Command::CompactWithInstructions(_)
+        | Command::AutoCompact(_)
+        | Command::Reload
+        | Command::New
+        | Command::Resume(_)
+        | Command::Fork
+        | Command::Clone
+        | Command::CacheWarming(Some(_))
+        | Command::Skills(_)
+        | Command::Unknown(_)
+        | Command::Theme(Some(_))
+        | Command::Bash(_) => true,
         Command::Fast(value) => value.is_some(),
-        Command::Extensions(sub) => !matches!(sub, commands::ExtensionsSubcommand::Status | commands::ExtensionsSubcommand::Inspect { .. }),
-        Command::Settings(sub) => !matches!(sub, commands::SettingsCommand::Show | commands::SettingsCommand::Transport | commands::SettingsCommand::Padding | commands::SettingsCommand::Theme(None) | commands::SettingsCommand::Images(None)),
+        Command::Extensions(sub) => !matches!(
+            sub,
+            commands::ExtensionsSubcommand::Status | commands::ExtensionsSubcommand::Inspect { .. }
+        ),
+        Command::Settings(sub) => !matches!(
+            sub,
+            commands::SettingsCommand::Show
+                | commands::SettingsCommand::Transport
+                | commands::SettingsCommand::Padding
+                | commands::SettingsCommand::Theme(None)
+                | commands::SettingsCommand::Images(None)
+        ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
-        Command::Model(None) | Command::Thinking(None) | Command::Theme(None)
-        | Command::Verbose(_) | Command::Answer(_) | Command::Status | Command::Context
-        | Command::Help(_) | Command::Hotkeys | Command::Copy | Command::Session
-        | Command::Cost | Command::Cache | Command::CacheWarming(None) | Command::Update
-        | Command::Changelog | Command::Name(_) | Command::Export(_) | Command::Exit
-        | Command::Debug | Command::Prompt(_) | Command::Goal(_) => false,
+        Command::Model(None)
+        | Command::Thinking(None)
+        | Command::Theme(None)
+        | Command::Verbose(_)
+        | Command::Answer(_)
+        | Command::Status
+        | Command::Context
+        | Command::Help(_)
+        | Command::Hotkeys
+        | Command::Copy
+        | Command::Session
+        | Command::Cost
+        | Command::Cache
+        | Command::CacheWarming(None)
+        | Command::Update
+        | Command::Changelog
+        | Command::Name(_)
+        | Command::Export(_)
+        | Command::Exit
+        | Command::Debug
+        | Command::Prompt(_)
+        | Command::Goal(_) => false,
     }
 }
 
@@ -2380,7 +2437,7 @@ fn stage_active_thinking(
 ) -> bool {
     if let Some(action) = queue
         .iter_mut()
-        .find(|action| matches!(action, PendingIdleAction::ActiveThinkingSelection(_)))
+        .find(|action| model_controls::is_active_thinking(action))
     {
         *action = PendingIdleAction::ActiveThinkingSelection(reasoning.clone());
         return true;
@@ -2402,10 +2459,13 @@ fn settle_active_thinking(
     inspection: &ActiveRunInspection,
     queue: &mut VecDeque<PendingIdleAction>,
 ) {
-    if !queue
-        .iter()
-        .any(|action| matches!(action, PendingIdleAction::ActiveThinkingSelection(_)))
-    {
+    if !queue.iter().any(|action| {
+        matches!(
+            action,
+            PendingIdleAction::ActiveThinkingSelection(_)
+                | PendingIdleAction::ExtensionActiveThinking { .. }
+        )
+    }) {
         return;
     }
     let effective = inspection
@@ -2419,6 +2479,7 @@ fn settle_active_thinking(
                 .map(|(_, reasoning)| reasoning)
         })
         .unwrap_or_else(|| inspection.reasoning.clone());
+    model_controls::settle_active_controls(queue, &effective);
     let mut latest = None;
     for action in queue.iter_mut() {
         if let PendingIdleAction::ActiveThinkingSelection(reasoning) = action {
@@ -2456,31 +2517,60 @@ fn apply_active_theme(
     requested: Option<String>,
     queue: &mut VecDeque<PendingIdleAction>,
 ) -> anyhow::Result<()> {
-    let mut config = shell.runtime_config().cloned().context("display configuration is unavailable")?;
+    let mut config = shell
+        .runtime_config()
+        .cloned()
+        .context("display configuration is unavailable")?;
     let Some(choice) = requested else {
         let background = shell.theme().background();
-        let mut keys: Vec<_> = TerminalThemeChoice::all().into_iter().map(|choice| choice.key().to_owned()).collect();
-        let mut previews: Vec<_> = TerminalThemeChoice::all().into_iter().map(|choice| {
-            if choice == TerminalThemeChoice::Auto && TerminalThemeChoice::from_config(&config) == Some(TerminalThemeChoice::Auto) { return shell.theme(); }
-            let mut preview_config = config.clone();
-            preview_config.theme = Some(choice.key().to_owned());
-            load_theme_for_background(&preview_config, background)
-        }).collect();
-        for (_, _, key, theme) in compiled_file_theme_picker_entries(&config, background) { keys.push(key); previews.push(theme); }
-        for (key, theme) in crate::tui::theme::selectable_file_themes(&config, background) { keys.push(key); previews.push(theme); }
+        let mut keys: Vec<_> = TerminalThemeChoice::all()
+            .into_iter()
+            .map(|choice| choice.key().to_owned())
+            .collect();
+        let mut previews: Vec<_> = TerminalThemeChoice::all()
+            .into_iter()
+            .map(|choice| {
+                if choice == TerminalThemeChoice::Auto
+                    && TerminalThemeChoice::from_config(&config) == Some(TerminalThemeChoice::Auto)
+                {
+                    return shell.theme();
+                }
+                let mut preview_config = config.clone();
+                preview_config.theme = Some(choice.key().to_owned());
+                load_theme_for_background(&preview_config, background)
+            })
+            .collect();
+        for (_, _, key, theme) in compiled_file_theme_picker_entries(&config, background) {
+            keys.push(key);
+            previews.push(theme);
+        }
+        for (key, theme) in crate::tui::theme::selectable_file_themes(&config, background) {
+            keys.push(key);
+            previews.push(theme);
+        }
         let current = config.theme.as_deref().unwrap_or("auto");
-        let selected = keys.iter().position(|key| key.eq_ignore_ascii_case(current)).unwrap_or(0);
+        let selected = keys
+            .iter()
+            .position(|key| key.eq_ignore_ascii_case(current))
+            .unwrap_or(0);
         shell.open_theme_preview_panel(Panel::SelectList {
-            surface: OrdinarySurfaceMetadata::with_purpose("Theme", "Preview display; save at idle"),
+            surface: OrdinarySurfaceMetadata::with_purpose(
+                "Theme",
+                "Preview display; save at idle",
+            ),
             items: keys.clone(),
             descriptions: vec![None; keys.len()],
             selected,
             filter: String::new(),
-            action: PanelAction::SelectTheme { keys, previews: previews.into() },
+            action: PanelAction::SelectTheme {
+                keys,
+                previews: previews.into(),
+            },
         });
         return Ok(());
     };
-    let selector = TerminalThemeChoice::parse(&choice).map_or(choice.clone(), |choice| choice.key().to_owned());
+    let selector = TerminalThemeChoice::parse(&choice)
+        .map_or(choice.clone(), |choice| choice.key().to_owned());
     config.theme = Some(selector.clone());
     config.theme_explicit = true;
     // Named themes fail closed before changing the live display or its config.
@@ -2492,8 +2582,16 @@ fn apply_active_theme(
     apply_active_theme_snapshot(shell, selector, theme, queue)
 }
 
-fn apply_active_theme_snapshot(shell: &mut InteractiveShell, selector: String, theme: OctetTheme, queue: &mut VecDeque<PendingIdleAction>) -> anyhow::Result<()> {
-    let mut config = shell.runtime_config().cloned().context("display configuration is unavailable")?;
+fn apply_active_theme_snapshot(
+    shell: &mut InteractiveShell,
+    selector: String,
+    theme: OctetTheme,
+    queue: &mut VecDeque<PendingIdleAction>,
+) -> anyhow::Result<()> {
+    let mut config = shell
+        .runtime_config()
+        .cloned()
+        .context("display configuration is unavailable")?;
     config.theme = Some(selector.clone());
     config.theme_explicit = true;
     shell.set_theme(theme);
@@ -2529,7 +2627,10 @@ where
 {
     let template = matches!(&command, Command::Unknown(text)
         if shell.has_prompt_template(split_prompt_invocation(text).map_or("", |(name, _)| name)));
-    if active_command_needs_idle_slot(&command) && !template && queue.len() >= MAX_PENDING_IDLE_ACTIONS {
+    if active_command_needs_idle_slot(&command)
+        && !template
+        && queue.len() >= MAX_PENDING_IDLE_ACTIONS
+    {
         anyhow::bail!("command queue is full; retry after the idle boundary");
     }
     match command {
@@ -3548,6 +3649,9 @@ where
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        if shell.set_pending_controls(model_controls::queue_labels(pending_actions)) {
+            shell.render();
+        }
         if settled_outcome.is_some() {
             // Ctrl+C can arrive after root settlement while a stop response is
             // pending. It must still revoke previously armed follow-up dispatch.
@@ -3652,7 +3756,7 @@ where
                         }
                         Err(error) if selected_reasoning == reasoning => {
                             selected_reasoning = last_control_reasoning.clone();
-                            pending_actions.retain(|action| !matches!(action, PendingIdleAction::ActiveThinkingSelection(choice) if choice == &reasoning));
+                            pending_actions.retain(|action| !matches!(action, PendingIdleAction::ActiveThinkingSelection(choice) | PendingIdleAction::ExtensionActiveThinking { reasoning: choice, .. } if choice == &reasoning));
                             if last_control_reasoning != inspection.reasoning {
                                 stage_active_thinking(pending_actions, &last_control_reasoning);
                             }
@@ -3740,6 +3844,17 @@ where
                 if apply_extension_background(shell, executable_extensions) { shell.render(); }
             }
             _ = extension_tick.tick() => {
+                if let Some(request) = executable_extensions.next_model_control_request() {
+                    if let Some(reasoning) = model_controls::admit_busy_control(
+                        request, executable_extensions, inspection, pending_actions, shell, aborting,
+                    ) {
+                        selected_reasoning = reasoning.clone();
+                        pending_reasoning = Some(reasoning);
+                        pending_reasoning_announce = true;
+                    }
+                    shell.set_pending_controls(model_controls::queue_labels(pending_actions));
+                    shell.render();
+                }
                 if apply_extension_background(shell, executable_extensions) {
                     shell.render();
                 }
@@ -3893,7 +4008,7 @@ where
                                             continue;
                                         }
                                     };
-                                    if inspection.model.responses_features().reasoning_effort_updates && !aborting {
+                                    if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) {
                                         if !stage_active_thinking(pending_actions, &reasoning) {
                                             shell.error("command queue is full; thinking unchanged".into());
                                             shell.render();
@@ -4167,8 +4282,8 @@ where
                             Command::Unknown(text) => subagents_command_arguments(text, executable_extensions).is_some_and(|args| subagent_list_requested(&args) || matches!(args.as_slice(), [action, _] if action == "stop")),
                             _ => false,
                         };
-                        let live_thinking = matches!(&parsed, Command::Thinking(Some(_))) && inspection.model.responses_features().reasoning_effort_updates && !aborting;
-                        let replaces_thinking = live_thinking && pending_actions.iter().any(|action| matches!(action, PendingIdleAction::ActiveThinkingSelection(_)));
+                        let live_thinking = matches!(&parsed, Command::Thinking(Some(_))) && inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions);
+                        let replaces_thinking = live_thinking && pending_actions.iter().any(model_controls::is_active_thinking);
                         if active_command_needs_idle_slot(&parsed) && !prompt_template && !live_subagent_control && !replaces_thinking && pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
                             shell.error("command queue is full; draft and attachments retained".into());
                             shell.render();
@@ -4181,7 +4296,7 @@ where
                             ));
                             match requested {
                                 Err(error) => { shell.error(error.to_string()); shell.render(); continue; }
-                                Ok(reasoning) if inspection.model.responses_features().reasoning_effort_updates && !aborting => {
+                                Ok(reasoning) if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) => {
                                     if !stage_active_thinking(pending_actions, &reasoning) {
                                         shell.error("command queue is full; thinking unchanged".into());
                                         shell.render();
@@ -4332,7 +4447,7 @@ where
                         shell.render();
                     }
                     InputAction::CycleThinking => {
-                        if inspection.model.responses_features().reasoning_effort_updates && !aborting {
+                        if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) {
                             let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
                             // Cycle from the latest user selection, including a
                             // value whose control send is still in flight.
@@ -4402,6 +4517,11 @@ where
                         if let Ok(session) = inspection.read_only_session() {
                             if let Ok(Some((_, reasoning))) = session.responses_reasoning(&inspection.model.endpoint.id, &inspection.model.spec.id) {
                                 shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &reasoning_label(&reasoning));
+                                if model_controls::acknowledge_response_boundary(pending_actions, &reasoning) {
+                                    executable_extensions.refresh_host_state(&session, &inspection.model, &reasoning, &inspection.sessions);
+                                    shell.set_pending_controls(model_controls::queue_labels(pending_actions));
+                                    shell.notice(format!("thinking {} applied at the host response boundary; not provider acknowledgement", reasoning_label(&reasoning)));
+                                }
                             }
                         }
                     }
@@ -4626,6 +4746,16 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
 }
 
 fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
+    // Owning &mut App proves no Run can have an in-flight request. Startup and
+    // other idle hook pumps need the same consumer as an idle command; never
+    // leave a synchronous setter waiting behind the hook which called it.
+    let model_control = app
+        .executable_extensions
+        .next_model_control_request()
+        .map(|request| {
+            let result = model_controls::apply_idle_request(app, &request);
+            (request, result)
+        });
     app.executable_extensions.refresh_host_state(
         app.agent.session(),
         &app.model,
@@ -4650,6 +4780,10 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
     shell.set_extension_commands(Arc::from(native_slash_command_suggestions(
         &app.executable_extensions,
     )));
+    if let Some((request, result)) = model_control {
+        update_status(shell, app);
+        request.respond_model_control(result);
+    }
 }
 
 /// Pi's idle delivery: a message that triggers a turn runs now, through the
@@ -5049,7 +5183,8 @@ where
     shell.set_theme(load_theme_for_background(&app.config, background));
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
-    app.executable_extensions.refresh_frontend_keybindings(shell);
+    app.executable_extensions
+        .refresh_frontend_keybindings(shell);
     shell.hydrate(app.agent.session())?;
     app.executable_extensions
         .activate_session_lifecycle_driver();
@@ -7335,15 +7470,8 @@ where
             create_extension_session_with_options(app, shell, input, &request, parent_session, None)
                 .await
         }
-        ExtensionSessionLifecycleOperation::ModelControl(selection) => {
-            let result = if request
-                .resource_owner()
-                .is_some_and(|owner| owner.session_id == app.agent.session().resource_owner_key())
-            {
-                crate::extensions::model_control::apply_idle_model_control(app, &selection)
-            } else {
-                Err("model selection owner is not the foreground session".into())
-            };
+        ExtensionSessionLifecycleOperation::ModelControl(_) => {
+            let result = model_controls::apply_idle_request(app, &request);
             // Publish the native snapshot before waking the synchronous caller.
             request_extension_ui(shell, app);
             update_status(shell, app);
@@ -7676,9 +7804,17 @@ async fn apply_pending_actions(
         }
         refresh_resource_paths(&mut app, shell, input).await?;
         let Some(action) = pending_actions.pop_front() else {
+            shell.set_pending_controls(Vec::new());
             break;
         };
+        shell.set_pending_controls(model_controls::queue_labels(pending_actions));
         match action {
+            PendingIdleAction::ExtensionModelControl { owner, selection } => {
+                model_controls::apply_queued_control(&mut app, shell, &owner, &selection);
+            }
+            PendingIdleAction::ExtensionActiveThinking { .. } => {
+                unreachable!("run settlement converts active controls")
+            }
             PendingIdleAction::Login(provider) => match validate_provider(provider.as_deref()) {
                 Ok("codex") => login_codex(&mut app, shell, input).await?,
                 Ok("custom") => login_custom(shell)?,
@@ -7723,7 +7859,12 @@ async fn apply_pending_actions(
                 let target = id.clone();
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
                 if app.model.spec.id == target {
-                    if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || crate::cli::persist_model(&target.0)).await {
+                    if let Err(error) =
+                        persist_configuration(Some(&mut app.executable_extensions), || {
+                            crate::cli::persist_model(&target.0)
+                        })
+                        .await
+                    {
                         shell.error(format!("failed to save model preference: {error}"));
                     }
                     shell.notice("model change applied at the idle boundary");
@@ -7891,16 +8032,30 @@ async fn apply_pending_actions(
             PendingIdleAction::SyncTheme(selector) => {
                 app.config.theme = Some(selector.clone());
                 app.config.theme_explicit = true;
-                if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || crate::cli::persist_theme_choice(&selector)).await {
-                    shell.error(format!("display changed, but theme preference was not saved: {error}"));
+                if let Err(error) =
+                    persist_configuration(Some(&mut app.executable_extensions), || {
+                        crate::cli::persist_theme_choice(&selector)
+                    })
+                    .await
+                {
+                    shell.error(format!(
+                        "display changed, but theme preference was not saved: {error}"
+                    ));
                 } else {
                     shell.notice("theme preference saved at the idle boundary");
                 }
             }
             PendingIdleAction::SyncImages(enabled) => {
                 app.config.show_images = enabled;
-                if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || crate::cli::persist_show_images(enabled)).await {
-                    shell.error(format!("display changed, but image preference was not saved: {error}"));
+                if let Err(error) =
+                    persist_configuration(Some(&mut app.executable_extensions), || {
+                        crate::cli::persist_show_images(enabled)
+                    })
+                    .await
+                {
+                    shell.error(format!(
+                        "display changed, but image preference was not saved: {error}"
+                    ));
                 } else {
                     shell.notice("image display preference saved at the idle boundary");
                 }

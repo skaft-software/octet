@@ -672,6 +672,158 @@ impl ExecutableExtensions {
         self.provider_runtime.clone()
     }
 
+    /// Activates one explicitly selected extension after its private Python
+    /// runtime has been provisioned, then publishes the process through the
+    /// same host-owned registries as startup activation.
+    pub(crate) async fn activate_python_extension(
+        &mut self,
+        extension: &str,
+    ) -> anyhow::Result<()> {
+        let python_runtime = super::status::private_python_runtime_config(None)?;
+        self.activate_python_extension_with_runtime(extension, python_runtime)
+            .await
+    }
+
+    async fn activate_python_extension_with_runtime(
+        &mut self,
+        extension: &str,
+        python_runtime: octet_agent::extension_process::PythonRuntimeConfig,
+    ) -> anyhow::Result<()> {
+        if self
+            .processes
+            .iter()
+            .any(|process| process.descriptor().manifest.name == extension && process.is_running())
+        {
+            // Setup is also offered for live extensions; provisioning a runtime
+            // for one that is already publishing its tools must not fail.
+            return Ok(());
+        }
+        let binding = self
+            .runtime_binding
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("extension runtime session is unavailable"))?;
+        let manager = self
+            .runtime_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("extension runtime catalogue is unavailable"))?;
+        let catalog = manager.catalog();
+        let entry = catalog
+            .get(extension)
+            .ok_or_else(|| anyhow::anyhow!("selected extension was not discovered"))?;
+        let mut runtime = ExtensionRuntimeConfig::new(self.workspace.clone());
+        // Mirrors the eager interactive startup closure: the selected extension
+        // is reactivated with the same host-owned services it would have had at
+        // startup, using the already configured private runtime location.
+        runtime.python_runtime = Some(python_runtime);
+        runtime.host_state = self
+            .host_state
+            .lock()
+            .expect("extension host state")
+            .clone();
+        runtime.remote_ui = self.remote_ui_wake.clone();
+        runtime.transcript_render = runtime.remote_ui.is_some();
+        runtime.resource_paths = true;
+        runtime.tool_composition = true;
+        runtime.provider_pipeline = true;
+        runtime.provider_registry = Some(self.provider_runtime.registry());
+        runtime.bulk_store = manager.bulk_storage().ok();
+        if let Some(config) = self.rescan_config.as_ref() {
+            runtime.flag_values = config
+                .extension_flag_values
+                .get(extension)
+                .cloned()
+                .unwrap_or_default();
+            runtime.agent_sessions =
+                extension == SUBAGENTS_EXTENSION_NAME && config.tool_available("subagent_spawn");
+        }
+        // Isolated lifecycle owners also receive the session event bus; shared
+        // workspace services reject either service at activation, exactly as at
+        // startup, so they must never be attached implicitly.
+        if extension_session_lifecycle_eligible(&entry.descriptor) {
+            runtime.session_lifecycle = self.session_lifecycle_service.clone();
+            runtime.event_bus = self.event_bus.clone();
+        }
+
+        let lease = binding.activate(extension, runtime).await?;
+        let process = lease.process().clone();
+        let registration = {
+            let host = self
+                .tool_host
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("extension tool host is unavailable"))?;
+            let registration = process.try_register_dynamic_tool_catalog(host);
+            if registration.is_ok() {
+                host.load(&process);
+            }
+            registration
+        };
+        if let Err(error) = registration {
+            let reason = format!("turned off: {error}");
+            self.diagnostics.push(format!(
+                "warning: extension {extension:?} was turned off: {error}"
+            ));
+            self.start_failures.insert(extension.to_owned(), reason);
+            anyhow::bail!("extension tool catalogue registration failed: {error}");
+        }
+        self.receivers.push(process.subscribe());
+        let contributions = process.contributions();
+        if let Some(summary) = self
+            .summaries
+            .iter_mut()
+            .find(|item| item.name == extension)
+        {
+            summary.running = true;
+            summary.api_version = process.api_version().to_owned();
+            summary.negotiated_features = process.negotiated_features().iter().cloned().collect();
+            summary.tools = contributions
+                .tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect();
+            summary.commands = contributions
+                .commands
+                .iter()
+                .map(|command| command.name.clone())
+                .collect();
+            summary.hooks = contributions.hooks.clone();
+            summary.ui = contributions.ui.clone();
+            summary.health = Some(process.health_snapshot());
+            (summary.telemetry_schema, summary.compatibility) = extension_compatibility(
+                extension,
+                true,
+                &summary.negotiated_features,
+                summary.health.as_ref(),
+            );
+        }
+        self.processes.push(process.clone());
+        self.start_failures.remove(extension);
+        self.start_policy_supervisors();
+        self.activate_new_process_session_lifecycle(process).await;
+        let (shortcuts, diagnostics) = register_extension_shortcuts(&self.processes);
+        self.shortcuts = shortcuts;
+        self.diagnostics.extend(diagnostics);
+        self.provider_runtime
+            .await_initial_registrations_async(&self.processes)
+            .await;
+        Ok(())
+    }
+
+    async fn activate_new_process_session_lifecycle(&mut self, process: ExtensionProcess) {
+        if let Some(session_id) = self.session_id.clone() {
+            let event = ExtensionLifecycleEvent::SessionStarted {
+                session_id,
+                run_id: None,
+            };
+            let messages = notify_lifecycle_all(std::slice::from_ref(&process), event).await;
+            self.diagnostics.extend(messages);
+        }
+        if process.declares_session_hooks() {
+            if let Some(owner) = self.resource_owner.clone() {
+                self.pending_session_hook_starts.push((process, owner));
+            }
+        }
+    }
+
     /// Projects the current registry snapshot into this App's local catalog.
     ///
     /// Callers own the catalog/client mutation boundary; executable extensions
@@ -727,6 +879,24 @@ impl ExecutableExtensions {
         self.session_lifecycle_receiver
             .as_mut()
             .and_then(ExtensionSessionLifecycleReceiver::try_next)
+    }
+
+    /// Busy controls acknowledge queue admission, never an in-flight mutation.
+    pub fn next_model_control_request(&mut self) -> Option<ExtensionSessionLifecycleRequest> {
+        self.session_lifecycle_receiver
+            .as_mut()
+            .and_then(ExtensionSessionLifecycleReceiver::try_next_model_control)
+    }
+
+    pub(crate) fn model_control_owner_is_current(
+        &self,
+        owner: &octet_agent::extension_process::ExtensionResourceOwner,
+    ) -> bool {
+        self.resource_owner.as_deref() == Some(owner.session_id.as_str())
+            && self
+                .processes
+                .iter()
+                .any(|process| process.resource_owner_is_live(owner))
     }
 
     pub fn bind_agent_sessions(&self, agent: &Agent) -> anyhow::Result<usize> {

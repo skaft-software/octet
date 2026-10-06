@@ -7,7 +7,7 @@ use super::*;
 
 use super::support::*;
 
-fn reasoning_control_model(uri: &str) -> Model {
+pub(super) fn reasoning_control_model(uri: &str) -> Model {
     let mut model = scripted_model(uri);
     let spec = Arc::make_mut(&mut model.spec);
     spec.protocol = octet_ai::Protocol::OpenAiResponses;
