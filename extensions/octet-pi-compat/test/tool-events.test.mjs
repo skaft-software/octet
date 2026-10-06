@@ -140,8 +140,16 @@ test('background native settlement: observes the complete paired result without 
   const runtime = {
     require(feature) { assert.equal(feature, 'session_entries'); },
     metadata: () => ({hooks:['model_turn_end']}),
-    bind(_params, store) { store.leaf = {grant:{}}; },
-    assertOwner() {}, queued: (_store, work) => work(),
+    bind(params, store) {
+      assert.deepEqual(params.context.resource_owner, owner);
+      store.state = { alive: true, owner: params.context.resource_owner };
+      store.leaf = {grant:{}};
+    },
+    assertSessionOwner(store) {
+      assert.equal(store.state?.alive, true, 'retired test session owner');
+      assert.deepEqual(store.state.owner, owner, 'foreign test session owner');
+    },
+    queued: (_store, work) => work(),
     runEvent: async (type, event) => { assert.equal(type,'turn_end'); observed.push(event); },
     flush: async () => {},
   };
@@ -154,6 +162,8 @@ test('background native settlement: observes the complete paired result without 
   assert.deepEqual(observed[0].message.content, [{type:'toolCall',id:'call-0',name:'read',arguments:{path:'original.txt'}}]);
   assert.deepEqual(observed[0].toolResults, [{role:'toolResult',toolCallId:'call-0',toolName:'read',content:[{type:'text',text:'FINAL_REDACTION'}],isError:false,timestamp:1100}]);
   assert.deepEqual(assistant, before); // Original durable async scheduling stays intact.
+  assert.throws(() => runtime.assertSessionOwner({state:{alive:false,owner}}), /retired test session owner/);
+  assert.throws(() => runtime.assertSessionOwner({state:{alive:true,owner:{...owner,process_generation:3}}}), /foreign test session owner/);
   assert.throws(() => canonicalToPi([{Assistant:assistant.value.Assistant}]), /scheduling/);
 });
 
@@ -171,8 +181,16 @@ test('model turn discovery result: observes content without replaying native reg
     catalog,
     require(feature) { assert.equal(feature, 'session_entries'); },
     metadata: () => ({hooks:['model_turn_end']}),
-    bind(_params, store) { store.leaf = {grant:{}}; },
-    assertOwner() {}, queued: (_store, work) => work(),
+    bind(params, store) {
+      assert.deepEqual(params.context.resource_owner, owner);
+      store.state = { alive: true, owner: params.context.resource_owner };
+      store.leaf = {grant:{}};
+    },
+    assertSessionOwner(store) {
+      assert.equal(store.state?.alive, true, 'retired test session owner');
+      assert.deepEqual(store.state.owner, owner, 'foreign test session owner');
+    },
+    queued: (_store, work) => work(),
     runEvent: async (type, event) => { assert.equal(type,'turn_end'); observed.push(event); },
     flush: async () => {},
   };
@@ -185,6 +203,8 @@ test('model turn discovery result: observes content without replaying native reg
   assert.deepEqual(observed[0].toolResults, [{role:'toolResult',toolCallId:'discover-0',toolName:'get_applicable_operations',
     content:[{type:'text',text:'Discovered actual operations'}],isError:false,timestamp:1100}]);
   assert.deepEqual({assistant,result,catalog:runtime.catalog}, before);
+  assert.throws(() => runtime.assertSessionOwner({state:{alive:false,owner}}), /retired test session owner/);
+  assert.throws(() => runtime.assertSessionOwner({state:{alive:true,owner:{...owner,session_id:'another-owner'}}}), /foreign test session owner/);
   assert.throws(() => canonicalToPi([{Assistant:assistant.value.Assistant},{User:result.value.User}]), /context tool registry metadata/);
 });
 

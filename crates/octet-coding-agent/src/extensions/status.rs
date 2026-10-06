@@ -2,7 +2,107 @@
 
 use super::*;
 
+pub(super) fn private_python_runtime_config(
+    setup: Option<octet_agent::extension_process::PythonRuntimeSetup>,
+) -> anyhow::Result<octet_agent::extension_process::PythonRuntimeConfig> {
+    private_python_runtime_config_for_home(dirs::home_dir(), setup)
+}
+
+fn private_python_runtime_config_for_home(
+    home: Option<PathBuf>,
+    setup: Option<octet_agent::extension_process::PythonRuntimeSetup>,
+) -> anyhow::Result<octet_agent::extension_process::PythonRuntimeConfig> {
+    let home = home.ok_or_else(|| anyhow::anyhow!("the authoritative user home is unavailable; private Python setup cannot use a workspace or '.' fallback"))?;
+    anyhow::ensure!(
+        home.is_absolute(),
+        "the authoritative user home must be absolute"
+    );
+    Ok(octet_agent::extension_process::PythonRuntimeConfig {
+        root: home.join(".octet/runtimes/python"),
+        setup,
+    })
+}
+
 impl ExecutableExtensions {
+    /// Explicit selected-source setup, usable even when Python-free startup
+    /// failed. Factory validation reads bounded extension source only; the
+    /// returned owned future holds no App/Agent or extension-process borrow.
+    pub(crate) fn python_runtime_setup(
+        &self,
+        extension: &str,
+        config: &Config,
+        setup: octet_agent::extension_process::PythonRuntimeSetup,
+    ) -> anyhow::Result<Pin<Box<dyn Future<Output = anyhow::Result<PathBuf>> + Send>>> {
+        use std::io::Read as _;
+        anyhow::ensure!(
+            self.workspace == config.workspace,
+            "runtime setup belongs to another workspace; reload /extensions before retrying"
+        );
+        anyhow::ensure!(
+            config.start_extension_processes && config.sandbox.process_execution_allowed(),
+            "extension runtime setup is disabled by native-host/process execution policy"
+        );
+        anyhow::ensure!(!config.offline, "private Python setup requires a connection; restart without --offline to approve its verified download");
+        let manager = self.runtime_manager.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("the selected extension has no native runtime catalogue")
+        })?;
+        let selected = manager.catalog();
+        let expected = selected
+            .get(extension)
+            .ok_or_else(|| anyhow::anyhow!("the selected extension was not discovered"))?;
+        anyhow::ensure!(
+            expected.source_verified,
+            "enable and trust the selected extension source before runtime setup"
+        );
+        let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+        let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
+        let mut diagnostics = Vec::new();
+        let (policy, _) = extension_policy(config, &mut diagnostics);
+        let fresh = snapshot.resources().iter().filter(|resource| resource.name == extension).filter_map(|resource| load_extension_descriptor(&resolver, resource, &policy, &mut diagnostics))
+            .find(|descriptor| descriptor.manifest.name == extension)
+            .ok_or_else(|| anyhow::anyhow!("the selected extension source is no longer discoverable; reload /extensions and retry"))?;
+        anyhow::ensure!(fresh.activation.start_decision(fresh.source, config.workspace_trusted) == ExtensionStartDecision::Allowed,
+            "the selected extension must be enabled, source-trusted and workspace-admitted before runtime setup");
+        anyhow::ensure!(fresh.source == expected.descriptor.source
+            && normalize_trusted_manifest_path(&fresh.manifest_path)? == normalize_trusted_manifest_path(&expected.descriptor.manifest_path)?,
+            "the selected extension source changed; reload /extensions and review source trust before retrying");
+        let current = ExtensionRuntimeCatalog::from_descriptors([fresh.clone()]);
+        let current = current.get(extension).ok_or_else(|| {
+            anyhow::anyhow!("the selected extension source could not be verified")
+        })?;
+        anyhow::ensure!(current.source_verified && current.content_digest == expected.content_digest,
+            "the selected extension content changed; reload /extensions and review it before retrying");
+        let directory = fresh
+            .manifest_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("the selected extension manifest has no directory"))?;
+        let entrypoint = directory.join(&fresh.manifest.entrypoint.command);
+        let mut first_line = Vec::new();
+        octet_agent::secure_fs::open_regular_file_for_read(&entrypoint)?
+            .take(256)
+            .read_to_end(&mut first_line)?;
+        first_line.truncate(
+            first_line
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .unwrap_or(first_line.len()),
+        );
+        anyhow::ensure!(
+            entrypoint
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+                || (first_line.starts_with(b"#!")
+                    && first_line.windows(6).any(|part| part == b"python")),
+            "the selected source is not a Python extension entrypoint"
+        );
+        let runtime = private_python_runtime_config(Some(setup))?;
+        Ok(Box::pin(async move {
+            octet_agent::extension_process::provision_python_runtime(&runtime)
+                .await
+                .map_err(Into::into)
+        }))
+    }
+
     pub fn status_summary(&self) -> String {
         let ready = self
             .summaries()
@@ -535,5 +635,146 @@ commands = ["subagents"]
             }
             Ok(output.text)
         }))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod python_setup_tests {
+    use super::*;
+
+    fn consent() -> octet_agent::extension_process::PythonRuntimeSetup {
+        octet_agent::extension_process::PythonRuntimeSetup {
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            progress: Arc::new(|_| {}),
+        }
+    }
+
+    async fn fixture() -> (tempfile::TempDir, ExecutableExtensions, Config, PathBuf) {
+        fixture_with_project_source(false).await
+    }
+
+    async fn fixture_with_project_source(
+        project: bool,
+    ) -> (tempfile::TempDir, ExecutableExtensions, Config, PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let extensions_root = root.join(if project {
+            ".octet/extensions"
+        } else {
+            "extensions"
+        });
+        let directory = extensions_root.join("private-python-fixture");
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("extension.py");
+        std::fs::write(
+            &source,
+            "#!/usr/bin/env python3\n# offline fixture, never executed\n",
+        )
+        .unwrap();
+        let manifest = "name = 'private-python-fixture'\nversion = '0.1.0'\napi_version = '0.4'\n[entrypoint]\ncommand = 'extension.py'\n";
+        std::fs::write(directory.join(EXTENSION_MANIFEST_FILENAME), manifest).unwrap();
+        let mut config = crate::extensions::tests::executable_extension_config(
+            &root,
+            &extensions_root,
+            "private-python-fixture",
+        );
+        config.offline = false;
+        if project {
+            config.extension_paths.clear();
+            config.workspace_trusted = true;
+        }
+        let resolver = ResourceResolver::new(root.clone(), config.workspace_trusted);
+        let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
+        let mut diagnostics = Vec::new();
+        let (policy, _) = extension_policy(&config, &mut diagnostics);
+        let descriptor = snapshot
+            .resources()
+            .iter()
+            .filter(|resource| resource.name == "private-python-fixture")
+            .find_map(|resource| {
+                load_extension_descriptor(&resolver, resource, &policy, &mut diagnostics)
+            })
+            .unwrap();
+        let manager =
+            ExtensionRuntimeManager::new(ExtensionRuntimeDomain::ordinary(&root).unwrap());
+        manager
+            .replace_catalog(ExtensionRuntimeCatalog::from_descriptors([descriptor]))
+            .await;
+        let mut extensions = ExecutableExtensions::default();
+        extensions.workspace = root;
+        extensions.runtime_manager = Some(manager);
+        (home, extensions, config, source)
+    }
+
+    #[test]
+    fn private_home_location_never_falls_back_to_workspace_or_current_directory() {
+        assert!(private_python_runtime_config_for_home(None, None).is_err());
+        assert!(
+            private_python_runtime_config_for_home(Some(PathBuf::from("relative")), None).is_err()
+        );
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let config = private_python_runtime_config_for_home(Some(root.clone()), None).unwrap();
+        assert_eq!(config.root, root.join(".octet/runtimes/python"));
+        assert!(config.setup.is_none());
+        assert!(!config.root.exists());
+    }
+
+    #[tokio::test]
+    async fn admitted_python_free_factory_requires_no_running_process_or_agent_borrow() {
+        let (_home, extensions, config, source) = fixture().await;
+        assert!(extensions.processes.is_empty());
+        let before = std::fs::read(&source).unwrap();
+        let action = extensions
+            .python_runtime_setup("private-python-fixture", &config, consent())
+            .unwrap();
+        drop(action); // Never poll: no download, Python execution or install.
+        assert_eq!(std::fs::read(source).unwrap(), before);
+        assert!(extensions.processes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn setup_factory_refuses_current_policy_disabled_untrusted_and_changed_sources() {
+        let (_home, extensions, config, source) = fixture().await;
+        let mut denied = config.clone();
+        denied.start_extension_processes = false;
+        assert!(extensions
+            .python_runtime_setup("private-python-fixture", &denied, consent())
+            .is_err());
+        denied = config.clone();
+        denied.sandbox.allow_process = false;
+        assert!(extensions
+            .python_runtime_setup("private-python-fixture", &denied, consent())
+            .is_err());
+        denied = config.clone();
+        denied.enabled_extensions.clear();
+        assert!(extensions
+            .python_runtime_setup("private-python-fixture", &denied, consent())
+            .is_err());
+        denied = config.clone();
+        denied.invocation_trusted_extensions.clear();
+        // An explicit CLI source is already a trusted invocation choice.
+        assert!(extensions
+            .python_runtime_setup("private-python-fixture", &denied, consent())
+            .is_ok());
+        let (_project_home, project_extensions, mut project_config, _) =
+            fixture_with_project_source(true).await;
+        project_config.invocation_trusted_extensions.clear();
+        assert!(project_extensions
+            .python_runtime_setup("private-python-fixture", &project_config, consent())
+            .is_err());
+        denied = config.clone();
+        denied.offline = true;
+        assert!(extensions
+            .python_runtime_setup("private-python-fixture", &denied, consent())
+            .is_err());
+        std::fs::write(
+            source,
+            "#!/usr/bin/env python3\n# changed since admission\n",
+        )
+        .unwrap();
+        assert!(extensions
+            .python_runtime_setup("private-python-fixture", &config, consent())
+            .is_err());
     }
 }

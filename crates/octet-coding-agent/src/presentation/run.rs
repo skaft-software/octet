@@ -459,6 +459,9 @@ impl RunTracker {
             // Auxiliary recovery belongs to the operation already in progress;
             // it must not reset the main answer or its compaction phase.
             AgentEvent::ProviderOperationRetry { .. } | AgentEvent::CacheWarmed { .. } => {}
+            AgentEvent::ExtensionObservationWarning { .. } => {
+                run.warnings = run.warnings.saturating_add(1);
+            }
             AgentEvent::ProviderUsageUncertain => {
                 if !run.usage_uncertain {
                     run.usage_uncertain = true;

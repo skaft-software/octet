@@ -130,6 +130,7 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox,
         theme: None,
+        theme_explicit: false,
         system_prompt: request.system_prompt.clone(),
         theme_paths: Vec::new(),
         color: ColorMode::Never,

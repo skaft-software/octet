@@ -117,8 +117,8 @@ impl Session {
     /// Appends a completed assistant turn with host-validated, extension-owned
     /// metadata at the same durable boundary as the canonical message.
     ///
-    /// This deliberately accepts only `extension_metadata`; host-owned prompt,
-    /// tool, and run presentation fields are cleared before persistence.
+    /// Retains extension metadata and the host-captured per-call replay fence;
+    /// prompt, tool-result, and run presentation fields are cleared before persistence.
     #[allow(clippy::too_many_arguments)]
     pub fn append_assistant_turn_with_metadata(
         &mut self,

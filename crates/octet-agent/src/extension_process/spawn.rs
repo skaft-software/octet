@@ -42,25 +42,28 @@ pub(super) async fn spawn_connection(
         generation,
         armed: true,
     };
-    #[cfg(windows)]
-    let mut command = {
-        let launch = windows_script_launch(&resolved_entrypoint.command).map_err(|error| {
-            ExtensionRuntimeError::Spawn {
+    // Trust/enable admission happens before this function. Python selection is
+    // native-owned on every platform; only a host's explicit setup action may
+    // authorize provisioning. Ordinary startup never downloads behind a shebang.
+    let python_launch =
+        python_script_launch(&resolved_entrypoint.command, config.python_runtime.as_ref())
+            .await
+            .map_err(|error| ExtensionRuntimeError::Spawn {
                 extension: descriptor.manifest.name.clone(),
                 message: error.to_string(),
-            }
-        })?;
-        match launch {
-            Some((interpreter, arguments)) => {
-                let mut command = Command::new(interpreter);
-                command.args(arguments).arg(&resolved_entrypoint.command);
-                command
-            }
-            None => Command::new(&resolved_entrypoint.command),
+            })?;
+    let is_python = python_launch.is_some();
+    let mut command = match python_launch {
+        Some((interpreter, arguments)) => {
+            let mut command = Command::new(interpreter);
+            command
+                .args(arguments)
+                .arg("-B")
+                .arg(&resolved_entrypoint.command);
+            command
         }
+        None => Command::new(&resolved_entrypoint.command),
     };
-    #[cfg(not(windows))]
-    let mut command = Command::new(&resolved_entrypoint.command);
     command
         .args(&descriptor.manifest.entrypoint.args)
         .current_dir(&config.workspace)
@@ -83,6 +86,11 @@ pub(super) async fn spawn_connection(
         .env("OCTET_EXTENSION_MANIFEST", &descriptor.manifest_path)
         .env("OCTET_WORKSPACE", &config.workspace)
         .env("OCTET_EXTENSION_SCRATCH", &scratch_directory);
+    if is_python {
+        // Children such as venv/pip must not write untracked stdlib bytecode
+        // into the integrity-checked private Python closure either.
+        command.env("PYTHONDONTWRITEBYTECODE", "1");
+    }
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
@@ -366,6 +374,7 @@ pub(super) async fn spawn_connection(
             && descriptor.manifest.contributes.providers
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         remote_ui: config.remote_ui.is_some(),
+        transcript_render: config.transcript_render && config.remote_ui.is_some(),
         provider_pipeline: config.provider_pipeline
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         resource_paths: config.resource_paths
@@ -422,6 +431,14 @@ pub(super) async fn spawn_connection(
         optional_features.push(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1.to_owned());
         optional_features.push(EXTENSION_FEATURE_TOOL_PROMPT_METADATA.to_owned());
         optional_features.push(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1.to_owned());
+        if !descriptor
+            .manifest
+            .capabilities
+            .builtin_tool_overrides
+            .is_empty()
+        {
+            optional_features.push(EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES.to_owned());
+        }
     }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
         && descriptor.manifest.capabilities.system_prompt
@@ -483,6 +500,9 @@ pub(super) async fn spawn_connection(
         && offered_host_services.remote_ui
     {
         optional_features.push(EXTENSION_FEATURE_REMOTE_UI.to_owned());
+        if offered_host_services.transcript_render {
+            optional_features.push(EXTENSION_FEATURE_TRANSCRIPT_RENDER.to_owned());
+        }
     }
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
@@ -734,21 +754,40 @@ pub(super) fn stage_entrypoint(path: &Path) -> std::io::Result<Option<ResolvedEn
 }
 
 /// Longest first line inspected for a `#!` interpreter line.
-#[cfg(windows)]
 pub(super) const MAX_SHEBANG_BYTES: usize = 256;
 
 /// Whether an entrypoint is a Python script: a `.py` file or a `#!` line
 /// naming Python (as the bundled `#!/usr/bin/env python3` entrypoints do).
-#[cfg(any(windows, test))]
 pub(super) fn is_python_script(path: &Path, first_line: &[u8]) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
         || (first_line.starts_with(b"#!") && first_line.windows(6).any(|part| part == b"python"))
 }
 
-/// Interpreter and leading arguments that execute a staged entrypoint.
+/// Native-owned interpreter resolution for staged Python entrypoints.
+async fn python_script_launch(
+    entrypoint: &Path,
+    runtime: Option<&python_runtime::PythonRuntimeConfig>,
+) -> std::io::Result<Option<(PathBuf, Vec<std::ffi::OsString>)>> {
+    let mut first_line = Vec::with_capacity(MAX_SHEBANG_BYTES);
+    std::fs::File::open(entrypoint)?
+        .take(MAX_SHEBANG_BYTES as u64)
+        .read_to_end(&mut first_line)?;
+    if let Some(end) = first_line.iter().position(|byte| *byte == b'\n') {
+        first_line.truncate(end);
+    }
+    if !is_python_script(entrypoint, &first_line) {
+        return Ok(None);
+    }
+    python_runtime::resolve_script_python(runtime)
+        .await
+        .map(Some)
+}
+
+/// Legacy platform discovery helper, retained for the existing Windows fixture.
+/// Production launch uses the native async resolver above on all platforms.
 ///
-/// Unix executes the staged file and the kernel honours its `#!` line.
+/// Unix otherwise executes staged files and honours their non-Python `#!` line.
 /// Windows has no shebang support: `CreateProcess` rejects a script as "not
 /// a valid Win32 application", so no Python extension could start. A Python
 /// script therefore runs through a Python 3 interpreter found the way
@@ -756,7 +795,7 @@ pub(super) fn is_python_script(path: &Path, first_line: &[u8]) -> bool {
 /// `python3.exe`/`python.exe`, with Microsoft Store app-execution aliases
 /// (which open the Store when Python is absent) last. Other entrypoints are
 /// executed directly.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(super) fn windows_script_launch(
     entrypoint: &Path,
 ) -> std::io::Result<Option<(PathBuf, Vec<std::ffi::OsString>)>> {

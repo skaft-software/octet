@@ -44,7 +44,7 @@ export default pi => {{
   fixtureFactory(pi);
   for (const type of ['message_start', 'message_end']) pi.on(type, event => {{
     if ('message' in event && event.message.role === 'custom')
-      appendFileSync(TRACE, JSON.stringify({{ type: event.type, id: event.message_id, message: event.message }}) + '\n');
+      appendFileSync(TRACE, JSON.stringify(event) + '\n');
   }});
 }};
 "#,
@@ -186,13 +186,11 @@ async fn assert_custom_lifecycle(app: &App) {
         "exactly one pair per durable commit: {events:#?}"
     );
     for (pair, (id, message)) in events.chunks_exact(2).zip(expected) {
-        assert_eq!(pair[0]["type"], "message_start");
-        assert_eq!(pair[1]["type"], "message_end");
-        for event in pair {
-            assert_eq!(event["id"], id, "not an invented assistant sequence ID");
+        for (event, kind) in pair.iter().zip(["message_start", "message_end"]) {
             assert_eq!(
-                event["message"], message,
-                "actual persisted content/details/timestamp"
+                event,
+                &json!({"type": kind, "message": message}),
+                "public Pi event for durable entry {id}: actual content/details/timestamp, no transport ID"
             );
         }
     }

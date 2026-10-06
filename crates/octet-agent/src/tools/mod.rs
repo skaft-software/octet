@@ -2,9 +2,9 @@
 //! extension that registers them, and the tool-layer durability primitives they
 //! need.
 //!
-//! Core tools are not special: they implement the same [`Tool`](crate::Tool)
-//! trait and register through the same [`ExtensionHost::tool`] method as any
-//! third-party tool.
+//! Core tools implement the same [`Tool`](crate::Tool) trait as third-party
+//! tools. [`CoreTools`] additionally marks their native identities so reviewed
+//! builtin overrides cannot replace unrelated tools with familiar names.
 //!
 //! The model-visible surface is deliberately narrow: `read`/`write`/`edit`/
 //! `bash` plus the ripgrep-backed `search` tool (available to embedders and
@@ -154,22 +154,26 @@ pub(crate) fn validate_expected_hash(value: Option<&serde_json::Value>) -> Resul
     Ok(())
 }
 
-/// Extension registering the built-in tools through the public registration
-/// boundary.
+/// Builtin identities eligible for an explicitly reviewed API 0.4 override.
+/// Publication still requires the actual CoreTools registration, not just a name.
+pub(crate) const BUILTIN_TOOL_NAMES: &[&str] =
+    &["read", "search", "edit", "write", "bash", "powershell"];
+
+/// Extension registering the built-in tools through the native registry.
 pub struct CoreTools;
 
 impl Extension for CoreTools {
     fn register(&self, host: &mut ExtensionHost) {
-        host.tool(ReadTool);
-        host.tool(EditTool);
-        host.tool(WriteTool);
-        host.tool(BashTool);
+        host.builtin_tool(ReadTool);
+        host.builtin_tool(EditTool);
+        host.builtin_tool(WriteTool);
+        host.builtin_tool(BashTool);
         // The coding product disables this redundant schema by default, while
         // keeping it available to embedders and explicit tool allowlists.
-        host.tool(SearchTool);
+        host.builtin_tool(SearchTool);
         // Optional at the product allowlist boundary; never a bash fallback.
         #[cfg(windows)]
-        host.tool(PowerShellTool::default());
+        host.builtin_tool(PowerShellTool::default());
     }
 }
 

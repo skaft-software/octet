@@ -20,13 +20,19 @@ export function strict(object, label) {
     return unsupported(`${label}.${key}`);
   } });
 }
-export function plainJSON(value, name, max = 65536) {
+export function plainJSON(value, name, max = 65536, { omitUndefined = false } = {}) {
   const visit = (v, depth) => {
     if (depth > 32) invalid(`${name} exceeds JSON depth`);
     if (v === null || typeof v === 'boolean' || typeof v === 'string') return;
     if (typeof v === 'number' && Number.isFinite(v) && (!Number.isInteger(v) || Number.isSafeInteger(v))) return;
     if (typeof v !== 'object' || (!Array.isArray(v) && ![Object.prototype, null].includes(Object.getPrototypeOf(v)))) invalid(`${name} must be plain JSON`);
-    for (const x of Object.values(v)) visit(x, depth + 1);
+    // Pi result details routinely contain optional undefined object members;
+    // JSON persistence omits those. Arrays and every other JSON contract stay
+    // strict: do not invent nulls or coerce unsupported values.
+    for (const x of Object.values(v)) {
+      if (omitUndefined && !Array.isArray(v) && x === undefined) continue;
+      visit(x, depth + 1);
+    }
   };
   visit(value, 0);
   const encoded = JSON.stringify(value);

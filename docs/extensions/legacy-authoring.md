@@ -10,7 +10,7 @@ wires or make every low-level service a supported coding-product feature.
 **Identity boundary:** octet 0.8.2 candidate source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
-The source SDK distributions and five official executable bundles are version
+The source SDK distributions and six official executable bundles are version
 `0.8.2`; independent examples keep their own versions. 0.8.2 assets are not
 published; use reviewed source or matching local archives. Native publication
 does not publish SDK registries; see

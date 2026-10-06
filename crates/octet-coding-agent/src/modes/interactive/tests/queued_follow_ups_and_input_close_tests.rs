@@ -42,12 +42,12 @@ async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement()
         let mut shell = InteractiveShell::test_shell();
         let mut events = vec![
             Event::Paste("queued first".into()),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             Event::Paste("queued second".into()),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             dequeue_gesture(),
             Event::Paste(" edited".into()),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
         ];
         if escape_first {
             events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));

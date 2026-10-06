@@ -20,7 +20,7 @@ function fixture() {
   };
   return { runtime, store, calls };
 }
-const receipt = { selected: true, model_view: { ...host.model_view, id: 'chosen-model' }, reasoning: 'high' };
+const receipt = { selected: true, model_view: { ...host.model_view, id: 'chosen-model' }, reasoning: 'high', context_usage: null };
 
 test('async setModel does not publish before an authoritative receipt', async () => {
   const { runtime, store, calls } = fixture();
@@ -32,6 +32,19 @@ test('async setModel does not publish before an authoritative receipt', async ()
   settle(receipt); assert.equal(await selected, true);
   assert.equal(store.state.host.model_view.id, 'chosen-model');
   assert.equal(store.state.host.reasoning, 'high');
+  assert.equal(store.state.host.context_usage, null);
+});
+
+test('model and nullable measured usage publish atomically, invalid receipts leave state unchanged', async () => {
+  const { runtime, store } = fixture();
+  store.state.host.context_usage = { tokens: 100, contextWindow: 32768, percent: 100 / 32768 * 100 };
+  const old = structuredClone(store.state.host);
+  runtime.reply = Promise.resolve({ ...receipt, context_usage: { tokens: 1, contextWindow: 999, percent: 1 } });
+  await assert.rejects(setModel(runtime, store, { provider: 'test', id: 'chosen-model' }), /context usage receipt/);
+  assert.deepEqual(store.state.host, old);
+  runtime.reply = Promise.resolve(receipt);
+  assert.equal(await setModel(runtime, store, { provider: 'test', id: 'chosen-model' }), true);
+  assert.equal(store.state.host.context_usage, null);
 });
 
 test('unknown models and host failures cannot fabricate selection', async () => {

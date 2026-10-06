@@ -300,6 +300,7 @@ pub(super) struct LifecycleEndpoint {
 #[derive(Clone)]
 pub(super) struct ActiveSessionHookBinding {
     pub(super) session_id: String,
+    pub(super) start_reason: &'static str,
     pub(super) started_at: Instant,
     pub(super) endpoint: LifecycleEndpoint,
     pub(super) start_outcome: Arc<SessionHookStartOutcome>,

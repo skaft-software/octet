@@ -98,11 +98,8 @@ pub(super) fn shell_chrome(
     if let Some(editor) = editor {
         chrome.composer = rows(remote, editor, width, height, budget.saturating_sub(1));
         chrome.suggestions.clear();
-        // Rescue remains visible even if the component paints no rows.
-        chrome.composer.push(super::fit_line(
-            "Ctrl+G restore editor · Ctrl+D exit",
-            width,
-        ));
+        // Ctrl+G rescue and Ctrl+D shutdown remain host-owned keys, without
+        // adding permanent chrome to the extension's editor surface.
     }
     let mut footer_rows = if let Some(footer) = footer {
         rows(remote, footer, width, height, budget)

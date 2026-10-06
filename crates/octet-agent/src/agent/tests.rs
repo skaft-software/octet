@@ -2,6 +2,9 @@ use super::*;
 use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
 use base64::Engine as _;
 
+#[path = "builtin_override_replay_tests.rs"]
+mod builtin_override_replay;
+
 fn image_input_fixture(large: bool) -> InputPart {
     let encoded = if large {
         // Valid opaque 4002x2 PNG: the fallback resizes it to <=4000px.

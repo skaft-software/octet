@@ -314,6 +314,34 @@ impl TernSurface {
         );
         for message in messages {
             self.observe(&message)?;
+            if let Incoming::Event(Event::Toggle {
+                sf,
+                id: node_id,
+                collapsed,
+                ..
+            }) = &message
+            {
+                if sf == SURFACE && self.collapsed.get(node_id) == Some(collapsed) {
+                    if let Some(identity) = node_id
+                        .strip_prefix('t')
+                        .and_then(|id| id.split('.').next())
+                        .and_then(|id| id.parse::<u64>().ok())
+                    {
+                        let mut shell = state.borrow();
+                        if let Some(index) = shell
+                            .transcript_commit_ids
+                            .iter()
+                            .position(|id| *id == identity)
+                        {
+                            shell
+                                .extension_transcript
+                                .expanded
+                                .insert(identity, !collapsed);
+                            shell.touch_block(index);
+                        }
+                    }
+                }
+            }
             if let Incoming::Event(Event::Ack { sf, s }) = message {
                 if sf == SURFACE {
                     let mut latest = None;
@@ -700,7 +728,56 @@ fn project(
         for (index, block) in shell.transcript.iter().enumerate() {
             // Commit IDs survive prepends, deletion, resume and streaming.
             let identity = shell.transcript_commit_ids[index];
-            if let Some(node) = block_node(identity, block, shell, images, collapsed) {
+            if shell.extension_markdown(index).is_none() {
+                if let Some(rendered) =
+                    shell.extension_rendered(index, shell.transcript_content_width(shell.size.0))
+                {
+                    if !rendered.lines.is_empty() {
+                        let rows = ansi_rows(&id(identity, "extension"), &rendered.lines);
+                        if let (TranscriptBlock::Tool(panel), Some(expanded)) =
+                            (block, shell.extension_tool_disclosure(index))
+                        {
+                            // Keep Tern's disclosure control independent of the
+                            // rows: collapsed Pi renderers still draw their own
+                            // bounded summary instead of having it hidden by Tern.
+                            let mut header = tool_node(
+                                identity,
+                                panel,
+                                shell.verbose_tools,
+                                images,
+                                shell.workspace.as_deref(),
+                                collapsed,
+                            );
+                            header.c = Some(Vec::new());
+                            header.p = Some(
+                                header
+                                    .p
+                                    .take()
+                                    .unwrap_or_default()
+                                    .set("collapsible", true)
+                                    .set("collapsed", !expanded),
+                            );
+                            out.main.push(Node::with_children(
+                                id(identity, "extension.group"),
+                                Kind::Col,
+                                Props::new(),
+                                vec![header, rows],
+                            ));
+                        } else {
+                            out.main.push(rows);
+                        }
+                    }
+                    continue;
+                }
+            }
+            if let Some(node) = block_node(
+                identity,
+                block,
+                shell,
+                images,
+                collapsed,
+                shell.extension_markdown(index),
+            ) {
                 out.main.push(node);
             }
         }
@@ -713,6 +790,11 @@ fn project(
         if !rows.is_empty() {
             out.dock.push(ansi_rows(id, rows));
         }
+    }
+    // Run activity stays above queued input, including while a tool owns the
+    // turn. Neither adding a follow-up nor changing the editor owner settles it.
+    if let Some(working) = working_row(shell, client.reduce_motion()) {
+        out.dock.push(working);
     }
     if let Some(pending) = super::tern_pending::node(shell) {
         out.dock.push(pending);
@@ -731,9 +813,6 @@ fn project(
         if remote_editor {
             out.dock.push(ansi_rows("remote.editor", &chrome.composer));
         } else {
-            if let Some(working) = working_row(shell, client.reduce_motion()) {
-                out.dock.push(working);
-            }
             out.dock.push(composer(shell));
         }
     }
@@ -817,7 +896,7 @@ fn id(identity: u64, suffix: &str) -> String {
 
 /// RAIL replies are unboxed reader prose. The retained Markdown identity is
 /// independent of model changes, disclosure, cursor motion and streaming.
-fn assistant_node(identity: u64, block: &AssistantBlock, _shell: &ShellState) -> Node {
+fn assistant_node(identity: u64, block: &AssistantBlock, text: &str) -> Node {
     Node::with_children(
         id(identity, "assistant"),
         Kind::Col,
@@ -826,7 +905,7 @@ fn assistant_node(identity: u64, block: &AssistantBlock, _shell: &ShellState) ->
             id(identity, "assistant.md"),
             Kind::Md,
             Props::new()
-                .set("text", tighten_markdown(&block.text))
+                .set("text", tighten_markdown(text))
                 .set("stream", !block.finished),
         )],
     )
@@ -912,22 +991,24 @@ fn block_node(
     shell: &ShellState,
     images: &super::tern_images::NativeImages,
     collapsed: &HashMap<String, bool>,
+    transformed_markdown: Option<&str>,
 ) -> Option<Node> {
     match block {
         TranscriptBlock::User { text, .. } => {
-            // A native card, not ANSI rows painted with the prompt colour: Tern
-            // owns the measure, so a wash padded to octet's PTY width came out
-            // ragged wherever Tern's column was narrower and wrapped the
-            // padding. The card fill is the projected `userMessageBg`, which
-            // already follows the active model family.
+            // Tone::User retains the model-adaptive prompt wash. Octet's own
+            // role avoids omp.user's private right-aligned bubble layout: the
+            // native card shares the transcript's left edge and available width.
             Some(Node::with_children(
                 id(identity, "user"),
                 Kind::Card,
-                Props::new().role("omp.user").tone(Tone::User),
+                Props::new().role("octet.user").tone(Tone::User),
                 vec![Node::new(
                     id(identity, "user.body"),
                     Kind::Md,
-                    Props::new().set("text", tighten_markdown(text)),
+                    Props::new().set(
+                        "text",
+                        tighten_markdown(transformed_markdown.unwrap_or(text)),
+                    ),
                 )],
             ))
         }
@@ -936,7 +1017,11 @@ fn block_node(
             id(identity, "assistant.group"),
             Kind::Col,
             Props::new().role("omp.assistant"),
-            vec![assistant_node(identity, block, shell)],
+            vec![assistant_node(
+                identity,
+                block,
+                transformed_markdown.unwrap_or(&block.text),
+            )],
         )),
         TranscriptBlock::Reasoning(block) if block.text.trim().is_empty() => None,
         TranscriptBlock::Reasoning(block) => Some(Node::with_children(
@@ -986,7 +1071,9 @@ fn block_node(
                         .set(
                             "text",
                             tighten_markdown(
-                                &super::assistant_block::reasoning_markdown_projection(&block.text),
+                                &super::assistant_block::reasoning_markdown_projection(
+                                    transformed_markdown.unwrap_or(&block.text),
+                                ),
                             ),
                         )
                         .set("stream", !block.finished),
@@ -1142,7 +1229,7 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             }
             crate::presentation::RunPhase::StreamingResponse => "Working".into(),
             crate::presentation::RunPhase::PreparingToolCall => "Preparing tool".into(),
-            crate::presentation::RunPhase::RunningTool { .. } => return None,
+            crate::presentation::RunPhase::RunningTool { .. } => "Working".into(),
             crate::presentation::RunPhase::AwaitingApproval { prompt } => prompt.clone(),
             crate::presentation::RunPhase::Finished(_) => return None,
         }
@@ -1886,3 +1973,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tern_inference_tests.rs"]
 mod inference_tests;
+
+#[cfg(all(test, unix))]
+#[path = "pi_renderer_test_support.rs"]
+pub(crate) mod pi_renderer_test_support;

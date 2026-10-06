@@ -175,7 +175,9 @@ impl AppendOnlyTail {
                         let runs =
                             renderer.inline_runs(prefix, renderer.theme.style(TextRole::Text));
                         stats.copied_bytes += run_bytes(&runs) as u64;
-                        let runs = renderer.expand_run_tabs(&runs);
+                        // The retained prefix needs ownership even when tab
+                        // expansion borrows. Charge that copy, not just expansion.
+                        let runs = renderer.expand_run_tabs(&runs).into_owned();
                         stats.copied_bytes += run_bytes(&runs) as u64;
                         let mut offset = 0;
                         for run in &runs {

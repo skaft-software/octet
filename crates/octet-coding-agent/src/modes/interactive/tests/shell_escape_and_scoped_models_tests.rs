@@ -188,6 +188,7 @@ async fn settings_and_scoped_models_render_mid_run_and_queue_mutations() {
     let directory = tempfile::tempdir().unwrap();
     let inspection = test_run_inspection_with_session(directory.path());
     let mut shell = InteractiveShell::test_shell();
+    shell.set_runtime_config(terminal_theme_test_config(directory.path().to_owned()));
     shell.begin_run("test");
 
     let (queue, quit) = run_active_command(
@@ -210,10 +211,9 @@ async fn settings_and_scoped_models_render_mid_run_and_queue_mutations() {
     assert!(!quit);
     assert!(matches!(
         queue.back(),
-        Some(PendingIdleAction::Settings(
-            commands::SettingsCommand::Images(Some(true))
-        ))
+        Some(PendingIdleAction::SyncImages(true))
     ));
+    assert!(shell.runtime_config().unwrap().show_images);
 
     let (queue, quit) = run_active_command(
         &mut shell,

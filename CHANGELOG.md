@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- Pi message observations now include user/assistant/custom payloads, accumulated
+  text deltas and bounded run-local `agent_end.messages`. Final accounting/model/
+  stop facts come from the matching persisted assistant record; cancellation and
+  failed projections do not turn provisional zeros into final accounting.
+- Report recoverable extension callback failures once in a bounded, redacted
+  `[Extension issues]` group with path and next action. Vetoes, cancellation,
+  ownership violations and failed host mutations still fail closed. Preserve
+  startup/new/resume/fork reasons and close activation admission before shutdown.
+- Import reviewed Pi palettes as selectable native themes and the session startup
+  preference, without rewriting settings; explicit CLI/environment choices win.
+  Pi helpers/components share the imported palette. Live native-to-Pi theme
+  synchronization remains unavailable.
+- Admit reviewed builtin tool overrides through exact native grants and generation
+  fences. Enforce supported schema patterns, preserve Pi's absent `unregisterTool`,
+  and route direct installed-Pi tool execution without weakening host schemas.
+- Add bounded asynchronous Pi transcript presentation for messages, private
+  entries, tools and Markdown in native terminal and Tern, preserving canonical
+  source/persistence. Translate bounded OSC 777 writes into foreground-owner-fenced
+  renderer notification intents; arbitrary terminal-control writes stay refused.
+
+- The interactive TUI now starts fullscreen by default: `mouse` defaults to
+  `app`, the alternate-screen viewport that captures the mouse. Set
+  `mouse = "auto"` (or pass `--mouse auto`) to stay inline in native
+  scrollback.
 - Remove the packaged Serve application, its browser client, and the macOS, iOS,
   and shared Apple companions: `extensions/octet-serve`, `apps/web`,
   `apps/macos`, `apps/ios`, and `apps/apple-shared`. The `octet serve` command,
@@ -63,8 +87,10 @@
   adapter uses selected Pi TUI utilities, never Pi's coding-agent runtime.
   Synthetic-host tests cover unchanged Doom, drawing, powerline footer, and
   rainbow editor behavior. Actual octet binary/PTY acceptance passed Doom,
-  drawing, the footer, and terminal restoration. Native custom-editor draft
-  restoration still fails qualification; startup comparison remains unrun.
+  drawing, the footer, and terminal restoration. The original rainbow editor now
+  passes paced and burst-without-grace rescue, retained editable draft, resize
+  and shutdown on a fresh native binary. Remove the permanent rescue hint row,
+  retaining Ctrl+G/Ctrl+D. Startup comparison remains unqualified.
   This is not general Pi runtime parity or a published extension bundle.
 
 - Render octet's shell natively inside Tern. In a Tern pane

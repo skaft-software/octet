@@ -262,6 +262,23 @@ pub trait Terminal {
         self.write(&format!("\x1b]2;{title}\x07"));
     }
 
+    /// Emit one bounded semantic desktop notification through the owning terminal.
+    /// A successful write does not establish that the operating system displayed it.
+    fn desktop_notification(&mut self, title: &str, body: &str) -> bool {
+        let capabilities = self.capabilities();
+        if capabilities.plain
+            || !capabilities.interactive
+            || title.len() > 1024
+            || body.len() > 4096
+            || title.contains(';')
+            || title.chars().chain(body.chars()).any(char::is_control)
+        {
+            return false;
+        }
+        self.write(&format!("\x1b]777;notify;{title};{body}\x07"));
+        true
+    }
+
     fn set_progress(&mut self, active: bool) {
         self.write(if active {
             "\x1b]9;4;1;0\x1b\\"

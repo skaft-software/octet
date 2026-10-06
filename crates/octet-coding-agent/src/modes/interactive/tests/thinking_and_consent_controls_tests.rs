@@ -674,9 +674,9 @@ async fn cancellation_retains_answer_draft_and_ordered_undelivered_steering() {
     let mut shell = InteractiveShell::test_shell();
     let events = [
         Event::Paste("first queued".into()),
-        Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         Event::Paste("second queued".into()),
-        Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         Event::Paste("/answer preserve this instruction".into()),
         Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),

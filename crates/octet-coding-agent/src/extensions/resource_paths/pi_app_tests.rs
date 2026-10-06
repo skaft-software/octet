@@ -95,10 +95,18 @@ fn put(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) {
     std::fs::write(path, bytes).unwrap();
 }
 
-fn phase(root: &Path, phase: &str, fail_start: bool) {
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StartBehavior {
+    Continue,
+    Throw,
+    RefusedWrite,
+}
+
+fn phase(root: &Path, phase: &str, start: StartBehavior) {
     put(
         root.join("workspace/resource-state.json"),
-        serde_json::to_vec(&json!({"phase": phase, "failStart": fail_start})).unwrap(),
+        serde_json::to_vec(&json!({"phase": phase, "startBehavior": start})).unwrap(),
     );
 }
 
@@ -122,7 +130,7 @@ fn adapter_root() -> PathBuf {
         .expect("reviewed Pi adapter and its existing local dependencies are required")
 }
 
-fn configured_pi(root: &Path, fail_start: bool) -> ConfiguredPi {
+fn configured_pi(root: &Path, start: StartBehavior) -> ConfiguredPi {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     for (name, code) in [
@@ -165,7 +173,7 @@ fn configured_pi(root: &Path, fail_start: bool) -> ConfiguredPi {
         "USER PROMPT $1\n",
     );
     std::fs::create_dir_all(root.join("explicit/themes")).unwrap();
-    phase(root, "a", fail_start);
+    phase(root, "a", start);
 
     let adapter = adapter_root();
     let output = root.join("extensions/octet-pi-compat");
@@ -363,10 +371,103 @@ async fn complete_rendered(app: &mut App, name: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_pi_theme_default_is_transient_and_explicit_choice_wins() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    put(
+        root.join("factory.mjs"),
+        "export default pi => pi.registerCommand('fixture', {handler(){}});",
+    );
+    put(
+        root.join("source.json"),
+        serde_json::to_vec(&super::pi_theme::fixture("import-proof", "#c792ea")).unwrap(),
+    );
+    let captured = Command::new("node")
+        .args([
+            "--input-type=module",
+            "-e",
+            r#"
+import {pathToFileURL} from 'node:url';
+const [adapter, root] = process.argv.slice(1);
+const {configure} = await import(pathToFileURL(adapter + '/configure.mjs'));
+const {planThemeImport, writeThemeImport} = await import(pathToFileURL(adapter + '/lib/theme-import.mjs'));
+const output = root + '/extensions/octet-pi-compat';
+const plan = planThemeImport({paths: [root + '/source.json'], selection: 'import-proof', thinkingLevel: 'max', output});
+if (!plan.selected) throw Error('theme import failed: ' + plan.diagnostics.join('; '));
+writeThemeImport(plan);
+configure({output, extensions: [root + '/factory.mjs'], reviewed: true, cwd: root,
+  piTheme: plan.selected, themePaths: plan.themes.map(theme => theme.nativePath)});
+"#,
+        ])
+        .arg(adapter_root())
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        captured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&captured.stderr)
+    );
+    let theme_path = root.join("extensions/octet-pi-compat/themes/pi-import-proof.toml");
+    let imported = std::fs::read(&theme_path).unwrap();
+    assert!(String::from_utf8_lossy(&imported).contains("composer_border = \"#c792ea\""));
+    for explicit in [false, true] {
+        let mut config = crate::extensions::tests::executable_extension_config(
+            &workspace,
+            &root.join("extensions"),
+            "octet-pi-compat",
+        );
+        config.mode = crate::config::Mode::Print {
+            prompt: "theme import".into(),
+        };
+        config.workspace_trusted = true;
+        config.theme = Some("dark".into());
+        config.theme_explicit = explicit;
+        let mut app = configured_app_from_config(config, true);
+        app.refresh_resource_paths_headless().await.unwrap();
+        assert_eq!(
+            app.config.theme.as_deref(),
+            Some(if explicit { "dark" } else { "pi-import-proof" })
+        );
+        assert_eq!(
+            app.original_resource_config().theme.as_deref(),
+            Some("dark")
+        );
+        let available = crate::tui::theme::selectable_file_themes(
+            &app.config,
+            crate::tui::theme::TerminalBackground::Dark,
+        );
+        assert!(available.iter().any(|(name, _)| name == "pi-import-proof"));
+        // A failed/revoked contribution restores saved appearance, not a stale
+        // imported selector. Restoring the file makes the session default live again.
+        put(&theme_path, "invalid TOML");
+        app.mark_resource_paths_reload();
+        app.refresh_resource_paths_headless().await.unwrap();
+        assert_eq!(app.config.theme.as_deref(), Some("dark"));
+        put(&theme_path, &imported);
+        app.mark_resource_paths_reload();
+        app.refresh_resource_paths_headless().await.unwrap();
+        assert_eq!(
+            app.config.theme.as_deref(),
+            Some(if explicit { "dark" } else { "pi-import-proof" })
+        );
+        // This is the same provenance bit set by the real /theme confirmation.
+        app.config.theme = Some("Cards".into());
+        app.config.theme_explicit = true;
+        app.mark_resource_paths_reload();
+        app.refresh_resource_paths_headless().await.unwrap();
+        assert_eq!(app.config.theme.as_deref(), Some("Cards"));
+        app.executable_extensions.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_pi_factories_first_provider_reload_and_empty_withdrawal() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let mut fixture = configured_pi(&root, false);
+    let mut fixture = configured_pi(&root, StartBehavior::Continue);
     let captures = Arc::new(Mutex::new(Vec::new()));
     fixture.app.client.register_host_stream_transport(
         fixture.app.model.endpoint.id.clone(),
@@ -387,7 +488,7 @@ async fn configured_pi_factories_first_provider_reload_and_empty_withdrawal() {
     }
     let old_prompts = fixture.app.prompts.clone();
     let old_skills = fixture.app.skills.clone();
-    phase(&root, "b", false);
+    phase(&root, "b", StartBehavior::Continue);
     fixture.app.mark_resource_paths_reload();
     fixture.app.refresh_resource_paths_headless().await.unwrap();
     assert!(old_prompts.descriptors().is_empty());
@@ -398,7 +499,7 @@ async fn configured_pi_factories_first_provider_reload_and_empty_withdrawal() {
         assert_eq!(requests.len(), 2);
         assert_phase(&fixture.app, &root, "b", &requests);
     }
-    phase(&root, "empty", false);
+    phase(&root, "empty", StartBehavior::Continue);
     fixture.app.mark_resource_paths_reload();
     fixture.app.refresh_resource_paths_headless().await.unwrap();
     for current in ["a", "b"] {
@@ -468,23 +569,127 @@ async fn configured_pi_factories_first_provider_reload_and_empty_withdrawal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn configured_pi_failed_start_cannot_discover_or_become_success_by_reload() {
+async fn configured_pi_callback_start_error_preserves_discovery_and_reload_without_replay() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let mut fixture = configured_pi(&root, true);
+    let mut fixture = configured_pi(&root, StartBehavior::Throw);
+    let mut events = fixture.app.executable_extensions.processes[0].subscribe();
     let captures = Arc::new(Mutex::new(Vec::new()));
     fixture.app.client.register_host_stream_transport(
         fixture.app.model.endpoint.id.clone(),
         Arc::new(Capture(captures.clone())),
     );
     fixture.app.refresh_resource_paths_headless().await.unwrap();
-    // Removing the local cause is not permission to replay session_start or
-    // convert an idempotent binding lookup into a successful start outcome.
-    phase(&root, "b", false);
+    complete_rendered(&mut fixture.app, "pi-first-a").await;
+    {
+        let requests = captures.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_phase(&fixture.app, &root, "a", &requests);
+    }
+    // A thrown observer does not invalidate the aggregate start or later
+    // factories. Reload discovers fresh paths, without retrying the callback.
+    phase(&root, "b", StartBehavior::Continue);
     fixture.app.mark_resource_paths_reload();
     fixture.app.refresh_resource_paths_headless().await.unwrap();
-    assert!(!fixture.app.prompts.contains("pi-first-a"));
-    assert!(!fixture.app.prompts.contains("pi-first-b"));
+    complete_rendered(&mut fixture.app, "pi-first-b").await;
+    {
+        let requests = captures.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_phase(&fixture.app, &root, "b", &requests);
+    }
+    let mut issues = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let octet_agent::extension_process::ExtensionEvent::Notification { notification } = event
+        {
+            if notification.title.as_deref() == Some("[Extension issues]") {
+                issues.push(notification);
+            }
+        }
+    }
+    assert_eq!(issues.len(), 1, "one truthful warning, not silent success");
+    assert_eq!(
+        issues[0].level,
+        octet_agent::extension_process::ExtensionNotificationLevel::Warning
+    );
+    assert!(issues[0]
+        .message
+        .contains(root.join("factories/first.mjs").to_str().unwrap()));
+    assert!(issues[0]
+        .message
+        .contains("session_start callback failed and was skipped"));
+    assert!(!issues[0].message.contains("private start failure details"));
+    let rows = trace(&root);
+    assert_eq!(
+        rows.len(),
+        10,
+        "no hidden process, callback retry, or duplicate discovery"
+    );
+    assert_eq!(rows[4]["kind"], "start_failed");
+    assert_eq!(rows[4]["factory"], "first");
+    assert_eq!(rows[5]["kind"], "started");
+    assert_eq!(rows[5]["factory"], "second");
+    for (row, (factory, phase, reason)) in rows[6..].iter().zip([
+        ("first", "a", "startup"),
+        ("second", "a", "startup"),
+        ("first", "b", "reload"),
+        ("second", "b", "reload"),
+    ]) {
+        assert_eq!(row["kind"], "discover");
+        assert_eq!(row["factory"], factory);
+        assert_eq!(row["phase"], phase);
+        assert_eq!(row["reason"], reason);
+    }
+    assert!(rows[2..].iter().all(|row| row["pid"] == rows[2]["pid"]));
+    assert_unchanged_capture(&root, &fixture);
+    fixture.app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_pi_refused_start_mutation_cannot_discover_or_become_success_by_reload() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut fixture = configured_pi(&root, StartBehavior::RefusedWrite);
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    fixture.app.client.register_host_stream_transport(
+        fixture.app.model.endpoint.id.clone(),
+        Arc::new(Capture(captures.clone())),
+    );
+    fixture.app.refresh_resource_paths_headless().await.unwrap();
+    assert!(!fixture.app.resource_paths_pending());
+    // Unlike an ordinary JS throw, a tracked session mutation receives a real
+    // headless-host refusal. Neither its effect nor discovery may be admitted.
+    let refusal = trace(&root)
+        .into_iter()
+        .find(|row| row["kind"] == "start_refused")
+        .unwrap();
+    assert_eq!(refusal["code"], -32602);
+    assert!(refusal["message"]
+        .as_str()
+        .unwrap()
+        .contains("no foreground session"));
+    assert_eq!(
+        fixture
+            .app
+            .sessions
+            .load_metadata(&fixture.app.goal_session_id)
+            .unwrap()
+            .name,
+        None,
+        "refused session name must not be committed",
+    );
+    // Removing the local cause cannot replay session_start or turn a failed
+    // retained binding into a successful one through an idempotent lookup.
+    phase(&root, "b", StartBehavior::Continue);
+    fixture.app.mark_resource_paths_reload();
+    fixture.app.refresh_resource_paths_headless().await.unwrap();
+    assert!(!fixture.app.resource_paths_pending());
+    for current in ["a", "b"] {
+        for factory in ["first", "second"] {
+            let name = format!("pi-{factory}-{current}");
+            assert!(!fixture.app.prompts.contains(&name));
+            assert!(fixture.app.skills.load(&name).is_err());
+        }
+    }
     assert!(render(&fixture.app, "user-proof").is_ok());
     complete(&mut fixture.app).await.unwrap();
     {
@@ -497,7 +702,13 @@ async fn configured_pi_failed_start_cannot_discover_or_become_success_by_reload(
     let rows = trace(&root);
     assert_eq!(
         rows.iter()
-            .filter(|row| row["kind"] == "start_failed")
+            .filter(|row| row["kind"] == "start_refusal_requested")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["kind"] == "start_refused")
             .count(),
         1
     );

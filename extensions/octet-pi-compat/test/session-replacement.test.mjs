@@ -192,7 +192,7 @@ test('cancellation skips setup and invalid setup options are rejected before rep
 async function beforeReplacement(hook, payload, handlers) {
   const store = { method: 'hook/run', controller: new AbortController(), state: { owner, host } };
   const runtime = {
-    metadata: () => ({ hooks: [hook] }), bind: () => {}, assertOwner: () => {},
+    metadata: () => ({ hooks: [hook] }), bind: () => {}, assertOwner: () => {}, assertSessionOwner: () => {},
     queued: (_store, callback) => callback(), scope: { run: (_store, callback) => callback() },
     events: new Map([[hook, handlers.map(handler => ({ factory: 0, handler }))]]), flush: async () => {},
   };

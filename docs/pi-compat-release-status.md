@@ -1,9 +1,8 @@
 # Pi extension compatibility: release status and merge notes
 
-Snapshot for the Pi 1.0.2 extension work stacked on PR #480
-(`claude/magical-lamport-7t0feb`). It records what was observed, which route
-each of Pi's example extensions takes, what is deferred, and how to merge.
-Row-level detail stays in the [extension API ledger](pi-extension-api.md).
+Working-tree snapshot for the Pi 1.0.2 compatibility repair (draft PR #523,
+stacked on #480). This records observed evidence, not a frozen release candidate
+or publication approval. Row-level detail stays in the [extension API ledger](pi-extension-api.md).
 
 ## Routes
 
@@ -21,7 +20,58 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
   for what it gives up. Path A failures it can fix report
   `pi_compat_fallback_eligible` with the names involved.
 
-## Example extensions (load and register)
+## Current verification (2026-10-05)
+
+- Adapter: **539 passed, 27 optional skips, zero failures** across all 60 test
+  files, split into two bounded batches (566 tests) with a disposable HOME.
+- Core libraries: `octet-agent` **1,066 passed / 2 ignored**, `octet-ai` **546
+  passed**, `sexy-tui-rs` **268 passed**. Offline, locked, default feature profile.
+- Full coding-agent library: **2,481 passed, zero failures, 3 ignored**, including
+  both formerly failing startup/tool-selection cases and two new non-resource
+  startup regressions. The focused tool-surface module passes **5/5**.
+- Earlier focused native Pi contracts: **59 passed** across baseline, context, exec, helpers,
+  messages, models/providers, session replacement, tools/hooks, UI and grouped
+  notification output. A further **20-test** focused run passed renderer/cache/
+  Tern, resource/theme and notification checks (some coverage overlaps).
+- Original rainbow editor: paced and burst-without-grace **PTY passes** on a
+  fresh native CLI. Both verify host mount/retirement identity, restored editable
+  draft, resize, coordinated shutdown and terminal restoration. The permanent
+  rescue hint row is gone; Ctrl+G/Ctrl+D are unchanged. Custom-editor slash-menu
+  work is excluded at the user's request.
+- Real App/adapter renderer acceptance passes controlled native read execution,
+  canonical persistence, invalidation, resize and active Tern. Native MCP **3/3**
+  passes registration/replacement, actual tool execution, removal/owner cleanup,
+  headless startup and missing-resident refusal.
+- Fresh original Doom/footer PTY passes gameplay, key release, resize, close and
+  shutdown. A real missing close-repaint wake was fixed; no follow-up input is
+  needed to restore the native composer.
+- Original hashline: **8 passed** with explicit original-source paths, including
+  installed-Pi text/image execution, anchored edit, artifact digest and zero
+  guard violations. This is a real adapter with scripted RPC host, not native PTY.
+
+The full coding-agent library is green; frozen-candidate release gates remain
+incomplete. Non-resource factories now settle deferred startup before command
+admission in both interactive and headless modes, without resource discovery or
+theme reload. Startup-worker failures still block admission. Command lifecycle
+ownership/reload and renderer/MCP cases pass. Clippy passes for all four libraries
+with warnings denied. Repository-wide formatting still flags shared-file hunks;
+those files were not rewritten over independent changes.
+Original Anthropic attribution is blocked
+by builtin provider inheritance and its need for a raw OAuth credential; existing
+extension trust/leases do not authorize credential export. Native-theme changes
+also do not yet synchronize back into Pi remote palettes. These are explicit
+limitations, not compatibility successes.
+
+Builds use one target directory with `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_INCREMENTAL=0` and bounded `-j 4`. Do not launch
+duplicate worktree builds or delete caches while another build holds Cargo's lock.
+Only inactive incremental caches were reclaimed; source and binaries were retained.
+
+Publication remains gated on a frozen candidate, local/PR/main green, explicit
+release authorization, published assets and public smoke. Nothing here declares
+Pi parity or a shipped release.
+
+## Example extensions (historical load and registration sample)
 
 Pi 1.0.2 ships 79 example extensions in
 `packages/coding-agent/examples/extensions`. Each was loaded with
@@ -40,11 +90,14 @@ below are the behavioral evidence.
 
 ## Native evidence (real Rust host, scripted provider)
 
-Each module was run on this branch's final source with the built library test
-binary, module by module:
+The following modules were exercised through the built library test binary.
+Use a disposable HOME and scrub provider credentials; only local scripted
+providers/fixtures are needed. The current full-library result is listed above;
+the module-level evidence below describes bounded behaviors, not full Pi parity:
 
 ```sh
-cargo test -p octet-coding-agent --lib --locked --offline --no-run
+CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p octet-coding-agent --lib --locked --offline -j 4 --no-run
 target/debug/deps/octet_sdk-<hash> <module>:: --test-threads=2
 ```
 
@@ -55,22 +108,26 @@ target/debug/deps/octet_sdk-<hash> <module>:: --test-threads=2
 | `pi_exec_contract_tests` | 3/3 |
 | `pi_helper_import_tests` | 1/1 |
 | `pi_messages_tests` | 9/9 |
-| `pi_model_provider_tests` | 3/3 (one earlier in-suite run failed `pi_idle_model_setters_preserve_the_live_command_and_binding`; it passed 3/3 alone: order-dependent flake, deferred) |
+| `pi_model_provider_tests` | 3/3; also passes in the full-library run |
 | `pi_session_replacement_tests` | 7/7 |
 | `pi_tool_hooks_tests` | 15/15 |
-| `pi_tools_surface_tests` | 3/3 |
-| `resource_paths::pi_app_tests` | 2/2 |
-| `pi_ui_contract_tests` | 2/5: `custom` overlay `onHandle`, dialog keys and dialog option countdown fail their acceptance barriers (deferred) |
-| `mcp_native_tests` | 1/2: the resident `octet-mcp` catalog never settles in `pi_mcp_native_app_register_replace_call_remove_and_owner_cleanup` (deferred; no example uses MCP registration) |
+| `pi_tools_surface_tests` | 5/5: authoritative catalogs/selection, late registration, startup ordering, headless exactly-once startup and failed-worker admission refusal |
+| `resource_paths::pi_app_tests` | 4/4: startup/reload, recoverable callback error, failed mutation and imported default theme |
+| `pi_ui_contract_tests` | 7/7, including overlays, dialog keys/countdowns, editor identity and terminal admission |
+| `mcp_native_tests` | 3/3: valid isolated config, real registration/call/replacement/removal/cleanup, headless startup and missing-resident refusal |
 | `pi_original_clm_tests` | ignored |
 
-Adapter suite (`extensions/octet-pi-compat`, synthetic host; #480 repair rerun):
-433 tests, 413 passed, 0 failed, 20 skipped. The native `octet-agent` library
-suite with all features passes 1,037 tests, with 2 ignored. `octet-mcp` `tests/test_pi_registration.py`: 3
-passed.
+The older 433-test adapter / 1,037-test agent counts are superseded by the
+current verification above. Native evidence qualifies the tested cases, not all
+members of a ledger row or the original extension corpus.
 
 ## Fixed in this change
 
+- Non-resource factory startup: the resource phase previously returned before
+  joining deferred `session_start` hooks when no resource contributor existed.
+  Both existing frontend pumps now settle pending starts first, without loading
+  resources or changing the theme. Worker/deadline/owner failures propagate;
+  ordinary callback diagnostics retain their existing handling.
 - `artifact/publish` acknowledgement: the host returns `{artifact_id}` (protocol
   reference), the adapter read `id`. Every Pi image failed on the real host while
   synthetic-host tests passed because they replied `{id}`. Fixed both.
@@ -103,7 +160,7 @@ refuse that metadata. D11 and both composition tests pass in the full native
 library suite. Bot-reported generated-source fixtures now parse variable values
 from JSON sidecars, with hostile-string regressions.
 
-## Deferred to later releases
+## Unresolved compatibility work and decisions
 
 - Native-backed Pi built-in tool factories on path A: `createBashTool` and
   friends returning Pi-shaped tools that call Octet's native tools through
@@ -118,10 +175,11 @@ from JSON sidecars, with hostile-string regressions.
   `octet-subagents`), so Pi `createAgentSession` spawns native Octet agents.
 - Host features above: provider OAuth for extension providers,
   `provider_stream_event`, `project_trust`, virtual models.
-- The three `pi_ui_contract_tests` failures, the resident MCP catalog test and
-  the order-dependent model-setter flake above.
-- Native transcript renderer consumer (ledger row 25), remaining UI/editor
-  setters, Windows `pi.exec`, MCP HTTP/credentials.
+- Provider inheritance and explicit credential/transport policy for the original
+  Anthropic-attribution callback; never substitute an invented credential.
+- Remaining UI/editor setters and native-to-Pi theme synchronization, Windows
+  `pi.exec`, MCP HTTP/credentials. Native transcript consumers now exist; final
+  original-extension qualification is separate.
 
 ### Fallback prompt proposal
 
@@ -133,17 +191,12 @@ host-read `bridge.json` with recomputed entrypoint hashes; add an
 the manifest and entrypoint digests; on reload append `--pi-runtime installed`
 while the approval matches.
 
-## Merge notes for agents
+## Candidate integration notes
 
-1. This branch is stacked on #480's head `ae7800e2`. Merge #480 first, then this.
-2. Formatting: the candidate's earlier uncommitted work left `cargo fmt` drift
-   in files this branch changes. The final commit formats exactly those files.
-   Re-run `cargo fmt --all -- --check` after rebasing.
-3. Not compiled into any target: an untracked
-   `crates/octet-coding-agent/src/modes/interactive/tests/pi_mcp_registration_tests.rs`
-   draft was left out of this branch; the registered MCP native tests are
-   `extensions/mcp_native_tests.rs`.
-4. Re-run the adapter suite (`node --test --test-concurrency=4 test/*.test.mjs`
-   from `extensions/octet-pi-compat`) and the native Pi modules listed above,
-   module by module with `--test-threads=2`; broad runs exceed tool deadlines.
-5. No fresh release binary or PTY smoke has been run on this head.
+The working tree contains independent, uncommitted changes. Do not treat this
+record as authority to commit, rebase, overwrite another writer or publish.
+Run formatting checks without whole-file rewrites, inspect the final diff and
+repeat relevant native/adapter tests after the last source change. The original
+rainbow and Doom/footer PTY passes qualify their observed binary, not a frozen
+candidate. The earlier original `/draw` acceptance remains historical; the
+currently installed `termdraw` factory is a different command, not that fixture.

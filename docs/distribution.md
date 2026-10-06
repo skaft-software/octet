@@ -34,19 +34,20 @@ channel evidence.
 | Product library | `octet_sdk` |
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
-| Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
+| Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK and five executable-bundle distribution versions | `0.8.2`; installed compatibility `requires_octet = "=0.8.2"` |
+| Product, SDK and six executable-bundle distribution versions | `0.8.2`; installed compatibility `requires_octet = "=0.8.2"` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
-Current extension authoring and the five executable-bundle manifests target API
+Current extension authoring and the six executable-bundle manifests target API
 `0.4`, the feature-negotiated wire the Python `Extension` runtime supports
 alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
-runtime. The minimal canonical process example and the independent Aider and Pi
-adapters keep version `0.1.0` with exact `=0.8.0` host pins. Renaming
+runtime. The minimal canonical process example and independent Aider adapter
+keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter is now a
+version-matched catalog bundle; its configured local bridge is separate. Renaming
 first-party wire fields such as `octet_version` doesn't renumber APIs or keep
 old-name aliases. Historical releases, measurements, upstream copyrights, Pi
 pins, independent example versions and mismatch fixtures keep their original
@@ -59,7 +60,7 @@ The release workflows don't publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets. Verify public installation after upload. |
-| Five executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
+| Six executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
 | npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all four. Disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication needed. The public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Don't advertise registry installation. Publishing the CLI and dependency graph and verifying registry ownership is separate work. |
@@ -177,6 +178,6 @@ The planned v0.8.2 version-pinned shell installer targets macOS arm64 and x64 an
 GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms and would
 publish as `@skaft/octet@0.8.2`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and
-provenance checks. Bun is unqualified. Cargo can build and install the local
+provenance checks. CLI installation with Bun is unqualified. Cargo can build and install the local
 checkout without a registry channel. Installing from the public canonical tag
 needs the version-pinned GitHub tag, not a crates.io package.

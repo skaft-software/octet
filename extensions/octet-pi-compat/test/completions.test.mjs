@@ -60,12 +60,20 @@ test('real callback receives raw arguments, not tokenized words; byte cursor kee
 
 test('non-command/file/attachment input is unclaimed and never calls a command completer', async t => {
   const peer = await started(t);
-  for (const text of ['src/ma', '/unknown x', '/plain x', '/complete', 'text /complete x', '/complete\tx', '/complete @file', '/complete (@file', '/complete ，@file', '/complete @"space name']) {
+  for (const text of ['src/ma', '/unknown x', '/plain x', 'text /complete x', '/complete\tx', '/complete @file', '/complete (@file', '/complete ，@file', '/complete @"space name']) {
     assert.deepEqual((await query(peer, snapshot(text)).response).result, { prefix: '', items: [] }, text);
   }
   assert.deepEqual((await state(peer)).calls, []);
   // Parent native test must verify this empty response falls through to native
   // file completion ONLY for the still-current text/cursor/revision snapshot.
+  await peer.close();
+});
+
+test('slash command names are completed without invoking argument callbacks', async t => {
+  const peer = await started(t);
+  const exact = await query(peer, snapshot('/complete')).response;
+  assert.deepEqual(exact.result, { prefix: '/complete', items: [{ value: '/complete ', label: 'complete', description: 'Argument completion fixture' }] });
+  assert.deepEqual((await state(peer)).calls, []);
   await peer.close();
 });
 
@@ -163,13 +171,16 @@ test('out-of-order stale completion results remain correlated to their own immut
   await peer.close();
 });
 
-test('cancellation settles a pending callback promptly and a late resolution emits no second terminal reply', async t => {
+test('cancellation retains a running callback until actual settlement and emits only one cancelled reply', async t => {
   const peer = await started(t);
   const pending = query(peer, snapshot('/complete slow:cancel'));
   assert.deepEqual((await state(peer, { wait_for: 'slow:cancel' })).pending, ['slow:cancel']);
   peer.notify('$/cancelRequest', { id: pending.id });
-  assert.equal((await pending.response).error.code, -32800);
+  // An independent correlated request proves cancellation has been processed.
+  await query(peer, snapshot('/complete still-live')).response;
+  assert.equal(peer.seen.some(f => f.id === pending.id && !f.method), false);
   await state(peer, { release: 'slow:cancel' });
+  assert.equal((await pending.response).error.code, -32800);
   await query(peer, snapshot('/complete after')).response;
   assert.equal(peer.seen.filter(f => f.id === pending.id && !f.method).length, 1);
   await peer.close();

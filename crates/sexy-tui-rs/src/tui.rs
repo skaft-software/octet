@@ -430,6 +430,13 @@ impl<'a> TUI<'a> {
         self.terminal.write(&format!("\x1b]2;{clean}\x07"));
     }
 
+    /// Emit one desktop-notification intent through the terminal owned by this
+    /// renderer. Support and delivery are terminal-dependent; plain output and
+    /// invalid OSC payloads are refused, never written as raw extension bytes.
+    pub fn desktop_notification(&mut self, title: &str, body: &str) -> bool {
+        self.terminal.desktop_notification(title, body)
+    }
+
     /// Add a component. Input and paste are delivered to the most recently
     /// added child, matching the single active-component usage of the shell.
     pub fn add_child(&mut self, child: Box<dyn Component>) {

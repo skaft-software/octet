@@ -828,3 +828,289 @@ fn syntax_data_is_cached_per_renderer() {
     assert_eq!(stats.misses, 1);
     assert_eq!(stats.hits, 1);
 }
+
+// The pre-optimization expansion is deliberately retained as an independent
+// oracle: tab stops carry across semantic runs, while graphemes are run-local.
+fn reference_expand_run_tabs(renderer: &RichRenderer, runs: &[RichRun]) -> Vec<RichRun> {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let mut column = 0usize;
+    runs.iter()
+        .map(|run| {
+            let expanded = renderer
+                .options
+                .width
+                .expand_tabs(&run.text, column)
+                .into_owned();
+            for grapheme in expanded.graphemes(true) {
+                if matches!(grapheme, "\n" | "\r") {
+                    column = 0;
+                } else {
+                    column = column
+                        .saturating_add(renderer.options.width.grapheme_width(grapheme, column));
+                }
+            }
+            RichRun::new(expanded, run.style, run.link.clone())
+        })
+        .collect()
+}
+
+fn identity_path_runs(parts: &[&str]) -> Vec<RichRun> {
+    parts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let style = match index % 3 {
+                0 => TextStyle::plain().bold(),
+                1 => TextStyle::plain()
+                    .foreground(Color::Rgb(12, 34, 56))
+                    .background(Color::Rgb(65, 43, 21))
+                    .italic(),
+                _ => TextStyle::plain().underline(),
+            };
+            let link = match index % 3 {
+                0 => Some("https://example.com/界?q=value".to_owned()),
+                1 => Some("javascript:alert(1)".to_owned()),
+                _ => None,
+            };
+            RichRun::new((*text).to_owned(), style, link)
+        })
+        .collect()
+}
+
+fn assert_same_runs(actual: &[RichRun], expected: &[RichRun]) {
+    assert_eq!(actual.len(), expected.len(), "{actual:?} != {expected:?}");
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(actual.text, expected.text, "run {index}");
+        assert_eq!(actual.style, expected.style, "run {index}");
+        assert_eq!(actual.link, expected.link, "run {index}");
+    }
+}
+
+#[test]
+fn no_tab_expansion_borrows_runs_at_all_workload_sizes() {
+    let renderer = renderer(ColorDepth::TrueColor, true);
+    let parts = ["plain ", "界e\u{301}👩\u{200d}💻", "", "\r\nnext", "🇦", "🇧"];
+    for count in [0, 1, 1_000, 10_000] {
+        let input = (0..count)
+            .map(|index| parts[index % parts.len()])
+            .collect::<Vec<_>>();
+        let runs = identity_path_runs(&input);
+        let expanded = renderer.expand_run_tabs(&runs);
+        let std::borrow::Cow::Borrowed(borrowed) = expanded else {
+            panic!("no-tab input copied at {count} runs");
+        };
+        assert!(std::ptr::eq(borrowed, runs.as_slice()));
+        assert_same_runs(borrowed, &reference_expand_run_tabs(&renderer, &runs));
+    }
+}
+
+#[test]
+fn tab_expansion_matches_reference_across_styles_links_and_unicode() {
+    use crate::width::AmbiguousWidth;
+
+    let parts = [
+        "",
+        "a",
+        " ",
+        "界",
+        "e\u{301}",
+        "·",
+        "👩\u{200d}💻",
+        "🇦",
+        "🇧",
+        "\t",
+        "a\tb",
+        "\n",
+        "\r",
+        "\r\n",
+        "x\r\n\ty",
+        "\u{301}",
+    ];
+    let mut renderer = renderer(ColorDepth::TrueColor, true);
+    for ambiguous in [AmbiguousWidth::Narrow, AmbiguousWidth::Wide] {
+        for tab_stop in [0, 1, 4, 8] {
+            let mut options = renderer.options();
+            options.width = WidthPolicy {
+                ambiguous,
+                tab_stop,
+            };
+            renderer.set_options(options);
+            for first in parts {
+                for second in parts {
+                    // The final tab must honor columns established in earlier
+                    // runs, including blank runs and the original CRLF behavior.
+                    let runs = identity_path_runs(&[first, second, "", "\ttail"]);
+                    let expanded = renderer.expand_run_tabs(&runs);
+                    assert!(matches!(expanded, std::borrow::Cow::Owned(_)));
+                    assert_same_runs(&expanded, &reference_expand_run_tabs(&renderer, &runs));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fitting_owned_lines_preserve_run_text_and_link_allocations() {
+    let renderer = renderer(ColorDepth::TrueColor, true);
+    let parts = ["plain ", "界e\u{301}👩\u{200d}💻", "🇦🇧·"];
+    for count in [1, 1_000, 10_000] {
+        let input = (0..count)
+            .map(|index| parts[index % parts.len()])
+            .collect::<Vec<_>>();
+        let runs = identity_path_runs(&input);
+        let width = renderer.runs_width(&runs);
+        let allocation = runs.as_ptr();
+        let text_and_links = runs
+            .iter()
+            .map(|run| {
+                (
+                    run.text.as_ptr(),
+                    run.link.as_ref().map(|link| link.as_ptr()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let clipped = renderer.clip_line(RichLine { runs }, width);
+        assert_eq!(
+            clipped.runs.as_ptr(),
+            allocation,
+            "copied {count} fitting runs"
+        );
+        for (run, (text, link)) in clipped.runs.iter().zip(text_and_links) {
+            assert_eq!(run.text.as_ptr(), text);
+            assert_eq!(run.link.as_ref().map(|value| value.as_ptr()), link);
+        }
+    }
+}
+
+// Encode the general clipping result directly, without routing it back through
+// clip_line: an accidental second clipping must not hide a fast-path mismatch.
+fn reference_encode_clipped_line(renderer: &RichRenderer, line: &RichLine) -> RenderedLine {
+    let mut plain = String::new();
+    let mut styled = String::new();
+    for run in &line.runs {
+        plain.push_str(&run.text);
+        let styled_text = renderer.theme.apply_style(run.style, &run.text);
+        if renderer.capabilities.hyperlinks {
+            if let Some(target) = run
+                .link
+                .as_deref()
+                .and_then(crate::sanitize::SafeUrl::parse)
+            {
+                styled.push_str("\x1b]8;;");
+                styled.push_str(target.as_str());
+                styled.push_str("\x1b\\");
+                styled.push_str(&styled_text);
+                styled.push_str("\x1b]8;;\x1b\\");
+                continue;
+            }
+        }
+        styled.push_str(&styled_text);
+    }
+    RenderedLine { styled, plain }
+}
+
+#[test]
+fn owned_line_clipping_matches_general_path_and_encoded_bytes() {
+    use crate::width::AmbiguousWidth;
+
+    let cases: &[&[&str]] = &[
+        &[],
+        &[""],
+        &["", ""],
+        &["", "content", ""],
+        &["plain ", "styled", " text"],
+        &["longidentifierabcdefghijklmno"],
+        &["\t", "a\tb", "\t"],
+        &["a", "\t", "界\tend"],
+        &["first\nsecond"],
+        &["first\rsecond"],
+        &["first\r\nsecond"],
+        &["first\r", "\nsecond"],
+        &["\n", ""],
+        &["\r", "\t"],
+        &["界", "·", "e\u{301}"],
+        &["e", "\u{301}"],
+        &["👩", "\u{200d}", "💻"],
+        &["🇦", "🇧"],
+        &["\u{301}"],
+        &["\u{200d}"],
+        &["♥\u{fe0f}", "ำຳ"],
+    ];
+    for (color, unicode) in [
+        (ColorDepth::TrueColor, true),
+        (ColorDepth::Ansi16, true),
+        (ColorDepth::None, false),
+    ] {
+        for hyperlinks in [false, true] {
+            let capabilities = TerminalCapabilities::interactive(color, unicode).with_overrides(
+                &CapabilityOverrides {
+                    hyperlinks: Some(hyperlinks),
+                    ..CapabilityOverrides::default()
+                },
+            );
+            let mut renderer = RichRenderer::new(
+                Theme::with_capabilities(capabilities),
+                capabilities,
+                RenderOptions::default(),
+            );
+            for ambiguous in [AmbiguousWidth::Narrow, AmbiguousWidth::Wide] {
+                for tab_stop in [0, 4, 8] {
+                    let mut options = renderer.options();
+                    options.width = WidthPolicy {
+                        ambiguous,
+                        tab_stop,
+                    };
+                    renderer.set_options(options);
+                    for parts in cases {
+                        let runs = identity_path_runs(parts);
+                        for width in [0, 1, 2, 3, 7, 16, 120] {
+                            let expected = renderer.clip_runs(&runs, width);
+                            let actual = renderer.clip_line(RichLine { runs: runs.clone() }, width);
+                            assert_same_runs(&actual.runs, &expected.runs);
+                            assert_eq!(
+                                renderer.encode_line(RichLine { runs: runs.clone() }, width),
+                                reference_encode_clipped_line(&renderer, &expected),
+                                "width={width} parts={parts:?} policy={:?}",
+                                renderer.options.width,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn retained_rich_prefix_charges_ownership_for_borrowed_and_expanded_runs() {
+    let renderer = renderer(ColorDepth::TrueColor, true);
+    for text in ["no tabs 界e\u{301}", "tabs\t界\tend"] {
+        let mut prefix = vec![
+            Inline::strong(text),
+            Inline::link("docs", "https://example.com"),
+        ];
+        let runs = renderer.inline_runs(&prefix, renderer.theme.style(TextRole::Text));
+        let expected_copy = super::lines::run_bytes(&runs)
+            + super::lines::run_bytes(&reference_expand_run_tabs(&renderer, &runs));
+        prefix.push(Inline::Raw(String::new()));
+        let block = Block::Paragraph(prefix);
+        let mut cache = AppendOnlyTail::default();
+        let mut stats = StreamingLayoutStats::default();
+        let mut output = Vec::new();
+        // Zero width isolates prefix ownership from row encoding/copy work.
+        cache
+            .update(&block, &renderer, 0, &mut output, &mut stats)
+            .unwrap();
+        assert_eq!(stats.copied_bytes, expected_copy as u64);
+        assert_eq!(stats.rich_prefix_layouts, 1);
+        cache
+            .update(&block, &renderer, 0, &mut output, &mut stats)
+            .unwrap();
+        assert_eq!(
+            stats.copied_bytes, expected_copy as u64,
+            "unchanged prefix recopied"
+        );
+        assert_eq!(stats.rich_prefix_layouts, 1);
+    }
+}

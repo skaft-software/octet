@@ -345,7 +345,33 @@ impl ExecutableExtensions {
     /// Project validated semantic extension UI into the host-owned interactive
     /// shell. Any stale process generation is discarded before rendering.
     pub fn sync_semantic_ui(&mut self, shell: &mut InteractiveShell) -> bool {
+        self.refresh_frontend_theme(shell);
         shell.set_extension_ui(self.semantic_ui_projection())
+    }
+
+    /// Publish an already-resolved foreground palette, never render-time I/O or
+    /// a callback into the component factory. Existing process publication sends
+    /// owner-fenced context updates to every admitted remote mount.
+    pub(crate) fn refresh_frontend_theme(&self, shell: &InteractiveShell) {
+        let theme = shell.extension_theme_get(None);
+        let state = {
+            let mut state = self
+                .host_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.theme == theme {
+                return;
+            }
+            state.theme = theme;
+            state.clone()
+        };
+        for process in &self.processes {
+            if process.descriptor().manifest.runtime.sharing
+                == octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
+            {
+                process.set_host_state(state.clone());
+            }
+        }
     }
 
     /// Notify negotiated editor-handoff extensions whenever the host-owned

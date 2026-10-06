@@ -4,7 +4,7 @@ import { Text } from '../node_modules/@earendil-works/pi-tui/dist/components/tex
 import { Input } from '../node_modules/@earendil-works/pi-tui/dist/components/input.js';
 import { addAutocompleteProvider } from './completions.mjs';
 import { safeLines } from './remote-ui.mjs';
-import { theme } from './theme.mjs';
+import { theme, createNativeTheme, nativeTheme } from './theme.mjs';
 import { Container } from '../node_modules/@earendil-works/pi-tui/dist/tui.js';
 import { Spacer } from '../node_modules/@earendil-works/pi-tui/dist/components/spacer.js';
 import { Loader } from '../node_modules/@earendil-works/pi-tui/dist/components/loader.js';
@@ -60,11 +60,48 @@ export function chromeAPI(runtime, store) {
     const result = runtime.transport.requestSync('ui/chrome', {
       parent_request_id: store.id, resource_owner: store.state.owner, chrome: operation,
     }, { parent: store.live ? store.id : undefined, signal: store.controller.signal });
-    fields(result, ['tools_expanded'], 'UI chrome receipt');
-    if (typeof result.tools_expanded !== 'boolean') invalid('UI chrome tools_expanded receipt');
+    if (!['theme_get', 'theme_list', 'theme_set'].includes(operation.kind)) {
+      fields(result, ['tools_expanded', 'theme'], 'UI chrome receipt');
+      if (typeof result.tools_expanded !== 'boolean') invalid('UI chrome tools_expanded receipt');
+      if (result.theme != null) { nativeTheme(result.theme); store.state.host.theme = result.theme; }
+    }
     return result;
   };
   return {
+    getTheme(name) {
+      bounded(name, 'theme name', 128);
+      const result = call({ kind: 'theme_get', name });
+      fields(result, ['theme'], 'theme lookup receipt');
+      return result.theme === null ? undefined : createNativeTheme(result.theme);
+    },
+    getAllThemes() {
+      const result = call({ kind: 'theme_list' });
+      fields(result, ['themes'], 'theme catalog receipt');
+      if (!Array.isArray(result.themes)) invalid('theme catalog receipt');
+      return result.themes.map(metadata => {
+        fields(metadata, ['name', 'path'], 'theme catalog item');
+        bounded(metadata.name, 'theme catalog name', 128);
+        if (metadata.path != null) bounded(metadata.path, 'theme catalog path', 4096);
+        return { name: metadata.name, path: metadata.path ?? undefined };
+      });
+    },
+    setTheme(value) {
+      // The approved wire admits native named palettes, not arbitrary uploaded
+      // Theme objects. Never pretend an object's name selects its custom colors.
+      if (typeof value !== 'string') return { success: false, error: 'Native theme selection requires an available theme name' };
+      bounded(value, 'theme name', 128);
+      const result = call({ kind: 'theme_set', name: value });
+      fields(result, ['success', 'error', 'theme'], 'theme selection receipt');
+      if (typeof result.success !== 'boolean') invalid('theme selection success');
+      if (result.error !== undefined) bounded(result.error, 'theme selection error', 4096, { controls: true });
+      if (!result.success) return { success: false, ...(result.error === undefined ? {} : { error: result.error }) };
+      nativeTheme(result.theme);
+      store.state.host.theme = structuredClone(result.theme);
+      for (const surface of runtime.ui.surfaces.values()) if (surface.store.state === store.state) {
+        runtime.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
+      }
+      return { success: true };
+    },
     setTitle(title) { bounded(title, 'terminal title', 1024); call({ kind: 'title', title }); },
     setWorkingMessage(message) {
       if (message !== undefined) bounded(message, 'working message', 4096);
@@ -185,6 +222,8 @@ export function editorAPI(runtime, store, setSlot) {
       if (factory !== undefined && typeof factory !== 'function') invalid('editor factory');
       const previous = editorFactories.get(store.state), next = { factory };
       editorFactories.set(store.state, next);
+      // Invoke the original factory once, on the admitted real TUI. A headless
+      // probe can duplicate effects and silently discard custom editor behavior.
       const mounted = setSlot('editor', 'editor', factory);
       mounted.catch(() => {
         if (editorFactories.get(store.state) === next) {

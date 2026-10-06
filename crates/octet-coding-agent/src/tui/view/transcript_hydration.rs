@@ -92,10 +92,29 @@ pub(super) fn append_hydrated_items(
                 });
             }
             TranscriptItem::CustomMessage {
-                custom_type, text, ..
+                id,
+                timestamp_unix_ms,
+                content,
+                custom_type,
+                details,
+                ..
             } => {
-                state.seal_activity_group();
-                state.push_block(TranscriptBlock::Notice(format!("[{custom_type}]\n{text}")));
+                state.retain_custom_message(
+                    &id,
+                    &octet_agent::session::CustomMessage {
+                        custom_type,
+                        content,
+                        display: true,
+                        details,
+                    },
+                    timestamp_unix_ms,
+                );
+            }
+            TranscriptItem::PrivateEntry { namespace, entry } => {
+                state.retain_private_entry(namespace, entry)
+            }
+            TranscriptItem::ToolPresentation { id, result } => {
+                state.retain_tool_presentation(&id, result)
             }
             TranscriptItem::Assistant(text) => {
                 state.seal_activity_group();
@@ -259,6 +278,14 @@ pub(super) fn append_hydrated_items(
                     let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
                     state.tool_panels.insert(id, index);
                 }
+                state.retain_tool_presentation(
+                    &group_id,
+                    (text.len() <= 524_288).then(|| {
+                        serde_json::json!({
+                            "content":[{"type":"text","text":text}], "isError":is_error,
+                        })
+                    }),
+                );
                 if let Some(index) = state.tool_panels.get(&group_id).copied() {
                     if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get(index) {
                         let name = panel.name.clone();

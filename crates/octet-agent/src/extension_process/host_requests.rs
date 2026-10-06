@@ -249,6 +249,19 @@ pub struct ComposerGetRequest {
     pub resource_owner: Option<ExtensionResourceOwner>,
 }
 
+/// Owner-scoped request to seed older native prompt history.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposerHistoryRequest {
+    /// Active host request supplying the authoritative owner.
+    pub parent_request_id: u64,
+    /// Newest-first plain-text prompts (at most 100, 256 KiB aggregate).
+    pub entries: Vec<String>,
+    /// Previously issued owner for retained contexts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
 /// API `0.2` request carrying complete replacement composer text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -723,6 +736,24 @@ pub struct ExtensionContributions {
 /// Session and model facts exposed to an extension through typed requests.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionHostState {
+    /// Actual native palette facts, absent for hosts without a theme projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<serde_json::Value>,
+    /// Fresh native context-usage observation; explicit null clears stale facts.
+    #[serde(default)]
+    pub context_usage: Option<serde_json::Value>,
+    /// Read-only resolved native action keys, including disabled/user bindings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keybindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Frontend workspace-trust decision, absent for hosts without that policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_trusted: Option<bool>,
+    /// Whether a foreground UI consumer is available in this frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_ui: Option<bool>,
+    /// Active native frontend mode (tui, print, or rpc), when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     /// Stable session identifier, when a frontend has one.
     #[serde(default)]
     pub session_id: Option<String>,
@@ -744,6 +775,35 @@ pub struct ExtensionHostState {
     /// Skills explicitly active at this boundary.
     #[serde(default)]
     pub active_skills: Vec<ExtensionActiveSkill>,
+}
+
+#[cfg(test)]
+mod host_state_contract_tests {
+    use super::*;
+
+    #[test]
+    fn optional_palette_and_context_usage_roundtrip_without_fabricated_defaults() {
+        let empty: ExtensionHostState = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.theme.is_none());
+        assert!(empty.context_usage.is_none());
+        let wire = serde_json::to_value(empty).unwrap();
+        assert!(wire.get("theme").is_none());
+        assert_eq!(wire.get("context_usage"), Some(&serde_json::Value::Null));
+        let mut retained = serde_json::json!({"context_usage":{"tokens":127}});
+        retained
+            .as_object_mut()
+            .unwrap()
+            .extend(wire.as_object().unwrap().clone());
+        assert_eq!(retained["context_usage"], serde_json::Value::Null);
+        let state = ExtensionHostState {
+            theme: Some(serde_json::json!({"name":"native"})),
+            context_usage: Some(serde_json::json!({"tokens":127})),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&state).unwrap();
+        let roundtrip: ExtensionHostState = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip, state);
+    }
 }
 
 /// Pi-shaped model view exposed to an extension as `ctx.model`.

@@ -75,7 +75,172 @@ const SUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
     "uniqueItems",
     "minProperties",
     "maxProperties",
+    "pattern",
+    "deprecated",
 ];
+
+// A deliberately portable ECMAScript subset, also admitted by the Pi adapter:
+// anchored sequences of printable ASCII literals / positive character classes,
+// optionally followed by finite {m} or {m,n}. No escapes, wildcard, negation,
+// groups, alternation or unbounded repeats. Unsupported syntax fails admission;
+// the original schema is never rewritten. This avoids regex dialect differences
+// and backtracking while covering bounded identifiers used by Pi extensions.
+const MAX_SCHEMA_PATTERN: usize = 1_024;
+const UNSUPPORTED_PATTERN: &str = "unsupported JSON Schema pattern: require bounded ^...$ ASCII literals/classes with finite repetitions (1024 bytes/maximum characters)";
+
+struct PatternAtom {
+    characters: u128,
+    minimum: usize,
+    maximum: usize,
+}
+
+struct SchemaPattern {
+    atoms: Vec<PatternAtom>,
+    maximum: usize,
+}
+
+impl SchemaPattern {
+    fn parse(pattern: &str) -> Result<Self, &'static str> {
+        fn class_byte(byte: u8) -> bool {
+            (b' '..=b'~').contains(&byte) && !matches!(byte, b'[' | b']' | b'\\' | b'^' | b'-')
+        }
+        fn count(bytes: &[u8], index: &mut usize) -> Result<usize, &'static str> {
+            let start = *index;
+            let mut value = 0;
+            while let Some(byte) = bytes.get(*index).filter(|byte| byte.is_ascii_digit()) {
+                value = value * 10 + usize::from(*byte - b'0');
+                if value > MAX_SCHEMA_PATTERN {
+                    return Err(UNSUPPORTED_PATTERN);
+                }
+                *index += 1;
+            }
+            if *index == start || (*index > start + 1 && bytes[start] == b'0') {
+                return Err(UNSUPPORTED_PATTERN);
+            }
+            Ok(value)
+        }
+        let bytes = pattern.as_bytes();
+        if bytes.len() > MAX_SCHEMA_PATTERN
+            || bytes.first() != Some(&b'^')
+            || bytes.last() != Some(&b'$')
+        {
+            return Err(UNSUPPORTED_PATTERN);
+        }
+        let mut atoms = Vec::new();
+        let mut maximum = 0;
+        let mut index = 1;
+        while index < bytes.len() - 1 {
+            let mut characters = 0_u128;
+            if bytes[index] == b'[' {
+                index += 1;
+                let start = index;
+                loop {
+                    let byte = *bytes.get(index).ok_or(UNSUPPORTED_PATTERN)?;
+                    if byte == b']' {
+                        break;
+                    }
+                    if byte == b'-' && (index == start || bytes.get(index + 1) == Some(&b']')) {
+                        characters |= 1_u128 << byte;
+                        index += 1;
+                        continue;
+                    }
+                    if !class_byte(byte) {
+                        return Err(UNSUPPORTED_PATTERN);
+                    }
+                    if bytes.get(index + 1) == Some(&b'-') && bytes.get(index + 2) != Some(&b']') {
+                        let end = *bytes.get(index + 2).ok_or(UNSUPPORTED_PATTERN)?;
+                        if !class_byte(end) || end < byte {
+                            return Err(UNSUPPORTED_PATTERN);
+                        }
+                        for member in byte..=end {
+                            characters |= 1_u128 << member;
+                        }
+                        index += 3;
+                    } else {
+                        characters |= 1_u128 << byte;
+                        index += 1;
+                    }
+                }
+                if index == start {
+                    return Err(UNSUPPORTED_PATTERN);
+                }
+                index += 1;
+            } else {
+                let byte = bytes[index];
+                if !(b' '..=b'~').contains(&byte) || b".+*?^$(){}[]\\|".contains(&byte) {
+                    return Err(UNSUPPORTED_PATTERN);
+                }
+                characters |= 1_u128 << byte;
+                index += 1;
+            }
+            let (mut minimum, mut upper) = (1, 1);
+            if bytes.get(index) == Some(&b'{') {
+                index += 1;
+                minimum = count(bytes, &mut index)?;
+                upper = minimum;
+                if bytes.get(index) == Some(&b',') {
+                    index += 1;
+                    upper = count(bytes, &mut index)?;
+                }
+                if bytes.get(index) != Some(&b'}') || minimum > upper {
+                    return Err(UNSUPPORTED_PATTERN);
+                }
+                index += 1;
+            }
+            maximum += upper;
+            if maximum > MAX_SCHEMA_PATTERN {
+                return Err(UNSUPPORTED_PATTERN);
+            }
+            atoms.push(PatternAtom {
+                characters,
+                minimum,
+                maximum: upper,
+            });
+        }
+        if index != bytes.len() - 1 {
+            return Err(UNSUPPORTED_PATTERN);
+        }
+        Ok(Self { atoms, maximum })
+    }
+
+    fn matches(
+        &self,
+        value: &str,
+        budget: &mut ValueValidationBudget,
+    ) -> Result<bool, ValueValidationFailure> {
+        if value.len() > self.maximum || !value.is_ascii() {
+            return Ok(false);
+        }
+        let bytes = value.as_bytes();
+        let mut reachable = vec![false; bytes.len() + 1];
+        reachable[0] = true;
+        for atom in &self.atoms {
+            // Prefix counts answer whether any preceding match can reach this
+            // position within the repetition interval. Unlike a greedy matcher,
+            // this handles overlapping classes and adjacent variable repeats.
+            let mut prefix = vec![0_usize; reachable.len() + 1];
+            for (index, reached) in reachable.iter().enumerate() {
+                prefix[index + 1] = prefix[index] + usize::from(*reached);
+            }
+            let mut next = vec![false; reachable.len()];
+            let mut after_mismatch = 0;
+            for end in 0..=bytes.len() {
+                budget.consume()?;
+                if end > 0 && atom.characters & (1_u128 << bytes[end - 1]) == 0 {
+                    after_mismatch = end;
+                }
+                if let Some(last_start) = end.checked_sub(atom.minimum) {
+                    let first_start = end.saturating_sub(atom.maximum).max(after_mismatch);
+                    if first_start <= last_start {
+                        next[end] = prefix[last_start + 1] > prefix[first_start];
+                    }
+                }
+            }
+            reachable = next;
+        }
+        Ok(reachable[bytes.len()])
+    }
+}
 
 fn supported_json_type(name: &str) -> bool {
     matches!(
@@ -299,6 +464,17 @@ fn validate_schema(
             ));
         }
         match keyword.as_str() {
+            "pattern" => {
+                let pattern = value
+                    .as_str()
+                    .ok_or_else(|| "pattern must be a string".to_owned())?;
+                SchemaPattern::parse(pattern).map_err(str::to_owned)?;
+            }
+            "deprecated" => {
+                if !value.is_boolean() {
+                    return Err("deprecated must be boolean".to_owned());
+                }
+            }
             "$schema" | "title" | "description" => {
                 if !value.is_string() {
                     return Err(format!("{keyword} must be a string"));
@@ -638,6 +814,12 @@ fn validate_value(
         }
     }
     if let Some(string) = value.as_str() {
+        if let Some(pattern) = object.get("pattern").and_then(serde_json::Value::as_str) {
+            let pattern = SchemaPattern::parse(pattern).map_err(ValueValidationFailure::Unsafe)?;
+            if !pattern.matches(string, budget)? {
+                return Err(ValueValidationFailure::Mismatch);
+            }
+        }
         let count = string.chars().count() as u64;
         if object
             .get("minLength")
@@ -990,5 +1172,7 @@ fn remove_trailing_commas(input: &str) -> String {
     output
 }
 
+#[cfg(test)]
+mod schema_profile_tests;
 #[cfg(test)]
 mod tests;

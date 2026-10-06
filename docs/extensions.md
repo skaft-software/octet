@@ -188,7 +188,7 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, SDK source packages and five executable
+names or imports. The local host, SDK source packages and six executable
 bundles have distribution version **0.8.2**. That doesn't select an extension
 API or publish SDK registries. Catalog installation needs version-matched
 published assets: see [installation](installation.md) and the [release
@@ -492,8 +492,9 @@ generation. `SessionEnd` adds an outcome, a `shutdown`, `reload`, `crash` or
 path, a mutable `Session`, a prompt, a host-state snapshot or request-path
 context.
 
-Ownership is recorded before start to prevent duplicate pairs. Each dispatch is
-capped at 250 ms. Malformed results, timeouts and remote errors become bounded
+Ownership is recorded before start to prevent duplicate pairs. `session_start`
+runs off the startup path with the ordinary request deadline, as Pi awaits it;
+`session_end` is capped at 250 ms so exit and reload never wait on an extension. Malformed results, timeouts and remote errors become bounded
 diagnostics. A valid `deny` or `defer` is recorded but can't veto the host's
 lifecycle ownership. Settlement is idempotent and happens before child shutdown.
 On an accepted reload, the old generation gets its `interrupted`/`reload` end

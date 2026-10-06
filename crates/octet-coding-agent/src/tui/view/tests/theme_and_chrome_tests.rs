@@ -193,6 +193,37 @@ fn custom_theme_composer_tokens_render_framed_ruled_and_shaded_composers() {
 }
 
 #[test]
+fn replacing_a_theme_preview_cancels_back_to_the_committed_theme() {
+    let theme = |color: &str| {
+        crate::tui::theme::test_theme_from_source(&format!("[colors]\nforeground = '{color}'\n"))
+    };
+    let original = theme("#aa1122");
+    let panel = |preview: OctetTheme| Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::with_purpose("Theme", "Preview"),
+        items: vec!["preview".into()],
+        descriptions: vec![None],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectTheme {
+            keys: vec!["preview".into()],
+            previews: vec![preview].into(),
+        },
+    };
+    let mut shell = InteractiveShell::test_shell_with_theme(original.clone());
+    shell.open_theme_preview_panel(panel(theme("#1122aa")));
+    assert_ne!(
+        role_rgb_color(&shell.theme(), "foreground"),
+        role_rgb_color(&original, "foreground")
+    );
+    shell.open_theme_preview_panel(panel(theme("#11aa22")));
+    shell.close_panel();
+    assert_eq!(
+        role_rgb_color(&shell.theme(), "foreground"),
+        role_rgb_color(&original, "foreground")
+    );
+}
+
+#[test]
 fn transcript_and_composer_have_exactly_one_breathing_row() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 5);

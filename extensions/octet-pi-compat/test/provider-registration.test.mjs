@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch } from './helper.mjs';
-import { registerProvider, unregisterProvider, startProviderRegistration, validateProviderInitialization, prepareProviderStream, startProviderStream, cancelProviderStream } from '../lib/providers.mjs';
+import { modelRegistry, registerProvider, unregisterProvider, startProviderRegistration, validateProviderInitialization, prepareProviderStream, startProviderStream, cancelProviderStream } from '../lib/providers.mjs';
 
 const definition = streamSimple => ({ baseUrl: 'http://127.0.0.1:9/local/', apiKey: 'explicit-local-dummy', api: 'openai-completions',
   models: [{ id: 'virtual/model', name: 'Virtual Local', reasoning: false, input: ['text', 'image'], cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 }, contextWindow: 8192, maxTokens: 1024 }], streamSimple });
@@ -164,4 +164,16 @@ test('unsupported credential/transport fields fail rather than get silently drop
   assert.throws(() => registerProvider(runtime, 0, 'pi-local-provider', { ...definition(() => {}), oauth: {} }), /unsupported/);
   assert.throws(() => registerProvider(runtime, 0, 'pi-local-provider', { ...definition(() => {}), baseUrl: 'https://example.invalid/?api_key=secret' }), /unsupported/);
   assert.throws(() => registerProvider(runtime, 0, 'pi-local-provider', { ...definition(() => {}), streamSimple: undefined }), /unsupported/);
+});
+
+// workflow reads these in session_start: Pi's registry answers synchronously
+// with every extension-registered provider and the config it was given.
+test('modelRegistry lists registered provider ids and returns their configs', async () => {
+  const value = await registered(() => {});
+  const registry = modelRegistry(() => ({}), value.runtime);
+  assert.deepEqual(registry.getRegisteredProviderIds(), ['pi-local-provider']);
+  assert.equal(registry.getRegisteredProviderConfig('pi-local-provider').baseUrl, 'http://127.0.0.1:9/local/');
+  assert.equal(registry.getRegisteredProviderConfig('missing'), undefined);
+  unregisterProvider(value.runtime, 0, 'pi-local-provider'); await Promise.all(value.pending);
+  assert.deepEqual(registry.getRegisteredProviderIds(), []);
 });

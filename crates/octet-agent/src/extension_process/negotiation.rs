@@ -217,6 +217,13 @@ pub(super) fn negotiate_contributions_with_host_services(
                     "negotiated features contain duplicates".into(),
                 ));
             }
+            if !manifest.capabilities.builtin_tool_overrides.is_empty()
+                && !features.contains(EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "builtin tool override declaration requires negotiated builtin_tool_overrides_v1".into(),
+                ));
+            }
             let mut allowed = API_0_2_REQUIRED_FEATURES
                 .iter()
                 .chain(API_0_2_OPTIONAL_FEATURES)
@@ -227,6 +234,9 @@ pub(super) fn negotiate_contributions_with_host_services(
                 allowed.insert(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1);
                 allowed.insert(EXTENSION_FEATURE_TOOL_PROMPT_METADATA);
                 allowed.insert(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1);
+                if !manifest.capabilities.builtin_tool_overrides.is_empty() {
+                    allowed.insert(EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES);
+                }
             }
             if negotiated.limits.resource_refs_v1.is_some_and(|limits| {
                 manifest.api_version != EXTENSION_API_VERSION_0_4
@@ -354,6 +364,16 @@ pub(super) fn negotiate_contributions_with_host_services(
             if manifest.api_version == EXTENSION_API_VERSION_0_4 && offered_host_services.remote_ui
             {
                 allowed.insert(EXTENSION_FEATURE_REMOTE_UI);
+                if offered_host_services.transcript_render {
+                    allowed.insert(EXTENSION_FEATURE_TRANSCRIPT_RENDER);
+                }
+            }
+            if features.contains(EXTENSION_FEATURE_TRANSCRIPT_RENDER)
+                && !features.contains(EXTENSION_FEATURE_REMOTE_UI)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "transcript_render_v1 requires remote_ui".into(),
+                ));
             }
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);

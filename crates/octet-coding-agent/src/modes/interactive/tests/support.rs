@@ -28,6 +28,7 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox: SandboxPolicy::default(),
         theme: None,
+        theme_explicit: false,
         system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,

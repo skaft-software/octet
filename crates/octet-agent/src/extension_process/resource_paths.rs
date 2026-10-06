@@ -29,15 +29,28 @@ pub struct ExtensionResourcePaths {
     /// Prompt directories or supported Markdown/TOML files.
     #[serde(default)]
     pub prompt_paths: Vec<String>,
-    /// Native theme directories or TOML files, not arbitrary Pi JSON themes.
+    /// Native theme directories or supported TOML/Pi JSON files.
     #[serde(default)]
     pub theme_paths: Vec<String>,
+    /// Optional session-only startup preference. Must be an exact file entry in
+    /// theme_paths; host parsing, trust and explicit selections remain authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_theme: Option<String>,
 }
 
 impl ExtensionResourcePaths {
     /// Validate the untrusted response before any filesystem access. Bounds
     /// apply before deduplication; null, unknown fields and wrong types fail.
     pub fn validate(&self) -> Result<(), ExtensionRuntimeError> {
+        if self
+            .default_theme
+            .as_ref()
+            .is_some_and(|path| !self.theme_paths.contains(path))
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "default_theme must reference a contributed theme path".into(),
+            ));
+        }
         let all = self
             .skill_paths
             .iter()
@@ -232,6 +245,23 @@ mod tests {
         paths.prompt_paths.push(root());
         assert!(paths.validate().is_err());
     }
+    #[test]
+    fn resource_theme_default_must_reference_a_contributed_theme_path() {
+        let theme = format!("{}/palette.toml", root());
+        let reply: ResourcePathsReply = serde_json::from_value(serde_json::json!({
+            "resource_paths": {"theme_paths": [theme], "default_theme": theme}
+        }))
+        .unwrap();
+        reply.resource_paths.validate().unwrap();
+        for invalid in ["dark", "", "/other/palette.toml"] {
+            let reply: ResourcePathsReply = serde_json::from_value(serde_json::json!({
+                "resource_paths": {"theme_paths": [theme], "default_theme": invalid}
+            }))
+            .unwrap();
+            assert!(reply.resource_paths.validate().is_err());
+        }
+    }
+
     #[test]
     fn resource_paths_reject_relative_controls_parent_and_byte_overflow() {
         for bad in [

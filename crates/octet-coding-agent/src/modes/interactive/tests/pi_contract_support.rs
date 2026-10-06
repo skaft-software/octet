@@ -10,15 +10,36 @@ pub(super) fn pi_app_policy(
     factory: &str,
     policy: octet_agent::EffectPolicy,
 ) -> (tempfile::TempDir, App) {
-    pi_app_policy_with_frontend(factory, policy, None)
+    pi_app_policy_with_frontend(factory, policy, None, false)
 }
 
 /// Construct the real terminal consumer before process negotiation and retain
 /// that exact shell for command/input/frame acceptance. No synthetic UI peer.
 pub(super) fn pi_ui_app(factory: &str) -> (tempfile::TempDir, App, InteractiveShell) {
     let shell = InteractiveShell::test_shell();
-    let (directory, app) =
-        pi_app_policy_with_frontend(factory, octet_agent::EffectPolicy::UnsafeHost, Some(&shell));
+    let (directory, app) = pi_app_policy_with_frontend(
+        factory,
+        octet_agent::EffectPolicy::UnsafeHost,
+        Some(&shell),
+        false,
+    );
+    assert!(
+        app.executable_extensions.remote_ui_wake().is_some(),
+        "live shell consumer must bind before initialize"
+    );
+    (directory, app, shell)
+}
+
+/// Real controlled Agent with workspace-only reads, configured before the
+/// rebuild constructs it. Other Pi fixture profiles keep their existing scope.
+pub(super) fn pi_workspace_ui_app(factory: &str) -> (tempfile::TempDir, App, InteractiveShell) {
+    let shell = InteractiveShell::test_shell();
+    let (directory, app) = pi_app_policy_with_frontend(
+        factory,
+        octet_agent::EffectPolicy::Controlled,
+        Some(&shell),
+        true,
+    );
     assert!(
         app.executable_extensions.remote_ui_wake().is_some(),
         "live shell consumer must bind before initialize"
@@ -30,8 +51,15 @@ fn pi_app_policy_with_frontend(
     factory: &str,
     policy: octet_agent::EffectPolicy,
     frontend: Option<&InteractiveShell>,
+    workspace_only: bool,
 ) -> (tempfile::TempDir, App) {
     let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+    if workspace_only {
+        // Agent construction freezes the broker and sandbox. Mutating only
+        // app.config after rebuild would leave all reads classified HostRead.
+        app.config.effect_policy = policy;
+        app.config.sandbox.allow_external_paths = false;
+    }
     // Production session naming and lookup use the workspace SessionStore.
     // The estimate fixture's transcript deliberately lives outside that store.
     app.sessions.write_workspace_marker().unwrap();
@@ -98,8 +126,8 @@ fn pi_app_policy_with_frontend(
         extensions.inspect_text()
     );
     host.finalize_tool_surface();
-    // Preserve the real App frontend consumer through rebuild_app. The adapter
-    // reserves resources_discover even for factories without resource callbacks.
+    // Preserve the real App frontend capability through rebuild_app. Resource
+    // loading is enabled only for factories that actually contribute paths.
     app.resource_paths = crate::app::resource_paths::ResourcePathConsumer::new(
         &app.config,
         &app.skills,
@@ -120,14 +148,17 @@ pub(super) async fn command(
     name: &str,
 ) -> anyhow::Result<String> {
     let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-    let dialogs = app.executable_extensions.lifecycle_snapshot();
-    let mut frontend = InteractiveExtensionConfirmations {
-        shell,
-        input: &mut input,
-        dialogs: &dialogs,
-    };
-    tokio::time::timeout(
-        Duration::from_secs(20),
+    tokio::time::timeout(Duration::from_secs(20), async {
+        // Match the product's pre-command idle boundary. Discovery leaves Pi
+        // session_start deferred; starting a command first can race that hook
+        // (and its reload guard) with synchronous tool catalog publication.
+        resource_paths::refresh_resource_paths(app, shell, &mut input).await?;
+        let dialogs = app.executable_extensions.lifecycle_snapshot();
+        let mut frontend = InteractiveExtensionConfirmations {
+            shell,
+            input: &mut input,
+            dialogs: &dialogs,
+        };
         run_interactive_extension_command(
             app,
             &mut frontend,
@@ -136,8 +167,9 @@ pub(super) async fn command(
             Vec::new(),
             false,
             0,
-        ),
-    )
+        )
+        .await
+    })
     .await
     .expect("Pi command timed out")
     .map(|output| output.expect("Pi command is registered"))

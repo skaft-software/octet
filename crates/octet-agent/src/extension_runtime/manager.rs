@@ -467,15 +467,23 @@ impl ExtensionRuntimeManager {
         join_all(keys.into_iter().map(|key| self.reload_key(key, false))).await
     }
 
+    /// Closes admission and restart supervision before awaiting lifecycle cleanup.
+    /// Existing processes remain alive long enough to settle their end hooks.
+    pub fn begin_shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+        self.inner.startup_slots.close();
+        let state = lock(&self.inner.state);
+        for runtime in state.active.values() {
+            runtime.process.begin_shutdown();
+        }
+    }
+
     /// Stops every fleet process after cancelling/draining its protocol work.
     pub async fn shutdown(&self) {
-        if self.inner.shutdown.swap(true, Ordering::AcqRel) {
-            return;
-        }
+        self.begin_shutdown();
         // Terminal shutdown closes pending permit acquisition immediately;
         // start reservations then release their charges and wake coalesced
         // activation callers instead of waiting for the startup timeout.
-        self.inner.startup_slots.close();
         let (runtimes, starters) = {
             let mut state = lock(&self.inner.state);
             state.usage = ExtensionRuntimeUsage::default();

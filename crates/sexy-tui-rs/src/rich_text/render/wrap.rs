@@ -7,6 +7,8 @@
 //! through one method — and because a layout must never be able to emit a
 //! terminal control sequence that did not pass through it.
 
+use std::borrow::Cow;
+
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::lines::{
@@ -323,29 +325,49 @@ impl RichRenderer {
     }
 
     pub(super) fn clip_line(&self, line: RichLine, width: usize) -> RichLine {
+        // Wrapped rows already fit. Keep their owned runs instead of expanding,
+        // splitting and cloning them again at the encoding boundary. Empty runs
+        // and line/tab controls retain clip_runs' exact projection semantics.
+        if width > 0
+            && line
+                .runs
+                .iter()
+                .all(|run| !run.text.is_empty() && !run.text.contains(['\t', '\r', '\n']))
+            && self.runs_width(&line.runs) <= width
+        {
+            return line;
+        }
         self.clip_runs(&line.runs, width)
     }
 
-    pub(super) fn expand_run_tabs(&self, runs: &[RichRun]) -> Vec<RichRun> {
+    pub(super) fn expand_run_tabs<'a>(&self, runs: &'a [RichRun]) -> Cow<'a, [RichRun]> {
+        // A column is needed only if a later run contains a tab. Do not copy
+        // or re-segment all the no-tab prose/code merely to rediscover its width.
+        if !runs.iter().any(|run| run.text.contains('\t')) {
+            return Cow::Borrowed(runs);
+        }
         let mut column = 0usize;
-        runs.iter()
-            .map(|run| {
-                let expanded = self
-                    .options
-                    .width
-                    .expand_tabs(&run.text, column)
-                    .into_owned();
-                for grapheme in expanded.graphemes(true) {
-                    if matches!(grapheme, "\n" | "\r") {
-                        column = 0;
-                    } else {
-                        column = column
-                            .saturating_add(self.options.width.grapheme_width(grapheme, column));
+        Cow::Owned(
+            runs.iter()
+                .map(|run| {
+                    let expanded = self
+                        .options
+                        .width
+                        .expand_tabs(&run.text, column)
+                        .into_owned();
+                    for grapheme in expanded.graphemes(true) {
+                        if matches!(grapheme, "\n" | "\r") {
+                            column = 0;
+                        } else {
+                            column = column.saturating_add(
+                                self.options.width.grapheme_width(grapheme, column),
+                            );
+                        }
                     }
-                }
-                RichRun::new(expanded, run.style, run.link.clone())
-            })
-            .collect()
+                    RichRun::new(expanded, run.style, run.link.clone())
+                })
+                .collect(),
+        )
     }
 
     pub(super) fn runs_width(&self, runs: &[RichRun]) -> usize {

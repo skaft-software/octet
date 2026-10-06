@@ -580,6 +580,7 @@ pub struct ToolProgressSink {
     tool_call_id: Option<String>,
     parent_tool_call_id: Option<String>,
     programmatic: bool,
+    session_driver: Option<crate::extension_process::session_leaf::driver::SessionDriverRoute>,
 }
 
 impl ToolProgressSink {
@@ -596,6 +597,7 @@ impl ToolProgressSink {
             tool_call_id: None,
             parent_tool_call_id: None,
             programmatic: false,
+            session_driver: None,
         }
     }
 
@@ -621,6 +623,7 @@ impl ToolProgressSink {
             tool_call_id: None,
             parent_tool_call_id: None,
             programmatic: false,
+            session_driver: None,
         }
     }
 
@@ -657,6 +660,15 @@ impl ToolProgressSink {
         &self,
     ) -> Option<Arc<dyn crate::tool_composition::ToolCompositionService>> {
         self.composition.clone()
+    }
+
+    pub(crate) fn with_session_driver(mut self, route: crate::extension_process::session_leaf::driver::SessionDriverRoute) -> Self {
+        self.session_driver = Some(route);
+        self
+    }
+
+    pub(crate) fn session_driver(&self) -> Option<crate::extension_process::session_leaf::driver::SessionDriverRoute> {
+        self.session_driver.clone()
     }
 
     pub(crate) fn for_nested_call(&self) -> Self {

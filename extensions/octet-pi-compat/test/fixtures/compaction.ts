@@ -20,7 +20,8 @@ export default pi => {
         onError: error => {
           pi.events.emit('compact:error', error);
           if (mode === 'throw-error') throw new Error('error callback threw');
-          ctx.ui.notify('compact failed');
+          // Cancellation/retirement callbacks do not retain a foreground UI lease.
+          if (!ctx.signal.aborted) ctx.ui.notify('compact failed');
         },
       };
       const result = ctx.compact(mode === 'default' ? undefined : options);

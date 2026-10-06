@@ -12,9 +12,10 @@ const body = new Uint8Array(workerData.syncBuffer, 16);
 // retry readiness without a second reader or abandoning a partial JSON frame.
 const retryable = error => ['EAGAIN', 'EWOULDBLOCK', 'EINTR'].includes(error?.code);
 let readRetry, writeRetry;
-// Unix pipes use libuv readiness (no idle polling). Windows does not support
-// net.Socket's fd option; callback fd I/O is the portable fallback there.
-const input = process.platform === 'win32' ? new Readable({
+// Node Unix pipes use libuv readiness (no idle polling). Windows lacks the
+// net.Socket fd option, and Bun does not read inherited pipe fds through it.
+// Both use the callback fd reader, still owned exclusively by this worker.
+const input = process.platform === 'win32' || process.versions.bun ? new Readable({
   read() {
     const buffer = Buffer.alloc(65536);
     const attempt = () => read(0, buffer, 0, buffer.length, null, (error, count) => {

@@ -2,6 +2,7 @@ import { Console } from 'node:console';
 import { Writable } from 'node:stream';
 import { Worker } from 'node:worker_threads';
 import { fields, invalid, rpcError } from './errors.mjs';
+import { notificationIntent } from './desktop-notifications.mjs';
 
 export const MAX_FRAME = 1048576;
 const MAX_QUEUE = 128, MAX_QUEUE_BYTES = 4194304;
@@ -25,13 +26,20 @@ export function isolateStdout() {
     if (callback) queueMicrotask(callback);
     return true;
   };
-  let intentHandler;
+  let intentHandler, notificationHandler;
   const rawWrite = (chunk, encoding, callback) => {
     const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
     const enabled = mouseModeIntent(text);
     if (enabled !== undefined) {
       if (!intentHandler) throw rpcError(-32601, 'unsupported_feature mouse capture before host binding');
       intentHandler(enabled);
+      const cb = typeof encoding === 'function' ? encoding : callback; if (cb) queueMicrotask(cb);
+      return true;
+    }
+    const notification = notificationIntent(text);
+    if (notification) {
+      if (!notificationHandler) throw rpcError(-32601, 'unsupported_feature desktop notification before host binding');
+      notificationHandler(notification);
       const cb = typeof encoding === 'function' ? encoding : callback; if (cb) queueMicrotask(cb);
       return true;
     }
@@ -44,7 +52,7 @@ export function isolateStdout() {
   });
   const diagnosticStream = new Writable({ write(chunk, encoding, callback) { diagnostic(chunk, encoding, callback); } });
   globalThis.console = new Console({ stdout: diagnosticStream, stderr: diagnosticStream });
-  return { write, output, setIntentHandler(handler) { intentHandler = handler; } };
+  return { write, output, setIntentHandler(handler) { intentHandler = handler; }, setNotificationHandler(handler) { notificationHandler = handler; } };
 }
 
 export function mouseModeIntent(text) {

@@ -440,6 +440,10 @@ impl EventTranslator {
                 self.usage_uncertain |= cost.is_none();
                 emit_cache_warming_event(&event, output)?;
             }
+            AgentEvent::ExtensionObservationWarning { message } => {
+                output
+                    .send(json!({"type": "extension_observation_warning", "message": message}))?;
+            }
             AgentEvent::ProviderUsageUncertain => {
                 self.usage_uncertain = true;
                 output.send(json!({"type": "provider_usage_uncertain"}))?;

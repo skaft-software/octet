@@ -673,6 +673,7 @@ fn app_for_status() -> (tempfile::TempDir, App) {
             ..SandboxPolicy::default()
         },
         theme: None,
+        theme_explicit: false,
         system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,

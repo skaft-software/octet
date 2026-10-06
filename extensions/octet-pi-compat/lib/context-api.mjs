@@ -5,7 +5,7 @@ import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable, piToCanonical } from './provider-context.mjs';
 
 function fact(runtime, store, key, api) {
-  runtime.assertOwner(store);
+  runtime.assertSessionOwner(store);
   if (!Object.hasOwn(store.state.host, key)) unsupported(api, `authoritative ${key} snapshot required`);
   return store.state.host[key];
 }
@@ -57,7 +57,7 @@ export async function transformInput(runtime, payload, store) {
   let images = visibleImages(payload.images);
   const originalText = text, originalImages = JSON.stringify(images), signal = store.controller.signal;
   for (const entry of handlers) {
-    signal.throwIfAborted(); runtime.assertOwner(store);
+    signal.throwIfAborted(); runtime.assertSessionOwner(store);
     const child = { ...store, factory: entry.factory };
     let result;
     try {
@@ -65,12 +65,12 @@ export async function transformInput(runtime, payload, store) {
         type: 'input', text, images, source: payload.source, streamingBehavior: payload.streaming_behavior ?? undefined,
       }, 'input event'), createContext(runtime, child))), signal);
     } catch (error) {
-      signal.throwIfAborted(); runtime.assertOwner(store);
+      signal.throwIfAborted(); runtime.assertSessionOwner(store);
       if (Number.isInteger(error?.code)) throw error;
-      runtime.backgroundError(new Error('input callback failed (private input details redacted)'));
+      runtime.reportCallbackError('input', entry.factory, error);
       continue;
     }
-    signal.throwIfAborted(); runtime.assertOwner(store);
+    signal.throwIfAborted(); runtime.assertSessionOwner(store);
     if (result === undefined) continue;
     fields(result, ['action', 'text', 'images'], 'input result');
     if (result.action === 'handled') {
@@ -84,7 +84,7 @@ export async function transformInput(runtime, payload, store) {
     if (result.images != null) { inputImages(result.images); images = result.images; }
   }
   await cancellable(runtime.flush(store), signal);
-  signal.throwIfAborted(); runtime.assertOwner(store);
+  signal.throwIfAborted(); runtime.assertSessionOwner(store);
   return text !== originalText || JSON.stringify(images) !== originalImages
     ? { action: 'transform', text, ...(images === undefined ? {} : { images: inputImages(images) }) }
     : { action: 'continue' };

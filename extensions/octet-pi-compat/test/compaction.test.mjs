@@ -66,7 +66,8 @@ async function setup(t, { offered = features, hold = () => false } = {}) {
     const done = runtime.receive({ jsonrpc: '2.0', id, method: 'command/execute', params: { name: 'compact_test', arguments: [mode], context: context(binding) } });
     return { id, done };
   }
-  return { runtime, transport, frames, timeline, held, diagnostics, losses, events, command,
+  const start = binding => runtime.receive({ id: callbackId++, method: 'hook/run', params: { hook: 'session_start', payload: { binding }, context: context(binding) } });
+  return { runtime, transport, frames, timeline, held, diagnostics, losses, events, command, start,
     compacts: () => frames.filter(frame => frame.method === 'session/compact'),
     reply: id => frames.find(frame => frame.id === id && !frame.method),
     ack: (frame, result = committed) => terminal(frame, { result }),
@@ -160,6 +161,7 @@ for (const when of ['queued', 'request']) test(`owner retirement cancels ${when}
   if (when === 'request') await command.done;
   const captured = h.events.return[0].value.ctx, call = h.compacts()[0];
   const nextOwner = { ...owner, session_id: 'new-host-owner' };
+  await h.start(nextOwner);
   const replacement = h.command('capture', nextOwner); await replacement.done;
   if (when === 'queued') { h.events.barrier[0].value.resolve(); await command.done; }
   if (call) {
@@ -271,6 +273,7 @@ test('ordinary hook callback copies queue by their shared origin controller, not
     assert.notEqual(origin, h.runtime.active.get(20));
     assert.equal(ctx.compact({ onComplete: () => { complete++; } }), undefined);
   } }]);
+  await h.start(owner);
   const running = h.runtime.receive({ id: 20, method: 'hook/run', params: { hook: 'after_response', payload: {}, context: context() } });
   await tick(); assert.equal(h.compacts().length, 0); assert.equal(origin.pending.size, 0);
   h.held.shift().finish(); await running;
@@ -284,6 +287,7 @@ test('retirement during a running completion callback cancels its writes and pre
   const callbackStore = h.events.complete[0].store;
   const calls = h.frames.filter(frame => ['session/set_name', 'composer/set'].includes(frame.method));
   const nextOwner = { ...owner, session_id: 'replacement-owner' };
+  await h.start(nextOwner);
   await h.command('capture', nextOwner).done;
   assert.equal(callbackStore.controller.signal.aborted, true);
   for (const call of calls) {
@@ -304,6 +308,7 @@ test('captured ctx.signal cancels cooperative completion work on retirement and 
   // Nine consecutive real owner bindings must not leak the eight global slots.
   for (let i = 0; i < 9; i++) {
     const binding = { ...owner, session_id: `signal-owner-${i}` };
+    await h.start(binding);
     await h.command('capture', binding).done;
     const ctx = h.events.captured.at(-1).value;
     const ordinarySignal = ctx.signal;
@@ -339,16 +344,19 @@ test('actual hook/run root carries recursion marker into both before and after c
 
 test('one outstanding owner slot and eight global slots, including queued live origins', async t => {
   const h = await setup(t); const origins = [];
-  // Multiple valid owners are a module bound test; normal Runtime.bind retires
-  // its old foreground. Here no wire request is sent before root settlement.
-  h.runtime.foreground = null;
+  // Synthetic module-bound fixtures: independently model each foreground
+  // admission, without claiming native concurrent-owner compaction authority.
+  // No wire request is sent before root settlement.
   for (let i = 0; i < 8; i++) {
     const store = { id: 100 + i, state: { alive: true, owner: { ...owner, session_id: `owner-${i}` } }, controller: new AbortController(), pending: new Set(), errors: [], live: true };
     h.runtime.active.set(store.id, store); origins.push(store);
+    h.runtime.foreground = store.state;
     assert.equal(requestCompaction(h.runtime, store, { onError() {} }), undefined);
   }
+  h.runtime.foreground = origins[0].state;
   assert.throws(() => requestCompaction(h.runtime, origins[0]), /outstanding compaction for owner/);
   const ninth = { ...origins[0], id: 999, controller: new AbortController(), state: { alive: true, owner: { ...owner, session_id: 'owner-9' } } };
+  h.runtime.foreground = ninth.state;
   assert.throws(() => requestCompaction(h.runtime, ninth), /bounds_exceeded outstanding compactions/);
   assert.equal(h.compacts().length, 0);
   for (const store of origins) {

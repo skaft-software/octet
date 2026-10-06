@@ -194,6 +194,7 @@ impl ResourceLoader {
         config.skill_paths.clear();
         config.prompt_paths.clear();
         config.theme_paths.clear();
+        let mut default_themes = Vec::new();
         let mut fences = Vec::new();
         for contribution in batch.contributions {
             let process = contribution.process;
@@ -242,6 +243,17 @@ impl ResourceLoader {
                     }
                 }
             }
+            if let Some(preferred) = contribution.paths.default_theme {
+                let path = PathBuf::from(preferred);
+                if config.theme_paths.contains(&path) && path.is_file() {
+                    default_themes.push((path, process.descriptor().manifest.name.clone()));
+                } else {
+                    diagnostics.push(format!(
+                        "warning: {}: default theme was not an admitted theme file",
+                        process.descriptor().manifest.name
+                    ));
+                }
+            }
             fences.push((process, contribution.generation));
         }
         config.skill_paths.extend(base.skill_paths.iter().cloned());
@@ -276,7 +288,28 @@ impl ResourceLoader {
         );
         // Run the actual bounded parsers, not available_themes (names only).
         let file_themes = crate::tui::theme::selectable_file_themes(&config, background);
-        let selected_theme = crate::tui::theme::load_theme_for_background(&config, background);
+        let mut preferred_theme = None;
+        if !base.theme_explicit {
+            // The first valid process preference (extension-name order) wins.
+            // Names still resolve through normal native later-root precedence,
+            // so an explicit theme path can replace the contributed palette.
+            for (path, owner) in default_themes {
+                let name = path.file_stem().and_then(|name| name.to_str());
+                if let Some((name, theme)) = file_themes
+                    .iter()
+                    .find(|(candidate, _)| Some(candidate.as_str()) == name)
+                {
+                    config.theme = Some(name.clone());
+                    preferred_theme = Some(theme.clone());
+                    break;
+                }
+                diagnostics.push(format!(
+                    "warning: {owner}: default theme failed bounded native parsing"
+                ));
+            }
+        }
+        let selected_theme = preferred_theme
+            .unwrap_or_else(|| crate::tui::theme::load_theme_for_background(&config, background));
         for kind in [ResourceKind::Prompt, ResourceKind::Theme] {
             let roots = if kind == ResourceKind::Prompt {
                 &config.prompt_paths

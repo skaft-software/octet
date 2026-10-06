@@ -39,6 +39,11 @@ vocabulary that uses that hierarchy without adding a second TUI.
   so uncaptured wheel history remains terminal-owned.
 - Redirected, unknown, or explicitly plain terminals use the chronological
   fallback without cursor-control sequences.
+- The foreground synchronous crossterm poll remains the sole host byte reader.
+  An optional Unix readiness descriptor wakes it without reading: tty stdin is
+  duplicated close-on-exec without changing shared file-status flags; redirected
+  stdin uses a separate `/dev/tty` open. Cede and cancellation retain byte ownership.
+  A 10 ms fallback still handles signals, internal events and unsupported notifiers.
 - Provider, tool, and user text is sanitized before terminal output.
 - Rendering never relies on color alone; no-color and ANSI-16 paths preserve
   structure.
@@ -603,6 +608,9 @@ manual-compaction requests, actual ANSI style changes, keyboard echo and resize,
 500 ms input/cancellation budgets, static no-color motion, and bounded idle and
 active frame counts. The interactive driver fixtures separately cover delayed
 success, timeout, transport failure, and cancellation. These deterministic
-fixtures do not establish the cause of every reported freeze: expensive layout
-still shares a shell mutex with input, and real terminal/live-provider and
-long-duration soak qualification remain separate.
+fixtures do not establish the cause of every reported freeze. The production
+threaded renderer releases semantic shell ownership before private layout and
+terminal writes, but publication capture still uses the shared shell mutex.
+Independent control admission does not guarantee visible echo while the renderer
+or terminal is blocked; real-terminal/live-provider and long-duration soak
+qualification remain separate.

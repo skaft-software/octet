@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Explicit manifest-reviewed, process-owned replacement of named core tools.
+pub const EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES: &str = "builtin_tool_overrides_v1";
+
 /// Bounded model-facing tool snippets and guidelines, negotiated only on API 0.4.
 pub const EXTENSION_FEATURE_TOOL_PROMPT_METADATA: &str = "tool_prompt_metadata_v1";
 

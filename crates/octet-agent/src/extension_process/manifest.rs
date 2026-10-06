@@ -360,6 +360,25 @@ impl ExtensionManifest {
                 )));
             }
         }
+        if !self.capabilities.builtin_tool_overrides.is_empty() {
+            if self.api_version != EXTENSION_API_VERSION_0_4 {
+                return Err(ExtensionRuntimeError::InvalidManifest(
+                    "builtin tool overrides require extension API 0.4".into(),
+                ));
+            }
+            validate_identifiers(
+                "builtin tool override",
+                &self.capabilities.builtin_tool_overrides,
+                true,
+            )?;
+            for name in &self.capabilities.builtin_tool_overrides {
+                if !crate::tools::BUILTIN_TOOL_NAMES.contains(&name.as_str()) {
+                    return Err(ExtensionRuntimeError::InvalidManifest(format!(
+                        "`{name}` is not an overridable builtin tool"
+                    )));
+                }
+            }
+        }
         validate_identifiers("tool", &self.contributes.tools, true)?;
         validate_identifiers("command", &self.contributes.commands, true)?;
         validate_shortcut_definitions(&self.contributes.shortcuts)
@@ -411,6 +430,12 @@ pub struct ExtensionEntrypoint {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionCapabilities {
+    /// Exact reviewed builtin names this process may replace on API 0.4.
+    /// Requires builtin_tool_overrides_v1 negotiation. This never grants the
+    /// builtin's effect, replay, concurrency or metering privileges, and never
+    /// permits replacement of another extension or an arbitrary native tool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builtin_tool_overrides: Vec<String>,
     /// Filesystem scope requested by the extension.
     #[serde(default)]
     pub filesystem: ExtensionFilesystemAccess,

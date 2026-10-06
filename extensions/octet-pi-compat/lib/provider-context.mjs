@@ -62,7 +62,7 @@ function contentToPi(part, label) {
 // one-message conversion; they cannot claim the original native boundary.
 const projectionOrigins = new WeakMap();
 
-export function canonicalToPi(messages, calls = new Map(), { observation = false } = {}) {
+export function canonicalToPi(messages, calls = new Map(), { observation = false, replay = false } = {}) {
   const output = [];
   for (const message of array(messages, 'canonical messages')) {
     const start = output.length;
@@ -84,6 +84,27 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
         }
         if (kind === 'Reasoning') {
           record(value, ['text', 'state'], 'canonical reasoning');
+          // Context projection may retain native state through unchanged provenance;
+          // ordinary Pi-to-native conversion cannot invent opaque continuations.
+          const observedState = (observation || replay) && value.state != null ? variant(record(value.state, ['protocol', 'model', 'kind'], 'context opaque reasoning').kind, 'reasoning state kind') : null;
+          if ((observation || replay) && observedState?.[0] === 'OpenAiReasoning') {
+            if (replay && (body.protocol !== 'open_ai_responses' || value.state.protocol !== body.protocol || value.state.model !== body.model)) unsupported('context opaque reasoning continuation', 'signature producer must match the assistant');
+            // Read-only observation: Pi 1.0.2's Responses provider keeps the
+            // summary text (or "") and stores the reasoning item as signature.
+            // Native optional IDs stay absent, never invented or coerced to text.
+            const item = record(observedState[1], ['item_id', 'encrypted_content'], 'OpenAI reasoning state');
+            const summary = value.text === null ? [] : [{ type: 'summary_text', text: text(value.text) }];
+            return { type: 'thinking', thinking: value.text === null ? '' : text(value.text),
+              thinkingSignature: JSON.stringify({ type: 'reasoning', ...(item.item_id == null ? {} : { id: text(item.item_id) }), ...(item.encrypted_content == null ? {} : { encrypted_content: text(item.encrypted_content) }), summary }) };
+          }
+          if ((observation || replay) && observedState?.[0] === 'AnthropicRedacted' && body.protocol === 'anthropic_messages') {
+            if (value.state.protocol !== body.protocol || value.state.model !== body.model) unsupported('context opaque reasoning continuation', 'signature producer must match the assistant');
+            const item = record(observedState[1], ['data'], 'Anthropic redacted reasoning state');
+            // Pi 1.0.2 displays this marker, with opaque data kept as a redacted
+            // signature, not ordinary signed thinking. Only unchanged native
+            // context provenance authorizes its replay.
+            return { type: 'thinking', thinking: '[Reasoning redacted]', thinkingSignature: text(item.data), redacted: true };
+          }
           if (value.text === null) unsupported('context absent reasoning text', 'cannot replace absent text with an invented empty string');
           const thinking = { type: 'thinking', thinking: text(value.text) };
           if (value.state != null) {
@@ -125,7 +146,7 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
       if (!body.content.length) output.push({ role: 'user', content: [] });
     } else unsupported(`canonical context role ${role}`);
     const projected = output.slice(start);
-    const origin = { canonical: plainJSON(message, 'canonical source message', 786432), projected: JSON.stringify(projected), count: projected.length };
+    const origin = { replay, canonical: plainJSON(message, 'canonical source message', 786432), projected: JSON.stringify(projected), count: projected.length };
     projected.forEach((item, index) => projectionOrigins.set(item, { origin, index }));
   }
   return output;
@@ -143,45 +164,64 @@ function userParts(content) {
     return { Text: text(part.text) };
   });
 }
-export function piToCanonical(messages) {
+function piMessageToCanonical(message) {
   const output = [];
-  for (const message of array(messages, 'Pi messages')) {
-    if (message?.role === 'user' || message?.role === 'custom') {
-      record(message, message.role === 'custom' ? ['role', 'content', 'customType', 'display', 'details', 'timestamp'] : ['role', 'content', 'timestamp'], 'Pi user/custom message');
-      // Pi's real convertToLlm intentionally projects custom messages as users;
-      // display/details/customType are transcript metadata, not provider roles.
-      output.push({ User: { content: userParts(message.content) } });
-    } else if (message?.role === 'assistant') {
-      record(message, ['role', 'content', 'model', 'api', 'provider', 'timestamp', 'usage', 'stopReason', 'errorMessage'], 'Pi assistant message');
-      const protocol = protocols[message.api]; if (!protocol) unsupported(`Pi context API ${message.api}`);
-      const content = array(message.content, 'Pi assistant content').map(part => {
-        if (part?.type === 'text') { record(part, ['type', 'text'], 'Pi text part'); return { Text: text(part.text) }; }
-        if (part?.type === 'thinking') {
-          record(part, ['type', 'thinking', 'thinkingSignature'], 'Pi thinking part');
-          let state = null;
-          if (Object.hasOwn(part, 'thinkingSignature')) {
-            if (!['anthropic_messages', 'bedrock_converse'].includes(protocol)) unsupported('Pi opaque reasoning signature', 'no lossless native signature binding for this API');
-            state = { protocol, model: name(message.model), kind: { AnthropicSignature: { signature: text(part.thinkingSignature) } } };
-          }
-          return { Reasoning: { text: text(part.thinking), state } };
+  if (message?.role === 'user' || message?.role === 'custom') {
+    record(message, message.role === 'custom' ? ['role', 'content', 'customType', 'display', 'details', 'timestamp'] : ['role', 'content', 'timestamp'], 'Pi user/custom message');
+    // Pi's real convertToLlm intentionally projects custom messages as users;
+    // display/details/customType are transcript metadata, not provider roles.
+    output.push({ User: { content: userParts(message.content) } });
+  } else if (message?.role === 'assistant') {
+    record(message, ['role', 'content', 'model', 'api', 'provider', 'timestamp', 'usage', 'stopReason', 'errorMessage'], 'Pi assistant message');
+    const protocol = protocols[message.api]; if (!protocol) unsupported(`Pi context API ${message.api}`);
+    const content = array(message.content, 'Pi assistant content').map(part => {
+      if (part?.type === 'text') { record(part, ['type', 'text'], 'Pi text part'); return { Text: text(part.text) }; }
+      if (part?.type === 'thinking') {
+        record(part, ['type', 'thinking', 'thinkingSignature'], 'Pi thinking part');
+        let state = null;
+        if (Object.hasOwn(part, 'thinkingSignature')) {
+          if (!['anthropic_messages', 'bedrock_converse'].includes(protocol)) unsupported('Pi opaque reasoning signature', 'no lossless native signature binding for this API');
+          state = { protocol, model: name(message.model), kind: { AnthropicSignature: { signature: text(part.thinkingSignature) } } };
         }
-        if (part?.type === 'toolCall') {
-          record(part, ['type', 'id', 'name', 'arguments'], 'Pi tool call');
-          const args = plainJSON(part.arguments, 'tool arguments', 262144);
-          if (!args || typeof args !== 'object' || Array.isArray(args)) invalid('tool arguments object');
-          return { ToolCall: { id: name(part.id), name: name(part.name), arguments_json: JSON.stringify(args) } };
-        }
-        unsupported(`Pi assistant content ${part?.type}`);
-      });
-      output.push({ Assistant: { content, model: name(message.model), protocol } });
-    } else if (message?.role === 'toolResult') {
-      record(message, ['role', 'toolCallId', 'toolName', 'content', 'details', 'isError', 'timestamp'], 'Pi tool result');
-      if (typeof message.isError !== 'boolean') invalid('Pi tool result error flag');
-      output.push({ User: { content: [{ ToolResult: { tool_call_id: name(message.toolCallId), content: userParts(message.content), is_error: message.isError } }] } });
-    } else unsupported(`Pi context role ${message?.role}`, 'canonical provider role has no faithful binding');
-  }
-  // All parts must pass ordinary validation before reusing source structure:
-  // JSON equality alone would hide symbol/nonenumerable/undefined mutations.
+        return { Reasoning: { text: text(part.thinking), state } };
+      }
+      if (part?.type === 'toolCall') {
+        record(part, ['type', 'id', 'name', 'arguments'], 'Pi tool call');
+        const args = plainJSON(part.arguments, 'tool arguments', 262144);
+        if (!args || typeof args !== 'object' || Array.isArray(args)) invalid('tool arguments object');
+        return { ToolCall: { id: name(part.id), name: name(part.name), arguments_json: JSON.stringify(args) } };
+      }
+      unsupported(`Pi assistant content ${part?.type}`);
+    });
+    output.push({ Assistant: { content, model: name(message.model), protocol } });
+  } else if (message?.role === 'toolResult') {
+    record(message, ['role', 'toolCallId', 'toolName', 'content', 'details', 'isError', 'timestamp'], 'Pi tool result');
+    if (typeof message.isError !== 'boolean') invalid('Pi tool result error flag');
+    output.push({ User: { content: [{ ToolResult: { tool_call_id: name(message.toolCallId), content: userParts(message.content), is_error: message.isError } }] } });
+  } else unsupported(`Pi context role ${message?.role}`, 'canonical provider role has no faithful binding');
+  return output[0];
+}
+
+// JSON equality is insufficient: symbols, nonenumerable members, accessors and
+// undefined can be hidden by serialization. Inspect data descriptors against the
+// frozen projection before replaying the authoritative native source.
+function unchangedProjection(value, expected) {
+  if (expected === null || typeof expected !== 'object') return Object.is(value, expected);
+  if (value === null || typeof value !== 'object' || Array.isArray(value) !== Array.isArray(expected)) return false;
+  if (!Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== Reflect.ownKeys(expected).length) return false;
+  return keys.every(key => {
+    if (typeof key !== 'string' || !Object.hasOwn(expected, key)) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return Object.hasOwn(descriptor, 'value')
+      && descriptor.enumerable === Object.getOwnPropertyDescriptor(expected, key).enumerable
+      && unchangedProjection(descriptor.value, expected[key]);
+  });
+}
+
+export function piToCanonical(messages) {
+  array(messages, 'Pi messages');
   const restored = [];
   for (let index = 0; index < messages.length; index++) {
     const source = projectionOrigins.get(messages[index]);
@@ -190,11 +230,18 @@ export function piToCanonical(messages) {
       if (group.length === source.origin.count && group.every((item, offset) => {
         const next = projectionOrigins.get(item);
         return next?.origin === source.origin && next.index === offset;
-      }) && JSON.stringify(group) === source.origin.projected) {
+      }) && unchangedProjection(group, JSON.parse(source.origin.projected))) {
+        // Lifecycle observations confer no replay authority. Context projections
+        // can retain unchanged opaque native parts, never invent or edit them.
+        if (!source.origin.replay) group.forEach(piMessageToCanonical);
         restored.push(source.origin.canonical); index += group.length - 1; continue;
       }
     }
-    restored.push(output[index]);
+    const nativeContent = source?.origin.canonical.Assistant?.content;
+    if (nativeContent?.some(part => part.Reasoning?.state?.kind?.OpenAiReasoning || part.Reasoning?.state?.kind?.AnthropicRedacted)) {
+      unsupported('context opaque reasoning mutation', 'opaque native messages require unchanged projection provenance');
+    }
+    restored.push(piMessageToCanonical(messages[index]));
   }
   return plainJSON(restored, 'canonical context projection', 786432);
 }
@@ -213,11 +260,12 @@ export async function projectContext(runtime, params, store) {
   const { request, preparation } = params.payload;
   record(preparation, ['resource_owner', 'session_id', 'head', 'tool_generation'], 'context preparation');
   if (preparation.resource_owner !== params.context.resource_owner.session_id || typeof preparation.session_id !== 'string' || !Number.isSafeInteger(preparation.tool_generation) || preparation.tool_generation < 0) invalid('context preparation identity');
-  runtime.bind(params, store);
-  if (!store.leaf?.grant || store.leaf.grant.expected_head !== preparation.head) unsupported('provider_context', 'matching native session_leaf preparation required');
+  if (!name(preparation.session_id) || params.context.host?.session_id !== undefined && params.context.host.session_id !== preparation.session_id) invalid('context preparation session id');
+  if (preparation.head !== null && !name(preparation.head)) invalid('context preparation head');
+  runtime.bind(params, store, { requireLeaf: 'provider_context', preparationHead: preparation.head });
   store.providerContext = true;
   const signal = store.controller.signal;
-  const live = () => { signal.throwIfAborted(); runtime.assertOwner(store); };
+  const live = () => { signal.throwIfAborted(); runtime.assertSessionOwner(store); };
   return cancellable(runtime.queued(store, async () => {
     live();
     const tools = prepareToolLoadout(runtime, store, request.tools);
@@ -226,7 +274,7 @@ export async function projectContext(runtime, params, store) {
     const originalSystem = system;
     store.state.host.system_prompt = system ?? '';
     store.state.host.session_id = preparation.session_id;
-    let messages = canonicalToPi(request.messages);
+    let messages = canonicalToPi(request.messages, new Map(), { replay: true });
     const original = JSON.stringify(messages);
     // Snapshot handlers just once, retaining registration/factory order. Pi's
     // context event hides system messages, retaining the real native system.
@@ -237,7 +285,7 @@ export async function projectContext(runtime, params, store) {
         strict({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))), signal); }
       catch (error) {
         live(); if (Number.isInteger(error?.code)) throw error;
-        runtime.backgroundError(new Error(`context factory ${runtime.config.extensions[entry.factory]}: ${String(error?.message || error)}`));
+        runtime.reportCallbackError('context', entry.factory, error);
         continue;
       }
       live();
@@ -262,7 +310,7 @@ export async function projectContext(runtime, params, store) {
           strict({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))), signal); }
         catch (error) {
           live(); if (Number.isInteger(error?.code)) throw error;
-          runtime.backgroundError(new Error('context_with_system callback failed (private context details redacted)'));
+          runtime.reportCallbackError('context_with_system', entry.factory, error);
           continue;
         }
         live();

@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { addAutocompleteProvider, commandCompletions, getAutocompleteProvider, retireAutocomplete } from '../lib/completions.mjs';
 import { applyPiCompletion, autocompleteSnapshot, completionResponse, piPosition } from '../lib/autocomplete-edits.mjs';
+import { CombinedAutocompleteProvider } from '../node_modules/@earendil-works/pi-tui/dist/autocomplete.js';
 
 const snap = (text, before = text) => autocompleteSnapshot({ text, cursor: Buffer.byteLength(before), revision: 3 });
 function apply(snapshot, response, index = 0) {
@@ -15,19 +16,19 @@ function apply(snapshot, response, index = 0) {
 }
 function harness() {
   let next = 1;
-  const calls = [], state = { alive: true, owner: { session_id: 's', extension_instance_id: 'i', process_generation: 1 } };
+  const calls = [], errors = [], state = { alive: true, owner: { session_id: 's', extension_instance_id: 'i', process_generation: 1 } };
   const runtime = { features: new Set(['autocomplete', 'autocomplete_edit_v1']), foreground: state, commands: new Map(),
     scope: new AsyncLocalStorage(), autocompleteRegistration: null,
     ui: { activeEditor() { return undefined; } },
     require(feature) { if (!this.features.has(feature)) throw Error(`unsupported_feature ${feature}`); },
     assertOwner(store) { if (!store.state?.alive || this.foreground !== store.state) throw Error('not_foreground_owner'); },
     transport: { request(method, params) { calls.push({ method, params }); return Promise.resolve({ accepted: true }); } },
-    track(promise) { return promise; },
+    track(promise) { return promise; }, backgroundError(error) { errors.push(error); },
   };
   const store = () => ({ id: next++, state, factory: 0, controller: new AbortController(), live: true, pending: new Set(), errors: [] });
   const add = factory => { const s = store(); return runtime.scope.run(s, () => addAutocompleteProvider(runtime, s, factory)); };
   const query = (text, before = text, s = store()) => commandCompletions(runtime, { text, cursor: Buffer.byteLength(before), revision: 1 }, s);
-  return { runtime, state, store, add, query, calls };
+  return { runtime, state, store, add, query, calls, errors };
 }
 
 test('profile represents closing-quote removal, intra-value Unicode cursor, tabs and multiline edits exactly', () => {
@@ -146,8 +147,8 @@ test('provider admission is feature-gated and stale/retired owner results cannot
   const signal = await ready;
   retireAutocomplete(h.state); h.state.alive = false;
   assert.equal(signal.aborted, true);
-  await assert.rejects(pending, /owner retired/);
   release();
+  await assert.rejects(pending, /owner retired/);
   assert.throws(() => h.add(current => current), /not_foreground_owner/);
 });
 
@@ -162,6 +163,66 @@ test('pending provider snapshots remain independent and replacement rejects old 
   assert.equal((await h.query('new')).prefix, 'new');
   h.add(current => current); release();
   await assert.rejects(old, /chain replaced/);
+});
+
+test('component slash discovery matches Pi fuzzy ordering, skill names, indentation and exact acceptance', async () => {
+  const h = harness();
+  const commands = [
+    { name: 'model', description: 'Select model' }, { name: 'models' },
+    { name: 'help', description: '' }, { name: 'skill:review' }, { name: 'skill:release' },
+    ...Array.from({ length: 40 }, (_, i) => ({ name: `command-${i}` })),
+  ];
+  for (const command of commands) h.runtime.commands.set(command.name, { factory: 4, definition: command });
+  const provider = getAutocompleteProvider(h.runtime, h.store());
+  const oracle = new CombinedAutocompleteProvider(commands, '.');
+  for (const prefix of ['/', '/mo', '/MDL', '/rvw', '/skill:r', '/zzz', '/command-39']) {
+    for (const lead of ['', '  ', '\t', '　']) {
+      const before = lead + prefix, lines = ['earlier😀', before + 'TAIL'];
+      const ours = await provider.getSuggestions(lines, 1, before.length);
+      const expected = await oracle.getSuggestions(lines, 1, before.length, {});
+      assert.deepEqual(ours, expected, before);
+      if (ours) for (const item of ours.items) assert.deepEqual(
+        provider.applyCompletion(lines, 1, before.length, item, ours.prefix),
+        oracle.applyCompletion(lines, 1, before.length, item, expected.prefix));
+    }
+  }
+  assert.equal((await provider.getSuggestions(['/'], 0, 1)).items.length, 45, 'component menu is not truncated to the native 32-item response limit');
+  assert.equal(await provider.getSuggestions(['/model'], 0, 6, { force: true }), null);
+  assert.deepEqual(h.errors, []);
+});
+
+for (const boundary of ['cancel', 'close', 'replace', 'foreground', 'retire']) test(`component completion ${boundary} retains callback lifetime and cannot revive a stale menu`, async () => {
+  const h = harness(), s = h.store(); s.surface = { closed: false };
+  let release, enter, settled = false, callbackSignal, callbackStore;
+  const entered = new Promise(resolve => { enter = resolve; });
+  h.add(current => ({ ...current, async getSuggestions(_lines, _line, _col, options) {
+    callbackSignal = options.signal; callbackStore = h.runtime.scope.getStore(); enter();
+    await new Promise(resolve => { release = resolve; });
+    return { prefix: '/x', items: [{ value: 'xyz', label: 'xyz' }] };
+  } }));
+  const provider = getAutocompleteProvider(h.runtime, s), controller = new AbortController();
+  const pending = provider.getSuggestions(['/x'], 0, 2, { signal: controller.signal }).then(result => { settled = true; return result; });
+  await entered;
+  if (boundary === 'cancel') controller.abort(Error('cancelled query'));
+  if (boundary === 'close') s.surface.closed = true;
+  if (boundary === 'replace') h.add(current => current);
+  if (boundary === 'foreground') h.runtime.foreground = { alive: true };
+  if (boundary === 'retire') { retireAutocomplete(h.state); h.state.alive = false; }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, 'cancellation/retirement must not claim callback termination');
+  if (boundary === 'cancel' || boundary === 'retire') {
+    assert.equal(callbackSignal.aborted, true);
+    assert.equal(callbackStore.controller.signal.aborted, true, 'late retained effects observe query cancellation');
+  }
+  release(); assert.equal(await pending, null); assert.deepEqual(h.errors, []);
+  if (boundary !== 'cancel') assert.throws(() => provider.applyCompletion(['/x'], 0, 2, { value: 'xyz', label: 'xyz' }, '/x'), /retired|replaced|not_foreground_owner/);
+});
+
+test('component callback failures are surfaced without an unhandled Pi editor rejection', async () => {
+  const h = harness(), failure = Error('completion failed');
+  h.add(current => ({ ...current, getSuggestions() { throw failure; } }));
+  assert.equal(await getAutocompleteProvider(h.runtime, h.store()).getSuggestions(['/'], 0, 1), null);
+  assert.deepEqual(h.errors, [failure]);
 });
 
 const repo = process.env.PI_REFERENCE_REPO;

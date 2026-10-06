@@ -267,64 +267,102 @@ export default pi => {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_idle_model_setters_preserve_the_live_command_and_binding() {
     use octet_ai::{auth::Auth, EndpointId, ModelId, ReasoningEffort};
-    let (directory, mut app) = pi_app(SETTERS);
-    // A real configured, unauthenticated local route, not a fake credential or
-    // fabricated adapter snapshot. This test performs no provider request.
-    let source = app
-        .catalog
-        .models()
-        .find(|spec| {
-            spec.capabilities
-                .reasoning
-                .as_ref()
-                .is_some_and(|reasoning| {
-                    let choices = reasoning.choices();
-                    choices.contains(&ReasoningConfig::Effort(ReasoningEffort::High))
-                        && choices.contains(&ReasoningConfig::Effort(ReasoningEffort::Low))
-                })
-        })
-        .expect("offline catalog contains a portable reasoning model")
-        .id
-        .clone();
-    let source = app.catalog.resolve(&source).unwrap();
-    let mut endpoint = (*source.endpoint).clone();
-    endpoint.id = EndpointId("pi-idle-local".into());
-    endpoint.auth = Auth::None;
-    endpoint.base_url = "http://127.0.0.1:9/v1/".parse().unwrap();
-    app.catalog.register_endpoint(endpoint.clone()).unwrap();
-    let mut spec = (*source.spec).clone();
-    spec.id = ModelId("pi-idle-model".into());
-    spec.endpoint = endpoint.id;
-    app.catalog.register_model(spec.clone()).unwrap();
-    let session = app.agent.session().path().to_owned();
-    let owner = app.agent.session().resource_owner_key();
-    let default_model = app.config.model.clone();
-    let default_reasoning = app.config.reasoning.clone();
-    let mut shell = InteractiveShell::test_shell();
-    request_extension_ui(&mut shell, &mut app);
-    command(&mut app, &mut shell, "select").await.unwrap();
-    assert_eq!(app.model.spec.id, spec.id);
-    assert_eq!(app.agent.model().spec.id, spec.id);
-    assert_eq!(app.agent.reasoning(), &app.reasoning);
-    assert_eq!(app.agent.session().path(), session);
-    assert_eq!(app.agent.session().resource_owner_key(), owner);
-    command(&mut app, &mut shell, "observe").await.unwrap();
-    app.executable_extensions.shutdown().await;
-    let values = std::fs::read_to_string(directory.path().join("trace.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(values.len(), 2, "{values:#?}");
-    assert_eq!(values[0]["selected"], true);
-    for value in &values {
-        assert_eq!(value["model"]["provider"], "pi-idle-local");
-        assert_eq!(value["model"]["id"], spec.api_name);
-        assert_eq!(value["level"], "high");
+    // Catalog iteration is unordered. Cover native Responses updates and an
+    // ordinary token-budget route explicitly: portable high persists as an
+    // effort or an explicit budget, depending on the selected native model.
+    for (source_id, native_updates, expected_reasoning) in [
+        (
+            "gpt-6-astra",
+            true,
+            ReasoningConfig::Effort(ReasoningEffort::High),
+        ),
+        ("claude-sonnet-4-5", false, ReasoningConfig::Budget(6144)),
+    ] {
+        eprintln!("Pi idle model setters: {source_id}");
+        let (directory, mut app) = pi_app(SETTERS);
+        // A real configured, unauthenticated local route, not a fake credential
+        // or fabricated adapter snapshot. This test performs no provider request.
+        let source = app.catalog.resolve(&ModelId(source_id.into())).unwrap();
+        assert_eq!(
+            source.responses_features().reasoning_effort_updates,
+            native_updates
+        );
+        let mut endpoint = (*source.endpoint).clone();
+        endpoint.id = EndpointId("pi-idle-local".into());
+        endpoint.auth = Auth::None;
+        endpoint.base_url = "http://127.0.0.1:9/v1/".parse().unwrap();
+        app.catalog.register_endpoint(endpoint.clone()).unwrap();
+        let mut spec = (*source.spec).clone();
+        spec.id = ModelId("pi-idle-model".into());
+        spec.endpoint = endpoint.id;
+        app.catalog.register_model(spec.clone()).unwrap();
+        let session = app.agent.session().path().to_owned();
+        let owner = app.agent.session().resource_owner_key();
+        let default_model = app.config.model.clone();
+        let default_reasoning = app.config.reasoning.clone();
+        let mut shell = InteractiveShell::test_shell();
+        request_extension_ui(&mut shell, &mut app);
+        command(&mut app, &mut shell, "select").await.unwrap();
+        assert_eq!(app.model.spec.id, spec.id);
+        assert_eq!(app.agent.model().spec.id, spec.id);
+        assert_eq!(app.agent.reasoning(), &app.reasoning);
+        assert_eq!(app.reasoning, expected_reasoning);
+        assert_eq!(app.agent.session().path(), session);
+        assert_eq!(app.agent.session().resource_owner_key(), owner);
+        command(&mut app, &mut shell, "observe").await.unwrap();
+        app.executable_extensions.shutdown().await;
+        let values = std::fs::read_to_string(directory.path().join("trace.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 2, "{values:#?}");
+        assert_eq!(values[0]["selected"], true);
+        for value in &values {
+            assert_eq!(value["model"]["provider"], "pi-idle-local");
+            assert_eq!(value["model"]["id"], spec.api_name);
+            assert_eq!(value["level"], "high");
+        }
+        assert_eq!(app.config.model, default_model);
+        assert_eq!(app.config.reasoning, default_reasoning);
+
+        let reopened = Session::open_read_only(&session).unwrap();
+        assert_eq!(reopened.resource_owner_key(), owner);
+        assert_eq!(
+            reopened
+                .responses_reasoning(&app.model.endpoint.id, &spec.id)
+                .unwrap()
+                .map(|(_, effective)| effective),
+            native_updates.then(|| expected_reasoning.clone())
+        );
+        drop(reopened);
+
+        // Resume with the real reader from an independent App still on its
+        // default model/reasoning. A missing durable selection cannot pass by
+        // inheriting the already-selected in-memory values from the producer.
+        let (_resume_directory, mut resumed) = crate::compaction::tests::app_for_estimate();
+        resumed.catalog = app.catalog.clone();
+        assert_ne!(resumed.model.spec.id, spec.id);
+        assert_ne!(resumed.reasoning, expected_reasoning);
+        drop(app);
+        let mut resumed = rebuild_app(
+            resumed,
+            None,
+            None,
+            None,
+            Some(SessionSelection::OpenExisting(session.clone())),
+        )
+        .unwrap();
+        resumed.executable_extensions.shutdown().await;
+        assert_eq!(resumed.model.spec.id, spec.id);
+        assert_eq!(resumed.agent.model().spec.id, spec.id);
+        assert_eq!(resumed.reasoning, expected_reasoning);
+        assert_eq!(resumed.agent.reasoning(), &expected_reasoning);
+        assert_eq!(resumed.agent.session().path(), session);
+        assert_eq!(resumed.agent.session().resource_owner_key(), owner);
+        assert_eq!(
+            level_from_reasoning(&resumed.reasoning, &resumed.model).unwrap(),
+            ThinkingLevel::High
+        );
     }
-    assert!(app.agent.session().entries().iter().any(|entry| matches!(&entry.value,
-        octet_agent::session::EntryValue::Config { model: Some(model), reasoning: Some(reasoning), .. }
-        if model == "pi-idle-model" && reasoning == "high")));
-    assert_eq!(app.config.model, default_model);
-    assert_eq!(app.config.reasoning, default_reasoning);
 }

@@ -29,14 +29,15 @@ pub fn resolve_workspace(explicit: Option<&Path>, cwd: &Path) -> std::io::Result
     cwd.canonicalize()
 }
 
-/// Mouse ownership policy. `Auto`, `Terminal`, and `Off` preserve terminal
-/// selection and uncaptured wheel history. `App` explicitly captures mouse
-/// gestures for octet's semantic viewport; keyboard navigation can claim that
-/// viewport independently in every mode.
+/// Mouse ownership policy. `App` (the default) runs the fullscreen
+/// alternate-screen viewport and captures mouse gestures for it. `Auto`,
+/// `Terminal`, and `Off` stay inline and preserve terminal selection and
+/// uncaptured wheel history; keyboard navigation can claim the viewport
+/// independently in every mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseMode {
-    #[default]
     Auto,
+    #[default]
     App,
     Terminal,
     Off,
@@ -483,6 +484,10 @@ pub struct Config {
     /// Built-in appearance (auto, light, dark, Cards, Still) or a discovered TOML theme name.
     /// Unrecognized or malformed names fall back to the compiled default.
     pub theme: Option<String>,
+    /// CLI/environment or interactive choice for this invocation. A reviewed
+    /// extension's session-only startup preference may supersede a saved theme,
+    /// never this explicit choice, and never writes the saved configuration.
+    pub theme_explicit: bool,
     /// Explicit system prompt override. `None` uses composed built-in
     /// instructions, while `Some("")` intentionally blanks the system
     /// prompt.
@@ -646,8 +651,8 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn mouse_mode_defaults_to_native_selection_and_scrollback() {
-        assert_eq!(MouseMode::default(), MouseMode::Auto);
+    fn mouse_mode_defaults_to_the_fullscreen_viewport() {
+        assert_eq!(MouseMode::default(), MouseMode::App);
         assert_eq!(MouseMode::parse("app").unwrap(), MouseMode::App);
         assert_eq!(MouseMode::parse("terminal").unwrap(), MouseMode::Terminal);
         assert_eq!(MouseMode::parse("off").unwrap(), MouseMode::Off);

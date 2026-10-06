@@ -50,7 +50,7 @@ fn remote_ui_composes_editor_widgets_and_replacing_footer_without_rpc() {
             .composer
             .iter()
             .any(|line| line.contains("remote editor")));
-        assert!(chrome.composer.iter().any(|line| line.contains("Ctrl+G")));
+        assert_eq!(chrome.composer, vec!["remote editor\x1b[0m"]);
         assert!(chrome
             .extension_above
             .iter()
@@ -74,6 +74,28 @@ fn remote_ui_composes_editor_widgets_and_replacing_footer_without_rpc() {
         }
         assert!(chrome.transcript_rows > 0);
     }
+}
+
+#[test]
+fn remote_ui_empty_editor_does_not_add_a_restore_hint_row() {
+    let mut state = ShellState {
+        size: (80, 24),
+        ..ShellState::default()
+    };
+    let mut remote = projection(
+        state.size,
+        &[
+            (Placement::Editor, ""),
+            (Placement::Footer, "remote footer"),
+        ],
+    );
+    Arc::make_mut(&mut remote.components)
+        .store_render(&remote.mounts[0].id, state.size.0, Vec::new())
+        .unwrap();
+    state.extension_ui.remote = remote;
+    let chrome = shell_chrome(&state, state.size.0, Instant::now());
+    assert!(chrome.composer.is_empty(), "{:?}", chrome.composer);
+    assert_eq!(chrome.extension_below, vec!["remote footer\x1b[0m"]);
 }
 
 #[test]

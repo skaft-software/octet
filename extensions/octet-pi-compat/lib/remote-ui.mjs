@@ -1,7 +1,7 @@
 import { bounded, fields, invalid, rpcError, strict, unsupported } from './errors.mjs';
 import { keyData, mouseData, reservedKey } from './keys.mjs';
 import { mouseModeIntent } from './transport.mjs';
-import { theme, keybindings } from './theme.mjs';
+import { theme, hostKeybindings } from './theme.mjs';
 import { getAutocompleteProvider } from './completions.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 
@@ -183,7 +183,11 @@ export class RemoteUI {
       }
       surface.phase = 'constructing';
       const finish = value => this.close(surface, value).catch(error => this.runtime.backgroundError(error));
-      surface.component = await this.runtime.scope.run(surface.store, () => factory(surface.tui.facade, theme, keybindings, finish));
+      const editorTheme = placement === 'editor' ? {
+        borderColor: text => theme.getThinkingBorderColor(surface.store.state.host.reasoning ?? 'off')(text),
+        selectList: theme.selectList,
+      } : theme;
+      surface.component = await this.runtime.scope.run(surface.store, () => factory(surface.tui.facade, editorTheme, hostKeybindings(() => surface.store.state.host.keybindings), finish));
       component(surface.component);
       if (surface.closed) { this.runtime.scope.run(surface.store, () => surface.component.dispose?.()); return surface; }
       // Geometry is host-issued before construction. Each open freezes only its
@@ -288,14 +292,21 @@ export class RemoteUI {
       if (!editor.mutating) editor.checkpoint();
       change?.(value);
     };
+    c.onAction?.('app.clear', () => c.setText(''));
     c.onSubmit = value => {
       if (surface.closed) return;
-      const send = () => ordered(() => this.runtime.hostCall('session/send_user_message', { text: value }, store));
+      const send = () => ordered(async () => {
+        await this.runtime.hostCall('session/send_user_message', { text: value }, store);
+        // A callback observes host admission, never an optimistic send. It must
+        // not run after rescue/disposal, even if a late admission arrives.
+        if (surface.closed) return;
+        this.runtime.assertOwner(store);
+        return this.runtime.scope.run(store, () => submit?.(value));
+      });
       if (editor.submissions) {
         if (editor.submissions.length >= 128) throw rpcError(-32012, 'bounds_exceeded editor submissions');
         editor.submissions.push(send);
       } else { editor.checkpoint(); send(); }
-      submit?.(value);
     };
     // Custom setText may normalize the native seed before its first frame.
     if (c.getText() !== text) await editor.checkpoint();

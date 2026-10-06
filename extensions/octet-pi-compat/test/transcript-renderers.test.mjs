@@ -41,7 +41,34 @@ export default pi => pi.registerCommand('install', {handler: () => {
   await peer.close();
 });
 
-test('late terminal renderer registration refuses a missing native consumer', async t => {
+// Without a native consumer the terminal keeps its default rendering. The
+// registrations stay inert and one warning names them instead of refusing the
+// whole bridge, as Pi itself falls back when a renderer is absent.
+const rendererNotice = frame => frame.method === 'notification' && frame.params.level === 'warning'
+  && frame.params.title === '[Extension issues]' && /Custom renderers are not shown/.test(frame.params.message);
+
+test('load-time terminal renderers without a native consumer start and warn once', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'octet-pi-transcript-unavailable-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const factory = join(directory, 'render.ts');
+  writeFileSync(factory, `export default pi => {
+    pi.registerMessageRenderer('notice', () => { throw new Error('inert renderer ran'); });
+    pi.registerEntryRenderer('saved', () => undefined);
+    pi.registerCommand('install', {handler: () => { pi.registerMessageRenderer('later', () => undefined); }});
+  };`);
+  const peer = launch(t, [factory]);
+  await peer.init(['remote_ui', 'composer']);
+  const notice = await peer.wait(rendererNotice);
+  assert.match(notice.params.message, /notice/);
+  assert.match(notice.params.message, /saved/);
+  assert.ok((await peer.command('install').response).result);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.ok(!peer.seen.some(frame => frame !== notice && rendererNotice(frame)), 'one renderer warning per process');
+  assert.doesNotMatch(peer.stderr(), /inert renderer ran/);
+  await peer.close();
+});
+
+test('late terminal renderer registration without a native consumer is inert and warns', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'octet-pi-transcript-unavailable-'));
   t.after(() => rmSync(directory, {recursive: true, force: true}));
   const factory = join(directory, 'render.ts');
@@ -51,8 +78,9 @@ test('late terminal renderer registration refuses a missing native consumer', as
   const peer = launch(t, [factory]);
   await peer.init(['remote_ui', 'composer']);
   const response = await peer.command('install').response;
-  assert.equal(response.error?.code, -32601, JSON.stringify(response));
-  assert.match(response.error.message, /transcript_render_v1/);
+  assert.ok(response.result, JSON.stringify(response));
+  const notice = await peer.wait(rendererNotice);
+  assert.match(notice.params.message, /notice/);
   await peer.close();
 });
 
@@ -214,6 +242,37 @@ test('tool call/result contexts retain state and lastComponent, preserve exact r
   assert.equal(seen[2].context.cwd, '/real/workspace'); assert.equal(seen[2].context.isError, true);
   assert.deepEqual(seen[2].options, {expanded: true, isPartial: true}); assert.deepEqual(seen[2].result, result);
   h.registry.retire(h.store.state); assert.equal(disposed, 1);
+});
+
+test('tool slots independently fall back for absent callbacks and thrown component paints', t => {
+  const h = harness(t), issues = [];
+  h.runtime.reportCallbackError = (...args) => issues.push(args);
+  let definition = { renderResult: () => ({ render() { throw new Error('paint failed'); } }) };
+  h.registry.api(0).registerToolRenderer(() => definition);
+  const result = h.render('tool', {name: 'native-tool', tool_call_id: 'real-call', arguments: {path: 'safe'}, result: {content: [{type: 'text', text: 'canonical result'}], details: {n: 7}}, expanded: false, is_partial: false, is_error: false, execution_started: true, args_complete: true, show_images: false}, {width: 60});
+  assert.match(result.lines.join('\n'), /native-tool.*path/);
+  assert.match(result.lines.join('\n'), /canonical result/);
+  assert.equal(issues[0][0], 'renderResult');
+  definition = {renderCall: () => { throw new Error('call failed'); }, renderResult: () => new Text('kept custom result', 0, 0)};
+  const next = h.render('tool', {name: 'native-tool', arguments: {}, result: {content: []}, expanded: true, is_partial: false, is_error: false, execution_started: true, args_complete: true, show_images: false}, {width: 60});
+  assert.match(next.lines.join('\n'), /kept custom result/);
+});
+
+test('tool invalidations are bounded, coalesced, and retired with their exact owner', async t => {
+  const h = harness(t), notifications = [], invalidators = [];
+  h.store.state.owner = {session_id: 'session', extension_instance_id: 'instance', process_generation: 2};
+  h.runtime.transport = {notify: async (method, params) => notifications.push({method, params}), fail(error) { throw error; }};
+  h.registry.api(0).registerToolRenderer(() => ({renderCall: (_args, _theme, context) => {
+    invalidators.push(context.invalidate); assert.equal(context.toolCallId, 'actual-call'); return new Text('call', 0, 0);
+  }}));
+  const source = {name: 'native-tool', tool_call_id: 'actual-call', arguments: {}, result: null, expanded: false, is_partial: true, is_error: false, execution_started: true, args_complete: true, show_images: false};
+  h.render('tool', source, {source: 'first'}); h.render('tool', source, {source: 'second'});
+  for (let i = 0; i < 100; i++) invalidators[i % 2]();
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.deepEqual(notifications, [{method: 'transcript/invalidate', params: {resource_owner: h.store.state.owner, source_id: null}}]);
+  invalidators[0](); h.registry.retire(h.store.state); h.store.state.alive = false;
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(notifications.length, 1);
 });
 
 test('Markdown tabs are preserved, while unsafe OSC and malformed tool booleans still fail', t => {

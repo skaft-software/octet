@@ -59,7 +59,10 @@ pub(super) async fn refresh_resource_paths<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    if shell.close_requested() || !app.resource_paths_pending() {
+    let resources_pending = app.resource_paths_pending();
+    if shell.close_requested()
+        || (!resources_pending && !app.executable_extensions.has_pending_session_starts())
+    {
         return Ok(());
     }
 
@@ -67,6 +70,12 @@ where
         Ok(work) => pump(shell, input, app, async move { Ok(work.await) }).await?,
         Err(error) => Err(error),
     };
+    // Deferred startup also belongs to ordinary factories. Settle it under
+    // the existing UI/session pump, without inventing a resource-discovery pass.
+    if !resources_pending {
+        starts?;
+        return Ok(());
+    }
     let candidate = match starts {
         Ok(lease) => match app.prepare_resource_paths(shell.theme().background(), lease) {
             Ok(work) => pump(shell, input, app, async move { Ok(work.await) }).await?,

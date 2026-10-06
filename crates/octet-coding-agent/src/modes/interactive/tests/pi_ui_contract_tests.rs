@@ -19,13 +19,62 @@ async fn live_ui_app(factory: &str) -> (tempfile::TempDir, App, InteractiveShell
     (directory, app, shell)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_desktop_notification_requires_foreground_terminal_admission() {
+    let (directory, mut app, mut shell) = live_ui_app(
+        r#"
+import { writeFileSync } from 'node:fs';
+export default pi => pi.registerCommand('desktop-notify', {handler: () => {
+  process.stdout.write('\x1b]777;notify;π;Native notification\x07');
+  writeFileSync(TRACE, 'host-acknowledged');
+}});
+"#,
+    )
+    .await;
+    shell.cede_terminal_input();
+    let error = command(&mut app, &mut shell, "desktop-notify")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("terminal is ceded"), "{error}");
+    assert!(!directory.path().join("trace.jsonl").exists());
+    shell.release_terminal_input();
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_pi_test_shell_preserves_real_styles_and_complete_labels() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(37, 12);
+    let run = shell.begin_run("offline-test");
+    shell.render();
+    let rows = shell.dump_rendered_frame().await.unwrap();
+    let raw = rows.join("\n");
+    assert!(raw.contains("\x1b[38;2;"), "truecolor styles lost: {raw}");
+    assert!(
+        !raw.contains("^["),
+        "literal escaped ANSI in native frame: {raw}"
+    );
+    assert!(rows.iter().all(|row| sexy_tui_rs::visible_width(row) <= 37));
+    let visible = sexy_tui_rs::strip_terminal_sequences(&raw);
+    assert_eq!(visible.matches("Working").count(), 1, "{visible}");
+    assert!(visible.contains("esc to interrupt"), "{visible}");
+    shell.interrupt_run(run);
+}
+
 async fn rendered(shell: &mut InteractiveShell) -> String {
     shell.render();
-    shell
+    let frame = shell
         .dump_rendered_frame()
         .await
         .expect("live native renderer frame")
-        .join("\n")
+        .join("\n");
+    // Test visible text across real SGR runs (the native loader styles each
+    // character), but never mask the plain-profile escaping/truncation defect.
+    assert!(
+        !frame.contains("^["),
+        "literal escaped ANSI in native frame: {frame}"
+    );
+    sexy_tui_rs::strip_terminal_sequences(&frame)
 }
 
 fn component_key(app: &mut App, shell: &mut InteractiveShell, code: KeyCode) {
@@ -178,12 +227,7 @@ async fn pump_until(
             for message in app.executable_extensions.drain_events_for_shell(shell) {
                 shell.notice(message);
             }
-            shell.render();
-            let frame = shell
-                .dump_rendered_frame()
-                .await
-                .expect("live native renderer frame")
-                .join("\n");
+            let frame = rendered(shell).await;
             if ready(&frame) {
                 break;
             }

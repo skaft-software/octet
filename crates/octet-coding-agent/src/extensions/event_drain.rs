@@ -84,6 +84,7 @@ impl ExecutableExtensions {
         self.drain_host_requests_into_shell(shell);
         self.reconcile_terminal_grant_for_shell(shell);
         self.sync_remote_ui(shell);
+        self.sync_transcript_renderers(shell);
         messages
     }
 
@@ -91,6 +92,10 @@ impl ExecutableExtensions {
     /// ready process monopolize the input/render task. The start receiver
     /// rotates between calls and each receiver has a smaller per-call quota.
     pub fn drain_events(&mut self) -> Vec<String> {
+        // Headless session hooks can await reverse host requests too (e.g. MCP
+        // registration), even without a resource-discovery contributor. Start
+        // them only once this frontend is pumping their requests/refusals.
+        self.schedule_session_hook_starts();
         self.drain_events_inner(false)
     }
 
@@ -119,6 +124,28 @@ impl ExecutableExtensions {
             while receiver_budget > 0 {
                 let event = self.receivers[index].try_recv();
                 match event {
+                    Ok(ExtensionEvent::TranscriptInvalidated { invalidation }) => {
+                        if host_request_owner_is_foreground(
+                            Some(&invalidation.resource_owner),
+                            self.resource_owner.as_deref(),
+                        ) {
+                            self.transcript_renderers
+                                .invalidate(invalidation.resource_owner, invalidation.source_id);
+                        }
+                    }
+                    Ok(ExtensionEvent::TranscriptEntryCommitted {
+                        namespace,
+                        owner,
+                        entry,
+                    }) => {
+                        if host_request_owner_is_foreground(
+                            Some(&owner),
+                            self.resource_owner.as_deref(),
+                        ) && !self.transcript_renderers.committed(owner, namespace, entry)
+                        {
+                            self.diagnostics.push("warning: transcript entry observation limit reached; resume restores durable entries");
+                        }
+                    }
                     Ok(ExtensionEvent::McpRegistrationRequested {
                         request_id,
                         generation,

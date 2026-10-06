@@ -1,6 +1,7 @@
 name = "octet-pi-compat"
-version = "0.1.0"
+version = "0.8.2"
 api_version = "0.4"
+requires_octet = "=0.8.2"
 description = "Optional reviewed Pi factories; configure entrypoints explicitly before activation"
 
 [entrypoint]

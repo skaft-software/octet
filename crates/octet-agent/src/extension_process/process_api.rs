@@ -377,6 +377,17 @@ impl ExtensionProcess {
         &self,
         session_id: impl Into<String>,
     ) -> Result<(), ExtensionRuntimeError> {
+        self.start_session_hook_binding_with_reason(session_id, "startup")
+            .await
+    }
+
+    /// Starts a binding with the actual host transition, rather than inferring
+    /// it from transcript length. API 0.3 retains its canonical binding-only payload.
+    pub async fn start_session_hook_binding_with_reason(
+        &self,
+        session_id: impl Into<String>,
+        reason: &'static str,
+    ) -> Result<(), ExtensionRuntimeError> {
         if !self.declares_session_hooks() {
             return Err(self.undeclared("session hook", "session_start/session_end".to_owned()));
         }
@@ -398,6 +409,7 @@ impl ExtensionProcess {
             let binding = ActiveSessionHookBinding {
                 start_outcome: Arc::new(SessionHookStartOutcome::default()),
                 session_id: session_id.clone(),
+                start_reason: reason,
                 started_at: Instant::now(),
                 endpoint: LifecycleEndpoint {
                     generation: connection.generation,
@@ -487,6 +499,7 @@ impl ExtensionProcess {
                 let replacement = ActiveSessionHookBinding {
                     start_outcome: Arc::new(SessionHookStartOutcome::default()),
                     session_id: binding.session_id,
+                    start_reason: "resume",
                     started_at: Instant::now(),
                     endpoint: endpoint.clone(),
                 };
@@ -515,8 +528,13 @@ impl ExtensionProcess {
                     binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
                 },
             };
-            self.dispatch_session_hook(&binding.endpoint, &binding.session_id, params)
-                .await
+            self.dispatch_session_hook(
+                &binding.endpoint,
+                &binding.session_id,
+                params,
+                Some(binding.start_reason),
+            )
+            .await
         }
         .await;
         attempt.finish(result.is_ok());
@@ -544,8 +562,45 @@ impl ExtensionProcess {
             .hooks
             .contains(&ExtensionHook::SessionEnd)
         {
-            self.dispatch_session_hook(endpoint, &binding.session_id, params)
-                .await
+            // The foreground event pump is gone at this boundary. Refuse UI
+            // truthfully while polling the existing bounded end-hook future,
+            // including while a reply is queued; never extend its deadline.
+            let mut events = self.subscribe();
+            let settle = self.dispatch_session_hook(endpoint, &binding.session_id, params, None);
+            tokio::pin!(settle);
+            let refuse_ui = async {
+                loop {
+                    match events.recv().await {
+                        Ok(ExtensionEvent::RemoteUiRequested {
+                            request_id,
+                            generation,
+                            owner,
+                            ..
+                        }) if generation == endpoint.generation
+                            && owner.session_id == binding.session_id =>
+                        {
+                            let failure = ExtensionRequestFailure::NotForegroundOwner;
+                            let _ = endpoint
+                                .connection
+                                .send_child_error_response(
+                                    request_id,
+                                    failure.code(),
+                                    failure.message(
+                                        "session_end has no foreground UI; request was not applied",
+                                    ),
+                                )
+                                .await;
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            };
+            tokio::select! {
+                biased;
+                result = &mut settle => result,
+                () = refuse_ui => settle.await,
+            }
         } else {
             Ok(())
         };
@@ -564,10 +619,20 @@ impl ExtensionProcess {
         endpoint: &LifecycleEndpoint,
         session_id: &str,
         params: api_v03::SessionHookParams,
+        start_reason: Option<&'static str>,
     ) -> Result<(), ExtensionRuntimeError> {
         endpoint
             .connection
             .require_api_v03_host_method(methods::HOOK_RUN)?;
+        // Pi awaits session_start, and it runs off the startup path here, so it
+        // gets the ordinary request deadline. Only the end finalizer keeps the
+        // short cap, so exit and reload never wait on an extension.
+        let deadline = match params {
+            api_v03::SessionHookParams::SessionStart { .. } => self.inner.config.request_timeout,
+            api_v03::SessionHookParams::SessionEnd { .. } => {
+                self.inner.config.request_timeout.min(SESSION_HOOK_DEADLINE)
+            }
+        };
         let params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let params = api_v03::parse_session_hook_params(params).map_err(api_v03_protocol_error)?;
@@ -581,6 +646,9 @@ impl ExtensionProcess {
         let canonical =
             read_std_lock(&endpoint.connection.protocol).version == EXTENSION_API_VERSION_0_3;
         if !canonical {
+            if let Some(reason) = start_reason {
+                params["payload"]["reason"] = serde_json::json!(reason);
+            }
             let mut context = self.execution_context();
             context.resource_owner = Some(resource_owner.clone());
             params["context"] = serde_json::to_value(context)
@@ -593,12 +661,7 @@ impl ExtensionProcess {
         }
         let result = endpoint
             .connection
-            .request_lifecycle(
-                methods::HOOK_RUN,
-                params,
-                self.inner.config.request_timeout.min(SESSION_HOOK_DEADLINE),
-                resource_owner,
-            )
+            .request_lifecycle(methods::HOOK_RUN, params, deadline, resource_owner)
             .await?;
         let continued = if canonical {
             let result =
@@ -1194,6 +1257,49 @@ impl ExtensionProcess {
         menu.validate(&declared)
             .map_err(ExtensionRuntimeError::Protocol)?;
         Ok(menu)
+    }
+
+    /// Renders one bounded transcript snapshot on its exact process generation.
+    /// Frontends must call off the render thread and recheck their source/geometry
+    /// fence before publication. A failure always leaves the native fallback.
+    pub async fn render_transcript(
+        &self,
+        request: TranscriptRenderRequest,
+    ) -> Result<TranscriptRenderResponse, ExtensionRuntimeError> {
+        request
+            .validate()
+            .map_err(ExtensionRuntimeError::Protocol)?;
+        let connection = read_std_lock(&self.inner.connection).clone();
+        let owner = request
+            .context
+            .resource_owner
+            .as_ref()
+            .expect("validated owner");
+        if !read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_TRANSCRIPT_RENDER)
+            || owner.extension_instance_id != self.inner.instance_id
+            || owner.process_generation != connection.generation
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "unavailable or stale transcript renderer".into(),
+            ));
+        }
+        let result: TranscriptRenderResponse = self
+            .request_typed_on_connection(
+                connection,
+                "transcript/render",
+                &request,
+                Some(owner.clone()),
+            )
+            .await?;
+        result
+            .validate(&request.render)
+            .map_err(ExtensionRuntimeError::Protocol)?;
+        if !self.is_running() || self.health_snapshot().generation != owner.process_generation {
+            return Err(ExtensionRuntimeError::Closed(
+                "transcript renderer retired".into(),
+            ));
+        }
+        Ok(result)
     }
 
     /// Asks an extension to semantically render a declared tool lifecycle.
@@ -2446,7 +2552,10 @@ impl ExtensionProcess {
             let replacement_process_tools =
                 self.process_tools(Arc::clone(&replacement), &replacement_tools);
             let revision = Arc::clone(&replacement_process_tools.revision);
-            match registration.reserve(replacement_process_tools.tools) {
+            match registration.reserve_for_generation(
+                replacement_process_tools.tools,
+                Some(Arc::clone(&replacement.closed)),
+            ) {
                 Ok(reservation) => Some((reservation, revision)),
                 Err(message) => {
                     replacement.terminate().await;
@@ -2757,14 +2866,19 @@ impl ExtensionProcess {
         })
     }
 
-    /// Requests graceful shutdown using the configured per-stage timeout, waits
-    /// for child exit using that timeout again, then kills it if needed. Returns
-    /// whether it acknowledged and exited within their respective stages.
-    pub async fn shutdown(&self) -> bool {
+    /// Stops restart supervision immediately without interrupting end hooks.
+    pub fn begin_shutdown(&self) {
         self.inner
             .supervisor_cancelled
             .store(true, Ordering::Release);
         self.inner.generation_changed.notify_waiters();
+    }
+
+    /// Requests graceful shutdown using the configured per-stage timeout, waits
+    /// for child exit using that timeout again, then kills it if needed. Returns
+    /// whether it acknowledged and exited within their respective stages.
+    pub async fn shutdown(&self) -> bool {
+        self.begin_shutdown();
         let _guard = self.inner.reload_guard.lock().await;
         let connection = read_std_lock(&self.inner.connection).clone();
         self.settle_all_session_hook_bindings_locked(

@@ -385,6 +385,9 @@ async fn run_prompt(
                             crate::output::stderr_line(crate::commands::cache_warmed_notice(*cost, *extension_override));
                         }
                     }
+                    AgentEvent::ExtensionObservationWarning { message } => {
+                        crate::output::stderr!("warning: {message}");
+                    }
                     AgentEvent::ProviderUsageUncertain => {
                         crate::output::stderr!("warning: provider usage and cost are uncertain for this session; all subsequent numeric usage/cost values are known subtotals, not complete totals (including after resume).");
                     }

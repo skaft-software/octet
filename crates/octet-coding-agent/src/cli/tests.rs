@@ -409,10 +409,18 @@ fn colour_policy_resolves_from_cli() {
 }
 
 #[test]
-fn mouse_policy_defaults_to_terminal_ownership() {
+fn mouse_policy_defaults_to_the_fullscreen_viewport() {
     let directory = cwd();
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
+    let config = config_with_empty_global(cli, directory.path()).unwrap();
+    assert_eq!(config.mouse, config::MouseMode::App);
+    assert!(config.mouse.application_owned());
+
+    // Inline mode with native scrollback stays one setting away.
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.mouse = Some("auto".into());
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     assert_eq!(config.mouse, config::MouseMode::Auto);
     assert!(!config.mouse.application_owned());
@@ -1062,8 +1070,21 @@ fn cli_overrides_project_which_overrides_global() {
     assert!(config.model_explicit);
     assert!(!config.reasoning_explicit);
     assert_eq!(config.theme.as_deref(), Some("project-theme"));
+    assert!(!config.theme_explicit);
     assert_eq!(config.max_turns, Some(11));
     assert!(!config.sandbox.allow_external_paths);
+}
+
+#[test]
+fn cli_theme_choice_is_explicit_without_rewriting_saved_appearance() {
+    let directory = cwd();
+    let global = directory.path().join("global.toml");
+    std::fs::write(&global, "theme = 'dark'\n").unwrap();
+    let cli = Cli::try_parse_from(["octet", "--theme", "Still"]).unwrap();
+    let config = build_config_with_global_path(cli, directory.path(), Some(&global)).unwrap();
+    assert_eq!(config.theme.as_deref(), Some("Still"));
+    assert!(config.theme_explicit);
+    assert_eq!(std::fs::read_to_string(global).unwrap(), "theme = 'dark'\n");
 }
 
 #[test]

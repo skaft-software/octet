@@ -109,8 +109,10 @@ test('resources: ordinary callback failures are diagnosed with factory provenanc
   const peer = await started(t, {}, [fixture, second]);
   await set(peer, { mode: 'throw' });
   assert.deepEqual((await discover(peer).response).result.resource_paths.skill_paths, [join(root, 'more-skills'), join(root, 'skills')]);
-  const diagnostic = await peer.wait(f => f.method === 'notification' && /ordinary discovery callback failure/.test(f.params.message));
-  assert.ok(diagnostic.params.message.includes(fixture)); assert.match(diagnostic.params.message, /resources_discover factory/);
+  const diagnostic = await peer.wait(f => f.method === 'notification' && f.params.title === '[Extension issues]');
+  assert.ok(diagnostic.params.message.includes(fixture)); assert.match(diagnostic.params.message, /resources_discover callback failed/);
+  assert.match(diagnostic.params.message, /Next:/);
+  assert.doesNotMatch(diagnostic.params.message, /ordinary discovery callback failure/);
   assert.deepEqual(labels(await state(peer)), ['first', 'middle', 'last']);
   await set(peer, { mode: 'unsupported' });
   assert.match((await discover(peer).response).error.message, /unsupported_feature ctx.unimplementedContextMethod/);
@@ -148,6 +150,8 @@ for (const changed of ['session_id', 'extension_instance_id', 'process_generatio
   const peer = await started(t); await set(peer, { mode: 'hold' });
   const pending = discover(peer); await state(peer, { wait_for: 'first' });
   const context = { ...peer.context(), resource_owner: { ...owner, [changed]: changed === 'process_generation' ? owner.process_generation + 1 : `replacement-${changed}` } };
+  // Only the native lifecycle binding authorizes a foreground replacement.
+  assert.ok((await peer.request('hook/run', { hook: 'session_start', payload: { binding: context.resource_owner }, context }).response).result);
   const observed = await state(peer, {}, context); assert.deepEqual(observed.aborted, ['first']);
   assert.equal((await pending.response).error.code, -32800);
   await state(peer, { release: 'first' }, context); await state(peer, {}, context);

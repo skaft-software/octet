@@ -185,10 +185,12 @@ fn rebind_parent(
     parent_id: u64,
     previous: &ExtensionResourceOwner,
 ) -> Result<(), String> {
+    // Native publication always carries the owner; session_entries only gates
+    // its optional projection. Neither the peer nor a display ID can rebind it.
     let owner = lock_std_mutex(&mirror.mirror)
         .as_ref()
         .map(|mirror| mirror.owner.clone())
-        .ok_or("replacement session snapshot unavailable")?;
+        .ok_or("replacement session owner unavailable")?;
     if owner.extension_instance_id != previous.extension_instance_id
         || owner.process_generation != previous.process_generation
     {
@@ -261,11 +263,12 @@ pub(super) fn queue_replacement(
                             Ok(()) => {
                                 Ok(serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result}))
                             }
-                            Err(detail) => api_v03_session_lifecycle_error(
-                                &id,
-                                "not_foreground_owner",
-                                &detail,
-                            ),
+                            // This is the owner-scoped API 0.4 contract, not an
+                            // API 0.3 error semantic. Always send its real refusal.
+                            Err(detail) => Ok(serde_json::json!({
+                                "jsonrpc":"2.0", "id":id,
+                                "error":ExtensionRequestFailure::NotForegroundOwner.error_object(&detail),
+                            })),
                         }
                     }
                     Err(ExtensionSessionLifecycleError::Cancelled) => Ok(serde_json::json!({
@@ -287,28 +290,26 @@ pub(super) fn queue_replacement(
             }
             Err(error) => api_v03_session_lifecycle_submit_error(&id, error),
         };
-        match response {
-            Ok(response) => {
-                deliver_api_v03_session_lifecycle_response(
-                    children,
-                    id,
-                    writer,
-                    frame_limit,
-                    health,
-                    events,
-                    response,
-                )
-                .await
-            }
-            Err(message) => {
-                update_health(
-                    &health,
-                    ExtensionHealthState::Degraded,
-                    Some(message.clone()),
-                );
-                let _ = events.send(ExtensionEvent::Diagnostic { message });
-                settle_child_request(&children, &id);
-            }
+        // API 0.4 typed errors must not pass through the canonical API 0.3
+        // error table. Its ordinary bounded writer still atomically claims the
+        // child response, so cancellation cannot produce a second terminal.
+        let delivery = response.and_then(|response| {
+            try_queue_child_response(
+                &children,
+                &id,
+                &writer,
+                frame_limit.max_message_bytes(),
+                response,
+            )
+        });
+        if let Err(message) = delivery {
+            update_health(
+                &health,
+                ExtensionHealthState::Degraded,
+                Some(message.clone()),
+            );
+            let _ = events.send(ExtensionEvent::Diagnostic { message });
+            settle_child_request(&children, &id);
         }
         drop(worker);
     });

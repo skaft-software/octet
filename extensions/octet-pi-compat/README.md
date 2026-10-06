@@ -1,35 +1,81 @@
 # Optional Pi factory compatibility
 
-One optional Node process loads an **explicit reviewed list** of unchanged Pi
-extension factories. Rust still owns octet's agent, sessions, approvals, terminal,
-keyboard focus and shutdown. This package never imports or starts the Pi
-coding-agent runtime. It is not an OS sandbox or universal Pi compatibility claim.
+One optional Node/Bun process loads unchanged Pi extension factories after explicit
+review. Import an enabled Pi 1.0.2 setup, or supply entrypoints manually. Rust
+still owns octet's agent, sessions, approvals, terminal, keyboard focus and
+shutdown. The installed-Pi fallback loads helpers inside this process, not a
+second Pi CLI or agent loop. It is not an OS sandbox or universal Pi compatibility claim.
 Full stable Pi 1.0.2 compatibility remains the target; this source preview does
 not qualify that target, and new generic resource APIs do not substitute for Pi
 parity.
 
 ## Local setup and configuration
 
-Requires Node 22.19+ and npm. Nothing executes during extension discovery, and
+Requires Node 22.19+ or Bun. Source dependency setup uses npm; release bundles
+include the dependencies. Nothing executes during extension discovery, and
 neither helper enables an extension or writes host configuration/trust:
 
 ```sh
 node extensions/octet-pi-compat/setup.mjs
-node extensions/octet-pi-compat/configure.mjs --reviewed \
-  --output /absolute/local-extensions/octet-pi-compat \
-  /absolute/reviewed/extension.ts /absolute/another/extension.ts
+node extensions/octet-pi-compat/configure.mjs --reviewed --from-pi \
+  --output /absolute/local-extensions/octet-pi-compat
 # Explicit activation is a separate host/user decision:
 octet --extension-dir /absolute/local-extensions --enable-extension octet-pi-compat
 ```
 
-`--reviewed` authorizes executing those factories once in a bounded registration
-capture subprocess. Review their imports and normal OS effects first. Configure
-writes only the requested directory's `extension.toml` and `bridge.json`, uses the
-canonical Node executable and this package's absolute runner path, and refuses
-existing files unless `--overwrite` is explicit. It does not copy factories,
-assets, or their dependencies. Install a factory's own dependencies separately.
+`--from-pi` uses the installed Pi 1.0.2 resolver, probes each enabled factory on
+octet's emulated path, then automatically tries installed Pi when loading fails
+or a bounded source scan detects direct Pi tool execution, such as hashline's
+image-read branch. Child-tool descriptors alone stay on the emulated path.
+Setup prints each route or skip reason and records the Pi installation path.
+Broken factories, first-party tool conflicts, conflicting registrations and schemas
+outside octet's supported JSON Schema profile are skipped. Constraints are never
+stripped to make a tool load. Reviewed builtin tool replacements instead require
+exact manifest grants and negotiated native `builtin_tool_overrides_v1` admission.
+For a manual list, replace `--from-pi` with absolute entrypoint paths. Replace
+`node` with `bun` to reuse Bun; configure records that executable. A load pass
+does not qualify commands, hooks or UI behavior.
+
+`--from-pi` also snapshots enabled Pi palettes (plus Pi dark/light) under `themes/`
+with safe `pi-*` native selectors. Enabling this reviewed bridge contributes these
+regular themes to `/theme` and makes Pi's selected palette the session startup
+preference, even when host settings save `theme = "dark"`. `--theme`, `OCTET_THEME`,
+and later `/theme` choices win for native appearance; Auto/Light/Dark/Cards/Still remain available. No
+host or Pi settings are rewritten. `octet-config.toml` and printed theme arguments
+are optional standalone alternatives, not extra steps for the bridge launch above.
+Re-import to refresh these snapshots. Composer color uses Pi's configured thinking
+level (unset: medium); dynamic per-model reasoning changes are not projected.
+Terminal-dependent system/automatic themes are diagnosed rather than guessed.
+
+The selected JSON snapshot also initializes the bridge's Pi Theme **before**
+route probes, registration capture and factory loading. `ctx.ui.theme`, remote
+editors/footers, helper callbacks and custom renderers share it; admitted installed-Pi
+helpers use the same palette without calling Pi `initTheme` or starting a watcher.
+Palette rebinding retires renderer caches and invalidates live component frames.
+The native host currently supplies no theme selector/palette snapshot, so explicit
+native `--theme` or later `/theme` changes cannot yet recolor Pi remote content:
+those components keep the bridge-owned imported palette. No native palette service
+or live host-theme synchronization is claimed.
+
+Failing lifecycle observation callbacks are reported with their factory and event
+while later callbacks continue. Permission/veto hooks, owner fences, cancellation
+and failed host mutations still fail closed. This is isolation, not API parity.
+Print and JSON output both use the native `print` context mode, without a UI.
+
+`--reviewed` authorizes executing the selected factories and their imports during
+routing and capture, including installed Pi code on the fallback route. Review
+their normal OS effects first. Configure
+writes the requested directory's `extension.toml` and `bridge.json` (and, with
+`--from-pi`, normalized theme snapshots and an optional appearance snippet), uses the
+canonical Node/Bun executable and this package's absolute runner path, and refuses
+existing files unless `--overwrite` is explicit. It does not copy factories or
+their dependencies. Install a factory's own dependencies separately.
 The generated manifest is local/unpackaged; publishing an installable bundle also
 requires the host's exact `requires_octet` pin and independently reviewed packaging.
+The release catalog now includes this adapter with locked npm dependencies and
+an empty factory configuration. Publication is still a separate gate. When using
+an installed bundle, generate configuration in a separate directory rather than
+overwriting integrity-checked bundle files; see [Bring your Pi extensions](../../docs/pi-compatibility.md#bring-your-pi-extensions).
 
 The runner accepts `node runner.mjs --config /absolute/bridge.json`, with:
 
@@ -38,8 +84,12 @@ The runner accepts `node runner.mjs --config /absolute/bridge.json`, with:
 ```
 
 Generated config additionally retains entrypoint SHA-256 and exact static
-registration metadata. A changed entrypoint/catalog fails startup and requires
-explicit reconfiguration. These hashes are change detection, not a sandbox or
+registration metadata. A changed entrypoint is rejected; a multi-factory bridge
+reports and skips that factory. Other static registration changes require explicit
+reconfiguration; late tools use the negotiated host-acknowledged catalog instead.
+Static shortcut declarations stay reserved when a factory is
+skipped, but their missing handlers refuse execution; reconfigure to remove them.
+These hashes are change detection, not a sandbox or
 an integrity claim over an extension's entire import graph. The shipped config
 is empty and does not discover/import any Pi user installation.
 
@@ -55,7 +105,8 @@ providers or model calls. There is no coding-agent npm dependency. jiti keeps
 its default content-hashed transpile cache, as in Pi. Pure context helpers and
 command-argument parsing/path normalization are adapted from Pi 1.0.2 (tag
 `v1.0.2`, commit `cd32f7725fdbddbaecdff5b1e68491563394e0ca`) under its [MIT
-license](LICENSE.pi); no Pi session store or agent runtime is imported.
+license](LICENSE.pi); emulated helpers do not import Pi's session store or agent
+runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
 
 ## Implemented surface
 
@@ -63,9 +114,20 @@ license](LICENSE.pi); no Pi session store or agent runtime is imported.
   exports on both coding-agent aliases. They operate on caller-supplied Pi data,
   including compaction-aware branches and context edits; they neither transform
   live native provider requests nor read/write the canonical session.
-- Static `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`,
-  synchronous `getFlag`, and ordered `on` callbacks. Names/schemas are captured
-  before activation; runtime registrations are refused.
+- `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`,
+  synchronous `getFlag`, and ordered `on` callbacks. Initial names/schemas are
+  captured before activation. Late tool registration/replacement requires
+  `dynamic_tools` and waits synchronously for the native catalog ACK; refusal
+  leaves the accepted tool unchanged. Late `on` callbacks can use already
+  subscribed native hooks. New command/shortcut/flag names remain startup-bound.
+- Reviewed builtin overrides use exact `capabilities.builtin_tool_overrides`
+  grants for captured names among `read`, `search`, `edit`, `write`, `bash` and
+  `powershell`. Startup and late registrations must match the native initialize
+  grant and negotiated feature; `bridge.json` cannot grant authority. The
+  owner-scoped replacement keeps extension effects, scheduling, metering and
+  unsafe replay classification, not the displaced builtin's privileges. Native
+  retirement restores the builtin without retargeting frozen calls or replaying
+  unsafe historical calls. First-party external tool conflicts remain refused.
 - Real sync/async `getArgumentCompletions` callbacks through negotiated native
   `autocomplete`. Registration follows initialization and requires admission.
   Callbacks receive Pi's complete raw argument prefix, with whitespace/quotes and
@@ -86,8 +148,11 @@ license](LICENSE.pi); no Pi session store or agent runtime is imported.
 - A shared in-process `pi.events.on/once/off/emit` bus preserving synchronous
   order, object/function identity and retained owner contexts across factories.
 - Text/image tool results, `details` retained in `metadata.pi_details`, explicit
-  error results, structured outputs and cancellation signals. Images are published
-  through the verified native artifact service, never caller-selected host paths.
+  error results, structured outputs and cancellation signals. Optional undefined
+  object members are omitted only in final, progress and hook-result tool details;
+  explicit null survives. Schemas, structured content, other JSON contracts and
+  explicit undefined array elements remain strict. Images are published through
+  the verified native artifact service, never caller-selected host paths.
   `onUpdate` snapshots preserve text/images/details/structured content in a bounded
   native ephemeral result channel; late callbacks are ignored. Nested callbacks
   use the same bounded request-local channel and never publish into the transcript.
@@ -105,11 +170,14 @@ license](LICENSE.pi); no Pi session store or agent runtime is imported.
   operations only when negotiated. Setters update local mirrors synchronously,
   await host acknowledgement at live boundaries, roll back refused mirror writes,
   and report background refusals. `appendEntry` instead updates only after a known
-  synchronous durable receipt (see below). Assistant/system provider turns and custom
-  transcript display are explicitly unsupported.
+  synchronous durable receipt (see below). Raw assistant/system message injection
+  remains unsupported; custom transcript presentation has its own negotiated gate
+  described below.
 - `ctx.ui.custom`, footer/header/widget/editor factories, safe component focus,
-  input listeners and overlay composition. JS components, callbacks and timers
-  stay live in this process. Only printable text and bounded safe SGR snapshots
+  input listeners and overlay composition. Custom factories receive a read-only
+  snapshot of the actual native keybindings, including user overrides and reloads;
+  missing snapshots/actions refuse rather than inventing Pi defaults. Host Ctrl+D
+  and Ctrl+G remain reserved. JS components, callbacks and timers stay live in this process. Only printable text and bounded safe SGR snapshots
   cross the wire; Rust paints cached lines and never calls JS synchronously.
 - `setStatus` is local footer-provider metadata, not an assertion that every
   frontend displays ambient chrome. The compatibility palette is local, not a
@@ -132,15 +200,16 @@ license](LICENSE.pi); no Pi session store or agent runtime is imported.
   open reply establishes the mount identity; seeding finishes before ordered input
   dispatch, and the first component frame awaits its captured checkpoint ACK.
   Rescue discards undispatched events immediately, never replaying them into the
-  native editor. Current native qualification is pending below.
+  native editor. Original rainbow paced and immediate-burst native qualification
+  is recorded below; arbitrary editors remain unqualified.
 - Only fenced `composer/set` editor checkpoints from the mounted editor context
   have independent local lifetime while the opening request is live. Other reverse
   calls retain their live-parent attachment. The real parent ID, full owner and
   AbortSignal stay intact. Genuine request/child cancellation still aborts work,
   including cancellation after the opening reply. Nonretained operations require
   the actual live request; numeric ID reuse cannot revive an old captured context.
-  Native admission needs the corresponding narrow checkpoint-lifetime rule;
-  adapter-only tests cannot qualify it.
+  Native admission implements the corresponding narrow checkpoint-lifetime rule;
+  adapter tests alone cannot qualify it.
 - Same-owner `setEditorText` and `pasteToEditor`, including cross-factory callers,
   mutate the active custom component and await its fenced checkpoint. Paste uses
   the component's real cursor API, never an invented append. Without a custom
@@ -152,11 +221,33 @@ API 0.4 lifecycle hooks, `tool_call`/`tool_result` to tool hooks, and
 `turn_start`/`turn_end` use awaited native `model_turn_start`/`model_turn_end`
 callbacks with a real session-leaf consumer, not whole-run `turn/started` or
 `turn/settled` notifications. Whole-run observations remain `agent_start`/`agent_end`.
-Other negotiated tool/message/compaction/model/dialog observations are dispatched
-in order. Events expose only facts actually supplied by octet; reading absent Pi
-fields (for example an `agent_end.messages` array) or returning an unapplied
-transformation/veto fails explicitly. Command argument arrays join with spaces;
-the wire cannot reconstruct original shell quoting.
+Message observations now carry `message`, accumulated text updates carry
+`assistantMessageEvent`, and `agent_end.messages` contains the run-local observed
+messages. Message and `agent_end` observers request native `before_prompt` and
+`model_turn_end` hooks even without a Pi `turn_end` subscriber. These supply user
+text and committed assistant messages with paired tool results before `turn_end`.
+The assistant's exact persisted usage record, linked by entry ID, supplies final
+usage, available cost and supported stop reasons to `message_end`, `turn_end` and
+`agent_end`. Current model selection and aggregate session usage are never used
+for these final facts. Custom message payloads pass through unchanged.
+
+A stream starts with Pi 1.0.2's provisional zero usage and `pending` stop reason.
+When no committed observation is available (including projection failures),
+settlement removes those placeholders and selected-model identity rather than
+publishing them as final facts. Reading unavailable final fields fails explicitly.
+Whole-run failure/cancellation is not an assistant provider stop reason: a run
+can fail after a successful response. Cancelled runs still settle an open partial.
+History is bounded to 8192 messages / 4 MiB; overflow is reported rather than
+returning a truncated transcript.
+
+This is not complete Pi event parity: subscriptions determine which facts the
+native host supplies, user/stream timestamps are adapter observation times, and
+tool-result message boundaries arrive with the model-turn end hook rather than
+each tool execution. Missing final usage/provider/stop metadata is not invented.
+Other negotiated tool/compaction/model/dialog observations are dispatched in order.
+Reading unavailable Pi fields or returning an unapplied transformation/veto fails
+explicitly. Command argument arrays join with spaces; the wire cannot reconstruct
+original shell quoting.
 
 **pi-clm 1.0.0 is not qualified.** Unchanged pinned registration capture now
 succeeds with native per-model-turn mappings; no whole-run aliases are installed
@@ -179,9 +270,12 @@ candidate and security policy; historical passes do not qualify changed source.
 `session_leaf` grant. Ordered awaited callbacks can replace messages or mutate the
 list/content in place. The native system stays separate. Only canonical messages
 and system are returned, never replacement tools, credentials, route or Session.
-Text, tool calls/results and Pi custom messages have explicit translations; media,
-opaque reasoning/provider continuations and unsupported roles fail rather than lose
-data. Missing native timestamps, usage and historical provider identities are not
+Text, tool calls/results and Pi custom messages have explicit translations.
+Context callbacks can retain unchanged, provenance-bound OpenAI encrypted reasoning
+and Anthropic redacted thinking while editing other messages. The original native
+state replays unchanged; copied or modified opaque signatures are refused. Read-only
+lifecycle observations confer no replay authority. Unsupported media, continuations
+and roles fail rather than lose data. Missing timestamps, usage and historical provider identities are not
 invented. Native validation/budgeting remains authoritative.
 
 `appendEntry` is now **synchronous void**: an independent worker owns the sole
@@ -201,6 +295,12 @@ Negotiated `pipeline_hooks_v1` dispatches actual `before_provider_request`,
 JSON, header mutation/deletion patches, and real status/header arrival respectively,
 not canonical context or inferred stream completion. Private callback exceptions
 are redacted. Native code polices reserved headers and effects before send.
+
+The original Anthropic-attribution provider remains blocked: builtin provider
+inheritance is unsupported, and its direct HTTP callback requires a raw OAuth
+credential. Native credentials are not exported to the adapter. This needs an
+explicit credential/transport contract decision, not a dummy token or a weakened
+registration check.
 
 Actual awaited `session_before_compact`/`session_compact` and
 `session_before_tree`/`session_tree` hooks carry native session-leaf consumers.
@@ -237,18 +337,33 @@ compatibility gaps, not completed parity cases.
 Per-model observations carry the actual iteration index and boundary time. End
 follows the durable assistant plus its paired tool results, including native async
 settlement; retries do not duplicate start. The adapter projects representable text
-and tool messages with actual entry timestamps, including batched tool results,
-but does not invent provider identity, usage or stop reason. Opaque/media/scheduling
-projections still need repair. Model-turn callbacks may append private entries
+and tool messages with actual entry timestamps, including batched tool results.
+The native `assistant_metadata` payload contains `assistant_entry_id`, the
+recorded model, usage, optional native cost and optional stop reason from the
+matching persisted `UsageRecord`. The adapter validates entry/model correlation,
+preserves token totals and nonzero cache/reasoning subsets, and converts stored
+microdollar cost categories plus the total picodollar remainder to Pi dollars.
+Unpriced usage remains readable; reading unavailable cost explicitly refuses.
+`end_turn`, `stop_sequence` and `pause_turn` map to `stop`, `max_tokens` to `length`,
+`tool_use` to `toolUse`, and `refusal` to `error` with Pi's generic refusal message.
+Deferred/steered/unknown outcomes without a faithful Pi binding are reported,
+not converted to successful completion. Missing legacy accounting/stop reasons
+and historical provider identity are never invented. Unsupported media/scheduling
+projections remain separate gaps. Model-turn callbacks may append private entries
 through the live leaf consumer, but cannot veto already observed work or transform
 messages. A cancelled/failed turn need not have an end, and auxiliary compaction,
 gate and deferred-resume requests are not fabricated as logical model turns.
 
-These are source integrations, not native durability/provider/CLM qualification.
-The latest compaction service and model-turn Rust changes have not been compiled
-or tested while performance owns the heavy-build slot. Actual App/Agent captures
-remain required; `resource_paths/pi_app_tests.rs` supplies two ordinary nonempty factory
-integration tests without replacing the Agent or using a handwritten protocol peer.
+Full core-library suites and all 2,481 coding-agent tests pass on the integrated
+source (three coding-agent tests remain ignored), including bounded native
+compaction and model-turn persistence coverage. Non-resource factories also join
+deferred startup before command admission through the existing interactive or
+headless pump, without loading resources or changing themes. Native regressions
+cover startup ordering, exactly-once headless startup and failed-worker refusal.
+These do not qualify full provider parity or CLM's seven original-package gates.
+`resource_paths/pi_app_tests.rs` also covers ordinary nonempty factories through
+the actual App/Agent, without replacing the Agent or using a handwritten protocol
+peer; original-package and terminal acceptance remain separate gates.
 
 ## Transient MCP registrations (source integration)
 
@@ -279,18 +394,17 @@ prompt descriptions, HTTP/OAuth/provider credentials, `${NAME}`/`!command` and
 home expansion, Pi tool namespace spelling (native stable hashed names remain),
 and progress-reset timeout semantics. Native package limits still apply (32
 adapter registrations; the manager's configured-server, argv, env and timeout
-ceilings). No real Rust App acceptance is claimed by adapter or local Python
-tests; ledger row 21 remains partial until the native path qualifies.
-The offline real-App acceptance module is `extensions/mcp_native_tests.rs` in
-the coding-agent crate (reviewed configure, native discovery, real Agent tools,
-policy, durable results, replacement/removal and owner cleanup). Run it after
-integrating the source patch with:
+ceilings). Ledger row 21 remains partial for those explicit gaps.
+The offline real-App module `extensions/mcp_native_tests.rs` now passes all three
+cases: reviewed configure, native discovery, real Agent execution and durable
+results, replacement/removal/owner cleanup, headless startup and refusal without
+the resident. Tests use a private valid config and disposable HOME. Headless
+commands service owner-fenced reverse requests without implicitly acquiring a
+composer; explicit UI operations still require a real frontend. Reproduce with:
 
 ```sh
 cargo test -p octet-coding-agent --lib --locked --offline pi_mcp_native -- --nocapture
 ```
-
-No Cargo acceptance was run during this bounded adapter handoff.
 
 ## Resource discovery boundary
 
@@ -306,6 +420,8 @@ its existing ordered hook queue, snapshots handlers in factory/registration orde
 awaits each callback, and replies only
 `{resource_paths:{skill_paths:[],prompt_paths:[],theme_paths:[]}}` with actual results.
 There is no generic disposition/context/notification envelope or cached old roots.
+Reviewed imported themes precede factory paths in this reply and may include a
+`default_theme` file preference, subject to [native admission and selection](../../docs/extensions/resource-paths.md).
 Undefined/omitted contributions are empty; null, malformed arrays, sparse arrays,
 unknown fields and unsupported transformations fail explicitly. Ordinary callback
 exceptions are diagnosed with factory provenance and later callbacks run (Pi policy);
@@ -376,7 +492,12 @@ sequences (including original Doom's `wantsKeyRelease`). Ctrl+G and Ctrl+D remai
 host-reserved. `ui/mouse` reconstructs SGR mouse input. The original drawing
 extension's exact known `1000/1002/1006` enable/disable writes are interpreted
 **only as capture intent** before `ui/open {mouse_capture:true}`; no raw escape is
-written to a terminal. Other direct terminal-control writes fail explicitly.
+written to a terminal. A single complete OSC 777 desktop-notification write is
+decoded into a bounded `ui/chrome` `desktop_notification` request with the actual
+foreground owner. Only the Rust renderer emits the escape, after host admission;
+OS delivery depends on terminal support. Embedded controls, oversized text and
+headless/unowned calls are refused. Other direct terminal-control writes fail
+explicitly.
 
 Stdout is exclusively a captured serialized RPC writer. Console and direct
 plain `process.stdout.write` calls are bounded stderr diagnostics. Transport has
@@ -393,11 +514,48 @@ EOF/crash exits and the host owns final process-tree cleanup. Trusted code can
 still access OS facilities directly: this isolation is protocol discipline,
 not security confinement.
 
+### Transcript presentation
+
+Negotiated API 0.4 `transcript_render_v1` requires `remote_ui` and an installed
+interactive frontend consumer. Generic runtime configuration stays default-off;
+the active native terminal and Tern consume the same immutable presentation
+snapshots. This supports tool call/result/shell renderers, `registerToolRenderer`,
+`registerMessageRenderer`, `registerEntryRenderer` and
+`registerMarkdownTransformer` without render-thread RPC or a second renderer.
+Markdown transformations never alter canonical blocks, durable session data or
+provider content. Hidden messages stay hidden; private-entry requests are
+namespace-filtered before cloning or dispatch. Unrendered private entries remain
+invisible.
+
+Work is bounded to four async jobs, a 500 ms aggregate per-job deadline and a
+128-frame / 4 MiB presentation cache. Owner/process generation, source/content
+revision, geometry, disclosure, theme and session fences reject stale replies.
+Failures and older sources outside the recent presentation window keep native
+fallback instead of spinning retries. Native driver/cache/hydration and active-Tern
+projection tests pass. Real-App acceptance with the actual adapter also passes
+controlled native read execution, canonical persistence, invalidation, resize and
+active Tern. These cases do not establish complete renderer/UI or corpus parity.
+
 ## Verification
 
 ```sh
 npm test --prefix extensions/octet-pi-compat
+# Optional read-only managed Pi 1.0.2 helper/color integration (isolated HOME):
+PI_THEME_AGENT_DIR=/absolute/pi-agent node --test extensions/octet-pi-compat/test/runtime-theme.test.mjs
+# Optional guarded execution of the unchanged reviewed hashline factory:
+PI_FLEET_HASHLINE_PATH=/absolute/pi-hashline-edit-pro/index.ts \
+PI_FLEET_AGENT_DIR=/absolute/pi-agent \
+  node --test extensions/octet-pi-compat/test/hashline-original.test.mjs \
+    extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
+
+The latest bounded adapter run covered 566 tests in two batches with a disposable
+HOME: **539 passed, 27 skipped, zero failed**. The separate original-hashline/override run passed all
+8 tests: installed-route selection, native-style reviewed grants, session-start
+active-tool ACKs, real hashed text read, anchored replacement and PNG execution
+with verified artifact bytes/digest. Its isolated file/network/child-process
+guards reported zero violations. This uses real original code and an adapter
+subprocess with a scripted RPC host, not full native App/PTY acceptance.
 
 Deterministic synthetic-host subprocess tests cover registration, isolated output,
 owner-retained frames, cancellation/EOF/malformed transport, backpressure, shared
@@ -417,31 +575,29 @@ Optional acceptance tests load original files unchanged via `PI_DOOM_PATH` /
 when sources/assets are unavailable, never download or copy them, and exercise
 real Doom WASM animation/resume, powerline footer snapshots, drawing mouse export,
 and an animated CustomEditor. Synthetic-host acceptance does not establish actual
-terminal painting. The separate Rust/frontend PTY suite has passed unchanged Doom,
-drawing, the powerline footer, and terminal restoration in actual octet. Native
-custom-editor draft restoration remains **unqualified**. The strict paced rainbow
-probe passes input, post-rescue native draft/editability (including a later edit),
-resize and terminal restoration against the previously qualified macOS host
-binary. It includes a grace period and also passed against the baseline adapter;
-it does not prove in-flight handoff correctness or qualify a newly built host.
+terminal painting. Fresh Rust/frontend PTYs pass unchanged Doom and the powerline footer, including
+resize, close and terminal restoration without follow-up input. Original `/draw`
+acceptance remains historical; these are observed working-tree binaries, not a
+frozen release candidate.
 
-The historical stricter `--burst` probe reproduced loss of the complete draft
-after Ctrl+G without that grace period: the old wire allowed unfenced serial
-writes after rescue. That red evidence remains intact. The new adapter implements
-the proposed native checkpoint seam and synthetic-host tests cover metadata,
-matching ACKs, captured-frame barriers, no-op input, late echoes, immediate
-observed retirement, refusal and setter routing. These do **not** qualify the
-native host implementation: its DTO integration/build and current-source PTY
-probes must pass before claiming immediate-rescue restoration. The new adapter
-intentionally refuses that historical host for custom editors. Do not rely on
-arbitrary draft preservation or assume unacknowledged input was recovered.
-Startup/Pi runtime performance parity and Doom aspect ratio are not established
-by these editor probes.
+The unchanged original rainbow editor now passes both paced input (with a grace
+period) and strict `--burst` input (without one) on a freshly built native CLI.
+Both probes verify the host mount acknowledgement, matching Ctrl+G retirement,
+a complete native editable draft in a newer frame, a later native edit, resize
+and shutdown/terminal restoration. This closes the original immediate-rescue
+draft-loss regression, not arbitrary-editor or full Pi parity. Historical red
+burst evidence remains intact; it is not the result for this candidate.
+
+The checkpoint protocol intentionally refuses historical hosts without mount/input
+fences. Recovery still exposes the last host-committed draft, not a promise that
+unacknowledged input was recovered; stale effects cannot overwrite later native
+edits. Startup/Pi runtime performance parity and Doom aspect ratio are not
+established by these editor probes.
 
 ```sh
 python3 extensions/octet-pi-compat/test/native-editor.py /absolute/octet \
   --editor /absolute/reviewed/rainbow-editor.ts
-# Required outstanding gate: rescue immediately after a complete burst-input frame.
+# Strict regression probe: rescue immediately after a complete burst-input frame.
 python3 extensions/octet-pi-compat/test/native-editor.py /absolute/octet \
   --editor /absolute/reviewed/rainbow-editor.ts --burst
 # Optional offline comparison against source-extracted pure Pi 1.0.2 functions:

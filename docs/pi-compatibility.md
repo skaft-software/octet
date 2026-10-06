@@ -2,13 +2,15 @@
 
 Octet can load explicitly reviewed Pi extension factories through the optional
 `extensions/octet-pi-compat` Node package. **Rust remains the agent and terminal
-host.** The bridge does not run, embed, import, or install Pi's coding-agent
-runtime. Ordinary octet use and native executable extensions do not need Node.
+host.** The fallback loads installed Pi helpers in the extension process, not a
+second Pi CLI or agent loop. Ordinary octet use and native executable extensions
+do not need Node.
 
 **Source preview:** unchanged Doom, drawing, and powerline-footer factories have
-passed actual octet binary/PTY acceptance as well as synthetic-host tests. Native
-custom-editor draft restoration still fails qualification; full Pi API parity
-and a startup-speed comparison are not established.
+passed actual octet binary/PTY acceptance as well as synthetic-host tests. The
+original rainbow editor now passes paced and immediate-burst rescue on a fresh
+native binary, including retained editable draft, resize and shutdown. Full Pi API
+parity and a startup-speed comparison are not established.
 
 The contract is **Pi 1.0.2's public extension API**, replicated under Octet's
 subprocess JSON-RPC protocol. octet 0.8.2 is pinned to exactly Pi 1.0.2: the
@@ -20,20 +22,55 @@ Arbitrary third-party extensions, private Pi internals, the Pi CLI and child SDK
 are not targets. The [package README](../extensions/octet-pi-compat/README.md)
 describes the adapter; historical package acceptance is not public API parity.
 
-## Explicit local setup
+<a id="explicit-local-setup"></a>
 
-Use an absolute path to a reviewed original extension entrypoint. Review its
-imports as well: loading a factory executes ordinary unsandboxed JavaScript.
-Do not point the adapter at an entire unknown npm installation.
+## Bring your Pi extensions
+
+Requires Node 22.19+ or Bun and an existing managed **Pi 1.0.2** installation. From a
+source checkout, install the adapter's dependencies once:
 
 ```bash
 cd /absolute/path/to/octet/extensions/octet-pi-compat
 npm ci --ignore-scripts --no-audit --no-fund
-
-node configure.mjs --reviewed \
-  --output /absolute/workspace/.octet/extensions/octet-pi-compat \
-  /absolute/path/to/reviewed-extension.ts
 ```
+
+Then import your enabled Pi extensions with one setup command:
+
+```bash
+node configure.mjs --reviewed --from-pi \
+  --output "$HOME/.octet/pi-import/octet-pi-compat"
+octet --extension-dir "$HOME/.octet/pi-import" --enable-extension octet-pi-compat
+```
+
+Setup uses Pi's resolver, tries each factory on octet's emulated path, then tries
+the installed-Pi fallback if loading fails. It prints the chosen route or a skip
+reason for every entry. Broken factories and conflicting registrations are
+skipped. Reviewed builtin overrides receive exact manifest grants and require
+native `builtin_tool_overrides_v1` admission; first-party ownership conflicts
+remain refused. Unsupported tool-schema constraints cause an explicit skip, not
+constraint removal. Supported patterns are enforced. Loading is not proof that an extension's commands, hooks or UI work.
+Failing lifecycle observation callbacks are reported and isolated; permission/veto
+hooks and failed host mutations still fail closed. Replace `node` with `bun` to
+reuse Bun; generated configuration records the executable.
+
+`--reviewed` accepts executing the enabled factories and their imports, including
+installed Pi code on the fallback route, with your OS permissions. Setup does not
+import credentials, change Pi settings, or enable the bridge. It snapshots enabled
+Pi palettes as native `pi-*` themes and makes the selected palette this session's
+startup preference; explicit `--theme`/`OCTET_THEME` wins. Saved settings are not
+rewritten. Pi helper/remote-component colors use the imported snapshot; later
+native theme changes are not yet synchronized to those components. Missing
+packages are not installed. The Pi install location is recorded, so a different
+HOME at runtime does not hide it. A Pi upgrade requires reconfiguration.
+
+After matching release assets are published, `octet extension install octet-pi-compat`
+installs the adapter with its locked npm dependencies. Run its
+`~/.octet/extensions/octet-pi-compat/configure.mjs` with the same arguments above.
+Keep the generated output separate from the installed bundle; don't overwrite
+its integrity-checked files.
+
+To select factories manually instead, replace `--from-pi` with absolute paths to
+reviewed entrypoints.
 
 The helper captures registrations and writes a manifest plus a bridge
 configuration containing entrypoint hashes. It does **not** enable or trust the
@@ -53,6 +90,22 @@ commands](extensions.md). Alternatively use octet's interactive
 extension manager. Keep the Node package at its configured absolute path;
 the generated manifest references it. Node dependencies are extension-local.
 
+## Message observations
+
+The adapter supplies Pi `message_start/update/end` payloads and run-local
+`agent_end.messages` from the prompt, text stream and subscribed model-turn hooks.
+Committed assistant/tool messages replace the partial observation before
+`turn_end`; cancellation or a failed projection settles the streamed partial.
+Message observers request the corresponding hooks. Final model/usage/cost/stop
+facts come only from the assistant's linked persisted record, never aggregate
+session usage or the currently selected model. Missing facts remain explicitly
+unavailable. Exact tool-execution boundary parity remains incomplete; see the
+[adapter contract](../extensions/octet-pi-compat/README.md#implemented-surface).
+A complete, bounded OSC 777 desktop-notification write is translated to an
+owner-fenced native notification intent. The host renderer emits it; terminal
+support and OS delivery remain terminal-dependent. Other direct terminal control
+writes stay refused.
+
 ## UI execution model
 
 Pi components render inside the adapter, using selected pinned Pi TUI utilities
@@ -68,21 +121,27 @@ receives secret-free host model/session/context snapshots instead of fabricated
 usage or OAuth data. Unavailable capabilities fail explicitly. Custom editor
 state uses the host composer handoff rather than a separate agent input loop.
 `Ctrl+G` rescues a focused component; `Ctrl+D` remains host-owned shutdown.
+Settings-only standard Pi editors (no inherited editor-method overrides) keep
+octet's native editor and slash menu. Their prompt history seeds the native
+composer through bounded, owner-fenced `composer/history`; native prompts remain
+newer and the current draft is unchanged. Custom behavior still mounts remotely.
+Border-color translation for settings-only editors is not yet implemented.
 
 Raw extension terminal writes are not allowed into frames. The adapter recognizes
-only allowlisted mouse-mode escape writes as capture intent, which the host can
-refuse. Do not use unrelated Pi terminal patches, private session internals, or
+allowlisted mouse-mode writes as capture intent and bounded complete OSC 777
+writes as desktop-notification intent, both subject to host refusal. Do not use unrelated Pi terminal patches, private session internals, or
 session-file writers as compatibility assumptions.
 
-## Installed-Pi fallback (experimental, opt-in)
+<a id="installed-pi-fallback-experimental-opt-in"></a>
 
-If a reviewed factory imports a Pi export that Octet's shims lack, or one of Pi's
-built-in tool factories (`createBashTool`, `createReadToolDefinition`, …), the
-adapter refuses to start it and reports `pi_compat_fallback_eligible` with the
-names it found. You can then load that bridge against the Pi packages from your
-managed Pi install (`~/.pi/agent`, Pi 1.0.2 only) with `--pi-runtime installed`
-or `"pi_runtime": "installed"` in `bridge.json`. No Octet prompt offers this
-yet; a permission prompt is planned.
+## Installed-Pi fallback (experimental)
+
+`--from-pi --reviewed` authorizes automatic fallback during setup and records a
+route for each accepted factory. Manual entrypoint setup still defaults to the
+emulated path. Its `pi_compat_fallback_eligible` diagnostic names missing Pi
+exports; explicitly selected `--pi-runtime installed` or
+`"pi_runtime": "installed"` remains available for reviewed manual configurations.
+Only managed Pi 1.0.2 is accepted.
 
 This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
 `pi-agent-core`, `pi-ai` and `pi-tui`) inside the extension process:
@@ -97,7 +156,7 @@ This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
   read credentials, write Pi config or trust, start MCP servers, or own the
   terminal or clipboard are refused, as are names Octet has not classified.
 - A missing Pi install, or any version other than 1.0.2, fails loudly; nothing
-  falls back silently.
+  downloads or switches Pi versions silently.
 
 ## Qualification and reproduction
 
@@ -110,9 +169,18 @@ drawing, the powerline footer, and terminal restoration on macOS. That run
 observed an 88.1 ms first frame, a 270.0 ms Doom open, 31 frames/sec while turning,
 and a 26.5 ms close. These are one-run observations, not a Pi speed comparison.
 
-Native rainbow-editor acceptance failed to restore the complete draft after
-rescue. Do not rely on custom-editor draft preservation yet. SDK/child-agent
-semantics, private patches, and the wider extension corpus remain unqualified.
+Fresh native rainbow-editor acceptance passes both paced input and burst input
+without a grace period. The probe verifies the host mount acknowledgement,
+matching Ctrl+G retirement, complete native draft in newer editable frames,
+resize and Ctrl+D terminal restoration. This closes that original draft-loss
+regression, not arbitrary-editor or full Pi parity. Private patches and the wider
+extension corpus remain unqualified.
+
+The original Anthropic-attribution provider remains blocked: builtin provider
+inheritance is unsupported, and its direct HTTP callback requires a raw OAuth
+credential. Native credentials are not silently exported to the adapter. This
+needs an explicit credential/transport contract decision, not a dummy token or a
+weakened registration check.
 
 ```bash
 node --test extensions/octet-pi-compat/test/adapter.test.mjs

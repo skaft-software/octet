@@ -297,6 +297,9 @@ pub(super) fn validate_host_request(
     match operation {
         HostRequestOperation::Composer(operation) => match operation {
             ExtensionComposerOperation::Get => Ok(()),
+            ExtensionComposerOperation::History { entries } => {
+                ExtensionComposerOperation::validate_history(entries)
+            }
             ExtensionComposerOperation::Checkpoint {
                 text, checkpoint, ..
             } => {

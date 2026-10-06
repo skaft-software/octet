@@ -14,7 +14,7 @@ use octet_agent::extension_process::{
 
 const FIXTURE: &str = r#"#!/usr/bin/env python3
 import json, os, sys, time
-surfaces, opens, closes, hook_outputs = {}, {}, {}, set()
+surfaces, opens, closes, chromes, hook_outputs = {}, {}, {}, {}, set()
 counter = 0
 
 def send(value):
@@ -65,6 +65,12 @@ for line in sys.stdin:
     elif method == 'command/execute':
         counter += 1
         args = p.get('arguments', [])
+        if args and args[0] == 'chrome':
+            id = 'chrome-' + str(counter)
+            chromes[id] = m['id']
+            send(dict(id=id, method='ui/chrome', params=dict(parent_request_id=m['id'],
+                resource_owner=p['context']['resource_owner'], chrome=json.loads(args[1]))))
+            continue
         s = dict(id='shared-editor' if 'same' in args else 'screen-' + str(counter),
             parent=m['id'], owner=p['context']['resource_owner'],
             hold='hold' in args, checkpoint='checkpoint' in args, barriers='barriers' in args, revision=0)
@@ -123,6 +129,10 @@ for line in sys.stdin:
     elif method == 'shutdown':
         result(m['id'], {})
         break
+    elif 'id' in m and m['id'] in chromes:
+        parent = chromes.pop(m['id'])
+        if 'error' in m: send(dict(id=parent, error=m['error']))
+        else: output(parent)
     elif 'id' in m and m['id'] in opens:
         s = opens.pop(m['id'])
         if 'error' in m:
@@ -302,6 +312,63 @@ fn wire(path: &PathBuf) -> Vec<serde_json::Value> {
 }
 
 #[tokio::test]
+async fn remote_ui_detached_close_repaints_without_followup_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, log) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    // The command returns while the surface stays mounted, as Doom does.
+    command(&mut extensions, &mut frontend, &["fullscreen"]).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            extensions.drain_events_for_shell(&mut frontend.shell);
+            let frame = frontend.shell.dump_rendered_frame().await.unwrap();
+            if frame.iter().any(|line| line.contains("REMOTE FRAME")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the detached component must paint before closing");
+    assert!(extensions.route_remote_ui_event(
+        &mut frontend.shell,
+        &key(KeyCode::Char('q'), KeyEventKind::Press, KeyModifiers::NONE),
+    ));
+    // Pump requests and await the actual close ACK, but never force a render,
+    // insert text, or send another event that could hide a missing render wake.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            extensions.drain_events_for_shell(&mut frontend.shell);
+            if let Some(reply) = wire(&log)
+                .into_iter()
+                .find(|message| message["id"] == "close-screen-1")
+            {
+                assert!(reply["result"].is_object(), "{reply}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the extension must observe its close acknowledgement");
+    assert!(extensions.remote_ui.is_empty());
+    let native_frame = frontend.shell.dump_rendered_frame().await.unwrap();
+    assert!(
+        !native_frame
+            .iter()
+            .any(|line| line.contains("REMOTE FRAME")),
+        "retired component left its last frame painted: {native_frame:?}"
+    );
+    assert!(
+        native_frame
+            .iter()
+            .any(|line| line.contains("untouched draft")),
+        "the close acknowledgement must also schedule native restoration: {native_frame:?}"
+    );
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
 async fn remote_ui_close_then_paste_publishes_focus_within_one_request_drain() {
     use octet_agent::extension_process::ExtensionEvent;
     for (character, expected_requests) in [('p', 1), ('v', 2)] {
@@ -410,6 +477,48 @@ async fn remote_ui_session_start_services_reverse_requests_without_blocking_boot
             .count(),
         1
     );
+}
+
+// A real terminal runs session_start before its first frame. Pi extensions
+// mount footers, widgets and editors there, so startup must admit them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_ui_session_start_mounts_before_the_first_frame() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, log) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    crate::tui::view::tests::begin_startup(&frontend.shell);
+    extensions.start_session_lifecycle();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            extensions.drain_events_for_shell(&mut frontend.shell);
+            extensions.drain_background_updates();
+            // Finished hook tasks are pruned on the next drain, so wait for
+            // the fixture's accepted open instead.
+            if wire(&log)
+                .iter()
+                .any(|message| message["id"] == "open-hook" && message["result"].is_object())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("session_start settles during startup");
+    frontend.shell.finish_startup();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            extensions.drain_events_for_shell(&mut frontend.shell);
+            let frame = frontend.shell.dump_rendered_frame().await.unwrap();
+            if frame.iter().any(|line| line.contains("REMOTE FRAME")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the footer mounted during startup paints after the first frame");
+    extensions.release_binding().await;
 }
 
 #[tokio::test]
@@ -724,6 +833,202 @@ fn remote_ui_normalizes_key_kinds_and_zero_based_mouse() {
     )
     .unwrap();
     assert_eq!((mouse.x, mouse.y, mouse.wheel_delta), (0, 0, 1));
+}
+
+#[tokio::test]
+async fn native_theme_chrome_reads_selects_and_refuses_unknown_without_callbacks() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, log) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    let initial = frontend
+        .shell
+        .extension_theme_get(None)
+        .expect("native active palette");
+    command(
+        &mut extensions,
+        &mut frontend,
+        &["chrome", r#"{"kind":"theme_get"}"#],
+    )
+    .await;
+    let first = wire(&log)
+        .into_iter()
+        .find(|message| message["id"] == "chrome-1")
+        .unwrap();
+    assert_eq!(first["result"], serde_json::json!({"theme": initial}));
+    command(
+        &mut extensions,
+        &mut frontend,
+        &[
+            "chrome",
+            r#"{"kind":"theme_get","name":"nonexistent-native-theme"}"#,
+        ],
+    )
+    .await;
+    let missing = wire(&log)
+        .into_iter()
+        .find(|message| message["id"] == "chrome-2")
+        .unwrap();
+    assert_eq!(missing["result"], serde_json::json!({"theme": null}));
+    command(
+        &mut extensions,
+        &mut frontend,
+        &[
+            "chrome",
+            r#"{"kind":"theme_set","name":"nonexistent-native-theme"}"#,
+        ],
+    )
+    .await;
+    let refused = wire(&log)
+        .into_iter()
+        .find(|message| message["id"] == "chrome-3")
+        .unwrap();
+    assert_eq!(refused["result"]["success"], false);
+    assert!(!refused["result"]["error"].as_str().unwrap().is_empty());
+    assert_eq!(refused["result"]["theme"], initial);
+    assert_eq!(frontend.shell.extension_theme_get(None).unwrap(), initial);
+    command(
+        &mut extensions,
+        &mut frontend,
+        &["chrome", r#"{"kind":"theme_list"}"#],
+    )
+    .await;
+    let listed = wire(&log)
+        .into_iter()
+        .find(|message| message["id"] == "chrome-4")
+        .unwrap();
+    assert_eq!(
+        listed["result"]["themes"],
+        serde_json::json!(frontend.shell.extension_theme_list())
+    );
+    for record in listed["result"]["themes"].as_array().unwrap() {
+        assert!(record["name"].is_string());
+        assert!(
+            record
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| matches!(key.as_str(), "name" | "path")),
+            "theme catalog contains metadata, not complete palettes: {record}"
+        );
+    }
+    command(
+        &mut extensions,
+        &mut frontend,
+        &["chrome", r#"{"kind":"theme_set","name":"Cards"}"#],
+    )
+    .await;
+    let selected = wire(&log)
+        .into_iter()
+        .find(|message| message["id"] == "chrome-5")
+        .unwrap();
+    assert_eq!(selected["result"]["success"], true, "{selected}");
+    let committed = frontend.shell.extension_theme_get(None).unwrap();
+    assert_eq!(selected["result"]["theme"], committed);
+    assert_ne!(committed, initial);
+    command(
+        &mut extensions,
+        &mut frontend,
+        &["chrome", r#"{"kind":"theme_get"}"#],
+    )
+    .await;
+    let reread = wire(&log)
+        .into_iter()
+        .find(|message| message["id"] == "chrome-6")
+        .unwrap();
+    assert_eq!(reread["result"]["theme"], committed);
+    assert!(
+        extensions.remote_ui.is_empty(),
+        "palette controls never mount a factory"
+    );
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_theme_selection_publishes_to_retained_mount_before_its_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, log) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    command(&mut extensions, &mut frontend, &["footer"]).await;
+    let owner = extensions.remote_ui.mounts[0].owner.clone();
+    command(
+        &mut extensions,
+        &mut frontend,
+        &["chrome", r#"{"kind":"theme_set","name":"Cards"}"#],
+    )
+    .await;
+    let committed = frontend.shell.extension_theme_get(None).unwrap();
+    let messages = wire(&log);
+    let update = messages
+        .iter()
+        .position(|message| {
+            message["method"] == "context/updated"
+                && message["params"]["host"]["theme"] == committed
+        })
+        .expect(
+            "retained component receives actual committed palette without another factory callback",
+        );
+    let receipt = messages
+        .iter()
+        .position(|message| message["id"] == "chrome-2")
+        .unwrap();
+    assert!(
+        update < receipt,
+        "palette replacement precedes synchronous selection receipt"
+    );
+    assert_eq!(
+        messages[update]["params"]["resource_owner"],
+        serde_json::json!(owner)
+    );
+    assert_eq!(messages[receipt]["result"]["theme"], committed);
+    assert_eq!(extensions.remote_ui.mounts.len(), 1);
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_theme_selection_cannot_mutate_a_ceded_terminal() {
+    use octet_agent::extension_remote_ui::ExtensionRemoteUiChrome;
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    let initial = frontend.shell.extension_theme_get(None).unwrap();
+    let process = extensions.processes[0].clone();
+    let owner = process
+        .current_context_for_resource_owner("remote-test-session")
+        .resource_owner
+        .unwrap();
+    let failure = extensions
+        .remote_ui
+        .apply(
+            process,
+            owner,
+            ExtensionRemoteUiOperation::Chrome {
+                chrome: ExtensionRemoteUiChrome::ThemeSet {
+                    name: "Cards".into(),
+                },
+            },
+            &mut frontend.shell,
+            true,
+        )
+        .unwrap_err();
+    assert_eq!(failure.0, ExtensionRequestFailure::NotForegroundOwner);
+    assert_eq!(frontend.shell.extension_theme_get(None).unwrap(), initial);
+    assert!(extensions.remote_ui.is_empty());
+    extensions.shutdown().await;
+}
+
+#[test]
+fn theme_catalog_bounds_refuse_complete_oversize_catalogs_without_truncation() {
+    let metadata = serde_json::json!({"name":"Native","path":"/trusted/native.toml"});
+    validate_theme_list(&vec![metadata.clone(); 128]).unwrap();
+    assert_eq!(
+        validate_theme_list(&vec![metadata; 129]).unwrap_err().0,
+        ExtensionRequestFailure::BoundsExceeded
+    );
+    let escaped = serde_json::json!({"name":"Native","path":"\u{1}".repeat(100_000)});
+    assert_eq!(
+        validate_theme_list(&[escaped]).unwrap_err().0,
+        ExtensionRequestFailure::BoundsExceeded
+    );
 }
 
 #[path = "editor_tests.rs"]

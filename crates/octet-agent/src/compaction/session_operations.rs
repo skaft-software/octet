@@ -29,6 +29,22 @@ pub enum SessionCompactionReason {
     Overflow,
 }
 
+/// Per-response facts from the usage ledger, linked to one durable assistant.
+/// This deliberately excludes session totals and the currently selected model.
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelTurnAssistantMetadata {
+    /// Exact assistant entry referenced by this usage record.
+    pub assistant_entry_id: EntryId,
+    /// Model recorded for this provider call, when available in the ledger.
+    pub model: Option<octet_ai::ModelId>,
+    /// Provider usage for this assistant alone, including cache/reasoning subsets.
+    pub usage: octet_ai::Usage,
+    /// Persisted native cost; absence means unpriced, not zero cost.
+    pub cost: Option<octet_ai::Cost>,
+    /// Recorded provider outcome; legacy records may lack a stop reason.
+    pub stop_reason: Option<octet_ai::StopReason>,
+}
+
 /// Actual prepared or committed session state, never a synthesized notification.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -83,6 +99,8 @@ pub enum SessionOperation {
         timestamp_ms: u64,
         /// Actual persisted assistant entry; never a reconstructed Pi message.
         assistant_entry: Entry,
+        /// Exact matching assistant usage record, if one was durably recorded.
+        assistant_metadata: Option<Box<ModelTurnAssistantMetadata>>,
         /// Actual paired result entries in durable commit order, including errors.
         tool_result_entries: Vec<Entry>,
     },
@@ -167,7 +185,10 @@ pub enum SessionOperationError {
     /// A callback exceeded the shared operation deadline.
     #[error("session operation hook deadline exceeded")]
     Deadline,
-    /// An extension or its append service failed; no automatic fallback.
+    /// An observation/interception callback failed without a host append failure.
+    #[error("session operation callback failed")]
+    Callback,
+    /// The private append service failed; no automatic fallback or continuation.
     #[error("session operation hook failed")]
     Hook,
     /// The prepared source is no longer the exact Session revision.
@@ -276,7 +297,7 @@ pub async fn run_session_operation_hooks(
         revision.validate(session)?;
         let Some(mut invocation) = hook
             .begin(session, operation)
-            .map_err(|_| SessionOperationError::Hook)?
+            .map_err(|_| SessionOperationError::Callback)?
         else {
             continue;
         };
@@ -286,7 +307,7 @@ pub async fn run_session_operation_hooks(
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Err(SessionOperationError::Cancelled),
-                _ = tokio::time::sleep_until(deadline) => return Err(SessionOperationError::Deadline),
+                _ = tokio::time::sleep_until(deadline) => break Err(SessionOperationError::Deadline),
                 live = ready => {
                     if !live { return Err(SessionOperationError::Hook); }
                     revision.validate(session)?;
@@ -294,7 +315,7 @@ pub async fn run_session_operation_hooks(
                     // Only this known committed leaf may advance the prepared source.
                     revision = SessionSourceRevision::capture(session)?;
                 },
-                result = &mut future => break result.map_err(|_| SessionOperationError::Hook)?,
+                result = &mut future => break result.map_err(|_| SessionOperationError::Callback),
             }
         };
         invocation
@@ -304,6 +325,9 @@ pub async fn run_session_operation_hooks(
         if cancellation.is_cancelled() {
             return Err(SessionOperationError::Cancelled);
         }
+        // Revalidate authority even when the callback itself failed: an
+        // observational warning must never conceal a retired append owner.
+        let decision = decision?;
         validate_decision(operation, &decision)?;
         match decision {
             SessionOperationDecision::Continue => {}

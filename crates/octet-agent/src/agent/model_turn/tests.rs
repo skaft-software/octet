@@ -16,7 +16,10 @@ enum Behavior {
     Continue,
     VetoStart,
     VetoEnd,
+    FailStart,
     FailEnd,
+    FailAppendEnd,
+    FailEndWithRetiredOwner,
     HoldEnd(Arc<Notify>),
 }
 
@@ -29,6 +32,8 @@ struct Observe {
 struct Invocation {
     future: Option<SessionOperationFuture>,
     leaf: Option<(SessionLeafConsumer, SessionLeafBinding)>,
+    fail_append: bool,
+    invalid_owner: bool,
 }
 impl SessionOperationInvocation for Invocation {
     fn take_future(&mut self) -> SessionOperationFuture {
@@ -40,7 +45,17 @@ impl SessionOperationInvocation for Invocation {
             None => Box::pin(std::future::pending()),
         }
     }
+    fn validate_current(&self, _: &Session) -> Result<(), String> {
+        if self.invalid_owner {
+            Err("owner retired".into())
+        } else {
+            Ok(())
+        }
+    }
     fn consume_next(&mut self, session: &mut Session) -> Result<(), String> {
+        if self.fail_append {
+            return Err("private persistence failed".into());
+        }
         let (consumer, binding) = self.leaf.as_mut().unwrap();
         assert!(consumer
             .consume_next(session, binding)
@@ -114,7 +129,10 @@ impl SessionOperationHook for Observe {
             match behavior {
                 Behavior::VetoStart if !is_end => Ok(SessionOperationDecision::Cancel),
                 Behavior::VetoEnd if is_end => Ok(SessionOperationDecision::Cancel),
-                Behavior::FailEnd if is_end => Err("private payload must not escape".into()),
+                Behavior::FailStart if !is_end => Err("private payload must not escape".into()),
+                Behavior::FailEnd | Behavior::FailEndWithRetiredOwner if is_end => {
+                    Err("private payload must not escape".into())
+                }
                 Behavior::HoldEnd(entered) if is_end => {
                     entered.notify_one();
                     std::future::pending().await
@@ -125,6 +143,8 @@ impl SessionOperationHook for Observe {
         Ok(Some(Box::new(Invocation {
             future: Some(future),
             leaf,
+            fail_append: is_end && matches!(self.behavior, Behavior::FailAppendEnd),
+            invalid_owner: is_end && matches!(self.behavior, Behavior::FailEndWithRetiredOwner),
         })))
     }
 }
@@ -519,25 +539,162 @@ async fn start_is_continue_only_and_failure_never_calls_provider() {
 }
 
 #[tokio::test]
-async fn end_veto_or_failure_retains_all_durable_tools_without_retry_or_next_model_call() {
-    for behavior in [Behavior::VetoEnd, Behavior::FailEnd] {
-        let mut f = fixture(
-            vec![vec![call("one", false)], text("must not dispatch")],
-            behavior,
-            true,
-            false,
-        );
-        let error = f.agent.complete("observe").await.unwrap_err();
-        assert!(error.to_string().contains("durable entries retained"));
-        assert!(!error.to_string().contains("private payload"));
-        assert_eq!(f.script.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            *f.trace.lock().unwrap(),
-            ["start:0", "provider:0", "tool:one", "end:0"]
-        );
-        assert_eq!(f.seen.lock().unwrap().len(), 2);
-        assert_eq!(result_ids(f.agent.session.entries()), ["call-one"]);
+async fn end_veto_retains_all_durable_tools_without_retry_or_next_model_call() {
+    let mut f = fixture(
+        vec![vec![call("one", false)], text("must not dispatch")],
+        Behavior::VetoEnd,
+        true,
+        false,
+    );
+    let error = f.agent.complete("observe").await.unwrap_err();
+    assert!(error.to_string().contains("durable entries retained"));
+    assert!(!error.to_string().contains("private payload"));
+    assert_eq!(f.script.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *f.trace.lock().unwrap(),
+        ["start:0", "provider:0", "tool:one", "end:0"]
+    );
+    assert_eq!(f.seen.lock().unwrap().len(), 2);
+    assert_eq!(result_ids(f.agent.session.entries()), ["call-one"]);
+}
+
+async fn completed_warnings(agent: &mut Agent) -> Vec<String> {
+    let mut run = agent.prompt("observe").await.unwrap();
+    let mut warnings = Vec::new();
+    let mut terminals = 0;
+    while let Some(event) = run.next().await {
+        match event {
+            AgentEvent::ExtensionObservationWarning { message } => {
+                assert_eq!(terminals, 0, "warnings must precede the terminal result");
+                assert!(!message.contains("private payload"));
+                warnings.push(message);
+            }
+            AgentEvent::RunFinished { reason, .. } => {
+                assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+                terminals += 1;
+            }
+            _ => {}
+        }
     }
+    assert_eq!(terminals, 1);
+    warnings
+}
+
+#[tokio::test]
+async fn private_append_failures_and_retired_owners_are_not_observation_warnings() {
+    for behavior in [Behavior::FailAppendEnd, Behavior::FailEndWithRetiredOwner] {
+        let mut f = fixture(vec![text("done")], behavior, true, false);
+        let mut run = f.agent.prompt("observe").await.unwrap();
+        let mut terminals = 0;
+        while let Some(event) = run.next().await {
+            match event {
+                AgentEvent::ExtensionObservationWarning { .. } => {
+                    panic!("authority/persistence must fail closed")
+                }
+                AgentEvent::RunFinished { reason, .. } => {
+                    assert!(matches!(reason, FinishReason::Failed(_)), "{reason:?}");
+                    terminals += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(terminals, 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn observation_deadline_is_bounded_and_warns_without_replaying() {
+    let mut f = fixture(
+        vec![text("done")],
+        Behavior::HoldEnd(Arc::new(Notify::new())),
+        false,
+        false,
+    );
+    let warnings = completed_warnings(&mut f.agent).await;
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("deadline"));
+    assert_eq!(f.script.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn observation_error_after_committed_assistant_preserves_success_and_private_appends() {
+    let mut f = fixture(vec![text("done")], Behavior::FailEnd, true, false);
+    let warnings = completed_warnings(&mut f.agent).await;
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("end observer 1"));
+    assert!(warnings[0].contains("durable entries retained"));
+    assert_eq!(f.script.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*f.trace.lock().unwrap(), ["start:0", "provider:0", "end:0"]);
+    assert_eq!(f.seen.lock().unwrap().len(), 2);
+    let path = f.agent.session.path().to_owned();
+    let committed: Vec<_> = f
+        .agent
+        .session
+        .entries()
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    assert_eq!(
+        f.agent
+            .session
+            .entries()
+            .iter()
+            .filter(|entry| f
+                .agent
+                .session
+                .extension_entry(&entry.id, "model.turn.test")
+                .is_some())
+            .count(),
+        2,
+    );
+    drop(f.agent);
+    let reopened = Session::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>(),
+        committed,
+        "an observation error must neither roll back nor retry acknowledged writes",
+    );
+}
+
+#[tokio::test]
+async fn observation_error_does_not_skip_later_hooks_or_the_next_model_turn() {
+    let mut f = fixture(
+        vec![vec![call("one", false)], text("done")],
+        Behavior::FailEnd,
+        true,
+        false,
+    );
+    let later_seen = Arc::new(Mutex::new(Vec::new()));
+    f.agent.extensions.session_operation_hook(Observe {
+        seen: later_seen.clone(),
+        trace: Arc::new(Mutex::new(Vec::new())),
+        behavior: Behavior::Continue,
+        append: false,
+    });
+    let warnings = completed_warnings(&mut f.agent).await;
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings[0].contains("end observer 1"));
+    assert!(warnings[0].contains("durable entries retained"));
+    assert_eq!(f.script.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(result_ids(f.agent.session.entries()), ["call-one"]);
+    assert_eq!(f.seen.lock().unwrap().len(), 4);
+    assert_eq!(later_seen.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn observation_error_at_start_does_not_veto_the_model_request() {
+    let mut f = fixture(vec![text("done")], Behavior::FailStart, false, false);
+    let warnings = completed_warnings(&mut f.agent).await;
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("start observer 1"));
+    assert!(warnings[0].contains("durable entries retained"));
+    assert_eq!(f.script.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*f.trace.lock().unwrap(), ["start:0", "provider:0", "end:0"]);
 }
 
 #[tokio::test]

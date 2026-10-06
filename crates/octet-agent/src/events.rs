@@ -193,6 +193,12 @@ pub enum ProviderOperation {
 /// messages and tool results are.
 #[derive(Debug)]
 pub enum AgentEvent {
+    /// An extension observation failed without changing the run's outcome.
+    /// This is host-authored, payload-free diagnostic text, never model input.
+    ExtensionObservationWarning {
+        /// Bounded diagnostic identifying the failed observation boundary.
+        message: String,
+    },
     /// A custom message has been durably committed, including native image preparation.
     CustomMessageCommitted {
         /// Actual session entry identity.

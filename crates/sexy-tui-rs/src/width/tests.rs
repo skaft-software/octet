@@ -11,6 +11,48 @@
 use super::*;
 
 #[test]
+fn line_width_fast_path_matches_grapheme_policy_at_saturated_columns() {
+    let samples = [
+        "",
+        "ASCII words 0123456789 !~",
+        "a\tb",
+        "a\rb",
+        "a\nb",
+        "e\u{301}",
+        "界",
+        "👩‍💻",
+        "🇨🇦",
+        "ำຳ",
+        "·",
+        "\0\x7f",
+    ];
+    for ambiguous in [AmbiguousWidth::Narrow, AmbiguousWidth::Wide] {
+        for tab_stop in [0, 1, 4, 8] {
+            let policy = WidthPolicy {
+                ambiguous,
+                tab_stop,
+            };
+            for start in [0, 3, usize::MAX - 2, usize::MAX] {
+                for text in samples {
+                    let mut column = start;
+                    for grapheme in text.graphemes(true) {
+                        if grapheme == "\n" || grapheme == "\r" {
+                            break;
+                        }
+                        column = column.saturating_add(policy.grapheme_width(grapheme, column));
+                    }
+                    assert_eq!(
+                        policy.line_width_from(text, start),
+                        column.saturating_sub(start),
+                        "{policy:?}, {start}, {text:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn unicode_combining_and_wide_widths_are_cell_correct() {
     let policy = WidthPolicy::default();
     assert_eq!(policy.line_width("e\u{301}"), 1);

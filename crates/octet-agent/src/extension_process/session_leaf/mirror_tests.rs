@@ -396,14 +396,32 @@ async fn empty_is_real_unavailable_is_not_empty_and_foreign_owner_cannot_read_mi
         .iter()
         .find(|message| message["method"] == "context/updated")
         .unwrap();
-    assert_eq!(
-        invalidation["params"]["host"]["session_entries"],
-        Value::Null
-    );
-    assert_eq!(
-        invalidation["params"]["host"]["session_branch"],
-        Value::Null
-    );
+    for field in [
+        "session_entries",
+        "session_branch",
+        "session_leaf_id",
+        "session_file",
+        "session_header",
+        "session_labels",
+    ] {
+        assert_eq!(
+            invalidation["params"]["host"].get(field),
+            Some(&Value::Null),
+            "failed publication must explicitly invalidate {field}, not retain its previous value"
+        );
+    }
+    // Model the retained adapter's merge: header/labels must be invalidated too,
+    // rather than surviving as an earlier known header or an apparently valid
+    // empty label map. Overall unavailable history distinguishes null header
+    // from an authoritative view whose native header is genuinely absent.
+    let mut retained = json!({
+        "session_entries": [], "session_branch": [],
+        "session_leaf_id": "old", "session_file": "old.jsonl",
+        "session_header": {"name":"old"}, "session_labels": {"old":"old-label"}
+    });
+    merge_session_snapshot(&mut retained, &invalidation["params"]["host"]);
+    assert_eq!(retained["session_header"], Value::Null);
+    assert_eq!(retained["session_labels"], Value::Null);
 }
 
 #[tokio::test]
@@ -456,6 +474,48 @@ async fn distinct_native_owners_with_same_display_id_retire_old_mirror_and_ui() 
             .len(),
         1
     );
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn native_owner_publication_without_session_entries_retires_same_display_id() {
+    let (temp, process, _events) = process(false).await;
+    let first = crate::Session::create(temp.path().join("session.jsonl")).unwrap();
+    std::fs::create_dir(temp.path().join("other")).unwrap();
+    let second = crate::Session::create(temp.path().join("other/session.jsonl")).unwrap();
+    assert_eq!(state(&first), state(&second));
+    process
+        .set_host_state_with_session(state(&first), &first)
+        .unwrap();
+    let seen = inspect(&process, &first).await;
+    let old_owner: ExtensionResourceOwner =
+        serde_json::from_value(seen["command"]["context"]["resource_owner"].clone()).unwrap();
+    let connection = read_std_lock(&process.inner.connection).clone();
+    assert!(lock_std_mutex(&connection.issued_resource_owners).contains(&old_owner));
+    process
+        .set_host_state_with_session(state(&second), &second)
+        .unwrap();
+    assert!(!lock_std_mutex(&connection.issued_resource_owners).contains(&old_owner));
+    {
+        let slot = lock_std_mutex(&connection.session_leaf.mirror);
+        let publication = slot
+            .as_ref()
+            .expect("native owner does not require a projection");
+        assert_eq!(publication.owner.session_id, second.resource_owner_key());
+        assert_eq!(
+            publication.owner.extension_instance_id,
+            process.extension_instance_id()
+        );
+        assert_eq!(publication.owner.process_generation, connection.generation);
+        assert!(
+            publication.value.is_none(),
+            "unnegotiated history stays absent"
+        );
+    }
+    let seen = inspect(&process, &second).await;
+    assert!(seen["command"]["context"]["host"]
+        .get("session_entries")
+        .is_none());
     assert!(process.shutdown().await);
 }
 

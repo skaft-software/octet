@@ -105,8 +105,10 @@ def _readiness(status: Mapping[str, Any]) -> Tuple[bool, str]:
                and (status.get("runtime") != "desktop-host" or status.get("cursor_enabled") is True))
     if not status.get("installed"):
         return False, "not set up"
-    if granted:
+    if granted and status.get("doctor_ok") is True:
         return True, "ready"
+    if granted:
+        return False, "self-check needs attention"
     if status.get("runtime") == "unavailable":
         return False, "host unavailable"
     if status.get("runtime") == "desktop-host" and not status.get("cursor_enabled"):
@@ -421,6 +423,8 @@ class ComputerUse:
 
     def client(self) -> DriverClient:
         with self._lock:
+            if (self._paths.root / ".runtime-installing").exists():
+                raise McpError("Computer-use runtime setup is unfinished; wait for setup or retry it to recover.")
             if self._client is not None and self._client.started:
                 if self._cursor_runtime and not self._cursor_ready:
                     self._ensure_cursor(self._client, self._cursor_session or cursor_session())
@@ -819,10 +823,12 @@ class ComputerUse:
                 report["cursor_enabled"] = False
             probe = driver_module.permission_state(client, prompt=prompt)
         except Exception:
-            if report.get("runtime") == "desktop-host":
-                report.update({"permissions": "unknown", "doctor_ok": False,
-                               "cursor_enabled": False,
-                               "detail": "The selected desktop host's cursor session could not be verified."})
+            # A CLI check is not evidence that the selected live dispatch
+            # channel is usable. This applies to direct runtimes too.
+            report.update({"permissions": "unknown", "doctor_ok": False,
+                           "cursor_enabled": False,
+                           "permission_detail": "The selected driver did not answer its live desktop probe.",
+                           "detail": "The selected driver session could not be verified; check status again."})
             return report
         # A fresh probe supersedes any cached answer.
         self._permission_cache = None
@@ -1111,6 +1117,9 @@ def _run_setup(extension: Any, computer_use: "ComputerUse") -> Dict[str, Any]:
     step("Checking permissions; macOS may ask you to allow access…"
          if _host_platform() == "darwin" else "Checking the desktop session…")
     result.update(computer_use.publish_status(prompt=True))
+    ready, _ = _readiness(result)
+    step("Computer use is ready." if ready else
+         "Installation finished; computer use is not ready yet. Review the status steps below.")
     jev_outcome = _setup_jev(extension, computer_use)
     result.update(jev_outcome)
     result["jev_note"] = _render_jev_setup(jev_outcome)
@@ -1557,8 +1566,9 @@ def _render_status(status: Mapping[str, Any]) -> str:
             "OCTET_CUA_DESKTOP_HOST=0 explicitly selects cursorless direct mode."
         )
     if not status.get("installed"):
+        detail = (str(status["detail"]) + " ") if status.get("detail") else ""
         return (
-            f"Cua Driver is not installed. To install it, {driver_module.SETUP_HINT} "
+            detail + f"Cua Driver is not installed. To install it, {driver_module.SETUP_HINT} "
             "(or ask for the computer_use_setup tool)."
         )
     check = "ok" if status.get("doctor_ok") else "needs attention"

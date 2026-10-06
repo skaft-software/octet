@@ -50,7 +50,9 @@ pub(crate) async fn run_request(
         boot.set_prepared_session(session);
     }
     let session_path = match &selection {
-        SessionSelection::CreateNew(path) | SessionSelection::OpenExisting(path) => path.clone(),
+        SessionSelection::CreateNew(path)
+        | SessionSelection::OpenExisting(path)
+        | SessionSelection::Forked(path) => path.clone(),
     };
     let new_session = matches!(selection, SessionSelection::CreateNew(_));
     let launch = LaunchSelection {

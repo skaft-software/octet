@@ -158,7 +158,7 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
             }
             if after_completion_abort {
                 sender
-                    .send(key(KeyCode::Enter, KeyModifiers::NONE))
+                    .send(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
                     .await
                     .unwrap();
                 release.take().unwrap().send(true).unwrap();

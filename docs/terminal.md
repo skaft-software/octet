@@ -93,10 +93,10 @@ a new undo boundary instead of keeping an unbounded copy.
 
 While octet works:
 
-- Enter queues a local follow-up. Follow-ups run one at a time, in order, after
-  normal completion.
-- Ctrl+S queues live steering for the next model boundary. Both kinds of pending
-  input share the bounded hint above the input.
+- Enter queues live steering for the next model boundary.
+- Ctrl+S queues a local follow-up. Follow-ups run one at a time, in order, after
+  normal completion. Both kinds of pending input share the bounded hint above
+  the input.
 - Option+Up (Alt+Up) recalls the newest editable queued steering message or
   follow-up into an empty input, keeping attachment and paste chips. A recalled
   steering message is withdrawn from the agent before it's saved, so it's never
@@ -124,18 +124,19 @@ another input. See [all keys](commands.md#keys).
 
 ```sh
 octet --color auto
-octet --mouse app
+octet --mouse auto
 ```
 
-By default octet leaves mouse reporting off (`mouse = "auto"`; `terminal` and
-`off` do the same), so your terminal keeps drag selection and wheel history. The
-renderer follows the height of the content, not a fixed full-screen composer and
-footer. It loads the complete resumed branch and appends to native scrollback.
+By default octet runs fullscreen (`mouse = "app"`): it starts in its own
+viewport, captures the wheel and drag selection, and lets a resumed session load
+newest-first. `--mouse auto` (or `terminal`, or `off`) leaves mouse reporting
+off instead, so your terminal keeps drag selection and wheel history. Inline,
+the renderer follows the height of the content, not a fixed full-screen composer
+and footer; it loads the complete resumed branch and appends to native
+scrollback.
 
-PageUp pins the view above the tail while output grows, and shows when there's
-new output. PageDown returns to live output. `--mouse app` starts pinned,
-captures the wheel and drag selection, and lets a resumed session load
-newest-first. Wheel history that octet doesn't capture stays with your terminal,
+Inline, PageUp pins the view above the tail while output grows, and shows when
+there's new output. PageDown returns to live output. Wheel history that octet doesn't capture stays with your terminal,
 because portable protocols can't report its position.
 
 The renderer uses a complete retained frame, synchronized frames, and exact
@@ -144,7 +145,7 @@ Markdown participate in the same algorithm; visible changes do not force history
 replay. Dimension changes and canonical changes above the old viewport clear and
 replay the complete native transcript, so saved and live output remain complete.
 This can reset your terminal's reading position, and replay work grows with
-history. PageUp and `--mouse app` instead use a separate bounded semantic viewport.
+history. PageUp and the default fullscreen mode instead use a separate bounded semantic viewport.
 Resize bursts settle after 75 ms of quiet (150 ms maximum); width changes reflow
 the transcript, while height-only changes reuse its wrapping. Away-and-back
 resizes also rebuild native history. The hardware composer cursor stays visible

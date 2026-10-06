@@ -21,14 +21,15 @@ export async function providerPipeline(runtime, params, store) {
   runtime.require('pipeline_hooks_v1');
   const hook = params.hook;
   if (!pipelineHooks.includes(hook) || !runtime.metadata().hooks.includes(hook)) invalid('undeclared provider pipeline hook');
-  ownerKey(params.context?.resource_owner); runtime.bind(params, store); store.providerContext = true;
+  ownerKey(params.context?.resource_owner);
   const body = params.payload;
   fields(body, hook === 'before_provider_request' ? ['operation_id', 'model', 'payload'] : hook === 'before_provider_headers' ? ['operation_id', 'model', 'headers'] : ['operation_id', 'model', 'status', 'headers'], 'provider pipeline');
   bounded(body.operation_id, 'provider operation', 256);
   if (!body.operation_id) invalid('provider operation');
   fields(body.model, ['id', 'provider', 'api'], 'provider model');
   for (const value of Object.values(body.model)) bounded(value, 'provider model identity', 256);
-  const signal = store.controller.signal, live = () => { signal.throwIfAborted(); runtime.assertOwner(store); };
+  runtime.bind(params, store); store.providerContext = true;
+  const signal = store.controller.signal, live = () => { signal.throwIfAborted(); runtime.assertSessionOwner(store); };
   return cancellable(runtime.queued(store, async () => {
     live();
     let payload = hook === 'before_provider_request' ? plainJSON(body.payload, 'provider payload', 786432) : undefined;
@@ -47,7 +48,7 @@ export async function providerPipeline(runtime, params, store) {
         // These callbacks see private wire material. Never echo their exception
         // text, JSON payloads or headers to diagnostic/UI/session channels.
         if (Number.isInteger(error?.code)) throw rpcError(error.code, 'provider pipeline callback refused');
-        runtime.backgroundError(new Error(`${hook} factory ${entry.factory} failed`)); continue;
+        runtime.reportCallbackError(hook, entry.factory, error); continue;
       }
       live();
       if (hook === 'before_provider_request' && result !== undefined) payload = plainJSON(result, 'provider payload', 786432);

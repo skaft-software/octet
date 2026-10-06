@@ -37,6 +37,7 @@ pub(super) async fn notify_lifecycle_all(
 pub(super) async fn start_session_hooks_all(
     processes: &[ExtensionProcess],
     resource_owner: &str,
+    reason: &'static str,
 ) -> Vec<String> {
     futures_util::future::join_all(
         processes
@@ -48,7 +49,7 @@ pub(super) async fn start_session_hooks_all(
                 async move {
                     match tokio::time::timeout(
                         LIFECYCLE_NOTIFY_DEADLINE,
-                        process.start_session_hook_binding(resource_owner),
+                        process.start_session_hook_binding_with_reason(resource_owner, reason),
                     )
                     .await
                     {
@@ -350,15 +351,34 @@ pub(super) fn format_notification(
     extension: &str,
     notification: &octet_agent::extension_process::ExtensionNotification,
 ) -> String {
+    // This is literal text, not Markdown or terminal styling. Only body LF
+    // boundaries may create rows; a title, CR, TAB, ANSI or bidi control cannot.
+    // Bound before sanitization as well as after control-picture expansion.
+    let extension = sexy_tui_rs::sanitize_line(extension, true);
     let title = notification
         .title
-        .as_deref()
-        .map(|title| format!(" {title}:"))
+        .as_ref()
+        .map(|title| {
+            let title = truncate_diagnostic(title.clone());
+            format!(" {}:", sexy_tui_rs::sanitize_line(&title, true))
+        })
         .unwrap_or_default();
-    format!(
-        "[{extension} {:?}]{title} {}",
-        notification.level, notification.message
-    )
+    let body = truncate_diagnostic(notification.message.clone());
+    let mut message = format!("[{extension} {:?}]{title}", notification.level);
+    if body.contains('\n') {
+        let mut lines = body.split('\n');
+        for line in lines.by_ref().take(256) {
+            message.push_str("\n  ");
+            message.push_str(&sexy_tui_rs::sanitize_line(line, true));
+        }
+        if lines.next().is_some() {
+            message.push_str("\n  [… notification lines omitted …]");
+        }
+    } else {
+        message.push(' ');
+        message.push_str(&sexy_tui_rs::sanitize_line(&body, true));
+    }
+    truncate_diagnostic(message)
 }
 
 pub(super) fn extension_execution_context(
@@ -404,6 +424,14 @@ pub(super) fn host_state(
         })
         .unwrap_or_default();
     ExtensionHostState {
+        keybindings: None,
+        theme: None,
+        // This coding host supplies the usage query even when no current
+        // measurement exists. Explicit null clears retained prior facts.
+        context_usage: Some(model_control::context_usage(session, model).unwrap_or(Value::Null)),
+        project_trusted: None,
+        has_ui: None,
+        mode: None,
         session_id,
         session_name,
         model: Some(model.spec.id.0.clone()),

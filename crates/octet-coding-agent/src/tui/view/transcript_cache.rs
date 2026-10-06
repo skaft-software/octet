@@ -246,21 +246,23 @@ impl ShellState {
                 ));
 
                 for (index, block) in self.transcript.iter().enumerate() {
-                    let rendered = render_block_planned_with_rainbow(
-                        index
-                            .checked_sub(1)
-                            .and_then(|previous| self.transcript.get(previous)),
-                        block,
-                        &self.theme,
-                        rich_renderer,
-                        reasoning_renderer,
-                        width,
-                        self.show_tool_details(block),
-                        self.event_spinner_frame,
-                        self.status_shimmer_frame,
-                        rainbow_strength,
-                        running_outcome == Some(index),
-                    );
+                    let rendered = self.extension_rendered(index, width).unwrap_or_else(|| {
+                        render_block_planned_with_rainbow(
+                            index
+                                .checked_sub(1)
+                                .and_then(|previous| self.transcript.get(previous)),
+                            block,
+                            &self.theme,
+                            rich_renderer,
+                            reasoning_renderer,
+                            width,
+                            self.show_tool_details(block),
+                            self.event_spinner_frame,
+                            self.status_shimmer_frame,
+                            rainbow_strength,
+                            running_outcome == Some(index),
+                        )
+                    });
                     let start = cache.lines.len();
                     let length = rendered.lines.len();
                     cache.lines.extend(rendered.lines);
@@ -283,21 +285,23 @@ impl ShellState {
                 // once and leave every existing block's layout untouched.
                 while cache.block_revisions.len() < self.transcript.len() {
                     let index = cache.block_revisions.len();
-                    let rendered = render_block_planned_with_rainbow(
-                        index
-                            .checked_sub(1)
-                            .and_then(|previous| self.transcript.get(previous)),
-                        &self.transcript[index],
-                        &self.theme,
-                        rich_renderer,
-                        reasoning_renderer,
-                        width,
-                        self.show_tool_details(&self.transcript[index]),
-                        self.event_spinner_frame,
-                        self.status_shimmer_frame,
-                        rainbow_strength,
-                        running_outcome == Some(index),
-                    );
+                    let rendered = self.extension_rendered(index, width).unwrap_or_else(|| {
+                        render_block_planned_with_rainbow(
+                            index
+                                .checked_sub(1)
+                                .and_then(|previous| self.transcript.get(previous)),
+                            &self.transcript[index],
+                            &self.theme,
+                            rich_renderer,
+                            reasoning_renderer,
+                            width,
+                            self.show_tool_details(&self.transcript[index]),
+                            self.event_spinner_frame,
+                            self.status_shimmer_frame,
+                            rainbow_strength,
+                            running_outcome == Some(index),
+                        )
+                    });
                     let start = cache.lines.len();
                     first_changed = first_changed.min(start);
                     let length = rendered.lines.len();
@@ -337,8 +341,9 @@ impl ShellState {
                         width,
                         self.show_tool_details(&self.transcript[index]),
                     )
-                    .filter(|update| update.stable_rows <= old_length)
-                    {
+                    .filter(|update| {
+                        !self.extension_transcript.ever_active && update.stable_rows <= old_length
+                    }) {
                         let replacement_start = start.saturating_add(update.stable_rows);
                         first_changed = first_changed.min(replacement_start);
                         let new_length =
@@ -364,19 +369,21 @@ impl ShellState {
                     }
 
                     first_changed = first_changed.min(start);
-                    let rendered = render_block_planned_with_rainbow(
-                        previous,
-                        &self.transcript[index],
-                        &self.theme,
-                        rich_renderer,
-                        reasoning_renderer,
-                        width,
-                        self.show_tool_details(&self.transcript[index]),
-                        self.event_spinner_frame,
-                        self.status_shimmer_frame,
-                        rainbow_strength,
-                        running_outcome == Some(index),
-                    );
+                    let rendered = self.extension_rendered(index, width).unwrap_or_else(|| {
+                        render_block_planned_with_rainbow(
+                            previous,
+                            &self.transcript[index],
+                            &self.theme,
+                            rich_renderer,
+                            reasoning_renderer,
+                            width,
+                            self.show_tool_details(&self.transcript[index]),
+                            self.event_spinner_frame,
+                            self.status_shimmer_frame,
+                            rainbow_strength,
+                            running_outcome == Some(index),
+                        )
+                    });
                     let new_length = rendered.lines.len();
                     cache
                         .lines

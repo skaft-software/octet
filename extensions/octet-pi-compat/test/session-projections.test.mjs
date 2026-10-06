@@ -107,7 +107,7 @@ test('known native gaps stay explicit: mixed durable identities, opaque replay, 
 });
 
 test('process provider-context preserves an untouched mixed media batch when a callback appends a message', async t => {
-  const peer = launch(t, [join(root, 'test/fixtures/provider-context.ts')]); await peer.init(['session_entries']);
+  const peer = launch(t, [join(root, 'test/fixtures/provider-context.ts')]); await peer.init(['session_entries']); await peer.start();
   const messages = [assistant, user([{ Text: 'before' }, image(), result(), { Text: 'after' }])];
   const reply = await peer.request('hook/run', { hook: 'provider_context',
     session_leaf: { grant_id: 'a'.repeat(64), activation_epoch: 4, operation_id: 'context:4', owner, expected_head: 'head' },
@@ -120,7 +120,7 @@ test('process provider-context preserves an untouched mixed media batch when a c
 });
 
 test('process model-turn observation carries image result bytes and durable details', async t => {
-  const peer = launch(t, [join(root, 'test/fixtures/model-turns.ts')]); await peer.init(['session_entries']);
+  const peer = launch(t, [join(root, 'test/fixtures/model-turns.ts')]); await peer.init(['session_entries']); await peer.start();
   // Native scheduling/argument-error metadata remains an independently open gap.
   const a = structuredClone(assistant); delete a.Assistant.content[0].ToolCall.async; delete a.Assistant.content[0].ToolCall.argument_error;
   a.Assistant.protocol = 'anthropic_messages';

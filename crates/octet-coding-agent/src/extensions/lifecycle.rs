@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(all(test, unix))]
+#[path = "lifecycle_exit_tests.rs"]
+mod lifecycle_exit_tests;
+
 impl ExecutableExtensions {
     /// Discovers and starts extensions with a fresh ordinary-host runtime manager.
     ///
@@ -56,6 +60,7 @@ impl ExecutableExtensions {
     ///
     /// Bootstrap and rebuild pass the same value through this seam so API 0.3
     /// declarations keep their process-owner fences while the App is replaced.
+    #[cfg(all(test, unix))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn discover_and_start_with_provider_runtime(
         config: &Config,
@@ -68,6 +73,39 @@ impl ExecutableExtensions {
         provider_runtime: ExtensionProviderRuntime,
         resource_consumer: crate::app::resource_paths::ResourceConsumerCapability,
         remote_ui_consumer: Option<&crate::tui::view::InteractiveShell>,
+    ) -> Self {
+        Self::discover_and_start_with_provider_runtime_and_reason(
+            config,
+            session,
+            model,
+            reasoning,
+            sessions,
+            host,
+            runtime_manager,
+            provider_runtime,
+            resource_consumer,
+            remote_ui_consumer,
+            "startup",
+        )
+    }
+
+    /// Discovers and starts extensions using one product-owned provider runtime.
+    ///
+    /// Bootstrap and rebuild pass the same value through this seam so API 0.3
+    /// declarations keep their process-owner fences while the App is replaced.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn discover_and_start_with_provider_runtime_and_reason(
+        config: &Config,
+        session: &Session,
+        model: &Model,
+        reasoning: &ReasoningConfig,
+        sessions: &SessionStore,
+        host: &mut ExtensionHost,
+        runtime_manager: Option<ExtensionRuntimeManager>,
+        provider_runtime: ExtensionProviderRuntime,
+        resource_consumer: crate::app::resource_paths::ResourceConsumerCapability,
+        remote_ui_consumer: Option<&crate::tui::view::InteractiveShell>,
+        session_start_reason: &'static str,
     ) -> Self {
         let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
         let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
@@ -175,7 +213,16 @@ impl ExecutableExtensions {
         if needs_host_authority {
             diagnostics.push(CONTROLLED_EXTENSION_START_DIAGNOSTIC.to_owned());
         }
-        let host_state = host_state(session, model, reasoning, sessions);
+        let mut host_state = host_state(session, model, reasoning, sessions);
+        host_state.project_trusted = Some(config.workspace_trusted);
+        host_state.mode = Some(
+            match config.mode {
+                Mode::Interactive => "tui",
+                Mode::Print { .. } => "print",
+                Mode::Rpc => "rpc",
+            }
+            .into(),
+        );
         let has_enabled = descriptors
             .iter()
             .any(|descriptor| descriptor.activation.enabled);
@@ -202,6 +249,14 @@ impl ExecutableExtensions {
             })
             .cloned()
             .collect::<Vec<_>>();
+        // A tool-name clash turns the external extension off instead of
+        // failing startup; the first-party extension keeps the name.
+        let (startable, tool_clashes) = turn_off_tool_clashes(startable);
+        for (name, reason) in &tool_clashes {
+            diagnostics.push(format!(
+                "warning: extension {name:?} was turned off: {reason}"
+            ));
+        }
 
         // Bind before initialize. An already constructed native shell is the
         // consumer even when the calling process's stdout is not a TTY (an
@@ -224,6 +279,16 @@ impl ExecutableExtensions {
         } else {
             None
         };
+        host_state.has_ui = Some(remote_ui_wake.is_some());
+        if remote_ui_wake.is_some() {
+            host_state.keybindings = Some(remote_ui_consumer.map_or_else(
+                || {
+                    crate::tui::keymap::keybindings::KeybindingsManager::for_user()
+                        .get_resolved_bindings()
+                },
+                crate::tui::view::InteractiveShell::extension_keybindings,
+            ));
+        }
         let event_bus = Arc::new(ExtensionEventBus::default());
         let (session_lifecycle_service, session_lifecycle_receiver) =
             if active_session_lifecycle_enabled(config)
@@ -253,7 +318,8 @@ impl ExecutableExtensions {
                     && descriptor
                         .activation
                         .start_decision(descriptor.source, config.workspace_trusted)
-                        == ExtensionStartDecision::Allowed;
+                        == ExtensionStartDecision::Allowed
+                    && !tool_clashes.contains_key(&descriptor.manifest.name);
                 descriptor
             },
         ));
@@ -298,6 +364,18 @@ impl ExecutableExtensions {
                         None
                     }
                 };
+                // Configuration only: deriving the authoritative private home
+                // performs no provisioning, filesystem creation or download.
+                // Explicit action-scoped consent is never retained by the fleet.
+                let python_runtime = match super::status::private_python_runtime_config(None) {
+                    Ok(runtime) => Some(runtime),
+                    Err(error) => {
+                        diagnostics.push(format!(
+                            "warning: private Python runtime location unavailable: {error}"
+                        ));
+                        None
+                    }
+                };
                 let workspace = config.workspace.clone();
                 let state = host_state.clone();
                 let session_lifecycle_service = session_lifecycle_service.clone();
@@ -325,12 +403,17 @@ impl ExecutableExtensions {
                     let starts = binding
                         .activate_eager(startable_names, |entry| {
                             let mut runtime = ExtensionRuntimeConfig::new(workspace.clone());
+                            runtime.python_runtime = python_runtime.clone();
                             // Admission is supplied by the actual App consumer constructor,
                             // never inferred from Mode, an enabled factory or a manifest.
                             runtime.resource_paths = resource_consumer == crate::app::resource_paths::ResourceConsumerCapability::AppFrontend;
                             runtime.provider_pipeline = true;
                             runtime.host_state = state.clone();
                             runtime.remote_ui = remote_ui_wake.clone();
+                            // Both interactive frontends consume the same bounded
+                            // asynchronous transcript snapshots. Headless hosts
+                            // have neither this wake nor the presentation driver.
+                            runtime.transcript_render = runtime.remote_ui.is_some();
                             // Generic request-scoped composition is offered to
                             // API 0.4 extensions. Authority is attached later,
                             // only to live model-tool contexts, never commands.
@@ -407,7 +490,10 @@ impl ExecutableExtensions {
         let mut processes = Vec::new();
         let mut receivers = Vec::new();
         let mut running = BTreeSet::new();
-        let mut start_failures = BTreeMap::new();
+        let mut start_failures = tool_clashes
+            .iter()
+            .map(|(name, reason)| (name.clone(), format!("turned off: {reason}")))
+            .collect::<BTreeMap<_, _>>();
         for (name, start) in starts {
             match start {
                 Ok(process) => {
@@ -431,9 +517,24 @@ impl ExecutableExtensions {
         // Register tool catalogs before observers/hooks so all live processes
         // have a host-owned dynamic group. A compatible shared process was
         // detached from the previous App binding before this point.
-        for process in &processes {
-            process.register_dynamic_tool_catalog(host);
+        // First-party catalogs register first, so a clash found only at
+        // runtime turns the external extension off instead of failing startup.
+        let (first_party, external): (Vec<_>, Vec<_>) = processes
+            .iter()
+            .partition(|process| first_party_tool_owner(&process.descriptor().manifest.name));
+        let mut turned_off = BTreeSet::new();
+        for process in first_party.into_iter().chain(external) {
+            if let Err(error) = process.try_register_dynamic_tool_catalog(host) {
+                let name = process.descriptor().manifest.name.clone();
+                diagnostics.push(format!(
+                    "warning: extension {name:?} was turned off: {error}"
+                ));
+                start_failures.insert(name.clone(), format!("turned off: {error}"));
+                turned_off.insert(name);
+            }
         }
+        processes.retain(|process| !turned_off.contains(&process.descriptor().manifest.name));
+        running.retain(|name| !turned_off.contains(name));
         for process in &processes {
             host.load(process);
         }
@@ -536,6 +637,7 @@ impl ExecutableExtensions {
         extensions.session_lifecycle_service = session_lifecycle_service;
         extensions.session_lifecycle_receiver = session_lifecycle_receiver;
         extensions.session_id = host_state.session_id.clone();
+        extensions.session_start_reason = session_start_reason;
         extensions.host_state = Mutex::new(host_state);
         extensions.workspace = config.workspace.clone();
         extensions.resource_owner = Some(session.resource_owner_key());
@@ -713,6 +815,7 @@ impl ExecutableExtensions {
                 )),
             }
         }
+        let start_reason = self.session_start_reason;
         if let Some(resource_owner) = self.resource_owner.clone() {
             let (deferred_processes, processes): (Vec<_>, Vec<_>) =
                 self.processes.iter().cloned().partition(|process| {
@@ -736,7 +839,7 @@ impl ExecutableExtensions {
                     .map(|process| (process, resource_owner.clone())),
             );
             match block_on_runtime(async move {
-                start_session_hooks_all(&processes, &resource_owner).await
+                start_session_hooks_all(&processes, &resource_owner, start_reason).await
             }) {
                 Ok(messages) => self.diagnostics.extend(messages),
                 Err(error) => self.diagnostics.push(format!(
@@ -798,12 +901,16 @@ impl ExecutableExtensions {
     pub(super) fn schedule_session_hook_starts(&mut self) {
         self.session_hook_start_tasks
             .retain(|task| !task.is_finished());
+        let reason = self.session_start_reason;
         for (process, owner) in self.pending_session_hook_starts.drain(..) {
             let tx = self.background_tx.clone();
             self.session_hook_start_tasks.push(tokio::spawn(async move {
                 // The process owns its bounded request deadline. The shell is
                 // free to service ui/open while this hook awaits its result.
-                if let Err(error) = process.start_session_hook_binding(owner).await {
+                if let Err(error) = process
+                    .start_session_hook_binding_with_reason(owner, reason)
+                    .await
+                {
                     let _ = tx
                         .send(ExtensionBackgroundUpdate::Diagnostics(vec![format!(
                             "warning: extension {:?} session_start hook failed: {error}",
@@ -928,6 +1035,14 @@ impl ExecutableExtensions {
     /// in `ExtensionProcess`; the outer timeout prevents terminal restoration
     /// from being delayed indefinitely.
     pub async fn shutdown(&mut self) {
+        // Terminal intent must fence restart/activation before session_end can
+        // await, time out, or kill its generation. Rebuild release is not terminal.
+        if let Some(manager) = &self.runtime_manager {
+            manager.begin_shutdown();
+        }
+        for process in &self.processes {
+            process.begin_shutdown();
+        }
         self.release_binding().await;
         if let Some(manager) = self.runtime_manager.take() {
             let _ = tokio::time::timeout(SHUTDOWN_DEADLINE, manager.shutdown()).await;
@@ -1089,6 +1204,68 @@ impl ExecutableExtensions {
             .await_initial_registrations_async(&processes)
             .await;
     }
+}
+
+/// The Pi bridge ships in the official catalog, but every tool it carries
+/// comes from a third-party Pi package.
+const PI_BRIDGE_EXTENSION_NAME: &str = "octet-pi-compat";
+
+/// First-party extensions keep a clashing tool name: their tools are the ones
+/// octet ships and documents.
+fn first_party_tool_owner(name: &str) -> bool {
+    name != PI_BRIDGE_EXTENSION_NAME && crate::extension_bundle::is_official_bundle(name)
+}
+
+/// Splits startable extensions into those kept and the external ones whose
+/// declared tools clash with a first-party extension's, keyed by name with the
+/// reason. Runs in O(n log n) over declared tool names.
+fn turn_off_tool_clashes(
+    startable: Vec<DiscoveredExtension>,
+) -> (Vec<DiscoveredExtension>, BTreeMap<String, String>) {
+    let owners = startable
+        .iter()
+        .filter(|descriptor| first_party_tool_owner(&descriptor.manifest.name))
+        .flat_map(|descriptor| {
+            descriptor
+                .manifest
+                .contributes
+                .tools
+                .iter()
+                .map(|tool| (tool.clone(), descriptor.manifest.name.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut clashes = BTreeMap::new();
+    let kept = startable
+        .into_iter()
+        .filter(|descriptor| {
+            if first_party_tool_owner(&descriptor.manifest.name) {
+                return true;
+            }
+            let clashing = descriptor
+                .manifest
+                .contributes
+                .tools
+                .iter()
+                .filter_map(|tool| {
+                    owners
+                        .get(tool)
+                        .map(|owner| format!("`{tool}` (provided by {owner:?})"))
+                })
+                .collect::<Vec<_>>();
+            if clashing.is_empty() {
+                return true;
+            }
+            clashes.insert(
+                descriptor.manifest.name.clone(),
+                format!(
+                    "its tool {} clashes with a first-party extension",
+                    clashing.join(", ")
+                ),
+            );
+            false
+        })
+        .collect();
+    (kept, clashes)
 }
 
 /// Plain wording for a classified startup failure without host detail.

@@ -174,6 +174,56 @@ async fn discovery_refuses_owner_change_and_generation_retirement_before_publica
     extensions.processes[0].shutdown().await;
 }
 
+#[tokio::test]
+async fn resource_theme_default_overrides_saved_appearance_but_not_explicit_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (extensions, mut base) = fixture(&root).await;
+    let theme = root.join("assets/themes/discovery-proof.toml");
+    base.theme = Some("dark".into());
+    for explicit in [false, true] {
+        base.theme_explicit = explicit;
+        let mut batch = extensions
+            .prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup)
+            .unwrap()
+            .await;
+        batch.contributions[0].paths = serde_json::from_value(serde_json::json!({
+            "theme_paths": [theme], "default_theme": theme
+        }))
+        .unwrap();
+        let loaded = extensions
+            .load_resource_discovery(&base, batch, TerminalBackground::Dark)
+            .unwrap();
+        assert_eq!(
+            loaded.config.theme.as_deref(),
+            Some(if explicit { "dark" } else { "discovery-proof" })
+        );
+        assert_eq!(loaded.selected_theme.source_path().is_some(), !explicit);
+        assert!(crate::tui::theme::selectable_file_themes(
+            &loaded.config,
+            TerminalBackground::Dark
+        )
+        .iter()
+        .any(|(name, _)| name == "discovery-proof"));
+    }
+    base.theme_explicit = false;
+    std::fs::write(&theme, "invalid native theme").unwrap();
+    let mut batch = extensions
+        .prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup)
+        .unwrap()
+        .await;
+    batch.contributions[0].paths = serde_json::from_value(serde_json::json!({
+        "theme_paths": [theme], "default_theme": theme
+    }))
+    .unwrap();
+    let loaded = extensions
+        .load_resource_discovery(&base, batch, TerminalBackground::Dark)
+        .unwrap();
+    assert_eq!(loaded.config.theme.as_deref(), Some("dark"));
+    assert!(loaded.selected_theme.source_path().is_none());
+    extensions.processes[0].shutdown().await;
+}
+
 #[test]
 fn path_admission_does_not_launder_workspace_trust_links_or_theme_parsing() {
     let temp = tempfile::tempdir().unwrap();

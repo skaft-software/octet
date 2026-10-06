@@ -3,18 +3,20 @@ import { createJiti } from 'jiti';
 import { readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { isAbsolute } from 'node:path';
 import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions, retireAutocomplete } from './completions.mjs';
-import { toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent } from './tools.mjs';
+import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent } from './tools.mjs';
 import { discoverResources } from './resources.mjs';
-import { projectContext } from './provider-context.mjs';
-import { validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream } from './providers.mjs';
+import { cancellable, projectContext } from './provider-context.mjs';
+import { checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream } from './providers.mjs';
 import { transformInput } from './context-api.mjs';
-import { hasMcpRegistrations, startMcpSession, retireMcpSession } from './mcp.mjs';
+import { forgetMcpRegistrations, hasMcpRegistrations, startMcpSession, retireMcpSession } from './mcp.mjs';
 import { providerPipeline, pipelineHooks } from './provider-pipeline.mjs';
 import { sessionOperation, sessionOperationHooks, sessionReplacement, sessionReplacementHooks } from './session-operations.mjs';
 import { modelTurn, modelTurnHooks } from './model-turns.mjs';
+import { runMessageMethods, handleRunMessage, rememberPrompt } from './run-messages.mjs';
 import { compactionCallbackStore, settleCompactions, retireCompactions, cancelCompactions } from './compaction.mjs';
 import { beforeAgentStart } from './before-agent-start.mjs';
 import { installChildRuntime, retireChildSessions, CHILD_FEATURES, CHILD_METHODS } from './children.mjs';
@@ -22,11 +24,14 @@ import { appendReply, entryPayload, leafGrant } from './session-leaf.mjs';
 import { RemoteUI } from './remote-ui.mjs';
 import { TranscriptRenderers } from './transcript-renderers.mjs';
 import { Timers, deadline } from './timers.mjs';
-import { activateInstalledPi, classifyLoadFailure, fallbackData, installedPiAliases, piRuntimeMode } from './installed-pi.mjs';
+import { activateInstalledPi, classifyLoadFailure, fallbackData, installedPiAliases, piRuntimeMode, scanPiImportGaps } from './installed-pi.mjs';
 import { emulatedPiAliases, typeboxAliases } from './pi-modules.mjs';
+import { ExtensionIssues } from './issues.mjs';
+import { installHostKeybindings } from './keybindings.mjs';
+import { bindHostTheme, nativeTheme } from './theme.mjs';
 
-const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active']);
-const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
+const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active']);
+const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -34,6 +39,7 @@ class SharedBus {
   constructor(runtime) { this.runtime = runtime; this.listeners = new Map(); }
   facade(factory) {
     const on = (topic, handler, once = false) => {
+      this.runtime.assertFactory(factory);
       bounded(topic, 'shared event topic', 256, { controls: true }); if (typeof handler !== 'function') invalid('shared event listener');
       const entries = this.listeners.get(topic) || [];
       if ([...this.listeners.values()].reduce((n, xs) => n + xs.length, 0) >= 1024) throw rpcError(-32012, 'bounds_exceeded shared listeners');
@@ -47,6 +53,7 @@ class SharedBus {
       on: (topic, handler) => on(topic, handler), once: (topic, handler) => on(topic, handler, true),
       off: (topic, handler) => { for (const entry of [...(this.listeners.get(topic) || [])]) if (entry.handler === handler && entry.factory === factory) entry.off(); },
       emit: (topic, data) => {
+        this.runtime.assertFactory(factory);
         const emitter = this.runtime.scope.getStore();
         for (const entry of [...(this.listeners.get(topic) || [])]) {
           if (entry.captured?.state && !entry.captured.state.alive) continue;
@@ -68,10 +75,12 @@ export class Runtime {
     this.config = config; this.transport = transport;
     this.scope = new AsyncLocalStorage(); this.tools = new Map(); this.commands = new Map(); this.shortcuts = new Map(); this.flags = new Map(); this.events = new Map();
     this.bus = new SharedBus(this); this.ui = new RemoteUI(this); this.transcript = new TranscriptRenderers(this); this.timers = new Timers(this);
-    this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map();
+    this.issues = new ExtensionIssues(this);
+    this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map(); this.failedFactories = new Set();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
     this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null;
     this.uninstallChildren = installChildRuntime(this);
+    bindHostTheme(this);
   }
   mouseIntent(enabled) {
     this.require('remote_ui'); const store = this.scope.getStore(); this.assertOwner(store);
@@ -90,11 +99,18 @@ export class Runtime {
     (surface?.store ?? store).mouseCapture = enabled;
   }
   require(feature) { if (!this.features.has(feature)) unsupported(feature, 'feature was not negotiated'); }
-  assertOwner(store) {
+  assertSessionOwner(store) {
     if (!store?.state?.owner || !store.state.alive) throw rpcError(-32002, 'not_foreground_owner retained context is unavailable');
-    if (this.foreground && store.state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
+  }
+  assertOwner(store) {
+    this.assertSessionOwner(store);
+    if (store.state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
+  }
+  assertFactory(factory) {
+    if (this.failedFactories.has(factory)) throw rpcError(-32002, 'failed extension factory is unavailable');
   }
   current(factory) {
+    this.assertFactory(factory);
     const s = this.scope.getStore();
     this.assertOwner(s); return { ...s, factory };
   }
@@ -123,7 +139,7 @@ export class Runtime {
     this.require('session_entries');
     const clean = entryPayload(type, data);
     if (this.stopping) throw rpcError(-32002, 'host is draining');
-    this.assertOwner(store); store.controller.signal.throwIfAborted();
+    this.assertSessionOwner(store); store.controller.signal.throwIfAborted();
     if (!Number.isSafeInteger(store.id) || store.id < 0 || !store.live || this.active.get(store.id)?.controller !== store.controller) throw rpcError(-32002, 'active numeric parent_request_id required for synchronous append');
     const grant = store.leaf?.grant;
     if (!grant && !['command/execute', 'shortcut/execute', 'tool/call'].includes(store.method)) unsupported('synchronous hook append', 'actual host session_leaf grant required');
@@ -170,6 +186,8 @@ export class Runtime {
     console.error(`[pi-compat] ${String(error?.message || error).slice(0, 4096)}`);
     if (!this.stopping && !this.transport.closed) this.transport.notify('notification', { level: 'error', title: 'Pi compatibility error', message: String(error?.message || error).slice(0, 4096) }).catch(e => this.transport.fail(e));
   }
+  reportCallbackError(event, factory, error) { this.issues.callback(event, factory, error); }
+  reportObservationError(event) { this.issues.observation(event); }
   async load() {
     if (this.loaded) return;
     const extensions = this.config.extensions;
@@ -177,33 +195,95 @@ export class Runtime {
     // The module table Pi 1.0.2's own loader uses: Pi packages resolve to the
     // emulated shims, and both TypeBox spellings to the TypeBox Pi ships.
     const aliases = { ...typeboxAliases(), ...emulatedPiAliases() };
-    // Path B is explicit opt-in only (host-approved); it fails loudly, never silently.
-    const installed = piRuntimeMode(this.config) === 'installed' ? installedPiAliases() : null;
-    if (installed) Object.assign(aliases, installed.aliases);
     // jiti's default content-hashed transform cache, as in Pi 1.0.2.
     this.jiti = createJiti(import.meta.url, { alias: aliases, moduleCache: true, tryNative: false });
-    if (installed) await activateInstalledPi(this.jiti, installed.install);
-    for (let factory = 0; factory < extensions.length; factory++) {
-      const entry = realpathSync(extensions[factory]);
-      if (this.config.entrypoint_sha256?.[entry]) {
-        const actual = createHash('sha256').update(readFileSync(entry)).digest('hex');
-        if (actual !== this.config.entrypoint_sha256[entry]) invalid(`reviewed factory changed: ${entry}; configure again`);
+    await installHostKeybindings(this);
+    // Each extension runs on the route recorded at setup (`extension_runtimes`),
+    // or the bridge-wide `pi_runtime`. The installed-Pi route is created only
+    // when some extension needs it.
+    const globalMode = piRuntimeMode(this.config);
+    const routes = this.config.extension_runtimes ?? {};
+    if (!routes || typeof routes !== 'object' || Array.isArray(routes)) invalid('extension_runtimes must be a route map');
+    if (Object.values(routes).some(mode => mode !== 'shims' && mode !== 'installed')) invalid('extension runtime must be "shims" or "installed"');
+    const piAgentDir = this.config.pi_agent_dir;
+    if (piAgentDir !== undefined && (typeof piAgentDir !== 'string' || !isAbsolute(piAgentDir))) invalid('pi_agent_dir must be an absolute path');
+    let installedJiti;
+    const jitiFor = async mode => {
+      if (mode !== 'installed') return this.jiti;
+      if (!installedJiti) {
+        const installed = installedPiAliases(piAgentDir ? { ...process.env, OCTET_PI_AGENT_DIR: piAgentDir } : process.env);
+        const candidate = createJiti(import.meta.url, { alias: { ...aliases, ...installed.aliases }, moduleCache: true, tryNative: false });
+        await activateInstalledPi(candidate, installed.install);
+        installedJiti = candidate;
       }
+      return installedJiti;
+    };
+    // One extension that fails to load is reported and skipped; the others
+    // still load, as in Pi. A single explicit entrypoint keeps the failure.
+    this.loadFailures = [];
+    const isolate = extensions.length > 1;
+    for (let factory = 0; factory < extensions.length; factory++) {
+      let entry = extensions[factory];
+      let mode = routes[entry] ?? globalMode;
+      const previousTools = new Map(this.tools);
+      const restoreProviders = checkpointFactoryProviders(this);
       try {
-        const fn = await this.jiti.import(entry, { default: true });
-        if (typeof fn !== 'function') invalid(`default export must be a factory: ${entry}`);
-        const s = { id: this.initializingId, controller: new AbortController(), factory, pending: new Set(), errors: [], live: false };
-        await this.scope.run(s, () => fn(createAPI(this, factory)));
-      } catch (error) { throw installed ? error : await classifyLoadFailure(error, entry, this.jiti); }
+        entry = realpathSync(entry);
+        mode = routes[entry] ?? globalMode;
+        if (this.config.entrypoint_sha256?.[entry]) {
+          const actual = createHash('sha256').update(readFileSync(entry)).digest('hex');
+          if (actual !== this.config.entrypoint_sha256[entry]) invalid(`reviewed factory changed: ${entry}; configure again`);
+        }
+        const jiti = await jitiFor(mode);
+        try {
+          if (mode !== 'installed' && (await scanPiImportGaps(entry, this.jiti)).direct_tools.length) {
+            unsupported('direct Pi tool execution', 'requires the reviewed installed-Pi route, not native child-tool descriptors');
+          }
+          const fn = await jiti.import(entry, { default: true });
+          if (typeof fn !== 'function') invalid(`default export must be a factory: ${entry}`);
+          const s = { id: this.initializingId, controller: new AbortController(), factory, pending: new Set(), errors: [], live: false };
+          await this.scope.run(s, () => fn(createAPI(this, factory)));
+        } catch (error) { throw mode === 'installed' ? error : await classifyLoadFailure(error, entry, this.jiti); }
+      } catch (error) {
+        this.forgetFactory(factory, entry);
+        if (!isolate) throw error;
+        this.tools = previousTools;
+        restoreProviders();
+        const failure = { entry, route: mode, error: String(error?.message || error).slice(0, 1024), code: error?.code, name: error?.name };
+        this.loadFailures.push(failure);
+        // configure consumes this exact review-only diagnostic; capture has no
+        // prompt or session. Live startup uses the safe grouped issue block.
+        if (this.initializingId === undefined) console.error(`[pi-compat] skipped ${entry}: ${failure.error}`);
+      }
     }
     this.loaded = true;
     if (this.tools.size > 256 || this.commands.size > 256 || this.flags.size > 64 || this.shortcuts.size > 64) throw rpcError(-32012, 'bounds_exceeded registrations');
   }
+  // Removes everything a factory registered before its load failed.
+  forgetFactory(factory, entry) {
+    this.failedFactories.add(factory);
+    for (const map of [this.tools, this.commands, this.shortcuts, this.flags]) {
+      for (const [key, value] of [...map]) if (value.factory === factory) map.delete(key);
+    }
+    for (const [event, list] of [...this.events]) {
+      const kept = list.filter(value => value.factory !== factory);
+      if (kept.length) this.events.set(event, kept); else this.events.delete(event);
+    }
+    for (const entries of this.bus.listeners.values()) for (const value of [...entries]) if (value.factory === factory) value.off();
+    this.transcript.factories.delete(factory);
+    this.timers.clearWhere(store => store?.factory === factory);
+    forgetMcpRegistrations(this, entry);
+  }
   metadata() {
     const hooks = [...new Set(this.config.subscribed_hooks ?? [...this.events.keys()].filter(e => hookEvents[e]).map(e => hookEvents[e]))];
-    // Command replacement needs a fresh host binding even when the factory
-    // did not subscribe to session_start. Do not invent a replacement context.
-    if (this.commands.size || this.shortcuts.size || hasMcpRegistrations(this) || this.events.has('mcp_servers_change') || hooks.includes('session_start') || hooks.includes('session_end')) for (const name of ['session_start', 'session_end']) if (!hooks.includes(name)) hooks.push(name);
+    // Message history needs the real prompt and durable assistant/tool commits,
+    // even when the factory subscribes only to Pi notification events. These
+    // native inputs do not create public Pi callbacks or bypass feature checks.
+    if (['agent_end', 'message_start', 'message_update', 'message_end'].some(event => this.events.has(event))) for (const name of ['before_prompt', 'model_turn_end']) if (!hooks.includes(name)) hooks.push(name);
+    const notifications = [...Object.values(notificationEvents), ...Object.values(followingEvents)].some(event => this.events.has(event));
+    // Commands and notification-only factories need real owner lifecycle
+    // bindings even when they have no Pi session_start/session_end callbacks.
+    if (this.commands.size || this.shortcuts.size || this.transcript.factories.size || [...this.tools.values()].some(tool => tool.definition.renderCall || tool.definition.renderResult) || hasMcpRegistrations(this) || this.events.has('mcp_servers_change') || notifications || hooks.length) for (const name of ['session_start', 'session_end']) if (!hooks.includes(name)) hooks.push(name);
     const completions = [...this.commands].filter(([, command]) => command.definition.getArgumentCompletions).map(([name]) => name);
     return {
       ...(completions.length ? { argument_completions: completions } : {}),
@@ -211,7 +291,7 @@ export class Runtime {
       tools: [...this.tools].map(([name, tool]) => toolWire(name, tool)),
       commands: [...this.commands].map(([name, { definition: d }]) => ({ name, description: d.description || name, ...(d.usage ? { usage: d.usage } : {}) })),
       hooks: hooks.sort(), flags: [...this.flags].map(([name, { definition }]) => ({ name, ...definition })),
-      shortcuts: [...this.shortcuts].map(([key, { definition: d }], i) => ({ name: `pi-shortcut-${i}`, key, description: d.description || key })),
+      shortcuts: [...this.shortcuts].map(([key, { definition: d }], i) => ({ name: this.config.registrations?.shortcuts?.find(shortcut => shortcut.key === key)?.name ?? `pi-shortcut-${i}`, key, description: d.description || key })),
       events: [...this.events.keys()].sort(),
       tool_renderers: [...this.tools].filter(([, t]) => t.definition.renderCall || t.definition.renderResult).map(([name]) => name),
     };
@@ -225,6 +305,16 @@ export class Runtime {
     for (const f of ['request_cancellation', 'content_parts']) this.require(f);
     if (this.features.has('session_compaction_v1')) this.require('session_control_v1');
     if (this.features.has('transcript_render_v1')) this.require('remote_ui');
+    const builtinOverrides = params.capabilities?.builtin_tool_overrides === undefined ? [] : params.capabilities.builtin_tool_overrides;
+    if (!Array.isArray(builtinOverrides) || builtinOverrides.length > BUILTIN_TOOL_NAMES.length
+        || new Set(builtinOverrides).size !== builtinOverrides.length
+        || builtinOverrides.some(name => !BUILTIN_TOOL_NAMES.includes(name))) invalid('builtin tool override grant');
+    this.builtinToolOverrides = new Set(builtinOverrides);
+    if (builtinOverrides.length) this.require('builtin_tool_overrides_v1');
+    else {
+      if (required.includes('builtin_tool_overrides_v1')) invalid('builtin tool override feature requires a native grant');
+      this.features.delete('builtin_tool_overrides_v1');
+    }
     this.maxConcurrent = Math.min(8, params.protocol.limits?.max_concurrent_requests || 1);
     this.namespace = params.extension?.name;
     this.scratchDirectory = params.artifact_directory;
@@ -232,9 +322,6 @@ export class Runtime {
     for (const flag of params.flag_values || []) this.flagValues.set(flag.name, flag.value);
     await this.load();
     validateProviderInitialization(this);
-    // Headless factories may register renderers without painting. A live
-    // terminal must not accept these registrations and silently omit them.
-    if (this.features.has('remote_ui') && this.transcript.factories.size) this.require('transcript_render_v1');
     const metadata = this.metadata(), declared = params.contributes || {};
     if (metadata.argument_completions?.length) this.require('autocomplete');
     if (metadata.hooks.includes('resources_discover')) this.require('resource_paths_v1');
@@ -243,14 +330,23 @@ export class Runtime {
     if (metadata.events.includes('before_agent_start')) this.require('before_prompt_state_v1');
     if (metadata.events.includes('input')) this.require('input_transform_v1');
     if (metadata.tools.some(tool => tool.prompt_snippet !== undefined || tool.prompt_guidelines !== undefined)) this.require('tool_prompt_metadata_v1');
+    // A skipped extension leaves its declared registrations unused; nothing
+    // beyond the reviewed declarations may appear.
+    const skipped = this.loadFailures?.length > 0;
+    if (skipped && !isDeepStrictEqual([...metadata.commands.map(command => command.name)].sort(), [...(declared.commands || [])].sort())) this.require('runtime_commands');
     for (const [kind, names] of [['tools', metadata.tools.map(t => t.name)], ['commands', metadata.commands.map(c => c.name)], ['hooks', metadata.hooks], ['tool_renderers', metadata.tool_renderers]]) {
       if (kind === 'tools' && this.features.has('dynamic_tools')) continue;
-      if (JSON.stringify([...(declared[kind] || [])].sort()) !== JSON.stringify([...names].sort())) invalid(`manifest ${kind} differs from reviewed registrations: ${names.join(', ')}`);
+      const allowed = [...(declared[kind] || [])];
+      const matches = skipped ? names.every(name => allowed.includes(name)) : JSON.stringify(allowed.sort()) === JSON.stringify([...names].sort());
+      if (!matches) invalid(`manifest ${kind} differs from reviewed registrations: ${names.join(', ')}`);
     }
     const staticMetadata = this.config.registrations;
     if (staticMetadata) {
       const staticSurface = ({ tools, ...rest }) => rest;
-      if (JSON.stringify(staticSurface(staticMetadata)) !== JSON.stringify(staticSurface(metadata))) invalid('reviewed registration metadata changed; configure again');
+      const matches = skipped
+        ? Object.entries(staticSurface(metadata)).every(([kind, values]) => values.every(value => (staticMetadata[kind] || []).some(allowed => isDeepStrictEqual(value, allowed))))
+        : isDeepStrictEqual(staticSurface(staticMetadata), staticSurface(metadata));
+      if (!matches) invalid('reviewed registration metadata changed; configure again');
     }
     for (const [name, { definition: d }] of this.flags) {
       const value = this.flagValues.get(name) ?? d.default;
@@ -259,16 +355,22 @@ export class Runtime {
     if (metadata.shortcuts.length) this.require('shortcuts');
     // Static reviewed shortcut declarations are admitted during native startup.
     // A reverse registration here would wait for a frontend that is not live yet.
-    if (!isDeepStrictEqual(declared.shortcuts || [], metadata.shortcuts)) invalid('manifest shortcuts differ from reviewed registrations');
+    if (skipped ? !metadata.shortcuts.every(shortcut => (declared.shortcuts || []).some(allowed => isDeepStrictEqual(shortcut, allowed))) : !isDeepStrictEqual(declared.shortcuts || [], metadata.shortcuts)) invalid('manifest shortcuts differ from reviewed registrations');
     this.initialized = true;
     return {
-      api_version: '0.4', tools: metadata.tools, commands: metadata.commands, shortcuts: metadata.shortcuts,
+      // Shortcuts are static on the host wire. Keep the reviewed declarations;
+      // invoking one from a skipped factory refuses instead of running stale JS.
+      api_version: '0.4', tools: metadata.tools, commands: metadata.commands, shortcuts: skipped ? (declared.shortcuts || []) : metadata.shortcuts,
       protocol: { version: '0.4', features: [...this.features], limits: { max_concurrent_requests: this.maxConcurrent },
         ...(this.features.has('lifecycle_events') ? { lifecycle_events: ['turn/started', 'turn/settled', 'tool/started', 'tool/settled'] } : {}) },
     };
   }
+  // One Pi-style block after initialize, not a separate notice per issue kind.
+  reportStartupIssues() { this.issues.startup(); }
+  // Late renderer registrations are still inert without the native consumer.
+  reportInertRenderers() { this.issues.reportInertRenderers(); }
   registerAutocomplete() {
-    if (!this.metadata().argument_completions?.length) return;
+    if (!this.features.has('autocomplete') || !this.commands.size) return;
     // This process-scoped request MUST follow the initialize reply: the host
     // admits the chain only after startup and its interactive drain are live.
     this.autocompleteRegistration = this.transport.request('ui/autocomplete/register', { revision: 1 }).then(result => {
@@ -278,17 +380,38 @@ export class Runtime {
     });
     this.autocompleteRegistration.catch(error => this.backgroundError(error));
   }
-  bind(params, store) {
+  bind(params, store, { foreground = store.method === 'hook/run' && params.hook === 'session_start', requireLeaf, preparationHead } = {}) {
     const context = params.context || {};
+    if (Object.hasOwn(context.host || {}, 'theme')) nativeTheme(context.host.theme);
     const owner = context.resource_owner || params.payload?.binding;
-    if (!owner) return;
+    if (!owner) {
+      if (params.session_leaf !== undefined || requireLeaf) invalid('complete resource_owner required');
+      return;
+    }
     const key = ownerKey(owner);
+    for (const field of ['session_id', 'extension_instance_id']) bounded(owner[field], `resource_owner ${field}`, 256);
+    if (context.resource_owner && params.payload?.binding && ownerKey(params.payload.binding) !== key) invalid('session lifecycle binding owner');
+    const lifecycle = store.method === 'hook/run' && ['session_start', 'session_end'].includes(params.hook);
+    // Validate private authority before touching any retained state. A hook's
+    // session binding is not a host foreground lifecycle transition.
+    let grant;
+    if (params.session_leaf !== undefined) {
+      if (store.method !== 'hook/run') invalid('session_leaf requires hook/run');
+      grant = leafGrant(params.session_leaf, owner);
+      if (Object.hasOwn(context.host || {}, 'session_leaf_id') && context.host.session_leaf_id !== grant.expected_head) invalid('session_leaf snapshot head');
+    }
+    if (requireLeaf && (!grant || preparationHead !== undefined && grant.expected_head !== preparationHead)) unsupported(requireLeaf, requireLeaf === 'provider_context' ? 'matching native session_leaf preparation required' : 'actual native session_leaf consumer required');
     let state = this.states.get(key);
     // Revisiting a session creates a new incarnation. Captured old contexts
     // still point at their retired state and must never become live again.
     if (state && !state.alive && !(store.method === 'hook/run' && params.hook === 'session_start')) {
       throw rpcError(-32002, 'not_foreground_owner settled owner');
     }
+    if (!lifecycle && this.foreground && (owner.extension_instance_id !== this.foreground.owner.extension_instance_id || owner.process_generation !== this.foreground.owner.process_generation)) throw rpcError(-32002, 'not_foreground_owner process binding');
+    // Commands/shortcuts are foreground actions, not a way to switch a live
+    // foreground owner. Their first binding supports hosts without start hooks.
+    foreground ||= !this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method);
+    if (!foreground && this.foreground && state !== this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method)) throw rpcError(-32002, 'not_foreground_owner command belongs to an inactive session');
     if (!state || !state.alive) {
       state = { key, owner: Object.freeze({ ...owner }), alive: true, workspace: context.workspace || this.workspace, host: { ...this.initialHost, ...(context.host || {}) }, statuses: new Map(), branchListeners: new Set(), uiQueues: new Map(), parent: store.id };
       this.states.set(key, state);
@@ -296,12 +419,12 @@ export class Runtime {
       state.workspace = context.workspace || state.workspace;
       state.host = { ...state.host, ...(context.host || {}) }; state.parent = store.id;
     }
-    if (this.foreground && this.foreground !== state) this.retire(this.foreground).catch(e => this.backgroundError(e));
-    this.foreground = state; store.state = state;
-    for (const waiter of this.foregroundWaiters) waiter(state);
-    if (params.session_leaf !== undefined) {
-      if (store.method !== 'hook/run') invalid('session_leaf requires hook/run');
-      store.leaf = { grant: leafGrant(params.session_leaf, state.owner) };
+    store.state = state;
+    if (grant) store.leaf = { grant };
+    if (foreground) {
+      if (this.foreground && this.foreground !== state) this.retire(this.foreground).catch(e => this.backgroundError(e));
+      this.foreground = state;
+      for (const waiter of this.foregroundWaiters) waiter(state);
     }
   }
   bindReplacement(context, store) {
@@ -309,7 +432,8 @@ export class Runtime {
     ownerKey(next);
     if (next.extension_instance_id !== previous.extension_instance_id || next.process_generation !== previous.process_generation || next.session_id === previous.session_id) invalid('replacement receipt owner');
     const fresh = { ...store };
-    this.bind({ context }, fresh);
+    this.assertOwner(store);
+    this.bind({ context }, fresh, { foreground: true });
     return fresh;
   }
   // Resolves once the host binds the session that replaced the active one.
@@ -328,15 +452,17 @@ export class Runtime {
     cancelProviderStream(this, undefined, state);
     this.transcript.retire(state);
     state.alive = false; retireMcpSession(state); retireAutocomplete(state); retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
-    // Awaited resource/context callbacks are cancelled on owner retirement.
-    // Existing editor/retained-operation lifetime and cancellation stay unchanged.
-    for (const store of this.active.values()) if ((store.resourceDiscovery || store.providerContext) && store.state === state) store.controller.abort(cancelled());
+    // Session-scoped hooks are cancelled on their own owner retirement, never
+    // another hook's private binding. Replacement commands retain their parent.
+    for (const store of this.active.values()) if (store.state === state && (store.resourceDiscovery || store.providerContext || store.method === 'hook/run' && !['session_start', 'session_end'].includes(store.hook))) store.controller.abort(cancelled());
     await this.ui.ownerEnded(state);
   }
   updated(params) {
     this.require('remote_ui'); const key = ownerKey(params.resource_owner), state = this.states.get(key);
     if (!state || !state.alive || state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context/updated');
-    const previous = state.host.git_branch; state.host = { ...state.host, ...plainJSON(params.host, 'host snapshot', 524288) };
+    const next = plainJSON(params.host, 'host snapshot', 524288);
+    if (Object.hasOwn(next, 'theme')) nativeTheme(next.theme);
+    const previous = state.host.git_branch; state.host = { ...state.host, ...next };
     if (previous !== state.host.git_branch) for (const listener of state.branchListeners) listener();
     for (const surface of this.ui.surfaces.values()) if (surface.store.state === state) this.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
   }
@@ -344,7 +470,17 @@ export class Runtime {
     for (const entry of [...this.events.get(event) || []]) {
       store.controller.signal.throwIfAborted();
       const childStore = { ...store, factory: entry.factory };
-      const result = await this.scope.run(childStore, () => entry.handler(value, createContext(this, childStore)));
+      let result;
+      try { result = await this.scope.run(childStore, () => entry.handler(value, createContext(this, childStore))); }
+      catch (error) {
+        store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
+        // Pi's ExtensionRunner.emit reports a failing handler and runs the
+        // next one. Vetoes, cancellation, owner refusals and tracked host
+        // mutations still propagate; a skipped callback is never a host receipt.
+        if (veto || error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+        this.reportCallbackError(event, entry.factory, error);
+        continue;
+      }
       store.controller.signal.throwIfAborted();
       if (result !== undefined) {
         if (veto && result && typeof result === 'object' && Object.keys(result).every(k => ['block', 'reason', 'terminate'].includes(k))) {
@@ -353,7 +489,9 @@ export class Runtime {
             store.toolTermination = result.terminate;
             return { action: 'deny', reason: result.reason ?? 'Blocked by Pi extension' };
           }
-        } else unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
+        } else if (event.startsWith('session_before_')) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
+        // Pi ignores other handlers' return values.
+        else if (veto) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
       }
     }
     return { action: 'continue' };
@@ -372,7 +510,11 @@ export class Runtime {
       const childStore = { ...store, factory: entry.factory };
       let result;
       try { result = await this.scope.run(childStore, () => entry.handler(event, createContext(this, childStore))); }
-      catch (error) { this.backgroundError(error); continue; }
+      catch (error) {
+        store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
+        if (error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+        this.reportCallbackError('tool_result', entry.factory, error); continue;
+      }
       store.controller.signal.throwIfAborted();
       if (!result) continue;
       fields(result, ['content', 'details', 'structuredContent', 'isError', 'usage'], 'tool_result result');
@@ -392,14 +534,14 @@ export class Runtime {
     return {
       ...(changed.has('content') ? { content: event.content.every(part => part.type === 'text') ? textOnly(event.content).map(part => part.text) : await toolContent(this, event.content, store) } : {}),
       ...(changed.has('structuredContent') ? { structured_content: plainJSON(event.structuredContent, 'structured content', 262144) } : {}),
-      ...((changed.has('details') || changed.has('usage')) ? { metadata: { ...(payload.metadata ?? {}), ...(changed.has('details') ? { pi_details: plainJSON(event.details, 'tool details') } : {}), ...(changed.has('usage') ? { pi_usage: event.usage } : {}) } } : {}),
+      ...((changed.has('details') || changed.has('usage')) ? { metadata: { ...(payload.metadata ?? {}), ...(changed.has('details') ? { pi_details: plainJSON(event.details, 'tool details', 65536, { omitUndefined: true }) } : {}), ...(changed.has('usage') ? { pi_usage: event.usage } : {}) } } : {}),
       ...(changed.has('usage') ? { usage: { input_tokens: event.usage.input, output_tokens: event.usage.output, cache_read_tokens: event.usage.cacheRead, cache_write_tokens: event.usage.cacheWrite, cache_write_1h_tokens: 0, reasoning_tokens: 0, total_tokens: event.usage.totalTokens } } : {}),
       ...(changed.has('isError') ? { is_error: event.isError } : {}),
     };
   }
   queued(store, work) {
     if (++this.hookQueued > 128) { this.hookQueued--; throw rpcError(-32012, 'bounds_exceeded ordered hook queue'); }
-    const result = this.hookTail.then(() => { store.controller.signal.throwIfAborted(); return work(); });
+    const result = this.hookTail.then(() => { store.controller.signal.throwIfAborted(); return cancellable(Promise.resolve().then(work), store.controller.signal); });
     this.hookTail = result.catch(() => {});
     return result.finally(() => { this.hookQueued--; });
   }
@@ -427,7 +569,9 @@ export class Runtime {
       const opened = deferred(); store.detach = () => { store.detached = true; opened.resolve({ text: '', notifications: [], context: [] }); };
       store.factory = cmd.factory;
       const run = this.scope.run(store, async () => {
-        if (this.features.has('composer')) {
+        // Negotiated transport support is not a foreground UI lease. Ordinary
+        // headless commands must not acquire a composer before their handler.
+        if (this.features.has('composer') && store.state.host.has_ui !== false) {
           const { text } = await this.hostCall('composer/get', {}, store);
           if (!this.ui.activeEditor(store)) store.state.host.composer_text = text;
         }
@@ -472,11 +616,14 @@ export class Runtime {
         // Pi hands handlers one mutable input; later handlers see earlier mutations.
         const value = p.hook === 'before_tool_call' ? { type: event, toolName: payload.name, toolCallId: payload.tool_call_id, ...(payload.parent_tool_call_id == null ? {} : { parentToolCallId: payload.parent_tool_call_id }), input: toolInput ??= structuredClone(payload.arguments ?? {}) }
           : p.hook === 'after_tool_call' ? { type: event, toolName: payload.name, input: payload.arguments, content: [{ type: 'text', text: payload.output }], isError: payload.is_error }
-          : strict({ type: event, ...payload }, `${event} event`);
+          // Pi's session_start always has a reason; a host that gives none is
+          // starting this process's session, which Pi calls "startup".
+          : strict({ type: event, ...(event === 'session_start' && payload.reason === undefined ? { reason: 'startup' } : {}), ...payload }, `${event} event`);
         disposition = await this.runEvent(event, value, store, { veto: p.hook === 'before_tool_call' });
         if (disposition.action === 'deny') break;
       }
       await this.flush(store);
+      if (p.hook === 'before_prompt') rememberPrompt(store, payload);
       if (p.hook === 'session_end' && store.state) await this.retire(store.state);
       const replaced = toolInput !== undefined && disposition.action === 'continue' && !isDeepStrictEqual(toolInput, payload.arguments ?? {});
       return { disposition, context: [], notifications: [], ...(customMessages.length ? { custom_messages: customMessages } : {}), ...(systemPrompt === undefined || systemPrompt === payload.system_prompt ? {} : { system_prompt: systemPrompt }),
@@ -539,7 +686,8 @@ export class Runtime {
         store.factory = handler.factory;
         await this.scope.run(store, () => handler.definition.handler(createContext(this, store)));
       } else {
-        await this.runEvent(event, strict({ type: event, ...p }, `${event} event`), store);
+        if (runMessageMethods.has(message.method)) await handleRunMessage(this, message.method, p, store);
+        else await this.runEvent(event, strict({ type: event, ...p }, `${event} event`), store);
         const following = followingEvents[message.method];
         if (following) await this.runEvent(following, { type: following }, store);
       }
@@ -571,7 +719,7 @@ export class Runtime {
       if (!this.stopping) {
         await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
         settlementError = undefined;
-        if (message.method === 'initialize') { this.registerAutocomplete(); startProviderRegistration(this); }
+        if (message.method === 'initialize') { this.registerAutocomplete(); startProviderRegistration(this); this.reportStartupIssues(); }
         if (message.method === 'provider/stream') startProviderStream(this, message.params.stream_id);
       }
     } catch (error) {

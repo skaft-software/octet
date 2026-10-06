@@ -130,6 +130,11 @@ impl InteractiveShell {
         event.clone()
     }
 
+    /// Read-only action map from this shell's actual resolved input policy.
+    pub(crate) fn extension_keybindings(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.input_dispatch.bindings.get_resolved_bindings()
+    }
+
     /// Reload only the user-owned keybinding file. No project input policy or
     /// executable resource is loaded here.
     pub fn reload_keybindings(&mut self) {
@@ -441,7 +446,7 @@ impl InteractiveShell {
         }
         let typed_submission = matches!(event.as_ref(), Some(Event::Key(key))
             if self.input_dispatch.bindings.matches(key, "tui.input.submit")
-                || (key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL));
+                || self.input_dispatch.bindings.matches(key, "app.message.followUp"));
         let action = {
             let state = self.state.borrow();
             keymap::translate_with_bindings(

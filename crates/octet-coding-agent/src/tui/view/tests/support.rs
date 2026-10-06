@@ -155,6 +155,9 @@ pub(super) fn emulated_shell_with_mode(
         size: (width, height),
         follow_tail: true,
         application_viewport_requested: application_viewport,
+        transcript_navigation: RefCell::new(
+            super::super::transcript_navigation::TranscriptNavigation::without_scrollbar(),
+        ),
         ..ShellState::default()
     });
     let mut tui = TUI::new(Box::new(EmulatedTerminal {
@@ -182,6 +185,9 @@ pub(super) fn emulated_shell_with_mode(
             remote_mouse_capture: false,
             remote_keyboard_events: false,
             terminal_ceded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            runtime_config: None,
+            theme_preview: None,
+            extension_themes: RefCell::new(None),
             herdr: crate::herdr::PaneReporter::disabled(),
         },
         bytes,
@@ -971,4 +977,10 @@ pub(super) fn status_render_loop_shell(theme: OctetTheme) -> StatusRenderLoop {
         delay,
         bytes,
     }
+}
+
+/// Puts a test shell back before its first branded frame, the state a real
+/// terminal is in while session_start runs.
+pub(crate) fn begin_startup(shell: &InteractiveShell) {
+    shell.state.borrow_mut().startup_pending = true;
 }

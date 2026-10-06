@@ -4,7 +4,8 @@
 //! overlap the next response, so provider completion alone cannot end a turn.
 use super::*;
 use crate::compaction::{
-    run_session_operation_hooks, SessionOperation, SessionOperationError, SessionOperationHook,
+    run_session_operation_hooks, ModelTurnAssistantMetadata, SessionOperation,
+    SessionOperationError, SessionOperationHook,
 };
 
 const MODEL_TURN_HOOK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -23,6 +24,7 @@ pub(super) struct ModelTurnHooks<'a> {
     started: Option<u64>,
     pending: VecDeque<PendingTurn>,
     stopped: bool,
+    warnings: Vec<AgentEvent>,
 }
 
 impl<'a> ModelTurnHooks<'a> {
@@ -33,6 +35,7 @@ impl<'a> ModelTurnHooks<'a> {
             started: None,
             pending: VecDeque::new(),
             stopped: false,
+            warnings: Vec::new(),
         }
     }
 
@@ -114,8 +117,8 @@ impl<'a> ModelTurnHooks<'a> {
             .front()
             .is_some_and(|turn| turn.unresolved.is_empty())
         {
-            // Claim before awaiting. Errors/cancellation are terminal for this
-            // driver; terminal cleanup must not redeliver a committed turn.
+            // Claim before awaiting. Neither a failed observation nor terminal
+            // cleanup may redeliver a committed turn.
             let turn = self.pending.pop_front().expect("ready model turn");
             let operation = SessionOperation::ModelTurnEnd {
                 run_id: self.run_id.to_owned(),
@@ -125,6 +128,22 @@ impl<'a> ModelTurnHooks<'a> {
                     .entry(&turn.assistant)
                     .expect("committed assistant remains in append-only session")
                     .clone(),
+                assistant_metadata: session.usage_records().iter().rev().find_map(|record| {
+                    match &record.kind {
+                        UsageRecordKind::AssistantTurn { assistant }
+                            if assistant == &turn.assistant =>
+                        {
+                            Some(Box::new(ModelTurnAssistantMetadata {
+                                assistant_entry_id: assistant.clone(),
+                                model: record.model.clone(),
+                                usage: record.usage,
+                                cost: record.cost,
+                                stop_reason: record.stop_reason.clone(),
+                            }))
+                        }
+                        _ => None,
+                    }
+                }),
                 tool_result_entries: turn
                     .results
                     .iter()
@@ -141,42 +160,79 @@ impl<'a> ModelTurnHooks<'a> {
         Ok(())
     }
 
+    pub(super) fn take_warnings(&mut self) -> Vec<AgentEvent> {
+        std::mem::take(&mut self.warnings)
+    }
+
     async fn dispatch(
         &mut self,
         session: &mut Session,
         operation: SessionOperation,
         cancellation: &CancellationToken,
     ) -> Result<(), FinishReason> {
-        let result = run_session_operation_hooks(
-            session,
-            self.hooks,
-            &operation,
-            cancellation,
-            MODEL_TURN_HOOK_TIMEOUT,
-        )
-        .await;
-        match result {
-            Ok(_) => Ok(()), // The shared driver validates Continue-only observations.
-            Err(error) => {
-                self.stopped = true;
-                if matches!(error, SessionOperationError::Cancelled) {
-                    return Err(FinishReason::Aborted);
-                }
-                let boundary = match &operation {
-                    SessionOperation::ModelTurnEnd { assistant_entry, .. } => format!(
-                        "model turn hook failed after committed assistant {}; durable entries retained; callback not retried",
-                        assistant_entry.id.0
-                    ),
-                    _ => "model turn start hook failed; durable entries retained; callback not retried".into(),
+        let deadline = tokio::time::Instant::now() + MODEL_TURN_HOOK_TIMEOUT;
+        for (index, hook) in self.hooks.iter().enumerate() {
+            let result = run_session_operation_hooks(
+                session,
+                std::slice::from_ref(hook),
+                &operation,
+                cancellation,
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await;
+            let Err(error) = result else { continue };
+            if matches!(
+                error,
+                SessionOperationError::Callback | SessionOperationError::Deadline
+            ) {
+                let (phase, turn) = match &operation {
+                    SessionOperation::ModelTurnStart { turn_index, .. } => ("start", turn_index),
+                    SessionOperation::ModelTurnEnd { turn_index, .. } => ("end", turn_index),
+                    _ => unreachable!("model-turn observations only"),
                 };
-                Err(FinishReason::Failed(
-                    AiError::Config(octet_ai::ConfigError::Parse(format!("{boundary}: {error}")))
-                        .into(),
-                ))
+                let skipped = if matches!(error, SessionOperationError::Deadline) {
+                    "; remaining observers skipped at this boundary"
+                } else {
+                    ""
+                };
+                self.warnings.push(AgentEvent::ExtensionObservationWarning {
+                    message: format!(
+                        "model turn {turn} {phase} observer {}: {error}; durable entries retained; callback not retried{skipped}",
+                        index + 1,
+                    ),
+                });
+                if matches!(error, SessionOperationError::Deadline) {
+                    break; // Keep one shared budget, not one timeout per observer.
+                }
+                continue;
             }
+            // Cancellation, vetoes, owner/source changes and failed private
+            // appends remain fail-closed. Only callback failures are isolated.
+            self.stopped = true;
+            if matches!(error, SessionOperationError::Cancelled) {
+                return Err(FinishReason::Aborted);
+            }
+            let boundary = match &operation {
+                SessionOperation::ModelTurnEnd { assistant_entry, .. } => format!(
+                    "model turn hook failed after committed assistant {}; durable entries retained; callback not retried",
+                    assistant_entry.id.0
+                ),
+                _ => "model turn start hook failed; durable entries retained; callback not retried".into(),
+            };
+            return Err(FinishReason::Failed(
+                AiError::Config(octet_ai::ConfigError::Parse(format!("{boundary}: {error}")))
+                    .into(),
+            ));
         }
+        if cancellation.is_cancelled() {
+            self.stopped = true;
+            return Err(FinishReason::Aborted);
+        }
+        Ok(())
     }
 }
 
+#[cfg(test)]
+mod metadata_tests;
 #[cfg(test)]
 mod tests;

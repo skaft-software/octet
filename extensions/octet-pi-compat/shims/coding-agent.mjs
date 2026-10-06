@@ -5,7 +5,7 @@ export { VERSION, CONFIG_DIR_NAME, getAgentDir, isToolCallEventType, isBashToolR
   withFileMutationQueue, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES, formatSize, truncateHead, truncateTail,
   truncateLine, convertToLlm, serializeConversation } from '../lib/public-helpers.mjs';
 import { unsupported } from '../lib/errors.mjs';
-import { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
+export { CustomEditor } from '../lib/custom-editor.mjs';
 import { theme } from '../lib/theme.mjs';
 export const defineTool = definition => definition;
 export const getEditorTheme = () => ({ borderColor: theme.borderColor, selectList: theme.selectList });
@@ -17,11 +17,6 @@ export const getMarkdownTheme = () => ({
   quote: text => theme.fg('mdQuote', text), quoteBorder: text => theme.fg('mdQuoteBorder', text), hr: text => theme.fg('mdHr', text), listBullet: text => theme.fg('mdListBullet', text),
   bold: theme.bold, italic: theme.italic, strikethrough: theme.strikethrough, underline: theme.underline,
 });
-export class CustomEditor extends Editor {
-  constructor(tui, editorTheme, keybindings, options) {
-    super(tui, editorTheme, options); this.keybindings = keybindings;
-  }
-}
 // Named imports resolve to explicit refusals instead of any SDK fallback.
 export { createAgentSession, AgentSession, SessionManager, createCodingTools, codingTools, readTool, bashTool, editTool, writeTool, searchTool,
   createReadTool, createBashTool, createEditTool, createWriteTool, createSearchTool,

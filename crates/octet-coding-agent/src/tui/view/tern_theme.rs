@@ -152,6 +152,20 @@ fn variant(theme: &OctetTheme) -> Map<String, Value> {
         );
     }
     if let Some(accent) = theme.model_rgb(None) {
+        // ANSI's default composer uses model ink for its rule and a quieter
+        // version at rest. Export both, rather than leaving native chrome on
+        // Tern's neutral/fallback borders. Custom themes keep their own borders.
+        if theme.is_compiled_default() {
+            let border = theme.role_rgb("composer_border").unwrap_or(accent);
+            put(&mut out, "border", Color::Rgb(border.0, border.1, border.2));
+            put(
+                &mut out,
+                "borderAccent",
+                Color::Rgb(border.0, border.1, border.2),
+            );
+            let idle = theme.composer_idle_rgb(border);
+            put(&mut out, "borderMuted", Color::Rgb(idle.0, idle.1, idle.2));
+        }
         if theme.prompt_wash() {
             if let Some((r, g, b)) = theme.native_prompt_rgb(accent) {
                 put(&mut out, "userMessageBg", Color::Rgb(r, g, b));
@@ -326,6 +340,20 @@ foreground = "#252020"
             b.palette.dark.as_ref().unwrap()["accent"]
         );
         assert_ne!(a.palette.dark, a.palette.light);
+        for native in [&a, &b] {
+            for (palette, resolved) in [
+                (native.palette.dark.as_ref().unwrap(), &native.dark),
+                (native.palette.light.as_ref().unwrap(), &native.light),
+            ] {
+                assert_eq!(palette["border"], palette["accent"]);
+                assert_eq!(palette["borderAccent"], palette["accent"]);
+                let idle = resolved.composer_idle_rgb(resolved.model_rgb(None).unwrap());
+                assert_eq!(
+                    palette["borderMuted"],
+                    hex(Color::Rgb(idle.0, idle.1, idle.2)).unwrap()
+                );
+            }
+        }
         assert_eq!(
             a.palette.dark.as_ref().unwrap()["accent"],
             hex(a.dark.semantic_style("model_accent").foreground).unwrap()

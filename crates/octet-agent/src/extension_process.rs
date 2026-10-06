@@ -106,6 +106,11 @@ mod model_control;
 mod negotiation;
 mod presentation;
 mod process_api;
+mod transcript_render;
+pub use transcript_render::{
+    transcript_private_entry, TranscriptInvalidation, TranscriptRenderContent,
+    TranscriptRenderRequest, TranscriptRenderResponse, EXTENSION_FEATURE_TRANSCRIPT_RENDER,
+};
 mod process_group;
 mod process_hooks;
 mod process_state;
@@ -113,6 +118,8 @@ mod protocol;
 mod protocol_line;
 mod provider_context;
 mod provider_stream;
+mod python_runtime;
+pub use python_runtime::{provision_python_runtime, PythonRuntimeConfig, PythonRuntimeSetup};
 mod reader;
 mod resource_paths;
 mod session_control;
@@ -197,6 +204,7 @@ pub use self::host_requests::AgentSessionTargetRequest;
 pub use self::host_requests::AgentSessionWaitRequest;
 pub use self::host_requests::CommandDefinition;
 pub use self::host_requests::ComposerGetRequest;
+pub use self::host_requests::ComposerHistoryRequest;
 pub use self::host_requests::ComposerTextRequest;
 pub use self::host_requests::ComposerTextResult;
 pub use self::host_requests::ContextModelCatalogResult;
@@ -410,6 +418,7 @@ pub use self::protocol::ExtensionRequestId;
 pub use self::protocol::RenderedToolCall;
 pub use self::protocol::ResourceProtocolLimits;
 pub use self::protocol::ToolRenderSegment;
+pub use self::protocol::EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES;
 pub use self::protocol::EXTENSION_FEATURE_TOOL_PROMPT_METADATA;
 use self::protocol::*;
 use self::protocol_line::*;
@@ -576,6 +585,8 @@ pub mod methods {
     pub const COMPOSER_SET: &str = "composer/set";
     /// Extension request to insert text at the host composer cursor.
     pub const COMPOSER_INSERT: &str = "composer/insert";
+    /// Extension request to seed older native prompt history.
+    pub const COMPOSER_HISTORY: &str = "composer/history";
     /// Extension request to register one runtime terminal shortcut.
     pub const SHORTCUT_REGISTER: &str = "shortcut/register";
     /// Extension request to append one extension-owned durable session entry.
@@ -649,6 +660,7 @@ macro_rules! impl_owner_scoped_host_request {
 }
 
 impl_owner_scoped_host_request!(ComposerGetRequest);
+impl_owner_scoped_host_request!(ComposerHistoryRequest);
 impl_owner_scoped_host_request!(ComposerTextRequest);
 impl_owner_scoped_host_request!(ShortcutRegisterRequest);
 impl_owner_scoped_host_request!(SessionAppendEntryRequest);

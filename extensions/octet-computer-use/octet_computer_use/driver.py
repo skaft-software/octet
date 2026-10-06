@@ -15,16 +15,20 @@ platform-specific and bundles the ``cua-driver`` executable.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -162,12 +166,20 @@ def _install_environment() -> Dict[str, str]:
     """A sanitized environment for pip, mirroring the host's install path."""
 
     environment = os.environ.copy()
-    # A caller-controlled Python path could make the venv import an ambient
-    # package despite the exact distribution pin, so drop the selection
-    # variables. Ordinary proxy/TLS variables are kept for the download.
-    for name in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
-        environment.pop(name, None)
+    # Neither the user's pip configuration/index credentials nor ambient Python
+    # selection may participate in Octet-owned installation. pip's null config
+    # disables system/user/site configuration, including extra-index/find-links.
+    for name in list(environment):
+        if name.upper().startswith("PIP_") or name.upper() in {
+            "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "NETRC",
+        }:
+            environment.pop(name, None)
     environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PIP_CONFIG_FILE"] = os.devnull
+    environment["PIP_INDEX_URL"] = "https://pypi.org/simple"
+    environment["PIP_KEYRING_PROVIDER"] = "disabled"
+    environment["NETRC"] = os.devnull
     environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     # Force UTF-8 stdio so pip/driver output decodes deterministically
     # regardless of the Windows ANSI code page (see `_run`).
@@ -262,13 +274,103 @@ def _run_cancellable(
                 _kill_tree(process)
 
 
+def _reject_link(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and is_link_or_reparse_point(path.lstat())):
+        raise ProvisionError(f"computer-use setup path must not be a symlink or reparse point: {path}")
+
+
 def _ensure_directories(paths: DriverPaths) -> None:
+    # Check the Octet parent too, before mkdir can follow a redirected root.
+    for path in (paths.root.parent, paths.root):
+        _reject_link(path)
     paths.root.mkdir(parents=True, exist_ok=True)
-    # The runtime and logs live under a user-owned root. Refuse to continue if
-    # the root is a symlink (or, on Windows, a junction or other reparse point)
-    # so we never write through an attacker-planted link.
-    if paths.root.is_symlink() or is_link_or_reparse_point(paths.root.lstat()):
-        raise ProvisionError("computer-use root must not be a symlink")
+
+
+def _check_cancelled() -> None:
+    from octet_extension import current_cancellation
+
+    cancellation = current_cancellation()
+    if cancellation is not None:
+        cancellation.raise_if_cancelled()
+
+
+@contextmanager
+def _setup_lock(paths: DriverPaths):
+    """One installer owns runtime replacement/recovery across Octet processes."""
+    _reject_link(paths.install_lock)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(paths.install_lock, flags, 0o600), "r+b") as lock:
+        _reject_link(paths.install_lock)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                # Windows byte-range locks need one byte, at a stable offset.
+                if lock.seek(0, os.SEEK_END) == 0:
+                    lock.write(b"\0")
+                    lock.flush()
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise ProvisionError("computer-use setup is already running; wait or cancel it, then retry") from error
+        try:
+            _check_cancelled()
+            yield
+        finally:
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _recover_runtime(paths: DriverPaths) -> None:
+    """Roll back only an unfinished owned install, including after process loss."""
+    marker = paths.root / ".runtime-installing"
+    previous = paths.root / ".runtime-previous"
+    for path in (paths.venv, marker, previous):
+        _reject_link(path)
+    if marker.exists():
+        with marker.open("r", encoding="ascii") as checkpoint:
+            state = checkpoint.read(16)
+        if state not in ("fresh", "existing"):
+            raise ProvisionError("invalid computer-use install checkpoint; runtime left untouched")
+        if state == "fresh" or previous.exists():
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            if previous.exists():
+                previous.rename(paths.venv)
+        # An existing marker without a backup means the rename never started,
+        # or rollback already restored it. Keep that original runtime intact.
+        marker.unlink()
+    elif previous.exists():
+        # The checkpoint is removed only at commit. This is leftover cleanup
+        # from a successful installation, not permission to restore old code.
+        shutil.rmtree(previous)
+
+
+@contextmanager
+def _replace_runtime(paths: DriverPaths):
+    marker = paths.root / ".runtime-installing"
+    previous = paths.root / ".runtime-previous"
+    with marker.open("x", encoding="ascii") as checkpoint:
+        checkpoint.write("existing" if paths.venv.exists() else "fresh")
+        checkpoint.flush()
+        os.fsync(checkpoint.fileno())
+    try:
+        if paths.venv.exists():
+            paths.venv.rename(previous)
+        yield
+        _check_cancelled()
+    except BaseException:
+        _recover_runtime(paths)
+        raise
+    else:
+        marker.unlink()
+        if previous.exists():
+            shutil.rmtree(previous)
 
 
 def driver_version(binary: Path) -> Optional[str]:
@@ -571,8 +673,17 @@ def provision(
     for that network access. ``progress`` receives one short line per phase.
     """
 
-    report = progress or _no_progress
     _ensure_directories(paths)
+    with _setup_lock(paths):
+        _recover_runtime(paths)
+        return _provision(paths, version=version, timeout=timeout, progress=progress)
+
+
+def _provision(
+    paths: DriverPaths, *, version: str, timeout: int,
+    progress: Optional[Callable[[str], None]],
+) -> Path:
+    report = progress or _no_progress
     # Validate the request before anything else. An explicit pin must be checked
     # against what is installed, never satisfied by whatever happens to be
     # present, and a malformed pin must not be reported as a successful reuse.
@@ -591,11 +702,17 @@ def provision(
     interpreter, interpreter_version = _driver_interpreter(environment)
     report(f"Using Python {_version_text(interpreter_version)} ({interpreter})")
 
-    # A mismatch between the request and what is installed re-enters the owned
-    # venv from scratch, so a version switch cannot leave a half-upgraded
-    # runtime behind.
-    paths.venv.mkdir(parents=True, exist_ok=True)
+    # Keep stable venv paths (pip launchers are not relocatable), but retain the
+    # old runtime until the candidate is complete. Failure/cancellation restores
+    # it; the checkpoint makes the same rollback possible on the next retry.
+    with _replace_runtime(paths):
+        return _install_runtime(paths, requested, spec, environment, timeout,
+                                interpreter, interpreter_version, report)
 
+
+def _install_runtime(paths, requested, spec, environment, timeout,
+                     interpreter, interpreter_version, report) -> Path:
+    paths.venv.mkdir(parents=True, exist_ok=True)
     report("Creating the driver's private Python environment…")
     create = _run(
         [interpreter, "-m", "venv", "--clear", str(paths.venv)],
@@ -625,6 +742,8 @@ def provision(
             "--disable-pip-version-check",
             "--no-input",
             "--no-cache-dir",
+            "--index-url", "https://pypi.org/simple",
+            "--only-binary=:all:",
             spec,
         ],
         env=environment,
@@ -698,16 +817,24 @@ def _select_wheel(files: Any, arch: str) -> Mapping[str, Any]:
             continue
         name = entry.get("filename")
         digest = (entry.get("digests") or {}).get("sha256") if isinstance(entry.get("digests"), Mapping) else None
-        if (isinstance(name, str) and name.endswith(".whl") and "manylinux" in name
-                and name.endswith(f"_{arch}.whl") and isinstance(entry.get("url"), str)
-                and entry["url"].startswith("https://") and isinstance(digest, str)):
+        try:
+            url = urllib.parse.urlsplit(entry["url"]) if isinstance(entry.get("url"), str) else None
+        except ValueError:
+            continue
+        if (isinstance(name, str)
+                and re.fullmatch(r"cua_driver-[A-Za-z0-9_.+-]+\.whl", name)
+                and "manylinux" in name and name.endswith(f"_{arch}.whl")
+                and url is not None and url.scheme == "https"
+                and url.netloc == "files.pythonhosted.org"
+                and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)):
             return entry
     raise ProvisionError(f"{DISTRIBUTION} publishes no Linux {arch} wheel for this release")
 
 
 def _safe_member(name: str) -> bool:
     parts = name.split("/")
-    if name.startswith("/") or "\\" in name or any(part in ("", ".", "..") for part in parts):
+    if (len(parts) < 2 or name.startswith("/") or "\\" in name or ":" in name
+            or any(part in ("", ".", "..") for part in parts)):
         return False
     top = parts[0]
     return top == "cua_driver" or (top.startswith("cua_driver-") and top.endswith(".dist-info"))
@@ -749,22 +876,28 @@ def _provision_without_pip(
     site = _venv_site_packages(paths, environment)
     url = f"{PACKAGE_INDEX_JSON}/{DISTRIBUTION}/{version}/json" if version else \
         f"{PACKAGE_INDEX_JSON}/{DISTRIBUTION}/json"
+    _check_cancelled()
     try:
         with urllib.request.urlopen(url, timeout=60) as response:
-            index = json.loads(response.read(_MAX_INDEX_BYTES + 1)[:_MAX_INDEX_BYTES])
+            data = response.read(_MAX_INDEX_BYTES + 1)
+            if len(data) > _MAX_INDEX_BYTES:
+                raise ProvisionError("the package index response exceeds its size limit")
+            index = json.loads(data)
     except (OSError, ValueError) as error:
         raise ProvisionError(f"could not read the package index for {DISTRIBUTION}: {error}") from error
     wheel = _select_wheel(index.get("urls") if isinstance(index, Mapping) else None, arch)
-    archive = paths.root / (".%s.%d.part" % (wheel["filename"], os.getpid()))
+    archive_fd, archive_name = tempfile.mkstemp(prefix=".wheel-", suffix=".part", dir=paths.root)
+    archive = Path(archive_name)
     digest = hashlib.sha256()
     try:
-        with urllib.request.urlopen(wheel["url"], timeout=timeout) as response, \
-                open(archive, "wb") as sink:
+        with os.fdopen(archive_fd, "wb") as sink, \
+                urllib.request.urlopen(wheel["url"], timeout=timeout) as response:
             size = 0
             reported = -1
             total = _content_length(response)
             report(f"Downloading {wheel['filename']}…")
             while True:
+                _check_cancelled()
                 chunk = response.read(1 << 20)
                 if not chunk:
                     break
@@ -776,24 +909,38 @@ def _provision_without_pip(
                 if total and size * 10 // total > reported:
                     reported = size * 10 // total
                     report(f"Downloaded {size >> 20} of {total >> 20} MB")
+        _check_cancelled()
         report("Verifying the download against its published SHA-256…")
         if digest.hexdigest() != wheel["digests"]["sha256"]:
             raise ProvisionError(f"{wheel['filename']} does not match its published SHA-256")
         site.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(archive) as bundle:
-            for member in bundle.infolist():
+            members = bundle.infolist()
+            if len(members) > 4096 or sum(member.file_size for member in members) > _MAX_WHEEL_BYTES:
+                raise ProvisionError(f"{wheel['filename']} exceeds its expanded size limit")
+            names = set()
+            # Validate the entire artifact before extracting even its first file.
+            for member in members:
+                name = member.filename.rstrip("/") if member.is_dir() else member.filename
+                mode = member.external_attr >> 16
+                root_directory = member.is_dir() and (name == "cua_driver" or
+                    re.fullmatch(r"cua_driver-[A-Za-z0-9_.+-]+\.dist-info", name))
+                if ((not root_directory and not _safe_member(name)) or name in names
+                        or stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR)):
+                    raise ProvisionError(f"{wheel['filename']} contains an unexpected path or link")
+                names.add(name)
+            for member in members:
+                _check_cancelled()
                 if member.is_dir():
                     continue
-                if not _safe_member(member.filename):
-                    raise ProvisionError(f"{wheel['filename']} contains an unexpected path")
                 target = site / member.filename
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with bundle.open(member) as source, open(target, "wb") as sink:
+                with bundle.open(member) as source, open(target, "xb") as sink:
                     shutil.copyfileobj(source, sink)
                 mode = (member.external_attr >> 16) & 0o777
                 if mode & stat.S_IXUSR:
                     target.chmod(0o755)
-    except OSError as error:
+    except (OSError, zipfile.BadZipFile) as error:
         raise ProvisionError(f"failed to install {wheel['filename']}: {error}") from error
     finally:
         if archive.exists():
@@ -848,6 +995,7 @@ def provision_jev(
                 "--disable-pip-version-check",
                 "--no-input",
                 "--no-cache-dir",
+                "--index-url", "https://pypi.org/simple",
                 spec,
             ],
             env=environment,
@@ -1134,11 +1282,14 @@ def desktop_app_permissions(binary: Optional[Path] = None) -> str:
         first = content[0]
         if isinstance(first, dict):
             text = str(first.get("text") or "")
-    granted = text.count("granted.") >= 2
-    if granted:
-        return "granted"
+    # Negative answers contain the same suffix as positive ones. Never count
+    # two "not granted." sentences as proof of two live grants.
+    if isinstance(result, dict) and result.get("isError"):
+        return "unknown"
     if "pending" in text or "not granted" in text:
         return "denied"
+    if text.count("granted.") >= 2:
+        return "granted"
     return "unknown"
 
 
@@ -1194,6 +1345,8 @@ def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
         arguments["probe_direct_capture"] = False
     try:
         result = client.call("check_permissions", arguments)
+        if result.get("isError"):
+            raise ProvisionError("the driver refused the permission probe")
     except Exception:
         return {
             "permissions": "unknown",
@@ -1272,6 +1425,8 @@ def _linux_session_state(client: Any) -> Dict[str, Any]:
 
     try:
         result = client.call("check_permissions", {"prompt": False})
+        if result.get("isError"):
+            raise ProvisionError("the driver refused the desktop-session probe")
     except Exception:
         return {
             "permissions": "unknown",
@@ -1331,6 +1486,11 @@ def health(paths: DriverPaths) -> Health:
     failure; it never raises it.
     """
 
+    # An interrupted installer may have put an executable on disk without
+    # completing validation. Status must never launch that candidate.
+    if (paths.root / ".runtime-installing").exists():
+        return Health(False, None, "unknown", False,
+                      "Computer-use runtime setup is unfinished. Wait for active setup, or retry setup to recover it.")
     runtime = "unavailable"
     try:
         runtime = active_runtime()

@@ -22,6 +22,31 @@ fn host_request_validation_enforces_bounds_and_required_names() {
     .unwrap_err();
     assert!(matches!(error.0, ExtensionRequestFailure::BoundsExceeded));
 
+    for (entries, expected) in [
+        (
+            vec!["x".into(); 101],
+            ExtensionRequestFailure::BoundsExceeded,
+        ),
+        (
+            vec!["bad\u{1b}text".into()],
+            ExtensionRequestFailure::InvalidRequest,
+        ),
+        (
+            vec!["x".repeat(MAX_EXTENSION_COMPOSER_TEXT_BYTES), "y".into()],
+            ExtensionRequestFailure::BoundsExceeded,
+        ),
+    ] {
+        let error = validate_host_request(&HostRequestOperation::Composer(
+            ExtensionComposerOperation::History { entries },
+        ))
+        .unwrap_err();
+        assert_eq!(error.0, expected);
+    }
+
+    // A real Pi fleet plus octet's own tools passes well over 64 names.
+    let fleet = (0..120).map(|index| format!("tool_{index}")).collect();
+    assert!(validate_host_request(&HostRequestOperation::ActiveTools { names: fleet }).is_ok());
+
     let names = vec!["read".to_owned(); MAX_HOST_REQUEST_TOOL_NAMES + 1];
     let error = validate_host_request(&HostRequestOperation::ActiveTools { names }).unwrap_err();
     assert!(matches!(error.0, ExtensionRequestFailure::BoundsExceeded));
@@ -52,6 +77,10 @@ fn host_request_features_and_operation_names_match_the_wire_contract() {
         )),
         "composer"
     );
+    let history =
+        HostRequestOperation::Composer(ExtensionComposerOperation::History { entries: vec![] });
+    assert_eq!(host_request_feature(&history), "composer");
+    assert_eq!(host_request_operation_name(&history), "composer");
     assert_eq!(EXTENSION_FEATURE_SHORTCUTS, "shortcuts");
     assert_eq!(EXTENSION_FEATURE_SESSION_ENTRIES, "session_entries");
     assert_eq!(EXTENSION_FEATURE_MESSAGE_INJECTION, "message_injection");

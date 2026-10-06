@@ -347,11 +347,39 @@ struct Rgb {
     blue: u8,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    // Resolved theme constructions and clones, isolated from parallel tests.
+    static THEME_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_theme_work() -> (usize, usize) {
+    THEME_WORK.with(|work| work.replace((0, 0)))
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ThemeCloneWork;
+
+#[cfg(test)]
+impl Clone for ThemeCloneWork {
+    fn clone(&self) -> Self {
+        THEME_WORK.with(|work| {
+            let (constructions, clones) = work.get();
+            work.set((constructions, clones + 1));
+        });
+        Self
+    }
+}
+
 /// octet-side styling boundary around sexy-tui's semantic token store. octet owns
 /// model-family palette selection and contrast balancing; sexy-tui owns rich
 /// text layout, sanitization, syntax highlighting, and semantic encoding.
 #[derive(Clone, Debug)]
 pub struct OctetTheme {
+    #[cfg(test)]
+    _clone_work: ThemeCloneWork,
     inner: SexyTheme,
     capabilities: TerminalCapabilities,
     background: TerminalBackground,
@@ -592,6 +620,11 @@ impl OctetTheme {
         capabilities: TerminalCapabilities,
         background: TerminalBackground,
     ) -> Self {
+        #[cfg(test)]
+        THEME_WORK.with(|work| {
+            let (constructions, clones) = work.get();
+            work.set((constructions + 1, clones));
+        });
         inner.set_capabilities(rich_capabilities(capabilities));
         for &(token, source) in CONTEXT_COLOR_DEFAULTS {
             let value = if source.starts_with('#') {
@@ -602,6 +635,8 @@ impl OctetTheme {
             inner.override_token(token, &value);
         }
         Self {
+            #[cfg(test)]
+            _clone_work: ThemeCloneWork,
             inner,
             capabilities,
             background,
@@ -1663,6 +1698,26 @@ fn classify_reload_failure(error: &anyhow::Error) -> ReloadFailureKind {
         };
     }
     ReloadFailureKind::Invalid
+}
+
+/// Resolve compiled selectors with the already-owned terminal profile, without
+/// any resource discovery or filesystem access.
+pub(crate) fn compiled_theme_for_selector(
+    name: &str,
+    capabilities: TerminalCapabilities,
+    background: TerminalBackground,
+) -> Option<anyhow::Result<OctetTheme>> {
+    if let Some(compile) = compiled_file_theme_for(name) {
+        return Some(compile(capabilities, background));
+    }
+    let choice = TerminalThemeChoice::parse(name);
+    if choice.is_some() || name.eq_ignore_ascii_case(DEFAULT_THEME_NAME) {
+        let background = choice
+            .and_then(TerminalThemeChoice::explicit_background)
+            .unwrap_or(background);
+        return Some(Ok(default_theme_for(background, capabilities)));
+    }
+    None
 }
 
 /// Load a named theme or return an error without altering the current theme.

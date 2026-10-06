@@ -78,6 +78,8 @@ impl SessionLeafGrant {
 /// Known durable outcome, produced only after sync and in-memory publication.
 #[derive(Debug)]
 pub struct SessionLeafCommit {
+    /// Exact committed record for owner-scoped presentation observations.
+    pub entry: crate::session::Entry,
     /// Durably committed entry.
     pub entry_id: EntryId,
     /// Published active head (the same entry for this append-only operation).
@@ -508,6 +510,7 @@ impl SessionLeafConsumer {
                     &mut state,
                     request.id,
                     Ok(SessionLeafCommit {
+                        entry: session.entry(&entry_id).expect("committed entry").clone(),
                         head: entry_id.clone(),
                         entry_id,
                         successor,

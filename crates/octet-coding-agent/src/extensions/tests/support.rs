@@ -33,6 +33,7 @@ pub(in crate::extensions) fn executable_extension_config(
             ..crate::config::SandboxPolicy::default()
         },
         theme: None,
+        theme_explicit: false,
         system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,

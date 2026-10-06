@@ -20,6 +20,8 @@ pub(crate) struct ResourcePathConsumer {
     skill_paths: Vec<PathBuf>,
     prompt_paths: Vec<PathBuf>,
     theme_paths: Vec<PathBuf>,
+    // Saved appearance before any session-only resource preference is applied.
+    theme: Option<String>,
     // Kept independently of revoked registry descriptors, which become empty.
     pub(super) catalog_suffix: String,
     baseline_skills: Arc<dyn octet_agent::SkillRegistry>,
@@ -50,6 +52,7 @@ impl ResourcePathConsumer {
             skill_paths: config.skill_paths.clone(),
             prompt_paths: config.prompt_paths.clone(),
             theme_paths: config.theme_paths.clone(),
+            theme: config.theme.clone(),
             catalog_suffix: crate::resources::format_skills_for_prompt(&skills.descriptors()),
             baseline_skills: skills.clone(),
             baseline_prompts: prompts.clone(),
@@ -62,6 +65,9 @@ impl ResourcePathConsumer {
         config.skill_paths = self.skill_paths.clone();
         config.prompt_paths = self.prompt_paths.clone();
         config.theme_paths = self.theme_paths.clone();
+        if !config.theme_explicit {
+            config.theme = self.theme.clone();
+        }
     }
 }
 
@@ -145,6 +151,7 @@ impl App {
         self.config.skill_paths = loaded.config.skill_paths;
         self.config.prompt_paths = loaded.config.prompt_paths;
         self.config.theme_paths = loaded.config.theme_paths;
+        self.config.theme = loaded.config.theme;
         self.resource_paths.catalog_suffix = suffix;
         self.resource_paths.pending = None;
         self.resource_paths.guard.publish(lease);
@@ -184,13 +191,20 @@ impl App {
         })
     }
     pub(crate) async fn refresh_resource_paths_headless(&mut self) -> anyhow::Result<()> {
-        if !self.resource_paths_pending() {
+        let resources_pending = self.resource_paths_pending();
+        if !resources_pending && !self.executable_extensions.has_pending_session_starts() {
             return Ok(());
         }
         let starts = match self.executable_extensions.resource_session_starts() {
             Ok(work) => headless_work(&mut self.executable_extensions, work).await?,
             Err(error) => Err(error),
         };
+        // Startup must settle even without resource contributors. Keep the
+        // headless reverse-request policy, but do not reload baseline resources.
+        if !resources_pending {
+            starts?;
+            return Ok(());
+        }
         let candidate = match starts {
             Ok(lease) => match self.prepare_resource_paths(TerminalBackground::Unknown, lease) {
                 Ok(work) => headless_work(&mut self.executable_extensions, work).await?,
@@ -236,7 +250,9 @@ async fn headless_work<T>(
                 // requests get real typed refusals, not a hung caller or an
                 // invented foreground session service.
                 for notice in extensions.drain_events() {
-                    crate::output::stderr_line(notice);
+                    // Notifications already have bounded, line-safe grouped
+                    // layout. Retain it through the native diagnostic sink.
+                    crate::output::stderr_multiline(notice);
                 }
             }
         }

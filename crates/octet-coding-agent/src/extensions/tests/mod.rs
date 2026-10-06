@@ -26,6 +26,7 @@ mod context_contributions;
 mod dynamic_shortcuts;
 mod event_drain_and_reload;
 mod host_request_ownership;
+mod notification_output;
 mod presentation_state;
 mod shell_chrome_snapshots;
 mod status_and_mcp_policy;

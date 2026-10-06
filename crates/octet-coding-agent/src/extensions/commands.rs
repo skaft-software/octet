@@ -409,6 +409,7 @@ impl ExecutableExtensions {
             progress_rx,
             approval_budget,
             output: None,
+            headless_messages: BoundedDiagnostics::default(),
             owner_replaced: false,
         })
     }
@@ -522,6 +523,9 @@ impl ExecutableExtensions {
                     .tool_renderers
                     .iter()
                     .any(|tool| tool == name)
+                    && !process.supports_feature(
+                        octet_agent::extension_process::EXTENSION_FEATURE_TRANSCRIPT_RENDER,
+                    )
             })
             .cloned()
         else {
@@ -761,6 +765,7 @@ pub(crate) struct OwnedExtensionCommand {
     progress_rx: mpsc::Receiver<ToolProgress>,
     approval_budget: usize,
     output: Option<Result<CommandOutput, ExtensionRuntimeError>>,
+    headless_messages: BoundedDiagnostics,
 }
 
 impl OwnedExtensionCommand {
@@ -791,6 +796,7 @@ impl OwnedExtensionCommand {
             execution,
             progress_rx,
             approval_budget,
+            headless_messages,
             ..
         } = self;
         let legacy_uncorrelated = process.api_version() == EXTENSION_API_VERSION_0_1;
@@ -826,6 +832,11 @@ impl OwnedExtensionCommand {
                 if extensions.sync_semantic_ui(shell) {
                     shell.render();
                 }
+            } else {
+                // Headless commands can await reverse requests too (e.g. MCP
+                // registration). Use the same bounded, owner-fenced drain,
+                // without an editor lease, and retain notices until completion.
+                headless_messages.extend(extensions.drain_events());
             }
             // The cancellation future and confirmation UI borrow the same
             // frontend. Keep the select in its own scope so cancellation
@@ -1042,6 +1053,7 @@ impl OwnedExtensionCommand {
         if let Some(shell) = confirmations.command_shell() {
             blocks.extend(extensions.drain_events_for_shell(shell));
         } else {
+            blocks.extend(self.headless_messages.iter().cloned());
             blocks.extend(extensions.drain_events());
         }
         Ok(blocks.join("\n"))

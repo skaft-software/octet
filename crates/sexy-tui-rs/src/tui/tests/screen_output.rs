@@ -10,6 +10,33 @@
 use super::*;
 
 #[test]
+fn desktop_notification_uses_host_osc777_and_refuses_controls_or_plain_output() {
+    let size = Rc::new(Cell::new((20, 4)));
+    let capabilities = crate::capabilities::TerminalCapabilities::interactive(
+        crate::capabilities::ColorDepth::Ansi16,
+        true,
+    );
+    let (terminal, _, _, _, _, writes) = recording_terminal(size.clone(), capabilities);
+    let mut tui = TUI::new(Box::new(terminal));
+    assert!(tui.desktop_notification("π", "Hello; world"));
+    assert_eq!(
+        writes.borrow().join(""),
+        "\x1b]777;notify;π;Hello; world\x07"
+    );
+    for body in ["bad\x07", "bad\x1b]2;injection", "bad\nline"] {
+        assert!(!tui.desktop_notification("title", body));
+    }
+    assert!(!tui.desktop_notification("bad;title", "body"));
+    assert!(!tui.desktop_notification("title", &"x".repeat(4097)));
+    assert_eq!(writes.borrow().len(), 1);
+    let (terminal, _, _, _, _, writes) =
+        recording_terminal(size, crate::capabilities::TerminalCapabilities::plain());
+    let mut plain = TUI::new(Box::new(terminal));
+    assert!(!plain.desktop_notification("title", "body"));
+    assert!(writes.borrow().is_empty());
+}
+
+#[test]
 fn window_title_is_osc2_with_controls_stripped_and_silent_when_plain() {
     let size = Rc::new(Cell::new((20, 4)));
     let capabilities = crate::capabilities::TerminalCapabilities::interactive(

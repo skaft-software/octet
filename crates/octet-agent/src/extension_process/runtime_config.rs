@@ -7,6 +7,9 @@ use super::*;
 pub struct ExtensionRuntimeConfig {
     /// Workspace used as the child working directory and execution context.
     pub workspace: PathBuf,
+    /// Native-owned private Python location. Download consent, when present,
+    /// belongs only to a selected explicit setup action, never source trust.
+    pub python_runtime: Option<PythonRuntimeConfig>,
     /// Initial session/model/skill state.
     pub host_state: ExtensionHostState,
     /// Manifest-declared CLI values resolved by the product before startup.
@@ -35,6 +38,9 @@ pub struct ExtensionRuntimeConfig {
     /// Optional frontend wake/consumer binding for cached API 0.4 remote UI.
     /// Without this binding the host never offers or admits `remote_ui`.
     pub remote_ui: Option<Arc<Notify>>,
+    /// Offer transcript rendering only with a complete asynchronous frontend consumer.
+    /// Also requires the remote UI wake/owner binding; headless hosts leave this false.
+    pub transcript_render: bool,
     /// Offer single-use approval redemption. A trusted frontend can issue a
     /// capability with [`ExtensionProcess::respond_to_policy_approval`].
     pub approvals: bool,
@@ -79,6 +85,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
         formatter
             .debug_struct("ExtensionRuntimeConfig")
             .field("workspace", &self.workspace)
+            .field("python_runtime_configured", &self.python_runtime.is_some())
             .field("host_state", &self.host_state)
             .field(
                 "flag_value_names",
@@ -95,6 +102,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
             )
             .field("event_bus_configured", &self.event_bus.is_some())
             .field("remote_ui_configured", &self.remote_ui.is_some())
+            .field("transcript_render", &self.transcript_render)
             .field("approvals", &self.approvals)
             .field("secret_broker_configured", &self.secret_broker.is_some())
             .field(
@@ -124,6 +132,7 @@ impl ExtensionRuntimeConfig {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
+            python_runtime: None,
             host_state: ExtensionHostState::default(),
             flag_values: BTreeMap::new(),
             agent_sessions: false,
@@ -134,6 +143,7 @@ impl ExtensionRuntimeConfig {
             session_lifecycle: None,
             event_bus: None,
             remote_ui: None,
+            transcript_render: false,
             approvals: false,
             secret_broker: None,
             provider_registry: None,
@@ -156,6 +166,7 @@ impl ExtensionRuntimeConfig {
 pub(super) struct OfferedHostServices {
     pub(super) provider_proxy: bool,
     pub(super) remote_ui: bool,
+    pub(super) transcript_render: bool,
     pub(super) agent_sessions: bool,
     pub(super) tool_composition: bool,
     pub(super) resource_paths: bool,

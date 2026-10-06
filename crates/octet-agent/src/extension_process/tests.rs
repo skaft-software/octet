@@ -8,6 +8,10 @@ mod agent_sessions;
 mod cache_warming;
 #[path = "prompt_metadata_tests.rs"]
 mod prompt_metadata;
+#[path = "builtin_override_tests.rs"]
+mod builtin_overrides;
+#[path = "composer_history_tests.rs"]
+mod composer_history;
 
 const VALID_MANIFEST: &str = r#"
 name = "git-tools"
@@ -793,6 +797,7 @@ system_prompt = {system_prompt}
     }
 
     let no_services = OfferedHostServices {
+        transcript_render: false,
         provider_proxy: false,
         resource_paths: false,
         provider_pipeline: false,
@@ -4813,6 +4818,77 @@ hooks = ["session_start", "session_end"]
         .settle_session_hook_binding("session-owner-1", ExtensionLifecycleOutcome::Completed)
         .await
         .expect("idempotent settlement");
+    assert!(process.shutdown().await);
+}
+
+/// Pi awaits session_start; a Pi fleet's startup work takes longer than the
+/// 250 ms end-of-session cap. Only session_end keeps that short deadline.
+#[cfg(unix)]
+#[tokio::test]
+async fn slow_session_start_completes_within_the_request_deadline() {
+    let temp = TempDir::new().expect("tempdir");
+    let script_path = temp.path().join("slow-start.py");
+    write_executable_script(
+        &script_path,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+
+
+def receive():
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    return json.loads(line)
+
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
+    sys.stdout.flush()
+
+
+initialize = receive()
+contract = initialize["params"]["contract"]
+send({"jsonrpc": "2.0", "id": initialize["id"], "result": {"api_version": "0.3", "tools": [], "contract": {
+    "schema": contract["schema"], "encoding": contract["encoding"],
+    "capabilities": contract["required_capabilities"] + ["lifecycle_events"],
+    "methods": contract["required_methods"] + ["hook/run"], "limits": contract["limits"]}}})
+while True:
+    message = receive()
+    if message.get("method") == "hook/run":
+        if message["params"]["hook"] == "session_start":
+            time.sleep(0.6)
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"disposition": {"kind": "continue"}}})
+    elif message.get("method") == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"terminal": "shutdown"}})
+        break
+"#,
+    );
+    let manifest = ExtensionManifest::parse(
+        r#"name = "slow-session-start"
+version = "0.3.0"
+api_version = "0.3"
+[entrypoint]
+command = "slow-start.py"
+[contributes]
+hooks = ["session_start", "session_end"]
+"#,
+    )
+    .expect("slow session_start manifest");
+    let process = ExtensionProcess::start(
+        trusted_descriptor(temp.path(), manifest),
+        ExtensionRuntimeConfig::new(temp.path()),
+    )
+    .await
+    .expect("start slow session_start process");
+    process
+        .start_session_hook_binding("session-owner-1")
+        .await
+        .expect("a 600 ms session_start is not a timeout");
+    process
+        .settle_session_hook_binding("session-owner-1", ExtensionLifecycleOutcome::Completed)
+        .await
+        .expect("settle");
     assert!(process.shutdown().await);
 }
 

@@ -21,7 +21,7 @@ export async function sessionReplacement(runtime, params, store) {
   return cancellable(runtime.queued(store, async () => {
     let disposition = { action: 'continue' };
     for (const entry of [...runtime.events.get(hook) || []]) {
-      signal.throwIfAborted(); runtime.assertOwner(store);
+      signal.throwIfAborted(); runtime.assertSessionOwner(store);
       const child = { ...store, factory: entry.factory };
       const result = await cancellable(runtime.scope.run(child, () => entry.handler(
         strict({ type: hook, ...payload }, `${hook} event`), createContext(runtime, child))), signal);
@@ -42,8 +42,7 @@ export const sessionOperationHooks = ['session_before_compact', 'session_compact
 export async function sessionOperation(runtime, params, store) {
   runtime.require('session_entries'); const hook = params.hook;
   if (!sessionOperationHooks.includes(hook) || !runtime.metadata().hooks.includes(hook)) invalid('undeclared session operation');
-  ownerKey(params.context?.resource_owner); runtime.bind(params, store);
-  if (!store.leaf?.grant) unsupported('session operation', 'actual native session_leaf consumer required');
+  ownerKey(params.context?.resource_owner); runtime.bind(params, store, { requireLeaf: 'session operation' });
   store.providerContext = true;
   const body = params.payload, signal = store.controller.signal;
   if (hook === 'session_compact' && body?.kind === 'compaction_callback') {
@@ -51,7 +50,7 @@ export async function sessionOperation(runtime, params, store) {
   }
   const expected = { session_before_compact: 'before_compact', session_compact: 'compacted', session_before_tree: 'before_tree', session_tree: 'tree' }[hook];
   if (body?.kind !== expected) invalid('session operation kind');
-  const live = () => { signal.throwIfAborted(); runtime.assertOwner(store); };
+  const live = () => { signal.throwIfAborted(); runtime.assertSessionOwner(store); };
   return cancellable(runtime.queued(store, async () => {
     live(); let event;
     if (hook === 'session_before_compact') {

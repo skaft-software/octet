@@ -26,7 +26,7 @@ octet --version   # octet 0.8.2
 
 When moving from Ygg, install octet afresh. Older installations and data stay
 untouched, and there's no automatic migration. Homebrew, crates.io and SDK
-registries remain separate, unpublished channels. Bun is unqualified.
+registries remain separate, unpublished channels. CLI installation with Bun is unqualified.
 
 <a id="npm-availability"></a>
 
@@ -160,9 +160,10 @@ reference](cli.md#packages).
 | `octet-computer-use` | [Native desktop control](../extensions/octet-computer-use/README.md) (macOS, Windows, Linux) through a locally installed, MIT-licensed Cua Driver. Provisioning is explicit, and the OS permissions are yours to grant. |
 | `octet-codemode` | [Pi's offline JavaScript tool composition](../extensions/octet-codemode/README.md), with QuickJS/WASM and Node 22.19+. Explicitly enabled tools retain normal host policy and budgets. |
 | `octet-mcp` | An [MCP bridge](../extensions/octet-mcp/README.md). Local stdio works. Remote Streamable HTTP is blocked by default. |
+| `octet-pi-compat` | [Bring your Pi 1.0.2 extensions](pi-compatibility.md#bring-your-pi-extensions), with automatic per-extension loading routes and explicit setup. Requires Node 22.19+ or Bun. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
 
-The five executable-bundle manifests declare API `0.4`, distribution version
+The six executable-bundle manifests declare API `0.4`, distribution version
 `0.8.2`, and require octet `=0.8.2`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for

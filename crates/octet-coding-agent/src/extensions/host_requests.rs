@@ -100,6 +100,47 @@ impl ExecutableExtensions {
             return;
         }
         if !interactive {
+            // Tool reads and policy-bounded selection need no editor lease.
+            // Re-fence the live instance; selection can only narrow the shared
+            // host-policed catalog. Other headless requests stay refused.
+            if matches!(
+                &operation,
+                HostRequestOperation::ContextSnapshot(ExtensionContextOperation::Tools)
+                    | HostRequestOperation::ActiveTools { .. }
+            ) {
+                let outcome = if process.is_running()
+                    && process.health_snapshot().generation == generation
+                    && owner.as_ref().is_some_and(|owner| {
+                        owner.extension_instance_id == process.extension_instance_id()
+                            && owner.process_generation == generation
+                    }) {
+                    match operation {
+                        HostRequestOperation::ActiveTools { names } => match &self.tool_host {
+                            Some(host) => {
+                                match host.set_active_tools(Some(&names.into_iter().collect())) {
+                                    Ok(()) => ExtensionRequestOutcome::Ok(serde_json::json!({})),
+                                    Err(error) => ExtensionRequestOutcome::Failed(
+                                        ExtensionRequestFailure::InvalidRequest,
+                                        error,
+                                    ),
+                                }
+                            }
+                            None => ExtensionRequestOutcome::Failed(
+                                ExtensionRequestFailure::UnsupportedFeature,
+                                "live tool registry is not bound".into(),
+                            ),
+                        },
+                        _ => self.tool_snapshot_outcome(),
+                    }
+                } else {
+                    ExtensionRequestOutcome::Failed(
+                        ExtensionRequestFailure::NotForegroundOwner,
+                        "tool request owner is no longer foreground".into(),
+                    )
+                };
+                self.queue_host_request_response(process, request_id, generation, outcome);
+                return;
+            }
             let message = match &operation {
                 HostRequestOperation::Composer(_) => {
                     "no foreground composer is available in this host mode".to_owned()
@@ -336,6 +377,10 @@ impl ExecutableExtensions {
                         shell.extension_paste_editor(text);
                         ExtensionRequestOutcome::Ok(serde_json::json!({}))
                     }
+                    ExtensionComposerOperation::History { entries } => {
+                        shell.seed_prompt_history(entries);
+                        ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                    }
                 },
                 HostRequestOperation::Shortcut {
                     shortcut_id,
@@ -449,7 +494,11 @@ impl ExecutableExtensions {
                             Ok(result) => {
                                 // Publish ownership before the next queued request:
                                 // close followed by paste can share this drain.
-                                shell.set_remote_ui(self.remote_ui.projection());
+                                // Later sync sees this projection as unchanged, so
+                                // wake rendering here even if no more input arrives.
+                                if shell.set_remote_ui(self.remote_ui.projection()) {
+                                    shell.render();
+                                }
                                 ExtensionRequestOutcome::Ok(result)
                             }
                             Err((failure, detail)) => {
@@ -482,16 +531,20 @@ impl ExecutableExtensions {
             ExtensionContextOperation::PendingMessages => {
                 Self::context_pending_messages_outcome(shell)
             }
-            ExtensionContextOperation::Tools => match &self.tool_host {
-                Some(host) => ExtensionRequestOutcome::Ok(host.pi_tool_snapshot()),
-                None => ExtensionRequestOutcome::Failed(
-                    ExtensionRequestFailure::UnsupportedFeature,
-                    "live tool registry is not bound".into(),
-                ),
-            },
+            ExtensionContextOperation::Tools => self.tool_snapshot_outcome(),
             ExtensionContextOperation::SystemPrompt => ExtensionRequestOutcome::Failed(
                 ExtensionRequestFailure::InvalidRequest,
                 "the system prompt is resolved by the session owner".to_owned(),
+            ),
+        }
+    }
+
+    fn tool_snapshot_outcome(&self) -> ExtensionRequestOutcome {
+        match &self.tool_host {
+            Some(host) => ExtensionRequestOutcome::Ok(host.pi_tool_snapshot()),
+            None => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::UnsupportedFeature,
+                "live tool registry is not bound".into(),
             ),
         }
     }
@@ -772,13 +825,45 @@ impl ExecutableExtensions {
                     },
                 },
                 ExtensionSessionEntryOperation::Append { entry_type, data } => {
-                    Self::apply_extension_entry_append(
+                    let outcome = Self::apply_extension_entry_append(
                         session,
                         &namespace,
                         pending.generation,
                         &entry_type,
                         data,
-                    )
+                    );
+                    if pending.process.supports_feature(
+                        octet_agent::extension_process::EXTENSION_FEATURE_TRANSCRIPT_RENDER,
+                    ) {
+                        if let ExtensionRequestOutcome::Ok(value) = &outcome {
+                            if let Some(entry) = value
+                                .get("entry_id")
+                                .and_then(Value::as_str)
+                                .and_then(|id| session.entry(&EntryId(id.to_owned())))
+                            {
+                                let owner = extension_execution_context(
+                                    &pending.process,
+                                    self.resource_owner.as_deref(),
+                                )
+                                .resource_owner;
+                                if let (Some(owner), Some(entry)) = (
+                                    owner,
+                                    octet_agent::extension_process::transcript_private_entry(
+                                        entry, &namespace,
+                                    ),
+                                ) {
+                                    if !self.transcript_renderers.committed(
+                                        owner,
+                                        namespace.clone(),
+                                        entry,
+                                    ) {
+                                        self.diagnostics.push("warning: transcript entry observation limit reached; resume restores durable entries");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    outcome
                 }
                 ExtensionSessionEntryOperation::SetLabel { entry_id, label } => {
                     Self::apply_extension_entry_label(session, &entry_id, &label)

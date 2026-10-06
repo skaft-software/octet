@@ -113,6 +113,7 @@ mod provider_runtime;
 mod runtime_state;
 mod status;
 mod summaries;
+mod transcript_renderers;
 mod trust_policy;
 mod turns;
 mod ui_projection;
@@ -202,9 +203,10 @@ const MAX_PROJECTED_EXTENSION_UI_LINES: usize = if MAX_EXTENSION_UI_ENTRIES > MA
     MAX_EXTENSION_UI_LINES
 };
 const SESSION_LIFECYCLE_QUEUE_CAPACITY: usize = 8;
-/// Upper bound for one `tools/set_active` name list. Individual names mirror
-/// the agent-side key cap; the list bound is host-local.
-const MAX_HOST_REQUEST_TOOL_NAMES: usize = 64;
+/// Upper bound for one `tools/set_active` name list. Pi passes every active
+/// tool name across all extensions, so the list must hold a whole fleet plus
+/// octet's own tools; individual names mirror the agent-side key cap.
+const MAX_HOST_REQUEST_TOOL_NAMES: usize = 1024;
 /// Upper bound for host requests queued between two shell drains.
 const HOST_REQUEST_QUEUE_CAPACITY: usize = 64;
 const NATIVE_HOST_EXTENSION_START_DIAGNOSTIC: &str = "executable extensions were not started: the native-host protocol reports extension discovery only and never starts extension processes";
@@ -321,6 +323,7 @@ pub struct ExecutableExtensions {
     background_tx: mpsc::Sender<ExtensionBackgroundUpdate>,
     background_rx: mpsc::Receiver<ExtensionBackgroundUpdate>,
     renderer_tasks: Vec<JoinHandle<()>>,
+    transcript_renderers: transcript_renderers::TranscriptRenderers,
     // One session-owned overlay in the already admitted resident bridge.
     pi_mcp_binding: Arc<tokio::sync::Mutex<Option<mcp::PiMcpBinding>>>,
     autocomplete_tasks: Vec<JoinHandle<()>>,
@@ -358,6 +361,7 @@ pub struct ExecutableExtensions {
     workspace: PathBuf,
     resource_owner: Option<String>,
     session_started_at: Instant,
+    session_start_reason: &'static str,
     session_lifecycle_started: bool,
     // UI hooks must run while the foreground shell can answer reverse requests,
     // never inside the blocking application bootstrap.
@@ -415,6 +419,7 @@ impl Default for ExecutableExtensions {
             background_tx,
             background_rx,
             renderer_tasks: Vec::new(),
+            transcript_renderers: Default::default(),
             pi_mcp_binding: Arc::new(tokio::sync::Mutex::new(None)),
             autocomplete_tasks: Vec::new(),
             pending_editor_requests: VecDeque::new(),
@@ -443,6 +448,7 @@ impl Default for ExecutableExtensions {
             workspace: PathBuf::new(),
             resource_owner: None,
             session_started_at: Instant::now(),
+            session_start_reason: "startup",
             session_lifecycle_started: false,
             pending_session_hook_starts: Vec::new(),
             session_hook_start_tasks: Vec::new(),

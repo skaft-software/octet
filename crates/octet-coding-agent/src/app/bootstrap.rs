@@ -186,6 +186,7 @@ impl Bootstrap {
             None,
             self.provider_runtime.clone(),
             super::resource_paths::ResourceConsumerCapability::Disabled,
+            "startup",
         )?;
         // Populate a throwaway copy now so callers can validate/select the
         // projected models. `build_app` repeats this against its owned catalog.
@@ -284,6 +285,39 @@ fn extension_provider_bootstrap_model(catalog: &ModelCatalog) -> Model {
 pub enum SessionSelection {
     OpenExisting(PathBuf),
     CreateNew(PathBuf),
+    Forked(PathBuf),
+}
+
+impl SessionSelection {
+    fn session_start_reason(&self, initial_launch: bool) -> &'static str {
+        match self {
+            Self::CreateNew(_) if initial_launch => "startup",
+            Self::CreateNew(_) => "new",
+            Self::OpenExisting(_) => "resume",
+            Self::Forked(_) => "fork",
+        }
+    }
+}
+
+#[test]
+fn session_start_reason_tracks_host_transition_not_session_contents() {
+    let path = PathBuf::from("opaque-session.jsonl");
+    assert_eq!(
+        SessionSelection::CreateNew(path.clone()).session_start_reason(true),
+        "startup"
+    );
+    assert_eq!(
+        SessionSelection::CreateNew(path.clone()).session_start_reason(false),
+        "new"
+    );
+    assert_eq!(
+        SessionSelection::OpenExisting(path.clone()).session_start_reason(true),
+        "resume"
+    );
+    assert_eq!(
+        SessionSelection::Forked(path).session_start_reason(true),
+        "fork"
+    );
 }
 
 /// Resolved model and session for one launch.
@@ -6873,7 +6907,8 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 /// `catalog.fallback`, `catalog.enrich`, `codex.credentials`, `codex.inventory`,
 /// `session.marker`, `catalog.client`, `bootstrap.ready`, `session.resolve`, `session.replay`,
 /// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
-/// `app.build`, `history.hydrate`, `frame.ready`. `process.enter` starts after
+/// `app.build`, `app.config.persisted`, `app.goal.open`, `app.complete`,
+/// `history.hydrate`, `frame.ready`. `process.enter` starts after
 /// the Tokio runtime has initialized; spawn-to-first-editable-frame latency must
 /// be measured outside the process on a PTY, not inferred from this trace.
 /// `codex.credentials` and `codex.inventory` separate credential refresh from
@@ -7246,7 +7281,7 @@ fn launch_configuration_parts(
 ) -> anyhow::Result<(Option<Session>, LaunchConfiguration, PersistedSessionConfig)> {
     startup_phase("session.resolve");
     let prepared = match session {
-        SessionSelection::OpenExisting(path) => {
+        SessionSelection::OpenExisting(path) | SessionSelection::Forked(path) => {
             let descriptor_path = descriptor_session_path(path)?;
             let file = open_regular_file_for_append(&descriptor_path)?;
             Some(Session::open_with_file(path, file)?)
@@ -7437,7 +7472,7 @@ pub async fn resolve_launch_interactive(
                 fork_session_into(&store, &source_path, destination)
             })
             .await?;
-            SessionSelection::OpenExisting(path)
+            SessionSelection::Forked(path)
         }
         ResumeSelector::Resume(None) => {
             let sessions = boot.sessions.clone();
@@ -7534,7 +7569,7 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
         ResumeSelector::Fork(Some(id)) => {
             let source = resolve_fork_source_path(&boot.config, &boot.sessions, id)?;
             let destination = boot.sessions.new_path(stamp);
-            SessionSelection::OpenExisting(fork_session_into(&boot.sessions, &source, destination)?)
+            SessionSelection::Forked(fork_session_into(&boot.sessions, &source, destination)?)
         }
         ResumeSelector::Fork(None) => {
             anyhow::bail!("--fork needs a session id in print mode")
@@ -7734,6 +7769,7 @@ fn configured_extensions(
         None,
         ExtensionProviderRuntime::default(),
         super::resource_paths::ResourceConsumerCapability::Disabled,
+        "startup",
     )
 }
 
@@ -7747,20 +7783,23 @@ fn configured_extensions_with_runtime_manager(
     runtime_manager: Option<ExtensionRuntimeManager>,
     provider_runtime: ExtensionProviderRuntime,
     resource_consumer: super::resource_paths::ResourceConsumerCapability,
+    session_start_reason: &'static str,
 ) -> anyhow::Result<(ExtensionHost, ExecutableExtensions)> {
     let (mut extensions, telemetry) = configured_extension_host(config, model)?;
-    let mut executable_extensions = ExecutableExtensions::discover_and_start_with_provider_runtime(
-        config,
-        session,
-        model,
-        reasoning,
-        sessions,
-        &mut extensions,
-        runtime_manager,
-        provider_runtime,
-        resource_consumer,
-        None,
-    );
+    let mut executable_extensions =
+        ExecutableExtensions::discover_and_start_with_provider_runtime_and_reason(
+            config,
+            session,
+            model,
+            reasoning,
+            sessions,
+            &mut extensions,
+            runtime_manager,
+            provider_runtime,
+            resource_consumer,
+            None,
+            session_start_reason,
+        );
     executable_extensions.set_telemetry(telemetry);
     startup_phase("extensions.activate");
     Ok((extensions, executable_extensions))
@@ -7877,14 +7916,16 @@ pub(crate) fn open_launch_session(
             let file = create_regular_file_for_append(&descriptor_path)?;
             Ok(Session::create_with_file(path, file)?)
         }
-        SessionSelection::OpenExisting(path) => match prepared_session.take() {
-            Some(session) if session.path() == path => Ok(session),
-            _ => {
-                let descriptor_path = descriptor_session_path(&path)?;
-                let file = open_regular_file_for_append(&descriptor_path)?;
-                Ok(Session::open_with_file(path, file)?)
+        SessionSelection::OpenExisting(path) | SessionSelection::Forked(path) => {
+            match prepared_session.take() {
+                Some(session) if session.path() == path => Ok(session),
+                _ => {
+                    let descriptor_path = descriptor_session_path(&path)?;
+                    let file = open_regular_file_for_append(&descriptor_path)?;
+                    Ok(Session::open_with_file(path, file)?)
+                }
             }
-        },
+        }
     }
 }
 
@@ -7934,6 +7975,7 @@ fn build_app_with_consumer(
     runtime_manager: Option<ExtensionRuntimeManager>,
     resource_consumer: super::resource_paths::ResourceConsumerCapability,
 ) -> anyhow::Result<App> {
+    let session_start_reason = launch.session.session_start_reason(true);
     let Bootstrap {
         mut config,
         mut catalog,
@@ -7995,6 +8037,7 @@ fn build_app_with_consumer(
         runtime_manager,
         provider_runtime,
         resource_consumer,
+        session_start_reason,
     )?;
     complete_delegation_catalog(
         executable_extensions.has_agent_session_service(),
@@ -8070,6 +8113,7 @@ fn build_app_with_consumer(
         &reasoning,
         reasoning_mode,
     )?;
+    startup_phase("app.config.persisted");
     validate_explicit_tool_policy(
         &config,
         &definitions,
@@ -8079,6 +8123,7 @@ fn build_app_with_consumer(
     let goal_store = terminal_goal_store(&config)?;
     let goal_session_id = terminal_goal_session_id(&session)?;
     let goal_driver = GoalDriver::new(goal_store.clone(), goal_session_id.clone());
+    startup_phase("app.goal.open");
     let mut agent = Agent::new(AgentConfig {
         client: client.clone(),
         model: model.clone(),
@@ -8123,6 +8168,7 @@ fn build_app_with_consumer(
     }
     agent.finalize_tool_surface();
     let system_tokens = estimate_text_tokens(agent.system_prompt());
+    startup_phase("app.complete");
 
     Ok(App {
         agent,
@@ -8230,6 +8276,9 @@ pub fn rebuild_app(
     new_reasoning_mode: Option<ReasoningMode>,
     selection: Option<SessionSelection>,
 ) -> anyhow::Result<App> {
+    let session_start_reason = selection
+        .as_ref()
+        .map_or("resume", |selection| selection.session_start_reason(false));
     app.synchronize_extension_provider_catalog();
     let resource_consumer = app.resource_paths.capability;
     let mut config = app.original_resource_config();
@@ -8248,7 +8297,9 @@ pub fn rebuild_app(
     let mut codex_context_notes = app.codex_context_notes.clone();
     if selection.as_ref().is_some_and(|selection| {
         let path = match selection {
-            SessionSelection::CreateNew(path) | SessionSelection::OpenExisting(path) => path,
+            SessionSelection::CreateNew(path)
+            | SessionSelection::OpenExisting(path)
+            | SessionSelection::Forked(path) => path,
         };
         path != app.agent.session().path()
     }) {
@@ -8273,7 +8324,9 @@ pub fn rebuild_app(
     let current_path = app.agent.session().path().to_owned();
     let same_session = selection.as_ref().is_none_or(|selection| match selection {
         SessionSelection::CreateNew(_) => false,
-        SessionSelection::OpenExisting(path) => path == &current_path,
+        SessionSelection::OpenExisting(path) | SessionSelection::Forked(path) => {
+            path == &current_path
+        }
     });
     let service_tier = same_session.then(|| app.agent.service_tier()).flatten();
     let old_skill_metadata = app.resource_paths.catalog_suffix.clone();
@@ -8283,7 +8336,7 @@ pub fn rebuild_app(
     }
 
     let (persisted, mut prepared_session) = match selection.as_ref() {
-        Some(SessionSelection::OpenExisting(path)) => {
+        Some(SessionSelection::OpenExisting(path) | SessionSelection::Forked(path)) => {
             let descriptor_path = descriptor_session_path(path)?;
             let file = open_regular_file_for_append(&descriptor_path)?;
             let session = Session::open_with_file(path, file)?;
@@ -8344,7 +8397,9 @@ pub fn rebuild_app(
         persisted.reasoning_mode.unwrap_or(reasoning_mode)
     };
     let candidate_session = match selection.as_ref() {
-        Some(SessionSelection::OpenExisting(_)) => prepared_session.as_ref(),
+        Some(SessionSelection::OpenExisting(_) | SessionSelection::Forked(_)) => {
+            prepared_session.as_ref()
+        }
         Some(SessionSelection::CreateNew(_)) => None,
         None => Some(app.agent.session()),
     };
@@ -8378,14 +8433,16 @@ pub fn rebuild_app(
             let file = create_regular_file_for_append(&descriptor_path)?;
             Session::create_with_file(path, file)?
         }
-        Some(SessionSelection::OpenExisting(path)) => match prepared_session.take() {
-            Some(session) if session.path() == path => session,
-            _ => {
-                let descriptor_path = descriptor_session_path(&path)?;
-                let file = open_regular_file_for_append(&descriptor_path)?;
-                Session::open_with_file(path, file)?
+        Some(SessionSelection::OpenExisting(path) | SessionSelection::Forked(path)) => {
+            match prepared_session.take() {
+                Some(session) if session.path() == path => session,
+                _ => {
+                    let descriptor_path = descriptor_session_path(&path)?;
+                    let file = open_regular_file_for_append(&descriptor_path)?;
+                    Session::open_with_file(path, file)?
+                }
             }
-        },
+        }
         None => {
             let descriptor_path = descriptor_session_path(&current_path)?;
             let file = open_regular_file_for_append(&descriptor_path)?;
@@ -8420,6 +8477,7 @@ pub fn rebuild_app(
         runtime_manager,
         provider_runtime,
         resource_consumer,
+        session_start_reason,
     )?;
     complete_delegation_catalog(
         executable_extensions.has_agent_session_service(),

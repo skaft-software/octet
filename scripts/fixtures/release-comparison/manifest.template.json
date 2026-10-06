@@ -1,0 +1,178 @@
+{
+  "schema": "octet.release-comparison.v1",
+  "frozen": false,
+  "native_tern_approved": false,
+  "trials": 9,
+  "warmups": 1,
+  "timeout_seconds": 30,
+  "order": "random",
+  "seed": 20261005,
+  "host": {
+    "hardware": null,
+    "os": null,
+    "dimensions": [120, 40],
+    "tern": {"path": "/FILL/frozen/tern", "sha256": null, "version": null},
+    "cache_policy": "fresh independent home and session per trial; warm OS file caches; no cache flushing"
+  },
+  "clients": {
+    "octet": {
+      "argv": ["/FILL/frozen/octet"],
+      "version": null,
+      "package_identity": "octet RC: fill exact frozen build identity",
+      "artifacts": [{"path": "/FILL/frozen/octet", "sha256": null}],
+      "provenance": {
+        "kind": "source_build",
+        "source_revision": null,
+        "note": "Fill retained source snapshot/tree digest, compiler/flags/features, clean target directory and build logs; never infer source from executable hash",
+        "artifacts": [{"path": "/FILL/private/octet-build-manifest.json", "sha256": null}]
+      },
+      "setup": {
+        "frontend": "interactive-tui",
+        "provider": null, "model": null, "workload": null, "theme": null,
+        "session": null, "policy": null, "extension_contract": null,
+        "extensions": [], "dependency_count": null, "expected_child_processes": null
+      },
+      "home_files": []
+    },
+    "pi": {
+      "argv": ["/FILL/frozen/node", "/FILL/frozen/pi/dist/bundle/cli.js"],
+      "version": "1.0.2",
+      "package_identity": "@earendil-works/pi-coding-agent; reverify installed package.json before freezing",
+      "artifacts": [
+        {"path": "/FILL/frozen/node", "sha256": null},
+        {"path": "/FILL/frozen/pi/dist/bundle/cli.js", "sha256": null},
+        {"path": "/FILL/frozen/pi-launcher", "sha256": null},
+        {"path": "/FILL/frozen/pi/package.json", "sha256": null}
+      ],
+      "provenance": {
+        "kind": "installed_distribution",
+        "note": "Pin complete package/dependency inventory and launcher/current-version/runtime resolution. Package repository declaration is not proof of source commit or build flags",
+        "artifacts": [{"path": "/FILL/private/pi-package-inventory.json", "sha256": null}]
+      },
+      "setup": {
+        "frontend": "interactive-tui",
+        "provider": null, "model": null, "workload": null, "theme": null,
+        "session": null, "policy": null, "extension_contract": null,
+        "extensions": [], "dependency_count": null, "expected_child_processes": null
+      },
+      "home_files": []
+    },
+    "pig": {
+      "argv": ["/FILL/frozen/pig"],
+      "version": "0.3.0+0.87.1",
+      "package_identity": "github.com/MichaelKinsy/PiG/cmd/pig; reverify Go build metadata before freezing",
+      "artifacts": [{"path": "/FILL/frozen/pig", "sha256": null}],
+      "provenance": {
+        "kind": "installed_distribution",
+        "note": "Retain Go buildinfo: module github.com/MichaelKinsy/PiG, embedded dependency inventory and compiler. (devel) with no vcs.revision does not establish a source revision",
+        "artifacts": [{"path": "/FILL/private/pig-go-buildinfo.txt", "sha256": null}]
+      },
+      "setup": {
+        "frontend": "interactive-tui",
+        "provider": null, "model": null, "workload": null, "theme": null,
+        "session": null, "policy": null, "extension_contract": null,
+        "extensions": [], "dependency_count": null, "expected_child_processes": null
+      },
+      "home_files": []
+    },
+    "codex": {
+      "argv": ["/FILL/frozen/codex"],
+      "version": "0.160.0",
+      "package_identity": "Codex CLI; not app-server and not desktop app",
+      "artifacts": [{"path": "/FILL/frozen/codex", "sha256": null}],
+      "provenance": {
+        "kind": "installed_distribution",
+        "note": "Retain installed distribution/package metadata and symlink resolution; executable digest is not source/build proof",
+        "artifacts": [{"path": "/FILL/private/codex-distribution.json", "sha256": null}]
+      },
+      "setup": {
+        "frontend": "interactive-tui",
+        "provider": null, "model": null, "workload": null, "theme": null,
+        "session": null, "policy": null, "extension_contract": null,
+        "extensions": [], "dependency_count": null, "expected_child_processes": null
+      },
+      "home_files": []
+    }
+  },
+  "cases": [
+    {
+      "id": "version-command-not-ui", "comparative": false,
+      "metrics": ["version_exit_ms"], "checks": ["version_matches"],
+      "members": {
+        "octet": {"mode": "version", "version_pattern": "FILL_EXACT_ESCAPED_RC_VERSION"},
+        "pi": {"mode": "version", "version_pattern": "1\\.0\\.2"},
+        "codex": {"mode": "version", "version_pattern": "codex-cli 0\\.160\\.0"}
+      }
+    },
+    {
+      "id": "startup-clocks", "comparative": true,
+      "metrics": ["first_editable_ms", "submission_ready_ms", "pty_ready_ms"],
+      "checks": ["application_raw_mode_edit", "submission_accepted_without_live_inference", "complete_ready_frame", "terminal_modes_restored", "shutdown_settled"],
+      "members": {
+        "octet": {"mode": "unavailable", "reason": "Needs frozen RC and reviewed cross-client driver; existing Octet PTY driver is not equivalent Pi/Codex UI startup"},
+        "pi": {"mode": "unavailable", "reason": "Needs reviewed Pi TUI driver and actual effective state evidence"},
+        "codex": {"mode": "unavailable", "reason": "Needs reviewed Codex CLI TUI driver with --no-daemon; app-server is not a TUI substitute"}
+      }
+    },
+    {
+      "id": "complete-history-resume", "comparative": true,
+      "metrics": ["resume_history_ms", "long_history_edit_ms"],
+      "checks": ["all_history_markers_once_in_order", "canonical_text_copy_exact", "editing_under_load", "terminal_modes_restored", "shutdown_settled"],
+      "members": {
+        "octet": {"mode": "unavailable", "reason": "Complete native history driver must be qualified on frozen RC"},
+        "pi": {"mode": "unavailable", "reason": "Equivalent complete history semantics and synthetic session encoding need qualification"},
+        "codex": {"mode": "unavailable", "reason": "Equivalent complete history semantics and synthetic session encoding need qualification"}
+      }
+    },
+    {
+      "id": "picker-interaction", "comparative": true,
+      "metrics": ["session_picker_ms", "model_picker_ms"],
+      "checks": ["picker_filter_edit", "selected_identity_correct", "no_stale_selection", "cancel_picker_restores_draft", "shutdown_settled"],
+      "members": {
+        "octet": {"mode": "unavailable", "reason": "Actual picker input/presentation driver not approved"},
+        "pi": {"mode": "unavailable", "reason": "Actual picker input/presentation driver not approved"},
+        "codex": {"mode": "unavailable", "reason": "Matched picker semantics not established"}
+      }
+    },
+    {
+      "id": "extensions-pi-octet-pig", "comparative": true,
+      "metrics": ["extension_ready_ms", "extension_teardown_ms", "process_tree_settlement_ms"],
+      "checks": ["extension_behavior_equivalent", "extension_enabled_set_observed", "dependencies_counted", "child_tree_counted", "extension_teardown_complete", "no_surviving_children"],
+      "members": {
+        "octet": {"mode": "unavailable", "reason": "Fill enabled profiles separately from bare core; approve extension trust, dependency and resident child observations"},
+        "pi": {"mode": "unavailable", "reason": "Do not compare TypeScript/Pi extension loading against an empty core; qualify equivalent extension behavior"},
+        "pig": {"mode": "unavailable", "reason": "PiG upstream is identified, but extension feature equivalence has NOT been established; Go/Python/Rust extension names do not imply Pi API support"}
+      }
+    },
+    {
+      "id": "long-history-cancel", "comparative": true,
+      "metrics": ["cancel_admission_ms", "cancel_settlement_ms"],
+      "checks": ["durable_history_exact", "authoritative_cancel_set", "descendants_stopped", "prompt_regained", "no_lost_accepted_text"],
+      "members": {
+        "octet": {"mode": "unavailable", "reason": "Requires approved fixed synthetic load and authoritative cancellation/tree observations"},
+        "pi": {"mode": "unavailable", "reason": "Requires approved fixed synthetic load and equivalent cancellation semantics"},
+        "codex": {"mode": "unavailable", "reason": "Requires approved fixed synthetic load and equivalent cancellation semantics"}
+      }
+    },
+    {
+      "id": "process-tree-resources", "comparative": true,
+      "metrics": ["rss_peak_bytes", "pss_peak_bytes", "cpu_peak_percent", "allocation_calls", "allocation_requested_bytes"],
+      "checks": ["agent_and_descendants_inventory_complete", "observation_window_complete", "no_external_inference_server_in_total", "shutdown_settled"],
+      "members": {
+        "octet": {"mode": "unavailable", "reason": "Existing systems driver is direct-only; no all-descendant resource driver approved"},
+        "pi": {"mode": "unavailable", "reason": "No all-descendant resource driver approved; allocations require equivalent instrumentation"},
+        "codex": {"mode": "unavailable", "reason": "No all-descendant resource driver approved; allocations require equivalent instrumentation"}
+      }
+    },
+    {
+      "id": "physical-tern-paint", "comparative": true,
+      "metrics": ["input_to_paint_ms"],
+      "checks": ["physical_frame_correlated", "complete_history_visible", "no_flicker_or_lost_text", "terminal_modes_restored"],
+      "members": {
+        "octet": {"mode": "unavailable", "reason": "Parent owns final physical Tern qualification; PTY bytes are not paint"},
+        "pi": {"mode": "unavailable", "reason": "Native-Tern driver and correctness approval pending"},
+        "codex": {"mode": "unavailable", "reason": "Native-Tern driver and correctness approval pending"}
+      }
+    }
+  ]
+}

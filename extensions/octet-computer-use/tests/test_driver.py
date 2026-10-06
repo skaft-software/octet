@@ -274,7 +274,7 @@ class InterpreterPreflightTests(unittest.TestCase):
             bundle.writestr("cua_driver/__init__.py", "")
         wheel = buffer.getvalue()
         name = "cua_driver-9.9.9-py3-none-manylinux_2_31_x86_64.whl"
-        wheel_url = "https://files.example/" + name
+        wheel_url = "https://files.pythonhosted.org/" + name
         index = json.dumps({"urls": [{
             "filename": name,
             "url": wheel_url,

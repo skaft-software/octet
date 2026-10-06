@@ -3,7 +3,9 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isolateStdout, Transport } from './lib/transport.mjs';
 import { Runtime } from './lib/runtime.mjs';
+import { sendDesktopNotification } from './lib/desktop-notifications.mjs';
 import { fallbackData } from './lib/installed-pi.mjs';
+import { configureBridgeTheme, bindInstalledPiTheme, onBridgeThemeChange } from './lib/theme.mjs';
 
 const writer = isolateStdout();
 try {
@@ -18,11 +20,25 @@ try {
   }
   const config = extensions.length ? { extensions } : JSON.parse(readFileSync(configPath, 'utf8'));
   if (piRuntime !== undefined) config.pi_runtime = piRuntime; // explicit opt-in; validated by the runtime
+  // Resolve reviewed palette data before loading any factory/helper, including
+  // inspect/capture. No Pi settings lookup or native theme-selection claim.
+  configureBridgeTheme(config.pi_theme);
+  if (config.pi_runtime === 'installed' || Object.values(config.extension_runtimes ?? {}).includes('installed')) bindInstalledPiTheme();
   let runtime;
   const transport = new Transport(writer, { onMessage: m => runtime.receive(m), onLost: (e, eof) => runtime.lost(e, eof) });
   runtime = new Runtime(config, transport);
+  onBridgeThemeChange(() => {
+    if (runtime.stopping) return;
+    // The facade is stable: invalidate owned renderer components explicitly,
+    // including cached lastComponent tool slots, rather than comparing identity.
+    for (const state of runtime.states.values()) if (state.alive) runtime.transcript.retire(state);
+    const store = runtime.scope.getStore();
+    if (store?.state?.alive && store.state === runtime.foreground && !store.controller.signal.aborted) runtime.transcript.invalidate(store);
+    for (const surface of runtime.ui.surfaces.values()) if (surface.store.state.alive) runtime.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
+  });
   runtime.timers.install();
   writer.setIntentHandler?.(enabled => runtime.mouseIntent(enabled));
+  writer.setNotificationHandler(notification => sendDesktopNotification(runtime, notification));
   process.on('uncaughtException', error => transport.fail(error));
   process.on('unhandledRejection', error => transport.fail(error instanceof Error ? error : new Error(String(error))));
   if (inspect) {

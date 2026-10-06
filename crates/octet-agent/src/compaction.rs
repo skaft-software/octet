@@ -13,9 +13,9 @@ use crate::session::{Entry, EntryId, EntryValue, Session, SessionError};
 
 mod session_operations;
 pub use session_operations::{
-    run_session_operation_hooks, session_operation_branch, SessionCompactionReason,
-    SessionCompactionReplacement, SessionOperation, SessionOperationDecision,
-    SessionOperationError, SessionOperationFuture, SessionOperationHook,
+    run_session_operation_hooks, session_operation_branch, ModelTurnAssistantMetadata,
+    SessionCompactionReason, SessionCompactionReplacement, SessionOperation,
+    SessionOperationDecision, SessionOperationError, SessionOperationFuture, SessionOperationHook,
     SessionOperationInvocation, SessionSourceRevision,
 };
 

@@ -7,7 +7,7 @@ import { launch, owner } from './helper.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const frame = text => f => f.method === 'ui/frame' && f.params.lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '').includes(text);
-const factory = '(tui,theme,kb) => new CustomEditor(tui,theme,kb)';
+const factory = '(tui,theme,kb) => new (class extends CustomEditor { handleInput(data) { return super.handleInput(data); } })(tui,theme,kb)';
 async function fixture(t, body = '', make = factory) {
   const dir = await mkdtemp(join(tmpdir(), 'octet-editor-fence-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -260,4 +260,30 @@ test('cross-factory setEditorText/paste use the actual editor cursor and wait fo
   ack(peer, inserted); assert.ok((await paste.response).result);
   await peer.wait(f => f.method === 'notification' && f.params.message === 'AXB');
   await peer.wait(frame('AXB')); await peer.close();
+});
+
+// cwd-history reads the editor in session_start, before any editor-state
+// snapshot. Pi's editor is empty then; a composer host must not refuse it.
+test('getEditorText during session_start reads an empty composer before the first snapshot', async t => {
+  const entry = join(tmpdir(), `octet-editor-start-${process.pid}-${Date.now()}.ts`);
+  t.after(() => rm(entry, { force: true }));
+  await writeFile(entry, `export default pi => pi.on('session_start', (_e, ctx) => { ctx.ui.notify('editor:[' + ctx.ui.getEditorText() + ']'); });`);
+  const peer = launch(t, [entry]);
+  await peer.init(); await peer.start();
+  const notice = await peer.wait(f => f.method === 'notification' && /editor:/.test(f.params.message ?? f.params.title ?? ''));
+  assert.match(notice.params.message ?? notice.params.title, /editor:\[\]/);
+  await peer.close();
+});
+
+// pi-permission-system branches on event.reason; Pi's first session_start
+// in a process is "startup" when the host gives no other reason.
+test('session_start carries Pi\'s startup reason', async t => {
+  const entry = join(tmpdir(), `octet-session-reason-${process.pid}-${Date.now()}.ts`);
+  t.after(() => rm(entry, { force: true }));
+  await writeFile(entry, `export default pi => pi.on('session_start', (event, ctx) => { ctx.ui.notify('reason:' + event.reason); });`);
+  const peer = launch(t, [entry]);
+  await peer.init(); await peer.start();
+  const notice = await peer.wait(f => f.method === 'notification' && /reason:/.test(f.params.message ?? ''));
+  assert.equal(notice.params.message, 'reason:startup');
+  await peer.close();
 });

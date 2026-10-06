@@ -20,7 +20,9 @@ async function fixture(t) {
         returned = pi.appendEntry('private.state', {value:'🙂\\nline\\r\\t', omitted:undefined});
         if (mode === 'twice') second = pi.appendEntry('private.state', {value:'second'});
       } catch(e) { error = e.message; }
-      ctx.ui.notify(JSON.stringify({error, voidReturn:returned===undefined, secondVoid:second===undefined,
+      // Test diagnostics observe terminal JS state even after cancellation;
+      // cancelled callbacks must not acquire a notification/effect authority.
+      console.error('sync-report:' + JSON.stringify({error, voidReturn:returned===undefined, secondVoid:second===undefined,
         entries:ctx.sessionManager.getEntries(), branch:ctx.sessionManager.getBranch(), leaf:ctx.sessionManager.getLeafId()}));
     }
     pi.registerCommand('append', {handler(mode,ctx){append(mode,ctx)}});
@@ -29,8 +31,17 @@ async function fixture(t) {
   };`);
   const peer = launch(t, [entry], { hold: ['session/append_entry'] }); await peer.init(['session_entries']);
   peer.snapshot = { session_entries: [], session_branch: [], session_leaf_id: null };
+  await peer.start(peer.snapshot);
   peer.invoke = (mode = '', leaf = grant()) => peer.request('hook/run', { hook: 'before_tool_call', payload: {name:'test',arguments:{mode}}, context: peer.context(peer.snapshot), ...(leaf === undefined ? {} : {session_leaf:leaf}) });
-  peer.report = async () => JSON.parse((await peer.wait(f => f.method === 'notification' && f.params.message.startsWith('{'))).params.message);
+  let reportsRead = 0;
+  peer.report = async () => {
+    for (let n = 0; n < 300; n++) {
+      const reports = [...peer.stderr().matchAll(/sync-report:([^\n]+)\n/g)];
+      if (reports.length > reportsRead) return JSON.parse(reports[reportsRead++][1]);
+      await sleep(10);
+    }
+    assert.fail('synchronous callback did not reach its terminal report: ' + peer.stderr());
+  };
   return peer;
 }
 test('initialized real helper blocks synchronous void append until authoritative delayed ACK, then publishes read-after-write', async t => {

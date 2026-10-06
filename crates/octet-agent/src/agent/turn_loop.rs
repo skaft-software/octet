@@ -34,6 +34,7 @@ impl Agent {
             return Ok(());
         }
 
+        let replay_safe_calls = pending_tool_replay_safety(&self.session).cloned();
         let (tool_generation, tools) = self.extensions.tool_snapshot();
         let mut tool_map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         for tool in &tools {
@@ -77,7 +78,11 @@ impl Agent {
                         synthesize_interruption(partial_output.as_deref()).text
                     ))),
                     Some(tool)
-                        if !call.async_execution && tool.replay_safety() == ReplaySafety::Safe =>
+                        if !call.async_execution
+                            && replay_safe_calls
+                                .as_ref()
+                                .is_none_or(|safe| safe.contains(&call_index))
+                            && tool.replay_safety() == ReplaySafety::Safe =>
                     {
                         execute_recovery_call(
                             call_index,
@@ -620,7 +625,11 @@ impl Agent {
                     context_capacity.invalidate();
                 }
                 if abort.is_set() { break 'run FinishReason::Aborted; }
-                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                let observation = model_turn_hooks.settle(session, &abort.cancellation).await;
+                for event in model_turn_hooks.take_warnings() {
+                    notify_observers(&observers, &event); yield event;
+                }
+                if let Err(finish) = observation {
                     break 'run finish;
                 }
 
@@ -708,7 +717,11 @@ impl Agent {
 
                 // Await the real logical-iteration observation before request
                 // preparation. Recovery/compaction re-entry must not repeat it.
-                if let Err(finish) = model_turn_hooks.start(session, completed_turns, &abort.cancellation).await {
+                let observation = model_turn_hooks.start(session, completed_turns, &abort.cancellation).await;
+                for event in model_turn_hooks.take_warnings() {
+                    notify_observers(&observers, &event); yield event;
+                }
+                if let Err(finish) = observation {
                     break 'run finish;
                 }
 
@@ -1639,6 +1652,7 @@ impl Agent {
                     &abort,
                 )
                 .await;
+                let persistence_metadata = capture_tool_replay_safety(&calls, &tool_map, persistence_metadata);
 
                 // ── Durable deferred park (rows 4.12 / 1e.1) ─────────────
                 // The provider did not finish this request. Retrying the
@@ -1844,7 +1858,11 @@ impl Agent {
                 // Prior async batches have now settled; no-tool assistants are
                 // also durable. A tool-emitting current turn stays pending until
                 // its own complete result batch commits below.
-                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                let observation = model_turn_hooks.settle(session, &abort.cancellation).await;
+                for event in model_turn_hooks.take_warnings() {
+                    notify_observers(&observers, &event); yield event;
+                }
+                if let Err(finish) = observation {
                     break 'run finish;
                 }
 
@@ -2620,17 +2638,19 @@ impl Agent {
                                     .and_then(|head| session.resolve_active_skills(&head).ok())
                                     .map(|state| state.active_skills)
                                     .unwrap_or_default();
+                                let (mut session_driver, session_route) = crate::extension_process::session_leaf::driver::SessionDriver::new(resource_owner.clone());
+                                let routed_progress = progress_sink.clone().with_session_driver(session_route);
                                 let composition_scope = tool.nested_execution().then(|| CompositionDispatcher::scope(
                                     call.id.clone(), call.name.clone(), composition_tools.clone(),
                                     sandbox.clone(), tool_scope.clone(), resource_owner.clone(),
                                     effect_run_id.clone(), tool_revision, active_skills.clone(),
-                                    tool_call_hooks.clone(), effect_broker.clone(), progress_sink.clone(),
+                                    tool_call_hooks.clone(), effect_broker.clone(), routed_progress.clone(),
                                     abort.cancellation.clone(), session, model.clone(),
                                     max_session_tokens, max_session_cost_microdollars,
                                 ));
                                 let tool_progress = match &composition_scope {
-                                    Some(scope) => progress_sink.clone().with_composition(scope.0.clone()),
-                                    None => progress_sink.clone(),
+                                    Some(scope) => routed_progress.clone().with_composition(scope.0.clone()),
+                                    None => routed_progress.clone(),
                                 };
                                 let tool_ctx = ToolContext {
                                     workspace: &sandbox.workspace,
@@ -2643,14 +2663,14 @@ impl Agent {
                                     cancellation: abort.cancellation.clone(),
                                 };
                                 let original_hook_arguments = args.clone();
-                                let args = match transform_tool_arguments(
+                                let args = match session_driver.drive(transform_tool_arguments(
                                     &tool_call_hooks,
                                     tool.as_ref(),
                                     &call.name,
                                     args,
                                     &tool_ctx,
-                                )
-                                .await
+                                ), session, &abort.cancellation)
+                                .await.unwrap_or_else(|error| Err(ToolError::new(error)))
                                 {
                                     Ok(args) => args,
                                     Err(error) => {
@@ -2664,10 +2684,11 @@ impl Agent {
                                             .lock()
                                             .expect("policy decision slot is not poisoned") =
                                             Some(decision);
-                                        break 'dispatch settle_tool_result_hooks(
+                                        break 'dispatch session_driver.drive(settle_tool_result_hooks(
                                             &tool_call_hooks, &call.name, &original_hook_arguments,
                                             Err(error), &tool_ctx,
-                                        ).await;
+                                        ), session, &abort.cancellation).await
+                                            .unwrap_or_else(|error| Err(ToolError::new(error)));
                                     }
                                 };
                                 let hook_arguments = args.clone();
@@ -2793,6 +2814,11 @@ impl Agent {
                                                 break None;
                                             }
                                             None => control_open = false,
+                                        },
+                                        event = session_driver.next() => {
+                                            if let Err(error) = session_driver.service(event, session) {
+                                                break Some(Err(ToolError::new(error)));
+                                            }
                                         },
                                         r = &mut operation => break Some(r),
                                         step = cache_warmer.next_step() => {
@@ -2930,14 +2956,14 @@ impl Agent {
                                     notify_observers(&observers, &ev);
                                     yield ev;
                                 }
-                                settle_tool_result_hooks(
+                                session_driver.drive(settle_tool_result_hooks(
                                     &tool_call_hooks,
                                     &call.name,
                                     &hook_arguments,
                                     result,
                                     &tool_ctx,
-                                )
-                                .await
+                                ), session, &abort.cancellation)
+                                .await.unwrap_or_else(|error| Err(ToolError::new(error)))
                             }
                         }
                         };
@@ -3162,7 +3188,11 @@ impl Agent {
 
                 // Unlike TurnFinished, this awaited boundary includes every
                 // paired tool result, in actual durable commit order.
-                if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+                let observation = model_turn_hooks.settle(session, &abort.cancellation).await;
+                for event in model_turn_hooks.take_warnings() {
+                    notify_observers(&observers, &event); yield event;
+                }
+                if let Err(finish) = observation {
                     break 'run finish;
                 }
 
@@ -3269,7 +3299,11 @@ impl Agent {
             // Semantic/provider failure may follow a durable no-tool response.
             // Observe only genuinely settled entries; cancelled or failed hook
             // activations are never retried, including in terminal cleanup.
-            if let Err(finish) = model_turn_hooks.settle(session, &abort.cancellation).await {
+            let observation = model_turn_hooks.settle(session, &abort.cancellation).await;
+            for event in model_turn_hooks.take_warnings() {
+                notify_observers(&observers, &event); yield event;
+            }
+            if let Err(finish) = observation {
                 reason = finish;
             }
 

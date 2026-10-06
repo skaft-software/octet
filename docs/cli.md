@@ -23,7 +23,7 @@ defaults that aren't listed here aren't guessed.
 | `--mode rpc` | Pi-compatible JSONL automation. Can't be combined with `--print`. Separate from [native-host protocol 1](sdk.md) and extension API 0.4. [Limits](terminal.md#choose-a-frontend). |
 | `--plain` | Chronological output, no cursor control. |
 | `--color VALUE` | Color mode, such as `auto`. Terminal capability fallbacks still apply. |
-| `--mouse auto\|terminal\|off\|app` | Default `auto`. Only `app` captures the mouse and pins the viewport from startup. |
+| `--mouse auto\|terminal\|off\|app` | Default `app`: the fullscreen viewport, which captures the mouse. `auto`, `terminal` and `off` stay inline in native scrollback. |
 | `--tern auto\|on\|off` | Default `auto`: octet draws native Tern surfaces only inside a Tern pane. `on` forces negotiation anywhere, `off` always uses the terminal renderer. |
 | `--show-reasoning` | Show reasoning instead of the collapsed default. |
 | `--show-images` | Show tool-result images inline on compatible terminals. Off by default. It isn't upload permission or attachment consent. [Behavior](terminal.md#tool-evidence-and-worker-activity). |
@@ -264,7 +264,7 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The five executable bundles are pinned exactly to the
+The six executable bundles are pinned exactly to the
 running host. This checkout's source manifests require `=0.8.2`, and the
 published 0.8.0 bundles require `=0.8.0`. The [0.8.2
 candidate notes](releases/v0.8.2.md) record planned distribution and remaining
@@ -279,7 +279,7 @@ octet extension remove NAME
 ```
 
 The executable catalog is `octet-codemode`, `octet-computer-use`, `octet-mcp`,
-`octet-subagents` and `octet-web-search`. Checksummed bundles install atomically
+`octet-pi-compat`, `octet-subagents` and `octet-web-search`. Checksummed bundles install atomically
 under `~/.octet/extensions/<id>`, and a local update must match the managed
 package ID. Nothing runs at install: no hook, dependency setup, activation,
 trust or launch. Packaged skills must be loaded explicitly. See
@@ -305,7 +305,8 @@ an explicit legacy `node_modules` search root. `octet migrate import pi` and
 `octet migrate restore` are separate, explicit steps that never copy credentials
 or modify Pi sources. Inventory classifications aren't runtime compatibility
 claims. The optional [Pi extension adapter](pi-compatibility.md) is a separate
-source preview with its own acceptance ledger. The import and restore bounds are in [Pi
+adapter with its own acceptance ledger and explicit
+[`--from-pi` setup](pi-compatibility.md#bring-your-pi-extensions). The import and restore bounds are in [Pi
 import and restore](pi-migration.md), and [native provider
 support](providers.md) is independent of Pi extensions.
 

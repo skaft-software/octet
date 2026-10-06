@@ -461,12 +461,12 @@ pub fn translate_with_bindings(
                     InputAction::Close
                 };
             }
-            let steer = key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL;
+            let follow_up = matches("app.message.followUp");
             let submit = matches("tui.input.submit");
             // Explicit skill invocations are prompts, not local commands.
             // During a run they must wait for idle prompt preparation to
             // expand and validate the skill before the agent sees its text.
-            if press && steer && editor_text.starts_with("/skill:") {
+            if press && (submit || follow_up) && editor_text.starts_with("/skill:") {
                 return if active {
                     InputAction::Queue(editor_text.to_owned())
                 } else {
@@ -474,7 +474,7 @@ pub fn translate_with_bindings(
                 };
             }
             if press
-                && (submit || steer)
+                && (submit || follow_up)
                 && editor_text.starts_with('/')
                 && !editor_text.starts_with("/skill:")
                 && !crate::tui::composer::looks_like_absolute_path(editor_text)
@@ -510,15 +510,21 @@ pub fn translate_with_bindings(
                 }
             }
             if press && !editor_text.is_empty() {
-                if submit || matches("app.message.followUp") {
+                // The explicit, overrideable Pi follow-up binding keeps its
+                // after-run queue. Ordinary submit uses live steering instead.
+                if follow_up {
                     return if active {
                         InputAction::Queue(editor_text.to_owned())
                     } else {
                         InputAction::Submit(editor_text.to_owned())
                     };
                 }
-                if active && steer {
-                    return InputAction::Steer(editor_text.to_owned());
+                if submit {
+                    return if active {
+                        InputAction::Steer(editor_text.to_owned())
+                    } else {
+                        InputAction::Submit(editor_text.to_owned())
+                    };
                 }
             }
             if matches("tui.input.newLine") {
@@ -529,7 +535,7 @@ pub fn translate_with_bindings(
                 };
             }
             // Keep terminal-specific modified Enter aliases, unless the user
-            // explicitly replaced the newline action. Alt+Enter is follow-up.
+            // explicitly replaced the newline action.
             if press
                 && !bindings.user_bindings().contains_key("tui.input.newLine")
                 && (key.code == KeyCode::Enter || matches!(key.code, KeyCode::Char('\n' | '\r')))
@@ -768,7 +774,7 @@ mod tests {
         );
         assert_eq!(
             translate(Some(key(KeyCode::Enter, KeyModifiers::NONE)), true, "hello"),
-            InputAction::Queue("hello".into())
+            InputAction::Steer("hello".into())
         );
         assert_eq!(
             translate(
@@ -776,7 +782,7 @@ mod tests {
                 true,
                 "steer"
             ),
-            InputAction::Steer("steer".into())
+            InputAction::Queue("steer".into())
         );
         assert_eq!(
             translate(
@@ -784,7 +790,7 @@ mod tests {
                 false,
                 "normal"
             ),
-            InputAction::Ignore
+            InputAction::Submit("normal".into())
         );
     }
 
@@ -1146,9 +1152,9 @@ mod tests {
             ),
             InputAction::Edit(EditAction::Backspace)
         );
-        // `alt+enter` is the Linux follow-up gesture (win32 uses `ctrl+q`).
+        // Ctrl+S is the configurable follow-up action on every platform.
         assert_eq!(
-            translate_linux(Some(key(KeyCode::Enter, KeyModifiers::ALT)), false, "x"),
+            translate_linux(Some(key(KeyCode::Char('s'), KeyModifiers::CONTROL)), false, "x"),
             InputAction::Submit("x".into())
         );
         assert_eq!(
@@ -1362,6 +1368,80 @@ mod tests {
                 translate(Some(key(key_code, KeyModifiers::NONE)), false, "/"),
                 InputAction::SlashMenu(expected)
             );
+        }
+    }
+
+    #[test]
+    fn follow_up_binding_is_platform_independent_overrideable_and_command_safe() {
+        for (platform, wsl) in [
+            ("darwin", false),
+            ("linux", false),
+            ("win32", false),
+            ("linux", true),
+        ] {
+            let defaults =
+                keybindings::KeybindingsManager::with_platform(platform, wsl, Default::default());
+            let translate = |event, text: &str, bindings: &keybindings::KeybindingsManager| {
+                translate_with_bindings(Some(event), true, text, false, bindings)
+            };
+            assert_eq!(
+                translate(key(KeyCode::Enter, KeyModifiers::NONE), "draft", &defaults),
+                InputAction::Steer("draft".into())
+            );
+            assert_eq!(
+                translate(
+                    key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                    "draft",
+                    &defaults
+                ),
+                InputAction::Queue("draft".into())
+            );
+            assert_eq!(
+                translate(
+                    key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                    "/theme Cards",
+                    &defaults
+                ),
+                InputAction::Command("/theme Cards".into())
+            );
+            let overrides = keybindings::KeybindingsManager::with_platform(
+                platform,
+                wsl,
+                std::collections::BTreeMap::from([(
+                    "app.message.followUp".into(),
+                    vec!["alt+s".into()],
+                )]),
+            );
+            assert_eq!(
+                translate(
+                    key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                    "draft",
+                    &overrides
+                ),
+                InputAction::Ignore
+            );
+            assert_eq!(
+                translate(
+                    key(KeyCode::Char('s'), KeyModifiers::ALT),
+                    "draft",
+                    &overrides
+                ),
+                InputAction::Queue("draft".into())
+            );
+            for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                assert_eq!(
+                    translate(
+                        Event::Key(KeyEvent::new_with_kind(
+                            KeyCode::Char('s'),
+                            KeyModifiers::ALT,
+                            kind
+                        )),
+                        "draft",
+                        &overrides
+                    ),
+                    InputAction::Ignore
+                );
+            }
         }
     }
 

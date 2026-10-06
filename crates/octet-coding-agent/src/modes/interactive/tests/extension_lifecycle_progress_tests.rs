@@ -9,6 +9,7 @@ const IDLE_COMMAND_PROBE: &str = r#"import json
 import sys
 
 pending = None
+retained = None
 receipts = []
 
 def send(value):
@@ -45,7 +46,8 @@ for line in sys.stdin:
         mode = request['params']['arguments']
         if mode == ['mutations']:
             mutations = {}
-            reverse('session/create', 'created')
+            # Fork the actual original head before newSession replaces it.
+            reverse('session/fork', 'forked')
         elif mode == ['reload']:
             reverse('session/reload', 'reloaded')
         elif mode == ['missing']:
@@ -69,18 +71,34 @@ for line in sys.stdin:
         receipts.append(request['result']['session_id'])
         finish({'sessions': receipts})
         pending = None
-    elif method is None and str(request.get('id')).startswith('created:'):
-        mutations['created'] = request['result']['session_id']
-        reverse('session/fork', 'forked')
     elif method is None and str(request.get('id')).startswith('forked:'):
         mutations['forked'] = request['result']['session_id']
+        reverse('session/wait_for_idle', 'fork-active')
+    elif method is None and str(request.get('id')).startswith('fork-active:'):
+        mutations['fork_active'] = request['result']['session_id']
+        reverse('session/create', 'created')
+    elif method is None and str(request.get('id')).startswith('created:'):
+        mutations['created'] = request['result']['session_id']
+        reverse('session/wait_for_idle', 'created-active')
+    elif method is None and str(request.get('id')).startswith('created-active:'):
+        mutations['created_active'] = request['result']['session_id']
+        reverse('session/switch', 'returned-fork', session_id=mutations['forked'])
+    elif method is None and str(request.get('id')).startswith('returned-fork:'):
+        assert request['result']['session_id'] == mutations['forked'], request
         reverse('session/wait_for_idle', 'before-switch')
     elif method is None and str(request.get('id')).startswith('before-switch:'):
         mutations['idle'] = request['result']['session_id']
         reverse('session/switch', 'switched', session_id=mutations['created'])
     elif method is None and str(request.get('id')).startswith('switched:'):
         mutations['switched'] = request['result']['session_id']
-        reverse('composer/set', 'stale-owner', text='must not reach replacement')
+        reverse('composer/set', 'live-owner', text='live command after switch')
+    elif method is None and str(request.get('id')).startswith('live-owner:'):
+        assert 'result' in request, request
+        mutations['live_applied'] = True
+        # This is a genuine retained old context, not the rebound live parent.
+        reverse('composer/set', 'stale-owner', text='must not reach replacement',
+                parent_request_id=retained['id'],
+                resource_owner=retained['params']['context']['resource_owner'])
     elif method is None and str(request.get('id')).startswith('stale-owner:'):
         assert request['error']['code'] == -32002, request
         mutations['stale_rejected'] = True
@@ -91,9 +109,11 @@ for line in sys.stdin:
         pending = None
     elif method is None and str(request.get('id')).startswith('missing:'):
         assert request['error']['code'] == -32603, request
+        retained = pending
         finish({'missing': True}, context=True)
         pending = None
     elif method == 'shutdown':
+        assert pending is None, 'reload must let its requesting command settle'
         send({'jsonrpc': '2.0', 'id': request['id'], 'result': {}})
         break
 "#;
@@ -272,7 +292,16 @@ commands = ["idle-proof"]
     let mut shell = InteractiveShell::test_shell();
     let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
     let mut switched_id = None;
-    for mode in ["missing", "mutations", "reload"] {
+    for mode in ["missing", "mutations", "reload", "after-reload"] {
+        let generation_before = app
+            .executable_extensions
+            .summaries()
+            .into_iter()
+            .find(|summary| summary.name == "idle-command-probe")
+            .unwrap()
+            .health
+            .unwrap()
+            .generation;
         let dialogs = app.executable_extensions.lifecycle_snapshot();
         let result = {
             let mut frontend = InteractiveExtensionConfirmations {
@@ -311,10 +340,14 @@ commands = ["idle-proof"]
             "mutations" => {
                 let created = receipt["created"].as_str().unwrap();
                 let forked = receipt["forked"].as_str().unwrap();
-                assert_eq!(receipt["idle"], original_id);
+                assert_eq!(receipt["fork_active"], forked);
+                assert_eq!(receipt["created_active"], created);
+                assert_eq!(receipt["idle"], forked);
                 assert_eq!(receipt["switched"], created);
+                assert_eq!(receipt["live_applied"], true);
                 assert_eq!(receipt["stale_rejected"], true);
                 assert_ne!(created, forked);
+                assert_ne!(forked, original_id);
                 assert_eq!(
                     terminal_goal_session_id(app.agent.session()).unwrap(),
                     created
@@ -331,9 +364,9 @@ commands = ["idle-proof"]
                     .unwrap()
                     .entry(&original_entry)
                     .is_some());
-                assert_ne!(
+                assert_eq!(
                     shell.extension_editor_snapshot().text,
-                    "must not reach replacement"
+                    "live command after switch"
                 );
                 switched_id = Some(created.to_owned());
             }
@@ -344,8 +377,29 @@ commands = ["idle-proof"]
                     switched_id.clone().unwrap()
                 );
             }
+            "after-reload" => {
+                let id = switched_id.as_ref().unwrap();
+                assert_eq!(receipt, serde_json::json!({"sessions": [id, id]}));
+                assert_eq!(
+                    shell.extension_editor_snapshot().text,
+                    "idle barrier acknowledged"
+                );
+            }
             _ => unreachable!(),
         }
+        let health = app
+            .executable_extensions
+            .summaries()
+            .into_iter()
+            .find(|summary| summary.name == "idle-command-probe")
+            .unwrap()
+            .health
+            .unwrap();
+        assert_eq!(
+            health.generation,
+            generation_before + u64::from(mode == "reload"),
+            "reload must actually replace the generation, not merely acknowledge its ID"
+        );
         let composed = app
             .executable_extensions
             .compose_prompt("system", "prompt".into())

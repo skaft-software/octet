@@ -15,45 +15,18 @@ pub(super) fn transcript(identity: u64, view: &SubagentTranscript, _verbose: boo
         marker = marker.effect(Effect::Pulse);
     }
     let label = view.label();
-    let mut heading = vec![Node::new(
-        id(".label"),
-        Kind::Text,
-        Props::new()
-            .text(
-                "spans",
-                vec![
-                    Span::styled("Subagents", "bold"),
-                    Span::styled(label.strip_prefix("Subagents").unwrap(), "muted"),
-                ],
-            )
-            .set("grow", 1)
-            .set("wrap", "none")
-            .set("truncate", "end"),
-    )];
+    // A native card head shares the other transcript surfaces' typography.
+    // Bare chrome avoids another box or an invented tool lifecycle for history.
+    let mut heading = vec![
+        marker,
+        Span::new(" "),
+        Span::styled("Subagents", "strong toolTitle"),
+        Span::styled(label.strip_prefix("Subagents").unwrap(), "muted"),
+    ];
     if live {
-        // A sibling inside the same heading keeps the stop hint inline while
-        // the longer state label can compact in narrow native layouts.
-        heading.push(Node::new(
-            id(".stop"),
-            Kind::Text,
-            Props::new()
-                .text(
-                    "spans",
-                    vec![Span::styled("· stop: /subagents stop all", "muted")],
-                )
-                .set("wrap", "none")
-                .set("truncate", "end"),
-        ));
+        heading.push(Span::styled(" · stop: /subagents stop all", "muted"));
     }
-    let mut body = vec![Node::with_children(
-        id(".heading"),
-        Kind::Row,
-        Props::new()
-            .set("gap", "xs")
-            .set("align", "start")
-            .set("wrap", false),
-        heading,
-    )];
+    let mut body = Vec::new();
     if live {
         for (index, worker) in view.live_workers.iter().take(4).enumerate() {
             let estimate = if worker.output_estimated { "~" } else { "" };
@@ -78,10 +51,9 @@ pub(super) fn transcript(identity: u64, view: &SubagentTranscript, _verbose: boo
                                 "spans",
                                 vec![Span::styled(
                                     sanitize_ordinary_surface_cell(&worker.name, true),
-                                    "muted",
+                                    "text",
                                 )],
                             )
-                            .set("grow", 1)
                             .set("wrap", "none")
                             .set("truncate", "end"),
                     ),
@@ -123,25 +95,17 @@ pub(super) fn transcript(identity: u64, view: &SubagentTranscript, _verbose: boo
     }
     Node::with_children(
         id(""),
-        Kind::Row,
+        Kind::Card,
         Props::new()
             .role("octet.subagents")
-            .set("gap", "xs")
-            .set("align", "start")
-            .set("wrap", false),
-        vec![
-            Node::new(
-                id(".marker"),
-                Kind::Text,
-                Props::new().text("spans", vec![marker]),
-            ),
-            Node::with_children(
-                id(".body"),
-                Kind::Col,
-                Props::new().set("gap", "xs").set("grow", 1),
-                body,
-            ),
-        ],
+            .set("variant", "bare")
+            .text("head", heading),
+        vec![Node::with_children(
+            id(".body"),
+            Kind::Col,
+            Props::new().set("gap", "xs"),
+            body,
+        )],
     )
 }
 
@@ -222,13 +186,25 @@ mod tests {
     fn text(root: &Node) -> String {
         nodes(root)
             .iter()
-            .filter_map(|node| node.p.as_ref()?.as_map().get("spans")?.as_array())
+            .filter_map(|node| {
+                let props = node.p.as_ref()?.as_map();
+                props.get("spans").or_else(|| props.get("head"))?.as_array()
+            })
             .flat_map(|spans| spans.iter().map(|span| span["t"].as_str().unwrap()))
             .collect()
     }
 
     fn marker(root: &Node) -> serde_json::Value {
-        find(root, ".marker").p.as_ref().unwrap().as_map()["spans"][0].clone()
+        root.p.as_ref().unwrap().as_map()["head"][0].clone()
+    }
+
+    fn label(root: &Node) -> String {
+        root.p.as_ref().unwrap().as_map()["head"]
+            .as_array()
+            .unwrap()[2..4]
+            .iter()
+            .map(|span| span["t"].as_str().unwrap())
+            .collect()
     }
 
     #[test]
@@ -236,7 +212,13 @@ mod tests {
         let view = summary();
         let root = transcript(9, &view, false);
         assert_eq!(root, transcript(9, &view, true));
-        assert_eq!(text(find(&root, ".label")), view.label());
+        assert_eq!(root.k, Kind::Card);
+        assert_eq!(root.p.as_ref().unwrap().as_map()["variant"], "bare");
+        assert_eq!(
+            root.p.as_ref().unwrap().as_map()["head"][2]["s"],
+            "strong toolTitle"
+        );
+        assert_eq!(label(&root), view.label());
         assert!(text(&root).contains("1 queued · 1 running"));
         assert!(text(&root).contains("stop: /subagents stop all"));
         assert_eq!(text(find(&root, ".worker0.tokens")), "· ↑1.3K ↓~3.9K");
@@ -244,7 +226,10 @@ mod tests {
         assert_eq!(marker(&root)["fx"], "pulse");
         assert!(!text(&root).contains("more"));
         for node in nodes(&root) {
-            assert!(matches!(node.k, Kind::Row | Kind::Col | Kind::Text));
+            assert!(matches!(
+                node.k,
+                Kind::Card | Kind::Row | Kind::Col | Kind::Text
+            ));
             let props = node.p.as_ref().unwrap().as_map();
             if node.k == Kind::Row {
                 assert_eq!(props["wrap"], false);
@@ -293,7 +278,7 @@ mod tests {
             view.live_workers.clear();
             let root = transcript(9, &view, false);
             assert_eq!(root.id, "t9.subagents");
-            assert_eq!(text(find(&root, ".label")), view.label());
+            assert_eq!(label(&root), view.label());
             assert!(text(&root).contains(state));
             assert_eq!(marker(&root)["s"], role);
             assert!(marker(&root).get("fx").is_none());
@@ -317,7 +302,7 @@ mod tests {
             view.hydrated = true;
             view.live_workers.clear();
             let root = transcript(9, &view, false);
-            assert_eq!(text(find(&root, ".label")), view.label());
+            assert_eq!(label(&root), view.label());
             assert!(text(&root).contains(expected));
             assert_eq!(marker(&root)["s"], role);
             assert!(marker(&root).get("fx").is_none());
@@ -336,8 +321,8 @@ mod tests {
         view.live_workers = vec![view.live_workers[0].clone(); 4];
         let root = transcript(9, &view, false);
         let body = find(&root, ".body");
-        assert_eq!(root.c.as_ref().unwrap()[1].id, body.id);
-        assert_eq!(body.c.as_ref().unwrap().len(), 6); // heading, four lines, overflow
+        assert_eq!(root.c.as_ref().unwrap()[0].id, body.id);
+        assert_eq!(body.c.as_ref().unwrap().len(), 5); // four lines, overflow
         for index in 0..4 {
             assert_eq!(text(find(&root, &format!(".worker{index}.elbow"))), "└");
             assert_eq!(
@@ -350,14 +335,14 @@ mod tests {
             );
         }
         assert_eq!(text(find(&root, ".overflow")), "└ +3 more");
-        assert_eq!(
-            find(&root, ".label").p.as_ref().unwrap().as_map()["wrap"],
-            "none"
-        );
-        assert_eq!(
-            find(&root, ".stop").p.as_ref().unwrap().as_map()["wrap"],
-            "none"
-        );
+        // Worker token metrics follow the name, not a distant right-hand HUD.
+        assert!(!find(&root, ".worker0.name")
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()
+            .contains_key("grow"));
+        assert!(text(&root).contains("stop: /subagents stop all"));
     }
 
     #[test]
@@ -368,7 +353,7 @@ mod tests {
         assert!(text(&root).contains("1 queued · 1 running"));
         assert!(!text(&root).contains('↑'));
         assert!(!text(&root).contains("more"));
-        assert_eq!(find(&root, ".body").c.as_ref().unwrap().len(), 1);
+        assert!(find(&root, ".body").c.is_none());
     }
 
     #[test]

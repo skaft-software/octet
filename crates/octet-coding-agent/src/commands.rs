@@ -92,6 +92,8 @@ pub enum ExtensionsSubcommand {
     Menu,
     Status,
     Reload,
+    /// Explicit host-owned bootstrap of a selected trusted Python runtime.
+    Setup { extension: String },
     Inspect { reference: String },
     Action { extension: String, action: String },
 }
@@ -856,6 +858,9 @@ pub fn parse(input: &str) -> Command {
             [] | ["list"] => Command::Extensions(ExtensionsSubcommand::Menu),
             ["status"] => Command::Extensions(ExtensionsSubcommand::Status),
             ["reload"] => Command::Extensions(ExtensionsSubcommand::Reload),
+            ["setup", extension] => Command::Extensions(ExtensionsSubcommand::Setup {
+                extension: (*extension).to_owned(),
+            }),
             ["inspect", reference] => Command::Extensions(ExtensionsSubcommand::Inspect {
                 reference: (*reference).to_owned(),
             }),

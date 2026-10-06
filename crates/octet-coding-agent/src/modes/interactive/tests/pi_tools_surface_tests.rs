@@ -17,7 +17,10 @@ export default pi => {
     async execute(){return {content:[{type:'text',text:name}],structuredContent:{name},details:{name}}}});
   pi.registerTool(tool('listed'));
   pi.registerTool(tool('optional', false));
+  let started = false;
+  pi.on('session_start', () => { started = true; });
   pi.registerCommand('probe', {handler: () => {
+    if (!started) throw new Error('command admitted before session_start');
     const initial = pi.getActiveTools();
     if (!initial.includes('listed') || initial.includes('optional')) throw new Error('defaultActive not applied');
     const all = pi.getAllTools();
@@ -36,6 +39,9 @@ export default pi => {
 };
 "#,
     );
+    assert!(!app.executable_extensions.has_resource_consumer_processes());
+    assert!(!app.resource_paths_pending());
+    assert!(app.executable_extensions.has_pending_session_starts());
     let mut shell = InteractiveShell::test_shell();
     let result = command(&mut app, &mut shell, "probe").await;
     app.executable_extensions.shutdown().await;
@@ -75,17 +81,116 @@ export default pi => {
     if (JSON.stringify(active) !== JSON.stringify(['hook_tool'])) throw new Error('hook selection missing');
     appendFileSync(TRACE, JSON.stringify({hook:true,active})+'\n');
   });
-  pi.registerCommand('probe', {handler:() => {}});
+  pi.registerCommand('probe', {handler:() => {
+    appendFileSync(TRACE, JSON.stringify({command:true})+'\n');
+  }});
 };
 "#,
     );
+    assert!(!app.executable_extensions.has_resource_consumer_processes());
+    assert!(!app.resource_paths_pending());
+    assert!(app.executable_extensions.has_pending_session_starts());
     let mut shell = InteractiveShell::test_shell();
-    let result = command(&mut app, &mut shell, "probe").await;
+    let first = command(&mut app, &mut shell, "probe").await;
+    let second = command(&mut app, &mut shell, "probe").await;
     app.executable_extensions.shutdown().await;
-    result.unwrap();
+    first.unwrap();
+    second.unwrap();
     let trace = std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap();
-    let observed: serde_json::Value = serde_json::from_str(trace.lines().next().unwrap()).unwrap();
-    assert_eq!(observed["active"], serde_json::json!(["hook_tool"]));
+    let observed = trace
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            serde_json::json!({"hook": true, "active": ["hook_tool"]}),
+            serde_json::json!({"command": true}),
+            serde_json::json!({"command": true}),
+        ],
+        "the real startup hook must finish exactly once before commands run"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_non_resource_headless_start_settles_once_without_loading_resources() {
+    let (directory, mut app) = pi_app(
+        r#"
+import { appendFileSync } from 'node:fs';
+export default pi => pi.on('session_start', () => {
+  pi.getAllTools(); // Requires the real headless reverse-request pump.
+  appendFileSync(TRACE, 'started\n');
+});
+"#,
+    );
+    assert!(!app.executable_extensions.has_resource_consumer_processes());
+    assert!(!app.resource_paths_pending());
+    assert!(app.executable_extensions.has_pending_session_starts());
+    let skills = app.skills.clone();
+    let prompts = app.prompts.clone();
+    let trace = directory.path().join("trace.jsonl");
+    assert!(!trace.exists());
+    for _ in 0..2 {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            app.refresh_resource_paths_headless(),
+        )
+        .await
+        .expect("non-resource session_start must settle")
+        .unwrap();
+        assert!(!app.executable_extensions.has_pending_session_starts());
+        assert!(!app.resource_paths_pending());
+        assert!(Arc::ptr_eq(&skills, &app.skills));
+        assert!(Arc::ptr_eq(&prompts, &app.prompts));
+        assert_eq!(std::fs::read_to_string(&trace).unwrap(), "started\n");
+    }
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_non_resource_start_worker_failure_blocks_admission() {
+    use crate::extensions::resource_paths::consumer_tests::hold_session_start;
+
+    for headless in [false, true] {
+        let (directory, mut app) = pi_app(
+            r#"
+import { appendFileSync } from 'node:fs';
+export default pi => {
+  pi.on('session_start', () => appendFileSync(TRACE, 'started\n'));
+  pi.registerCommand('probe', {handler: () => appendFileSync(TRACE, 'command\n')});
+};
+"#,
+        );
+        assert!(!app.executable_extensions.has_resource_consumer_processes());
+        assert!(!app.resource_paths_pending());
+        let (release, wait) = tokio::sync::oneshot::channel();
+        hold_session_start(&mut app, wait);
+        let mut shell = InteractiveShell::test_shell();
+        let result = {
+            let phase = async {
+                if headless {
+                    app.refresh_resource_paths_headless().await
+                } else {
+                    command(&mut app, &mut shell, "probe").await.map(|_| ())
+                }
+            };
+            tokio::pin!(phase);
+            assert!(futures_util::poll!(phase.as_mut()).is_pending());
+            // The barrier now owns the held worker. Dropping its required
+            // receipt causes a real JoinError, not a recoverable callback error.
+            drop(release);
+            tokio::time::timeout(Duration::from_secs(5), phase).await
+        };
+        app.executable_extensions.shutdown().await;
+        let error = result
+            .expect("failed startup worker must settle the boundary")
+            .unwrap_err();
+        assert!(error.to_string().contains("session_start worker failed"));
+        assert!(
+            !directory.path().join("trace.jsonl").exists(),
+            "failed startup must not admit a command (headless={headless})"
+        );
+    }
 }
 
 #[derive(Clone)]

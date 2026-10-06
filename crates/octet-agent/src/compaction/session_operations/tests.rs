@@ -254,6 +254,7 @@ fn model_turn_observations_serialize_real_entries_and_only_accept_continue() {
         turn_index: 7,
         timestamp_ms: 123,
         assistant_entry: session.entry(&assistant).unwrap().clone(),
+        assistant_metadata: None,
         tool_result_entries: Vec::new(),
     };
     let value = serde_json::to_value(&end).unwrap();
@@ -265,6 +266,7 @@ fn model_turn_observations_serialize_real_entries_and_only_accept_continue() {
         serde_json::to_value(session.entry(&assistant).unwrap()).unwrap()
     );
     assert_eq!(value["tool_result_entries"], serde_json::json!([]));
+    assert_eq!(value["assistant_metadata"], serde_json::Value::Null);
     let start = SessionOperation::ModelTurnStart {
         run_id: format!("run:{}", root.0),
         turn_index: 7,

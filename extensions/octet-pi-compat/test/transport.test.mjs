@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,7 +11,8 @@ import { launch, root } from './helper.mjs';
 import { Transport } from '../lib/transport.mjs';
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
 
-test('sender sync timeout requests cancellation, waits for known committed ACK rather than inferring noncommit', async t => {
+for (const executable of [process.execPath, 'bun']) test(`sender sync timeout requests cancellation and waits for committed ACK (${executable === 'bun' ? 'Bun' : 'Node'})`,
+  { skip: executable === 'bun' && spawnSync('bun', ['--version']).status !== 0 }, async t => {
   const dir=await mkdtemp(join(tmpdir(),'pi-sync-timeout-')); t.after(()=>rm(dir,{recursive:true,force:true}));
   const script=join(dir,'driver.mjs');
   await writeFile(script,`import {Transport,isolateStdout} from ${JSON.stringify(pathToFileURL(join(root,'lib/transport.mjs')).href)};
@@ -20,7 +21,7 @@ test('sender sync timeout requests cancellation, waits for known committed ACK r
       if(m.method==='append') { const result=transport.requestSync('session/append_entry',{parent_request_id:m.id,entry_type:'test',data:{}},{parent:m.id,timeout:50}); return transport.send({jsonrpc:'2.0',id:m.id,result}); }
       if(m.method==='shutdown') return transport.send({jsonrpc:'2.0',id:m.id,result:{}}).then(()=>transport.idle()).then(()=>transport.close()).then(()=>process.exit(0));
     }}); transport.start();`);
-  const child=spawn(process.execPath,[script],{stdio:['pipe','pipe','pipe']}); t.after(()=>child.kill());
+  const child=spawn(executable,[script],{stdio:['pipe','pipe','pipe']}); t.after(()=>child.kill());
   const frames=[]; let stderr='';child.stderr.on('data',b=>stderr+=b); child.stdin.on('error',()=>{});
   createInterface({input:child.stdout}).on('line',line=>frames.push(JSON.parse(line)));
   const send=message=>child.stdin.write(JSON.stringify({jsonrpc:'2.0',...message})+'\n');

@@ -31,6 +31,45 @@ pub(super) fn cancelled_tool_error() -> ToolError {
     )
 }
 
+/// Capture the frozen dispatch implementations, not a future catalog's names.
+/// Persist this in the same transaction as the assistant calls, before effects.
+pub(super) fn capture_tool_replay_safety(
+    calls: &[ToolCall],
+    tools: &HashMap<String, Arc<dyn Tool>>,
+    metadata: Option<EntryMetadata>,
+) -> Option<EntryMetadata> {
+    if calls.is_empty() {
+        return metadata;
+    }
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.replay_safe_tool_calls = Some(
+        calls
+            .iter()
+            .take(MAX_TOOL_CALLS_PER_TURN)
+            .enumerate()
+            .filter_map(|(index, call)| {
+                tools
+                    .get(&call.name)
+                    .is_some_and(|tool| tool.replay_safety() == ReplaySafety::Safe)
+                    .then_some(index)
+            })
+            .collect(),
+    );
+    Some(metadata)
+}
+
+pub(super) fn pending_tool_replay_safety(session: &Session) -> Option<&BTreeSet<usize>> {
+    let mut cursor = session.head_ref();
+    while let Some(id) = cursor {
+        let entry = session.entry(id)?;
+        if matches!(&entry.value, EntryValue::Message(Message::Assistant(_))) {
+            return entry.metadata.as_ref()?.replay_safe_tool_calls.as_ref();
+        }
+        cursor = entry.parent.as_ref();
+    }
+    None
+}
+
 pub(super) fn pending_tool_state(
     session: &Session,
 ) -> Option<(Vec<ToolCall>, HashSet<octet_ai::ToolCallId>)> {

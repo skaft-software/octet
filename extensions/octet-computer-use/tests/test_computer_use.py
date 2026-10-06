@@ -748,7 +748,7 @@ class LinuxSessionProbeTests(unittest.TestCase):
         computer.publish_status()
         self.assertEqual(extension.statuses[-1]["label"], "computer use · needs a desktop session")
         computer.status = lambda **_: {"installed": True, "runtime": "direct",
-                                       "platform": "linux", "permissions": "granted"}
+                                       "platform": "linux", "permissions": "granted", "doctor_ok": True}
         computer.publish_status()
         self.assertEqual(extension.statuses[-1]["label"], "computer use · ready")
 
@@ -784,7 +784,7 @@ class StatusRowTests(unittest.TestCase):
         return extension.statuses
 
     def test_ready_state_reports_active(self):
-        statuses = self._publish({"installed": True, "permissions": "granted"})
+        statuses = self._publish({"installed": True, "permissions": "granted", "doctor_ok": True})
         self.assertEqual(
             statuses,
             [{"state": "active", "label": "computer use · ready"}],
@@ -1677,16 +1677,16 @@ class PiplessProvisionTests(unittest.TestCase):
 
         files = [
             {"filename": "cua_driver-0.30.2-py3-none-macosx_13_0_universal2.whl",
-             "url": "https://files/a", "digests": {"sha256": "a"}},
+             "url": "https://files.pythonhosted.org/a", "digests": {"sha256": "a" * 64}},
             {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_aarch64.whl",
-             "url": "https://files/b", "digests": {"sha256": "b"}},
+             "url": "https://files.pythonhosted.org/b", "digests": {"sha256": "b" * 64}},
             {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_x86_64.whl",
-             "url": "http://files/insecure", "digests": {"sha256": "c"}},
+             "url": "http://files.pythonhosted.org/insecure", "digests": {"sha256": "c" * 64}},
             {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_x86_64.whl",
-             "url": "https://files/d", "digests": {"sha256": "d"}},
+             "url": "https://files.pythonhosted.org/d", "digests": {"sha256": "d" * 64}},
         ]
-        self.assertEqual(driver._select_wheel(files, "x86_64")["url"], "https://files/d")
-        self.assertEqual(driver._select_wheel(files, "aarch64")["url"], "https://files/b")
+        self.assertEqual(driver._select_wheel(files, "x86_64")["url"], "https://files.pythonhosted.org/d")
+        self.assertEqual(driver._select_wheel(files, "aarch64")["url"], "https://files.pythonhosted.org/b")
         with self.assertRaises(driver.ProvisionError):
             driver._select_wheel(files[:1], "x86_64")
 
@@ -2183,6 +2183,9 @@ class ObservationScreenshotTests(unittest.TestCase):
 
         client = FakeClient(read_only=[tool])
         use = ComputerUse.__new__(ComputerUse)
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        use._paths = entrypoint.driver_module.DriverPaths.for_home(Path(home.name))
         use._client = client
         use._lock = __import__("threading").Lock()
         use._app_daemon = False

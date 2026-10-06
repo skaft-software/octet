@@ -9,6 +9,7 @@ import { customMessage } from './custom-messages.mjs';
 // Creation identity/provenance comes from the durable native header. Historical
 // files without a header return undefined rather than fabricated timestamps.
 export function sessionHeader(host) {
+  if (host.session_entries === null || host.session_branch === null) unsupported('ctx.sessionManager.getHeader', 'native session view unavailable');
   const header = host.session_header;
   if (header == null) return undefined;
   bounded(header.id, 'session header id', 256); bounded(header.cwd, 'session header cwd', 4096);

@@ -139,10 +139,11 @@ input) appear in place. Actions an extension marks destructive ask first. A
 third-party extension without its own menu gets one entry per command it
 declares, which asks for that command's arguments.
 
-Other extension commands are no longer typed after the slash in the terminal UI:
-typing one, such as `/computer-use setup`, names the extension to open instead.
-`/subagents` remains a runtime slash command and appears in completion while its
-first-party extension is ready.
+Commands published by ready extensions appear in slash completion and execute
+through their registered handlers. During active work, commands that need an
+idle boundary are visibly queued. `/extensions` remains the configuration menu;
+`/subagents` remains a runtime slash command while its first-party extension is
+ready.
 The menu never writes a trust
 grant on enablement. Full access implicitly trusts enabled extensions; safe
 mode starts only enabled extensions with explicit source-bound host authority.
@@ -167,10 +168,10 @@ See [Discovery and trust](resources.md).
 
 | Key | What it does |
 | --- | --- |
-| Enter | Send. While octet works, queue an editable follow-up for after the run. In a picker, choose the highlighted action. In the slash popup, run the highlighted command. |
+| Enter | Send when idle; while octet works, steer at the next model boundary. In a picker, choose the highlighted action. In the slash popup, run the highlighted command. |
 | Shift+Enter | New line, if your terminal reports enhanced key events. |
 | Shift+Tab | Cycle through the active model's thinking levels, lowest to highest, wrapping at the end. During a run it updates the queued selection at once. |
-| Ctrl+S | Steer at the next model boundary. In the resume picker, change the sort order. |
+| Ctrl+S | Queue an editable follow-up for after the run; send normally when idle. In the resume picker, change the sort order. |
 | Escape | Close a panel or slash popup first. Otherwise interrupt active work, then send the oldest queued follow-up after it settles (never the draft). |
 | Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty input. It never submits or interrupts. On Windows and WSL, where Windows Terminal uses Alt+arrows for panes, use Alt+Q. The queued-message hint names the key in use. |
 | Ctrl+C | Clear a draft. With no draft, abort active work. Does nothing when idle. |
@@ -192,9 +193,9 @@ scrolling](terminal.md#scrolling-and-rendering) covers the mouse.
 <details>
 <summary>How queued follow-ups and steering behave</summary>
 
-Follow-ups stay local until sent, one per settled run, in order. Ctrl+S is
-different: it queues live steering for the next model boundary. Option+Up can
-retract it until the agent claims it for saving. Past that point it can't be
+Ctrl+S follow-ups stay local until sent, one per settled run, in order. Enter
+during active work instead queues live steering for the next model boundary.
+Option+Up can retract steering until the agent claims it for saving. Past that point it can't be
 recalled, even before the UI shows delivery. The newest eligible steering
 message or follow-up is recalled, with its attachment and paste chips. `/answer`
 can't be retracted because it changes the run's tool policy. Failed runs, Ctrl+C

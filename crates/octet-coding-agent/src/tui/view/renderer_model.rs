@@ -354,7 +354,7 @@ impl RenderModel {
         publication.reset = false;
         let root = publication.root.clone();
         state.render_publication = publication;
-        let mut chrome = ShellState::default();
+        let mut chrome = ShellState::with_theme(state.theme.clone());
         copy_presentation(state, &mut chrome);
         Self {
             chrome,
@@ -374,6 +374,15 @@ pub(super) struct RenderOwner {
     pub(super) revision: u64,
 }
 impl RenderOwner {
+    pub(super) fn new(theme: crate::tui::theme::OctetTheme) -> Self {
+        Self {
+            state: ShellState::with_theme(theme),
+            geometry_fence: None,
+            root: SharedSequence::default(),
+            revision: 0,
+        }
+    }
+
     pub(super) fn accept(&mut self, model: RenderModel) {
         let state = &mut self.state;
         let structural = model.reset || state.transcript_epoch != model.chrome.transcript_epoch;
@@ -391,6 +400,7 @@ impl RenderOwner {
             .viewport_anchor
             .set(state.viewport_anchor.get());
         copy_presentation(&model.chrome, state);
+        state.theme = model.chrome.theme;
         if structural {
             state.transcript.clear();
             state.transcript_commit_ids.clear();
@@ -474,6 +484,8 @@ impl RenderOwner {
 }
 
 fn copy_presentation(source: &ShellState, target: &mut ShellState) {
+    // The caller supplies the resolved theme: capture clones it once into the
+    // fresh shell, and accept moves it into the renderer-owned shell.
     // Queue roots and their immutable entries are Arc-shared: these clones
     // never duplicate ComposedInput parts or attachment/paste/media payloads.
     // TerminalImageStore likewise clones one Arc; deferred history contains
@@ -486,11 +498,11 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         panel_epoch,
         overlay_epoch,
         pending_panel_document_top,
-        theme,
         safe_mode,
         image_rendering,
         theme_epoch,
         transcript_epoch,
+        extension_transcript,
         model_lab,
         prompt_color,
         event_dot_visible,
@@ -514,6 +526,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         tool_input_overflowed,
         prompt_templates,
         skill_commands,
+        extension_commands,
         subagent_activity,
         subagent_committed_costs,
         slash_selection,
@@ -593,11 +606,35 @@ mod tests {
 
     fn state() -> ShellState {
         ShellState {
-            theme: crate::tui::theme::test_theme(),
             size: (80, 24),
             follow_tail: true,
-            ..Default::default()
+            ..ShellState::with_theme(crate::tui::theme::test_theme())
         }
+    }
+
+    #[test]
+    fn extension_command_catalog_survives_publication_and_removal() {
+        let mut semantic = state();
+        semantic.extension_commands = vec![
+            ("doom".into(), "Play Doom".into()),
+            ("subagents".into(), "Workers".into()),
+        ]
+        .into();
+        semantic.editor.set_text("/");
+        let mut renderer = RenderOwner::new(semantic.theme.clone());
+        renderer.accept(RenderModel::capture(&mut semantic));
+        assert!(Arc::ptr_eq(
+            &semantic.extension_commands,
+            &renderer.state.extension_commands
+        ));
+        let painted = super::super::input_overlays::input_slash_suggestions(&renderer.state);
+        assert!(painted.iter().any(|suggestion| suggestion.name == "doom"));
+        assert!(painted
+            .iter()
+            .any(|suggestion| suggestion.name == "subagents"));
+        semantic.extension_commands = Arc::from([]);
+        renderer.accept(RenderModel::capture(&mut semantic));
+        assert!(renderer.state.extension_commands.is_empty());
     }
 
     #[test]
@@ -647,7 +684,7 @@ mod tests {
             ..Default::default()
         };
         semantic.set_subagent_activity(roster.clone());
-        let mut renderer = RenderOwner::default();
+        let mut renderer = RenderOwner::new(semantic.theme.clone());
 
         // The old worker's spend is already in the root ledger; only the new
         // worker's spend is provisional. Both publication copies must agree.
@@ -749,7 +786,7 @@ mod tests {
         )));
         let first = RenderModel::capture(&mut semantic);
         let root = first.root.clone();
-        let mut renderer = RenderOwner::default();
+        let mut renderer = RenderOwner::new(semantic.theme.clone());
         renderer.accept(first);
         renderer.state.rendered_transcript(80);
         let prefix_length = renderer.state.transcript_cache.borrow().block_starts[1_000];
@@ -783,7 +820,7 @@ mod tests {
     fn skipped_publications_recover_exact_source_and_canonical_layout() {
         let mut semantic = state();
         semantic.append_text_block(OutputChannel::Text, "**prefix**\n\n");
-        let mut renderer = RenderOwner::default();
+        let mut renderer = RenderOwner::new(semantic.theme.clone());
         renderer.accept(RenderModel::capture(&mut semantic));
         renderer.state.rendered_transcript(80);
         for _ in 0..512 {
@@ -886,7 +923,7 @@ mod tests {
     fn replaced_snapshot_roots_are_not_retained_as_an_event_fifo() {
         let mut semantic = state();
         semantic.push_block(TranscriptBlock::Notice("one semantic block".into()));
-        let mut renderer = RenderOwner::default();
+        let mut renderer = RenderOwner::new(semantic.theme.clone());
         let mut old: Vec<Weak<Node<Arc<PublishedBlock>>>> = Vec::new();
         for _ in 0..1_000 {
             semantic.touch_block(0);

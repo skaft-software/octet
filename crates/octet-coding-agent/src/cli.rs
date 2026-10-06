@@ -1419,6 +1419,7 @@ fn build_config_with_global_path_and_diagnostics(
         LoadedConfigLayer::default()
     };
     let environment = environment_layer()?;
+    let theme_explicit = cli.theme.is_some() || environment.theme.is_some();
     let policy_environment = environment.clone();
     let extension_activation_overridden = project.values.enabled_extensions.is_some()
         || environment.enabled_extensions.is_some()
@@ -1475,7 +1476,7 @@ fn build_config_with_global_path_and_diagnostics(
     };
     let mouse = match cli.mouse.as_deref().or(values.mouse.as_deref()) {
         Some(value) => config::MouseMode::parse(value)?,
-        None => config::MouseMode::Auto,
+        None => config::MouseMode::default(),
     };
     let tern = match cli.tern.as_deref().or(values.tern.as_deref()) {
         Some(value) => config::TernMode::parse(value)?,
@@ -1764,6 +1765,7 @@ fn build_config_with_global_path_and_diagnostics(
         show_cache_miss_notices: values.show_cache_miss_notices.unwrap_or(false),
         effect_policy,
         sandbox,
+        theme_explicit,
         theme: cli.theme.or(values.theme),
         system_prompt,
         theme_paths: cli.theme_dirs,

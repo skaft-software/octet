@@ -80,10 +80,18 @@ export async function discoverResources(runtime, params, store) {
   runtime.bind(params, store);
   store.resourceDiscovery = true;
   const signal = store.controller.signal;
-  const live = () => { signal.throwIfAborted(); runtime.assertOwner(store); };
+  const live = () => { signal.throwIfAborted(); runtime.assertSessionOwner(store); };
   return cancellable(runtime.queued(store, async () => {
     live();
     const paths = { skill_paths: [], prompt_paths: [], theme_paths: [] }, budget = { cwd, count: 0, bytes: 0 };
+    // Reviewed import snapshots use the same native owner/trust/retirement
+    // gates as factory resources. This preference never writes host settings.
+    appendPaths(paths, { themePaths: runtime.config.pi_theme_paths }, budget);
+    if (runtime.config.pi_theme?.native_path !== undefined) {
+      const preferred = normalizeResourcePath(runtime.config.pi_theme.native_path, cwd);
+      if (!paths.theme_paths.includes(preferred)) invalid('imported default theme must be a contributed theme path');
+      paths.default_theme = preferred;
+    }
     // Snapshot before the first callback, in factory/registration order, like Pi.
     for (const entry of [...runtime.events.get('resources_discover') || []]) {
       live();
@@ -98,7 +106,7 @@ export async function discoverResources(runtime, params, store) {
         // Ordinary callback failures are diagnosed and later handlers still run,
         // as in Pi. Adapter/native contract refusals must not become false success.
         if (Number.isInteger(error?.code)) throw error;
-        runtime.backgroundError(new Error(`${provenance}: ${String(error?.message || error)}`));
+        runtime.reportCallbackError('resources_discover', entry.factory, error);
         continue;
       }
       live();

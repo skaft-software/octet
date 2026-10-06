@@ -309,6 +309,51 @@ fn rapid_page_and_wheel_navigation_reuse_painted_history_after_draft_edits() {
 }
 
 #[test]
+fn navigation_after_unpainted_output_keeps_the_reader_position() {
+    for page in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 16);
+        for index in 0..120 {
+            shell.notice(format!("reader-history-{index:03}"));
+        }
+        shell.state.borrow_mut().render_threaded = true;
+        let component = ShellComponent::isolated(shell.state.clone(), false);
+        component.render(80);
+        shell.state.frame_written();
+        shell.scroll(-1);
+        component.render_update(80);
+        shell.state.frame_written();
+        let expected = {
+            let state = shell.state.borrow();
+            let geometry = state.retained_render_geometry().unwrap();
+            let step = if page {
+                usize::from(state.size.1 / 2)
+            } else {
+                1
+            };
+            let expected = state.rendered_transcript(80)[geometry.visible_start - step].clone();
+            expected
+        };
+        // Accepted tail output invalidates the full semantic geometry fence.
+        // The next input must not drop the existing reader anchor before paint.
+        for index in 0..20 {
+            shell.notice(format!("unpainted-tail-{index:03}"));
+        }
+        if page {
+            shell.scroll(-1);
+        } else {
+            shell.scroll_lines(-1);
+        }
+        let update = component.render_update(80).unwrap();
+        assert_eq!(
+            sexy_tui_rs::strip_terminal_sequences(&update.replacement[0]),
+            sexy_tui_rs::strip_terminal_sequences(&expected),
+            "page={page}: new tail output must not swallow a repeated reader movement"
+        );
+    }
+}
+
+#[test]
 fn page_up_before_next_paint_anchors_an_offscreen_reader_through_new_output() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 16);

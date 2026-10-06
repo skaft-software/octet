@@ -16,7 +16,7 @@ async function boundary(t, editor = true) {
   await writeFile(entry, `import { CustomEditor } from '@earendil-works/pi-coding-agent';
 export default pi => {
   let opening;
-  pi.on('session_start', (_, ctx) => { opening = ctx; if (${editor}) ctx.ui.setEditorComponent((tui, theme, kb) => new CustomEditor(tui, theme, kb)); });
+  pi.on('session_start', (_, ctx) => { if (opening) return; opening = ctx; if (${editor}) ctx.ui.setEditorComponent((tui, theme, kb) => new (class extends CustomEditor { handleInput(data) { return super.handleInput(data); } })(tui, theme, kb)); });
   pi.registerTool({ name: 'retained_probe', description: 'Exercise the actual retained context', parameters: { type: 'object' },
     async execute(_id, args, _signal, _update, ctx) {
       if (args.mode === 'plain') await opening.ui.setEditorText('plain set');
@@ -141,6 +141,8 @@ for (const retire of ['session_end', 'replacement']) test(`retained editor: ${re
     assert.ok(ended.result, JSON.stringify(ended));
   } else {
     context = { ...context, resource_owner: { ...owner, session_id: 'host-issued-next-owner' } };
+    // A tool call cannot authorize foreground replacement; native start does.
+    assert.ok((await peer.request('hook/run', { hook: 'session_start', payload: { binding: context.resource_owner }, context }).response).result);
     const native = probe(peer, 'native', context);
     const next = await peer.wait(f => f.method === 'composer/set');
     assert.equal(next.params.text, 'native edit'); assert.equal(next.params.editor_checkpoint, undefined);

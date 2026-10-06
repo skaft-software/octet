@@ -199,9 +199,19 @@ pub(super) async fn project_provider_context(
         if abort.is_set() {
             return Err(AgentError::Cancelled);
         }
-        let mut service = hook
-            .begin_session_wait(session, context)
-            .map_err(|_| refused("session append service refused activation"))?;
+        let mut service = hook.begin_session_wait(session, context).map_err(|error| {
+            // Activation implementations historically return String. Expose
+            // only the finite native refusal codes, never arbitrary hook
+            // errors, credentials, paths or session content.
+            refused(match error.as_str() {
+                "session_append_authority_unavailable" => "session_append_authority_unavailable",
+                "session_append_lease_busy" => "session_append_lease_busy",
+                "session_append_process_retired" => "session_append_process_retired",
+                "session_snapshot_too_large" => "session_snapshot_too_large",
+                "session_snapshot_unavailable" => "session_snapshot_unavailable",
+                _ => "session append service refused activation",
+            })
+        })?;
         // Neither this hook future nor readiness borrows Session. Only the
         // owning driver below receives mutable persistence authority.
         let projection = {

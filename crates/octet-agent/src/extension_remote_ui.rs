@@ -109,12 +109,32 @@ pub struct ExtensionRemoteUiChromeRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionRemoteUiChrome {
-    /// Read the authoritative tool expansion state.
+    /// Read authoritative foreground chrome, including the active palette.
     Get,
+    /// Look up a pre-resolved native palette without selecting it.
+    ThemeGet {
+        /// Native selector; absent reads the active palette.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// List pre-resolved native palettes available to this foreground shell.
+    ThemeList,
+    /// Commit a native theme selection before acknowledging the request.
+    ThemeSet {
+        /// Native selector, including imported Pi resource selectors.
+        name: String,
+    },
     /// Set the terminal window title.
     Title {
         /// Plain terminal title without control sequences.
         title: String,
+    },
+    /// Ask the owning terminal to display an OSC 777 desktop notification.
+    DesktopNotification {
+        /// Plain title (no semicolon delimiter).
+        title: String,
+        /// Plain notification body.
+        body: String,
     },
     /// Override or restore the working message.
     WorkingMessage {
@@ -145,13 +165,86 @@ pub enum ExtensionRemoteUiChrome {
     },
 }
 
+#[cfg(test)]
+#[test]
+fn desktop_notification_chrome_is_bounded_plain_text() {
+    let request = |title: &str, body: &str| {
+        serde_json::json!({
+            "operation": "chrome", "chrome": {"kind": "desktop_notification", "title": title, "body": body}
+        })
+    };
+    let valid: ExtensionRemoteUiOperation =
+        serde_json::from_value(request("π", "Hello; world")).unwrap();
+    valid.validate().unwrap();
+    for (title, body) in [
+        ("bad;title", "body"),
+        ("title", "bad\u{1b}]2;escape"),
+        ("title", "bad\u{7}"),
+        ("title", "bad\nline"),
+    ] {
+        let invalid: ExtensionRemoteUiOperation =
+            serde_json::from_value(request(title, body)).unwrap();
+        assert!(invalid.validate().is_err());
+    }
+    let oversized: ExtensionRemoteUiOperation =
+        serde_json::from_value(request("title", &"x".repeat(4097))).unwrap();
+    assert_eq!(
+        oversized.validate().unwrap_err().0,
+        ExtensionRequestFailure::BoundsExceeded
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn theme_chrome_names_are_bounded_and_operations_are_closed() {
+    for chrome in [
+        serde_json::json!({"kind":"theme_get"}),
+        serde_json::json!({"kind":"theme_get","name":"pi-local"}),
+        serde_json::json!({"kind":"theme_list"}),
+        serde_json::json!({"kind":"theme_set","name":"Cards"}),
+    ] {
+        let operation: ExtensionRemoteUiOperation =
+            serde_json::from_value(serde_json::json!({"operation":"chrome","chrome":chrome}))
+                .unwrap();
+        operation.validate().unwrap();
+    }
+    for name in ["".to_owned(), "bad\u{1b}name".into(), "x".repeat(257)] {
+        let operation: ExtensionRemoteUiOperation = serde_json::from_value(
+            serde_json::json!({"operation":"chrome","chrome":{"kind":"theme_set","name":name}}),
+        )
+        .unwrap();
+        assert!(operation.validate().is_err());
+    }
+    for chrome in [
+        serde_json::json!({"kind":"theme_list","name":"Cards"}),
+        serde_json::json!({"kind":"theme_set"}),
+        serde_json::json!({"kind":"theme_get","path":"/tmp/untrusted-theme"}),
+    ] {
+        assert!(serde_json::from_value::<ExtensionRemoteUiOperation>(
+            serde_json::json!({"operation":"chrome","chrome":chrome}),
+        )
+        .is_err());
+    }
+}
+
 impl ExtensionRemoteUiChrome {
     fn validate(&self) -> ValidationResult {
         match self {
+            Self::ThemeGet { name: Some(name) } | Self::ThemeSet { name } => {
+                validate_text("theme name", name, 256, false)
+            }
             Self::Title { title } => {
                 validate_remote_ui_line(title)
                     .map_err(|detail| (ExtensionRequestFailure::InvalidRequest, detail))?;
                 validate_text("terminal title", title, 1024, true)
+            }
+            Self::DesktopNotification { title, body } => {
+                validate_text("notification title", title, 1024, true)?;
+                validate_text("notification body", body, 4096, true)?;
+                if title.contains(';') {
+                    return Err(invalid("notification title contains an OSC delimiter"));
+                }
+                Ok(())
             }
             Self::WorkingMessage { message } | Self::HiddenThinking { label: message } => {
                 if let Some(text) = message {

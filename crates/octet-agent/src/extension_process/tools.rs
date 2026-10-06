@@ -52,7 +52,10 @@ pub(super) async fn run_catalog_updates(
                         .and_then(|()| {
                             let process_tools = process.process_tools(Arc::clone(&active), &next);
                             let revision_stamp = Arc::clone(&process_tools.revision);
-                            let reservation = registration.reserve(process_tools.tools)?;
+                            let reservation = registration.reserve_for_generation(
+                                process_tools.tools,
+                                Some(Arc::clone(&active.closed)),
+                            )?;
                             let revision = active
                                 .catalog_revision
                                 .load(Ordering::Acquire)
@@ -548,7 +551,9 @@ impl Tool for ProcessTool {
                             "extension event stream dropped {count} event(s)"
                         ));
                     }
-                    Ok(ExtensionEvent::ComposerRequested { .. })
+                    Ok(ExtensionEvent::TranscriptInvalidated { .. })
+                    | Ok(ExtensionEvent::TranscriptEntryCommitted { .. })
+                    | Ok(ExtensionEvent::ComposerRequested { .. })
                     | Ok(ExtensionEvent::ExecRequested { .. })
                     | Ok(ExtensionEvent::McpRegistrationRequested { .. })
                     | Ok(ExtensionEvent::SessionEntryRequested { .. })

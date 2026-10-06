@@ -11,7 +11,7 @@ const entry = { id: 'kept', parent: null, timestamp_unix_ms: 1234, value: { type
 const operation = (peer, hook, payload, mode) => ({ hook, payload, session_leaf: grant, context: peer.context({ session_name: mode, session_entries: [entry], session_branch: [entry], session_leaf_id: 'kept' }) });
 
 test('actual encoded phases: replacement, ordered in-place mutation, exact header deletion patch and response arrival', async t => {
-  const peer = launch(t, [pipeline]); await peer.init(['pipeline_hooks_v1']);
+  const peer = launch(t, [pipeline]); await peer.init(['pipeline_hooks_v1']); await peer.start();
   const params = (hook, body) => ({ hook, context: peer.context(), payload: { operation_id: 'actual-attempt', model, ...body } });
   assert.deepEqual((await peer.request('hook/run', params('before_provider_request', { payload: { model: 'wire-model', max_output_tokens: 1, input: ['encoded'] } })).response).result,
     { provider_payload: { model: 'wire-model', max_output_tokens: 256, input: ['encoded'], sequence: ['first', 'second'] } });
@@ -21,14 +21,14 @@ test('actual encoded phases: replacement, ordered in-place mutation, exact heade
   await peer.wait(frame => frame.method === 'notification' && frame.params.message === 'actual-arrival:429'); await peer.close();
 });
 test('private provider callback exception is redacted, not emitted with wire body', async t => {
-  const peer = launch(t, [pipeline]); await peer.init(['pipeline_hooks_v1']);
+  const peer = launch(t, [pipeline]); await peer.init(['pipeline_hooks_v1']); await peer.start();
   const reply = await peer.request('hook/run', { hook: 'before_provider_request', context: peer.context(), payload: { operation_id: 'attempt', model, payload: { secret: 'NEVER-LOG-ME' } } }).response;
   assert.deepEqual(reply.result, { provider_payload: { secret: 'NEVER-LOG-ME' } });
   assert.ok(!peer.stderr().includes('NEVER-LOG-ME'));
   assert.ok(peer.seen.filter(frame => frame.method === 'notification').every(frame => !JSON.stringify(frame).includes('NEVER-LOG-ME'))); await peer.close();
 });
 test('provider pipeline cancellation has no late success or header/payload publication', async t => {
-  const peer = launch(t, [pipeline], { hold: ['confirmation/request'] }); await peer.init(['pipeline_hooks_v1']);
+  const peer = launch(t, [pipeline], { hold: ['confirmation/request'] }); await peer.init(['pipeline_hooks_v1']); await peer.start();
   const request = peer.request('hook/run', { hook: 'before_provider_request', context: peer.context({ session_name: 'wait' }), payload: { operation_id: 'attempt', model, payload: {} } });
   const call = await peer.wait(frame => frame.method === 'confirmation/request'); peer.notify('$/cancelRequest', { id: request.id });
   assert.equal((await request.response).error.code, -32800);

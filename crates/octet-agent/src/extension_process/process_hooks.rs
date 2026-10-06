@@ -319,26 +319,57 @@ impl ExtensionProcess {
     /// fast child can publish while a slower sibling is still initializing;
     /// the later full [`Extension`] registration remains deterministic.
     pub fn register_dynamic_tool_catalog(&self, host: &mut ExtensionHost) {
+        if let Err(error) = self.try_register_dynamic_tool_catalog(host) {
+            host.duplicate_tools.push(error);
+        }
+    }
+
+    /// Like [`Self::register_dynamic_tool_catalog`], but returns a tool-name
+    /// clash to the caller instead of recording a fatal duplicate, so a product
+    /// can turn the extension off and keep starting.
+    pub fn try_register_dynamic_tool_catalog(
+        &self,
+        host: &mut ExtensionHost,
+    ) -> Result<(), String> {
         if lock_std_mutex(&self.inner.dynamic_tool_registration).is_some() {
-            return;
+            return Ok(());
         }
         let definitions = self.tool_definitions();
         let owner = format!(
-            "{}@{}",
+            "{}@{}#{}",
             self.inner.descriptor.manifest.name,
-            self.inner.descriptor.manifest_path.display()
+            self.inner.descriptor.manifest_path.display(),
+            self.inner.instance_id,
         );
         let connection = read_std_lock(&self.inner.connection).clone();
         let process_tools = self.process_tools(Arc::clone(&connection), &definitions);
         let published_connection = Arc::clone(&connection);
-        match host.dynamic_tools_with(owner, process_tools.tools, move |_, published| {
-            let _catalog = write_std_lock(&published_connection.catalog_guard);
-            write_std_lock(&published_connection.tool_catalog)
-                .retain(|definition| published.contains(&definition.name));
-            published_connection
-                .catalog_revision
-                .store(0, Ordering::Release);
-        }) {
+        let builtin_overrides = &self
+            .inner
+            .descriptor
+            .manifest
+            .capabilities
+            .builtin_tool_overrides;
+        if !builtin_overrides.is_empty()
+            && !read_std_lock(&connection.protocol)
+                .supports(EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES)
+        {
+            return Err("builtin overrides require negotiated builtin_tool_overrides_v1".into());
+        }
+        match host.dynamic_tools_with_authority(
+            owner,
+            process_tools.tools,
+            builtin_overrides.iter().cloned().collect(),
+            Some(Arc::clone(&connection.closed)),
+            move |_, published| {
+                let _catalog = write_std_lock(&published_connection.catalog_guard);
+                write_std_lock(&published_connection.tool_catalog)
+                    .retain(|definition| published.contains(&definition.name));
+                published_connection
+                    .catalog_revision
+                    .store(0, Ordering::Release);
+            },
+        ) {
             Ok(registration) => {
                 if read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_RESOURCE_REFS_V1)
                 {
@@ -351,10 +382,9 @@ impl ExtensionProcess {
                 }
                 *lock_std_mutex(&self.inner.dynamic_tool_registration) = Some(registration);
                 self.inner.dynamic_tool_registration_ready.notify_waiters();
+                Ok(())
             }
-            Err(error) => {
-                host.duplicate_tools.push(error);
-            }
+            Err(error) => Err(error),
         }
     }
 }
@@ -457,6 +487,23 @@ impl EventObserver for ExtensionProcess {
 }
 
 impl ExtensionProcess {
+    async fn run_tool_session_hook(&self, hook: ExtensionHook, payload: serde_json::Value,
+        context: &ToolContext<'_>) -> Result<ExtensionHookOutput, ExtensionRuntimeError>
+    {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        let execution = self.tool_execution_context(context, connection.generation);
+        let routed = session_leaf::owner_routes_enabled(&read_std_lock(&connection.protocol));
+        if routed {
+            let route = context.progress.session_driver().ok_or_else(||
+                ExtensionRuntimeError::Protocol("session hook requires active causal driver".into()))?;
+            let invocation = route.prepare(self, context.resource_owner).await
+                .map_err(|_| ExtensionRuntimeError::Protocol("session hook causal driver unavailable".into()))?;
+            invocation.run_hook(hook, payload, execution).await
+        } else {
+            self.run_hook(hook, payload, execution).await
+        }
+    }
+
     async fn run_before_tool_call(
         &self,
         name: &str,
@@ -464,15 +511,12 @@ impl ExtensionProcess {
         context: &ToolContext<'_>,
     ) -> Result<Option<serde_json::Value>, ToolError> {
         let output = self
-            .run_hook(
+            .run_tool_session_hook(
                 ExtensionHook::BeforeToolCall,
                 serde_json::json!({ "name": name, "arguments": arguments,
                     "tool_call_id": context.progress.tool_call_identity().0,
                     "parent_tool_call_id": context.progress.tool_call_identity().1 }),
-                self.tool_execution_context(context, {
-                    let connection = read_std_lock(&self.inner.connection);
-                    connection.generation
-                }),
+                context,
             )
             .await
             .map_err(|error| ToolError::new(error.to_string()))?;
@@ -558,12 +602,8 @@ impl ExtensionProcess {
                 payload["usage"] = serde_json::to_value(value).expect("Usage serializes");
             }
         }
-        let context = self.tool_execution_context(context, {
-            let connection = read_std_lock(&self.inner.connection);
-            connection.generation
-        });
         match self
-            .run_hook(ExtensionHook::AfterToolCall, payload, context)
+            .run_tool_session_hook(ExtensionHook::AfterToolCall, payload, context)
             .await
         {
             Ok(output) => {

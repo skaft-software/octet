@@ -4,6 +4,77 @@ import { lstat, open, unlink } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { bounded, fields, invalid, plainJSON, unsupported } from './errors.mjs';
 
+export const BUILTIN_TOOL_NAMES = Object.freeze(['read', 'search', 'edit', 'write', 'bash', 'powershell']);
+const builtinToolNames = new Set(BUILTIN_TOOL_NAMES);
+
+// Match octet 0.8.2's bounded schema profile (octet-ai/json_repair.rs).
+// Never strip a constraint to make a Pi tool load: reject its factory so import
+// can report it, instead of poisoning every subsequent provider request.
+const schemaKeywords = new Set(['$schema', 'title', 'description', 'default', 'examples', 'type', 'properties', 'required',
+  'additionalProperties', 'items', 'enum', 'const', 'allOf', 'anyOf', 'oneOf', 'minimum', 'maximum', 'exclusiveMinimum',
+  'exclusiveMaximum', 'minLength', 'maxLength', 'minItems', 'maxItems', 'uniqueItems', 'minProperties', 'maxProperties', 'pattern', 'deprecated']);
+
+// Exact portable subset shared with octet-ai's SchemaPattern: ^...$ sequences
+// of printable ASCII literals / positive character classes and finite {m,n}
+// repetitions. No escapes, wildcard, groups, alternation or unbounded repeats.
+// Admission never changes the pattern; native argument validation enforces it.
+function supportedPattern(pattern) {
+  if (typeof pattern !== 'string' || pattern.length > 1024 || !pattern.startsWith('^') || !pattern.endsWith('$')) return false;
+  const printable = c => c !== undefined && c >= ' ' && c <= '~';
+  const classChar = c => printable(c) && !'[]\\^-'.includes(c);
+  let index = 1, maximum = 0;
+  while (index < pattern.length - 1) {
+    if (pattern[index] === '[') {
+      const start = ++index;
+      while (pattern[index] !== ']') {
+        const c = pattern[index];
+        if (c === '-' && (index === start || pattern[index + 1] === ']')) { index++; continue; }
+        if (!classChar(c)) return false;
+        if (pattern[index + 1] === '-' && pattern[index + 2] !== ']') {
+          const end = pattern[index + 2];
+          if (!classChar(end) || end < c) return false;
+          index += 3;
+        } else index++;
+      }
+      if (index === start) return false;
+      index++;
+    } else {
+      if (!printable(pattern[index]) || '.+*?^$(){}[]\\|'.includes(pattern[index])) return false;
+      index++;
+    }
+    let upper = 1;
+    if (pattern[index] === '{') {
+      const repeat = /^\{(0|[1-9][0-9]*)(?:,(0|[1-9][0-9]*))?\}/.exec(pattern.slice(index));
+      if (!repeat) return false;
+      upper = Number(repeat[2] ?? repeat[1]);
+      if (Number(repeat[1]) > upper || upper > 1024) return false;
+      index += repeat[0].length;
+    }
+    maximum += upper;
+    if (maximum > 1024) return false;
+  }
+  return index === pattern.length - 1;
+}
+
+function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0) {
+  if (depth > 32) invalid(`tool ${tool} schema depth`);
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) invalid(`tool ${tool} ${path} must be a schema object`);
+  for (const [key, value] of Object.entries(schema)) {
+    if (!schemaKeywords.has(key)) unsupported(`tool ${tool} ${path}.${key}`, 'JSON Schema keyword is not supported by octet 0.8.2');
+    if (key === 'pattern' && !supportedPattern(value)) unsupported(`tool ${tool} ${path}.pattern`, 'pattern syntax is not supported: require bounded ^...$ ASCII literals/classes with finite repetitions (1024 bytes/maximum characters)');
+    if (key === 'deprecated' && typeof value !== 'boolean') invalid(`tool ${tool} ${path}.deprecated must be boolean`);
+    if (key === 'properties') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(`tool ${tool} ${path}.properties`);
+      for (const [name, child] of Object.entries(value)) validateSchemaProfile(child, tool, `${path}.properties.${name}`, depth + 1);
+    } else if (key === 'items' || key === 'additionalProperties' && typeof value !== 'boolean') {
+      validateSchemaProfile(value, tool, `${path}.${key}`, depth + 1);
+    } else if (['allOf', 'anyOf', 'oneOf'].includes(key)) {
+      if (!Array.isArray(value) || !value.length) invalid(`tool ${tool} ${path}.${key}`);
+      for (const [index, child] of value.entries()) validateSchemaProfile(child, tool, `${path}.${key}[${index}]`, depth + 1);
+    }
+  }
+}
+
 // Public Pi names end at this boundary; the Rust wire stays canonical.
 export function validateTool(tool) {
   fields(tool, ['name', 'label', 'description', 'parameters', 'execute', 'promptSnippet', 'promptGuidelines',
@@ -13,6 +84,7 @@ export function validateTool(tool) {
   if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(tool.name)) invalid('tool name');
   bounded(tool.description, 'tool description', 4096);
   if (!tool.description.trim() || !tool.parameters || typeof tool.parameters !== 'object' || Array.isArray(tool.parameters) || typeof tool.execute !== 'function') invalid('tool definition');
+  validateSchemaProfile(tool.parameters, tool.name);
   if (tool.label !== undefined) bounded(tool.label, 'tool label', 128);
   if (tool.promptSnippet !== undefined) bounded(tool.promptSnippet, 'tool promptSnippet', 1024);
   if (tool.promptGuidelines !== undefined) {
@@ -63,6 +135,12 @@ export function toolWire(name, { definition: d }) {
 
 export function registerTool(runtime, factory, definition) {
   validateTool(definition);
+  // Inspection captures names for review, not authority. Both initialize-time
+  // and late registrations need the exact grant supplied by the native host.
+  if ((runtime.initializingId !== undefined || runtime.loaded) && builtinToolNames.has(definition.name)) {
+    runtime.require('builtin_tool_overrides_v1');
+    if (!runtime.builtinToolOverrides?.has(definition.name)) invalid(`builtin override ${definition.name} was not reviewed; configure again`);
+  }
   if (!runtime.tools.has(definition.name) && runtime.tools.size >= 256) invalid('tool registration limit');
   const entry = { definition, factory };
   if (!runtime.loaded) { runtime.tools.set(definition.name, entry); return; }
@@ -100,7 +178,7 @@ export function getAllTools(runtime, factory, snapshot = toolSnapshot(runtime, f
 }
 
 export function setActiveTools(runtime, factory, names) {
-  if (!Array.isArray(names) || names.length > 256) invalid('active tools');
+  if (!Array.isArray(names) || names.length > 1024) invalid('active tools'); // The host's tools/set_active bound.
   for (const name of names) bounded(name, 'active tool name', 128);
   runtime.require('active_tools');
   const store = runtime.current(factory);
@@ -282,7 +360,9 @@ export async function executeRegisteredTool(runtime, params, store, context) {
     if (queued >= 64) invalid('tool update queue exceeds 64 pending results');
     // Snapshot immediately, then serialize artifact publication and delivery so
     // a slower image update cannot overtake a later text/details update.
-    const snapshot = plainJSON(Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined)), 'tool update', 1048576);
+    const snapshot = plainJSON({ ...Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined)),
+      ...(result.details === undefined ? {} : { details: plainJSON(result.details, 'tool update details', 65536, { omitUndefined: true }) }),
+    }, 'tool update', 1048576);
     if (snapshot.isError !== undefined && typeof snapshot.isError !== 'boolean') invalid('tool update isError must be boolean');
     queued++;
     const pending = tail.then(async () => {
@@ -305,7 +385,7 @@ export async function executeRegisteredTool(runtime, params, store, context) {
   const content = await toolContent(runtime, result.content, store);
   await runtime.flush(store);
   return { content, is_error: result.isError ?? false,
-    ...(result.details === undefined ? {} : { metadata: { pi_details: plainJSON(result.details, 'tool details') } }),
+    ...(result.details === undefined ? {} : { metadata: { pi_details: plainJSON(result.details, 'tool details', 65536, { omitUndefined: true }) } }),
     ...(result.structuredContent === undefined ? {} : { structured_content: plainJSON(result.structuredContent, 'structured content', 262144) }),
   };
 }

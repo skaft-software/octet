@@ -942,6 +942,10 @@ impl ProcessConnection {
         request_started: Option<oneshot::Sender<ExtensionOperationToken>>,
         tool_admission: Option<Arc<ToolResultAdmission>>,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
+        let routed = session_leaf::owner_routes_enabled(&read_std_lock(&self.protocol));
+        // Lifecycle hooks execute factory code too: routed requests cannot use
+        // the legacy lifecycle semaphore bypass. Shutdown is transport control.
+        let use_request_slot = use_request_slot || (routed && method != methods::SHUTDOWN);
         if self.closed.load(Ordering::Acquire) {
             return Err(ExtensionRuntimeError::Closed("stdout is closed".into()));
         }
@@ -993,15 +997,25 @@ impl ProcessConnection {
             } else {
                 None
             };
-            let _slot =
-                if use_request_slot {
-                    let slots = read_std_lock(&connection.slots).clone();
-                    Some(slots.acquire_owned().await.map_err(|_| {
-                        ExtensionRuntimeError::Closed("request queue is closed".into())
-                    })?)
+            let mut slot = if use_request_slot {
+                let slots = read_std_lock(&connection.slots).clone();
+                Some(if routed {
+                    slots.try_acquire_owned().map_err(|error| match error {
+                        tokio::sync::TryAcquireError::Closed => {
+                            ExtensionRuntimeError::Closed("request queue is closed".into())
+                        }
+                        tokio::sync::TryAcquireError::NoPermits => {
+                            ExtensionRuntimeError::Protocol("session_request_quota_exceeded".into())
+                        }
+                    })?
                 } else {
-                    None
-                };
+                    slots.acquire_owned().await.map_err(|_| {
+                        ExtensionRuntimeError::Closed("request queue is closed".into())
+                    })?
+                })
+            } else {
+                None
+            };
             if use_request_slot && connection.draining.load(Ordering::Acquire) {
                 return Err(ExtensionRuntimeError::Closed(
                     "extension generation is draining".into(),
@@ -1065,7 +1079,14 @@ impl ProcessConnection {
             if let Some(owner) = &resource_owner {
                 lock_std_mutex(&connection.issued_resource_owners).insert(owner.clone());
             }
-            lock_std_mutex(&connection.pending).insert(
+            {
+            let mut pending = lock_std_mutex(&connection.pending);
+            if routed {
+                if let Some(permit) = slot.take() {
+                    lock_std_mutex(&connection.session_leaf.execution_slots).insert(id, permit);
+                }
+            }
+            pending.insert(
                 id,
                 PendingRequest {
                     method: method.to_owned(),
@@ -1088,6 +1109,7 @@ impl ProcessConnection {
                         .flatten(),
                 },
             );
+            }
             if let Some(request_started) = request_started {
                 let _ = request_started.send(ExtensionOperationToken {
                     generation: connection.generation,
@@ -1405,6 +1427,7 @@ impl ProcessConnection {
             )
             .is_err();
         if !frame_was_admitted {
+            self.session_leaf.settle_execution(id);
             lock_std_mutex(&self.resources).settle_execution(id);
             self.resource_cleanup_changed.notify_one();
             lock_std_mutex(&self.tombstones).remove(id);
@@ -1439,7 +1462,8 @@ impl ProcessConnection {
         tokio::spawn(async move {
             tokio::time::sleep(connection.cancellation_grace).await;
             let unresolved = lock_std_mutex(&connection.tombstones).contains(id)
-                || lock_std_mutex(&connection.resources).execution_pending(id);
+                || lock_std_mutex(&connection.resources).execution_pending(id)
+                || lock_std_mutex(&connection.session_leaf.execution_slots).contains_key(&id);
             if unresolved && !connection.closed.load(Ordering::Acquire) {
                 update_health(
                     &connection.health,
@@ -1878,6 +1902,7 @@ impl ProcessConnection {
             }
         };
         self.closed.store(true, Ordering::Release);
+        self.session_leaf.terminate_execution();
         lock_std_mutex(&self.resources).terminate_generation();
         self.resource_cleanup_changed.notify_one();
         update_health(&self.health, ExtensionHealthState::Stopped, None);
@@ -1900,6 +1925,7 @@ impl ProcessConnection {
         let _ = child.kill().await;
         let _ = child.wait().await;
         self.closed.store(true, Ordering::Release);
+        self.session_leaf.terminate_execution();
         lock_std_mutex(&self.resources).terminate_generation();
         self.resource_cleanup_changed.notify_one();
         let current = read_std_lock(&self.health).state;
@@ -1926,6 +1952,7 @@ impl Drop for ProcessConnection {
         self.remove_provider_owner();
         lock_std_mutex(&self.provider_streams).clear();
         self.process_group.terminate_now();
+        self.session_leaf.terminate_execution();
         self.settle_artifacts();
     }
 }

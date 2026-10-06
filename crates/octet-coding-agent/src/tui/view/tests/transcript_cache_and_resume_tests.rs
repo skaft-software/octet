@@ -233,6 +233,58 @@ fn deferred_history_keeps_local_outcome_before_a_later_persisted_prompt() {
 }
 
 #[test]
+fn fullscreen_theme_swap_keeps_deferred_history_and_stream_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let session = session_with_user_prompts(
+        &directory.path().join("active-theme.jsonl"),
+        "theme prompt",
+        100,
+    );
+    let (mut shell, bytes) =
+        emulated_shell_with_mode(crate::tui::theme::test_theme(), 80, 12, false, true);
+    shell.hydrate(&session).unwrap();
+    let run_id = shell.begin_run("test");
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "before theme ".into(),
+        },
+    );
+    let (index, commit) = {
+        let state = shell.state.borrow();
+        assert!(state.deferred_session_history.is_some());
+        let index = state.active_text.unwrap();
+        (index, state.transcript_commit_ids[index])
+    };
+    shell.set_theme(crate::tui::theme::test_theme_from_source(
+        "[colors]\nforeground = '#2040c0'\n",
+    ));
+    {
+        let state = shell.state.borrow();
+        assert!(
+            state.deferred_session_history.is_some(),
+            "theme selection must not synchronously load history"
+        );
+        assert_eq!(state.active_text, Some(index));
+        assert_eq!(state.transcript_commit_ids[index], commit);
+        assert!(state.run.is_active());
+    }
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "after theme".into(),
+        },
+    );
+    shell.render();
+    let mut terminal = vt100::Parser::new(12, 80, 128);
+    terminal.process(&bytes.lock().unwrap());
+    let screen = terminal.screen().contents();
+    assert!(screen.contains("before theme after theme"), "{screen}");
+}
+
+#[test]
 fn resize_keeps_deferred_history_lazy_during_an_active_stream() {
     const WIDTH: u16 = 80;
     const RESIZED_WIDTH: u16 = 96;

@@ -4,7 +4,8 @@
 //! service containers, or lifecycle callbacks — those can be added as new
 //! `ExtensionHost` methods later without breaking the [`Extension`] trait.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
@@ -323,6 +324,11 @@ pub trait ProviderContextHook: Send + Sync {
     /// adapter may publish its grant only after returning a real consumer here;
     /// it must not offer synchronous append through the foreground event queue.
     /// Pure native projection hooks need no append service.
+    /// Activation refusals may return the payload-free codes
+    /// `session_append_authority_unavailable`, `session_append_lease_busy`,
+    /// `session_append_process_retired`, `session_snapshot_too_large`, or
+    /// `session_snapshot_unavailable`. The driver redacts every other error;
+    /// arbitrary hook error strings must not become session or UI diagnostics.
     fn begin_session_wait(
         &self,
         _session: &crate::Session,
@@ -611,6 +617,10 @@ pub(crate) struct RegisteredPersistenceMetadataHook {
 #[derive(Default)]
 pub(crate) struct DynamicToolRegistry {
     static_names: HashSet<String>,
+    // Only CoreTools marks these identities. A familiar name is not authority
+    // to replace another native/external tool or a reserved host name.
+    builtin_names: HashSet<String>,
+    overridden_tools: HashMap<String, Arc<dyn Tool>>,
     groups: Vec<DynamicToolGroup>,
     reservations: Vec<DynamicToolReservationEntry>,
     // Updated at catalog publication/removal, never by per-tool registration.
@@ -653,7 +663,8 @@ impl DynamicToolRegistry {
         request: ApplicableOperationsRequest,
     ) -> Result<ApplicableOperationsPage, ToolError> {
         let (revision, sources) = {
-            let state = registry.read().unwrap_or_else(|p| p.into_inner());
+            let mut state = registry.write().unwrap_or_else(|p| p.into_inner());
+            state.retire_closed_groups();
             (state.catalog_policy_epoch, state.resource_sources())
         };
         // Never hold the catalog lock while acquiring a process connection:
@@ -670,6 +681,7 @@ impl DynamicToolRegistry {
                 })
             })?;
         let mut state = registry.write().unwrap_or_else(|p| p.into_inner());
+        state.retire_closed_groups();
         if state.catalog_policy_epoch != revision {
             return Err(ToolError::new("catalog_changed"));
         }
@@ -731,7 +743,43 @@ impl DynamicToolRegistry {
         })
     }
 
+    /// Snapshot admission also observes transport death when a fleet manager,
+    /// rather than the per-process supervisor, owns restart. A candidate's
+    /// reservation survives retirement of its old generation.
+    fn retire_closed_groups(&mut self) {
+        let mut retired = false;
+        for group in &mut self.groups {
+            if group
+                .closed
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::Acquire))
+            {
+                group.tools.clear();
+                group.closed = None;
+                // Preserve this instance's resource source for a later reload,
+                // just as an explicit empty catalog does. Its old refs are fenced
+                // independently by the process generation.
+                retired = true;
+            }
+        }
+        if retired {
+            self.refresh_name_index();
+            self.revision = self.revision.saturating_add(1);
+            self.catalog_policy_epoch = self.catalog_policy_epoch.saturating_add(1);
+        }
+    }
+
     fn refresh_name_index(&mut self) {
+        self.overridden_tools = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.tools)
+            .filter_map(|tool| {
+                let name = tool.definition().name;
+                (self.builtin_names.contains(&name) && self.static_names.contains(&name))
+                    .then(|| (name, Arc::clone(tool)))
+            })
+            .collect();
         self.dynamic_names = self
             .groups
             .iter()
@@ -750,6 +798,8 @@ impl DynamicToolRegistry {
 struct DynamicToolGroup {
     owner: String,
     tools: Vec<Arc<dyn Tool>>,
+    // Exact published generation; never a live pointer to its replacement.
+    closed: Option<Arc<AtomicBool>>,
     // Retained even for an empty/hidden catalog so live lookup can return no
     // matches without conflating policy invisibility with a fabricated token.
     resource_source: Option<ExtensionProcess>,
@@ -772,6 +822,7 @@ struct DynamicToolReservationEntry {
 #[derive(Clone)]
 pub(crate) struct DynamicToolRegistration {
     owner: String,
+    builtin_overrides: BTreeSet<String>,
     registry: Weak<RwLock<DynamicToolRegistry>>,
 }
 
@@ -783,6 +834,7 @@ pub(crate) struct DynamicToolReservation {
     owner: String,
     registry: Weak<RwLock<DynamicToolRegistry>>,
     tools: Option<Vec<Arc<dyn Tool>>>,
+    closed: Option<Arc<AtomicBool>>,
 }
 
 impl DynamicToolRegistration {
@@ -874,9 +926,18 @@ impl DynamicToolRegistration {
         self.reserve(tools)?.commit()
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve(
         &self,
+        tools: Vec<Arc<dyn Tool>>,
+    ) -> Result<DynamicToolReservation, String> {
+        self.reserve_for_generation(tools, None)
+    }
+
+    pub(crate) fn reserve_for_generation(
+        &self,
         mut tools: Vec<Arc<dyn Tool>>,
+        closed: Option<Arc<AtomicBool>>,
     ) -> Result<DynamicToolReservation, String> {
         let registry = self
             .registry
@@ -885,10 +946,11 @@ impl DynamicToolRegistration {
         let mut state = registry
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.retire_closed_groups();
         if let Some(policy) = &state.policy {
             tools.retain(|tool| policy(&tool.definition().name));
         }
-        validate_dynamic_catalog(&state, &self.owner, &tools)?;
+        validate_dynamic_catalog(&state, &self.owner, &tools, &self.builtin_overrides)?;
         if state
             .reservations
             .iter()
@@ -913,6 +975,7 @@ impl DynamicToolRegistration {
             owner: self.owner.clone(),
             registry: Arc::downgrade(&registry),
             tools: Some(tools),
+            closed,
         })
     }
 
@@ -961,6 +1024,13 @@ impl DynamicToolReservation {
         else {
             return Err("dynamic tool catalog reservation is no longer active".to_owned());
         };
+        if self
+            .closed
+            .as_ref()
+            .is_some_and(|closed| closed.load(Ordering::Acquire))
+        {
+            return Err("dynamic tool catalog generation is closed".to_owned());
+        }
         let mut tools = self
             .tools
             .take()
@@ -1011,11 +1081,18 @@ impl DynamicToolReservation {
                 .collect()
         });
         for removed in old_names.difference(&published) {
-            active.remove(removed);
+            // Removing an override restores the base under the same logical
+            // active name. Do not accidentally deactivate that builtin.
+            if !registry.builtin_names.contains(removed) {
+                active.remove(removed);
+            }
         }
         for tool in &tools {
             let name = tool.definition().name;
-            if tool.default_active() && !previously_default.contains(&name) {
+            if tool.default_active()
+                && !registry.builtin_names.contains(&name)
+                && !previously_default.contains(&name)
+            {
                 active.insert(name);
             }
         }
@@ -1028,10 +1105,12 @@ impl DynamicToolReservation {
             .find(|group| group.owner == self.owner)
         {
             group.tools = tools;
+            group.closed = self.closed.take();
         } else {
             registry.groups.push(DynamicToolGroup {
                 owner: self.owner.clone(),
                 tools,
+                closed: self.closed.take(),
                 resource_source: None,
             });
             registry
@@ -1065,6 +1144,7 @@ fn validate_dynamic_catalog(
     registry: &DynamicToolRegistry,
     owner: &str,
     tools: &[Arc<dyn Tool>],
+    builtin_overrides: &BTreeSet<String>,
 ) -> Result<(), String> {
     // Tool::definition returns an owned schema. Extract existing names once,
     // not once per candidate (which repeatedly cloned every nested schema).
@@ -1087,8 +1167,10 @@ fn validate_dynamic_catalog(
         if !names.insert(name.clone()) {
             return Err(format!("dynamic tool catalog contains duplicate `{name}`"));
         }
-        if registry.static_names.contains(&name) {
-            return Err(format!("dynamic tool `{name}` conflicts with a host tool"));
+        if registry.static_names.contains(&name)
+            && !(registry.builtin_names.contains(&name) && builtin_overrides.contains(&name))
+        {
+            return Err(format!("dynamic tool `{name}` conflicts with a host tool (no reviewed builtin override grant)"));
         }
         if registered_names.contains(&name) {
             return Err(format!(
@@ -1152,7 +1234,7 @@ impl ExtensionHost {
         Self::default()
     }
 
-    /// Registers a tool. Core tools use this same method.
+    /// Registers a native tool. Only CoreTools privately marks replaceable builtins.
     ///
     /// Duplicate tool names are rejected deterministically: the first
     /// registration wins, and [`Agent::new`](crate::Agent::new) fails with
@@ -1162,7 +1244,15 @@ impl ExtensionHost {
         self.tool_arc(Arc::new(tool));
     }
 
+    pub(crate) fn builtin_tool(&mut self, tool: impl Tool + 'static) {
+        self.register_tool_arc(Arc::new(tool), true);
+    }
+
     pub(crate) fn tool_arc(&mut self, tool: Arc<dyn Tool>) {
+        self.register_tool_arc(tool, false);
+    }
+
+    fn register_tool_arc(&mut self, tool: Arc<dyn Tool>, builtin: bool) {
         let name = tool.definition().name;
         let mut dynamic = self
             .dynamic_tools
@@ -1178,6 +1268,9 @@ impl ExtensionHost {
         {
             self.duplicate_tools.push(name);
         } else {
+            if builtin {
+                dynamic.builtin_names.insert(name.clone());
+            }
             dynamic.static_names.insert(name);
             self.tools.push(tool);
         }
@@ -1206,20 +1299,28 @@ impl ExtensionHost {
         owner: impl Into<String>,
         tools: Vec<Arc<dyn Tool>>,
     ) -> Result<DynamicToolRegistration, String> {
-        self.dynamic_tools_with(owner, tools, |_, _| {})
+        self.dynamic_tools_with_authority(owner, tools, BTreeSet::new(), None, |_, _| {})
     }
 
-    pub(crate) fn dynamic_tools_with(
+    /// Host-derived, manifest-reviewed authority belongs to this exact owner,
+    /// never to a tool name or to another extension's catalog. The displaced
+    /// native implementation stays in `self.tools` for transactional restoration.
+    pub(crate) fn dynamic_tools_with_authority(
         &mut self,
         owner: impl Into<String>,
         tools: Vec<Arc<dyn Tool>>,
+        builtin_overrides: BTreeSet<String>,
+        closed: Option<Arc<AtomicBool>>,
         before_publish: impl FnOnce(u64, &BTreeSet<String>),
     ) -> Result<DynamicToolRegistration, String> {
         let registration = DynamicToolRegistration {
             owner: owner.into(),
+            builtin_overrides,
             registry: Arc::downgrade(&self.dynamic_tools),
         };
-        registration.reserve(tools)?.commit_with(before_publish)?;
+        registration
+            .reserve_for_generation(tools, closed)?
+            .commit_with(before_publish)?;
         Ok(registration)
     }
 
@@ -1323,6 +1424,7 @@ impl ExtensionHost {
             let retained = keep(&name);
             if !retained {
                 dynamic.static_names.remove(&name);
+                dynamic.builtin_names.remove(&name);
             }
             retained
         });
@@ -1348,6 +1450,7 @@ impl ExtensionHost {
                 .iter()
                 .any(|tool| tool.definition().name == *name)
         });
+        dynamic.builtin_names.retain(|name| keep(name));
         for group in &mut dynamic.groups {
             group.tools.retain(|tool| keep(&tool.definition().name));
         }
@@ -1419,6 +1522,7 @@ impl ExtensionHost {
             .dynamic_tools
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dynamic.retire_closed_groups();
         if let Some(names) = names {
             let policed = self.policed_tool_names_locked(&dynamic);
             let refused = names.difference(&policed).cloned().collect::<Vec<_>>();
@@ -1447,9 +1551,27 @@ impl ExtensionHost {
         &'a self,
         dynamic: &'a DynamicToolRegistry,
     ) -> impl Iterator<Item = &'a Arc<dyn Tool>> {
+        // Replacement occupies the builtin's original slot. All provider,
+        // direct, composition, Pi and child views consume this one projection.
         self.tools
             .iter()
-            .chain(dynamic.groups.iter().flat_map(|group| group.tools.iter()))
+            .map(move |tool| {
+                dynamic
+                    .overridden_tools
+                    .get(&tool.definition().name)
+                    .unwrap_or(tool)
+            })
+            .chain(
+                dynamic
+                    .groups
+                    .iter()
+                    .flat_map(|group| group.tools.iter())
+                    .filter(move |tool| {
+                        !dynamic
+                            .overridden_tools
+                            .contains_key(&tool.definition().name)
+                    }),
+            )
     }
 
     /// Every published tool name after product policy, ignoring any active-set
@@ -1462,7 +1584,11 @@ impl ExtensionHost {
 
     /// Authoritative registered/active Pi tool view, excluding product-denied tools.
     pub fn pi_tool_snapshot(&self) -> serde_json::Value {
-        let dynamic = self.dynamic_tools.read().unwrap_or_else(|p| p.into_inner());
+        let mut dynamic = self
+            .dynamic_tools
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        dynamic.retire_closed_groups();
         let active = dynamic.active_names.as_ref();
         let mut names = Vec::new();
         let tools = self.policed_tools(&dynamic).map(|tool| {
@@ -1483,20 +1609,22 @@ impl ExtensionHost {
     /// here was removed by product policy or never registered, and no
     /// activation request can reintroduce it.
     pub(crate) fn policed_tool_names(&self) -> Vec<String> {
-        let dynamic = self
+        let mut dynamic = self
             .dynamic_tools
-            .read()
+            .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dynamic.retire_closed_groups();
         self.policed_tool_names_locked(&dynamic)
             .into_iter()
             .collect()
     }
 
     pub(crate) fn tool_snapshot(&self) -> (u64, Vec<Arc<dyn Tool>>) {
-        let dynamic = self
+        let mut dynamic = self
             .dynamic_tools
-            .read()
+            .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dynamic.retire_closed_groups();
         let active = dynamic.active_names.as_ref();
         let tools = self
             .policed_tools(&dynamic)
@@ -1535,7 +1663,11 @@ impl ExtensionHost {
     pub(crate) fn model_tool_snapshot(&self, owner: &str) -> (u64, Vec<Arc<dyn Tool>>) {
         loop {
             let (revision, selection, sources) = {
-                let dynamic = self.dynamic_tools.read().unwrap_or_else(|p| p.into_inner());
+                let mut dynamic = self
+                    .dynamic_tools
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner());
+                dynamic.retire_closed_groups();
                 (
                     dynamic.revision,
                     dynamic.operation_selection.clone(),
@@ -1553,6 +1685,7 @@ impl ExtensionHost {
                 .dynamic_tools
                 .write()
                 .unwrap_or_else(|p| p.into_inner());
+            dynamic.retire_closed_groups();
             if dynamic.revision != revision {
                 continue;
             }
@@ -1610,6 +1743,10 @@ impl ExtensionHost {
         crate::tool_composition::advertised_surface(&self.tool_snapshot().1)
     }
 }
+
+#[cfg(test)]
+#[path = "extension_builtin_override_tests.rs"]
+mod builtin_overrides;
 
 #[cfg(test)]
 mod tests {
@@ -1924,15 +2061,19 @@ mod tests {
                 groups: vec![DynamicToolGroup {
                     owner: "other".into(),
                     tools: tools("old"),
+                    closed: None,
                     resource_source: None,
                 }],
                 ..DynamicToolRegistry::default()
             };
-            validate_dynamic_catalog(&registry, "new", &tools("new")).unwrap();
+            validate_dynamic_catalog(&registry, "new", &tools("new"), &BTreeSet::new()).unwrap();
             assert_eq!(definitions.load(Ordering::Relaxed), 2 * count);
-            assert!(validate_dynamic_catalog(&registry, "new", &tools("old")).is_err());
+            assert!(
+                validate_dynamic_catalog(&registry, "new", &tools("old"), &BTreeSet::new())
+                    .is_err()
+            );
             // Replacing one's own group never conflicts with its previous names.
-            validate_dynamic_catalog(&registry, "other", &tools("old")).unwrap();
+            validate_dynamic_catalog(&registry, "other", &tools("old"), &BTreeSet::new()).unwrap();
         }
     }
 

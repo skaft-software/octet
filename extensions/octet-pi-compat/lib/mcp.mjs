@@ -84,6 +84,11 @@ function registry(runtime, state) {
 }
 const list = servers => [...servers.values()].map(server => structuredClone(server));
 export const hasMcpRegistrations = runtime => Boolean(registries.get(runtime)?.size);
+/** Drops load-time MCP registrations of an extension that failed to load. */
+export function forgetMcpRegistrations(runtime, extensionPath) {
+  const seeds = registries.get(runtime);
+  for (const [name, server] of [...(seeds ?? [])]) if (server.extensionPath === extensionPath) seeds.delete(name);
+}
 
 async function connect(runtime, store, servers) {
   runtime.assertOwner(store); store.controller.signal.throwIfAborted();

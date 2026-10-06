@@ -98,6 +98,23 @@ indexed-color, and RGB foreground/background. Cursor movement, erase controls,
 OSC, queries, embedded newlines, and other control bytes are rejected. The host
 preserves approved styling; it does not feed ANSI through a plain-text widget.
 
+### `ui/chrome` — desktop notification intent
+
+A foreground, owner-fenced request can ask the host terminal to display a
+desktop notification without granting raw terminal access:
+
+```json
+{"jsonrpc":"2.0","id":"notify-1","method":"ui/chrome","params":{"parent_request_id":7,"resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"demo","process_generation":1},"chrome":{"kind":"desktop_notification","title":"Ready","body":"The run finished."}}}
+```
+
+This requires negotiated `remote_ui` and the same owner admission as other chrome
+requests. Title/body must be control-free UTF-8, at most 1024/4096 bytes; a title
+cannot contain a semicolon. Ceded/unavailable terminals and a full 16-intent
+mailbox are refused. The ordinary chrome receipt (`tools_expanded`) acknowledges
+native admission, not OS delivery. Only the host renderer encodes OSC 777; the
+terminal must support that desktop-notification protocol. Headless/plain output
+does not advertise this frontend service. No escape bytes are accepted in frames.
+
 ### `ui/close` — request
 
 ```json
@@ -157,6 +174,27 @@ verify the exact returned revision pair, and publish a captured editor frame onl
 **after the checkpoint for that same captured draft is acknowledged**. Do not
 render newer text after awaiting an older checkpoint. Frame publication or
 painting alone does not establish a recovery checkpoint.
+
+### `composer/history` — native prompt-history seed
+
+With negotiated `composer`, an owner-scoped request may seed older native prompts:
+
+```json
+{"jsonrpc":"2.0","id":"history-1","method":"composer/history","params":{"parent_request_id":7,"resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"host-issued-instance","process_generation":1},"entries":["newer prompt","older prompt"]}}
+```
+
+Entries are newest-first, at most 100, and at most 256 KiB UTF-8 in aggregate.
+Plain-text validation permits newline/tab but rejects terminal controls; unknown
+fields and malformed entries are refused. The normal composer feature, generation,
+foreground-owner and cancellation fences apply. Success returns `{}` after the
+shell prepends the older entries, deduplicates them against native history and
+retains the latest 100 prompts. The current draft, history navigation and native
+attachment payloads are preserved. This seed is UI-only, not session persistence
+or model context.
+
+The Pi adapter applies settings-only standard editors to this native composer
+instead of mounting a remote editor, keeping native slash completion available.
+Editors overriding inherited editor behavior still use the remote mount contract.
 
 ## Host-to-extension notifications
 

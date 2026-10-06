@@ -415,6 +415,12 @@ fn sync_window_title(
     state: &SharedState,
     last_title: &mut Option<(Option<String>, String)>,
 ) {
+    if !state.borrow().desktop_notifications.is_empty() {
+        let notifications = std::mem::take(&mut state.borrow_mut().desktop_notifications);
+        for (title, body) in notifications {
+            tui.desktop_notification(&title, &body);
+        }
+    }
     let shell = state.borrow();
     if shell.startup_pending {
         return;
@@ -788,6 +794,10 @@ fn render_native_loop_with_surface(
     let mut last_progress = false;
     let mut last_resize = Instant::now();
     loop {
+        let notifications = std::mem::take(&mut state.borrow_mut().desktop_notifications);
+        for (title, body) in notifications {
+            terminal.desktop_notification(&title, &body);
+        }
         if state.file_index_ready() {
             super::poll_file_index_scan(&mut state.borrow_mut());
         }
@@ -1385,7 +1395,8 @@ impl ShellComponent {
 
     fn isolated(state: SharedState, application_viewport: bool) -> Self {
         let mut component = Self::new(state, application_viewport);
-        component.owner = Some(RefCell::new(RenderOwner::default()));
+        let theme = component.state.borrow().theme.clone();
+        component.owner = Some(RefCell::new(RenderOwner::new(theme)));
         component
     }
 

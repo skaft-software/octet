@@ -289,7 +289,7 @@ async fn active_skill_invocations_queue_as_prompts_instead_of_unknown_commands()
 }
 
 #[tokio::test]
-async fn scripted_active_loop_queues_controls_and_never_forwards_active_model_command() {
+async fn scripted_active_loop_enter_steers_and_never_forwards_active_model_command() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio_stream::wrappers::ReceiverStream;
 
@@ -312,8 +312,8 @@ async fn scripted_active_loop_queues_controls_and_never_forwards_active_model_co
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
     sender
         .send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL,
+            KeyCode::Enter,
+            KeyModifiers::NONE,
         ))))
         .await
         .unwrap();
@@ -409,8 +409,8 @@ async fn abort_restores_all_undelivered_steering_after_the_final_event() {
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
     sender
         .send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL,
+            KeyCode::Enter,
+            KeyModifiers::NONE,
         ))))
         .await
         .unwrap();
@@ -425,8 +425,8 @@ async fn abort_restores_all_undelivered_steering_after_the_final_event() {
     }
     sender
         .send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL,
+            KeyCode::Enter,
+            KeyModifiers::NONE,
         ))))
         .await
         .unwrap();
@@ -574,8 +574,8 @@ async fn full_steering_admission_restores_the_draft_without_a_shell_entry() {
         .unwrap();
     sender
         .send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL,
+            KeyCode::Enter,
+            KeyModifiers::NONE,
         ))))
         .await
         .unwrap();
@@ -632,7 +632,7 @@ async fn recalled_live_steering_returns_to_the_editor_without_delivery() {
         &mut shell,
         vec![
             Event::Paste("steer recalled".into()),
-            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             // Option/Alt+Up recalls the newest retractable live steering
             // before the provider boundary can claim it.
             dequeue_gesture(),
@@ -663,10 +663,10 @@ async fn requeued_edited_live_steering_is_what_the_next_provider_request_carries
         &mut shell,
         vec![
             Event::Paste("original".into()),
-            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             dequeue_gesture(),
             Event::Paste(" edited".into()),
-            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         ],
     )
     .await;
@@ -694,9 +694,9 @@ async fn recalled_live_steering_is_not_double_counted_in_the_editor() {
         &mut shell,
         vec![
             Event::Paste("alpha".into()),
-            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Paste("beta".into()),
-            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             dequeue_gesture(),
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         ],
@@ -805,6 +805,343 @@ async fn active_run_subagents_without_extension_owner_stays_an_unknown_command()
         Some("unknown command: /subagents"),
         "without a octet-subagents owner the command must not open the live view"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_pi_command_is_published_and_executes_without_extension_menu() {
+    let (directory, mut app, mut shell) = super::pi_contract_support::pi_ui_app(
+        r#"
+import { writeFileSync } from 'node:fs';
+export default pi => pi.registerCommand('doom', {description: 'Fixture Doom', handler: args => {
+  writeFileSync(TRACE, args);
+}});
+"#,
+    );
+    let mut input = EventStream::from_stream(futures_util::stream::pending());
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input),
+    )
+    .await
+    .expect("startup deadline")
+    .unwrap();
+    shell.finish_startup();
+    request_extension_ui(&mut shell, &mut app);
+    shell.apply_edit(crate::tui::keymap::EditAction::Paste("/doo".into()));
+    shell.render();
+    let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+    assert!(
+        frame.contains("/doom"),
+        "registered command not painted: {frame}"
+    );
+    shell.complete_slash_command();
+    shell.apply_edit(crate::tui::keymap::EditAction::Paste(
+        "fixture arguments".into(),
+    ));
+    let action = shell.translate_input(
+        Some(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))),
+        false,
+    );
+    let crate::tui::keymap::InputAction::Command(_) = action else {
+        panic!("typed command not dispatched: {action:?}");
+    };
+    let command = commands::parse(&shell.drain_editor());
+    let mut deadline = None;
+    let mut reload =
+        crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
+    let mut input = EventStream::new();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(20),
+        run_idle_command(
+            app,
+            &mut shell,
+            &mut input,
+            command,
+            &mut deadline,
+            None,
+            &mut reload,
+        ),
+    )
+    .await
+    .expect("command deadline")
+    .unwrap();
+    let IdleCommandOutcome::Continue(mut app) = outcome else {
+        panic!("extension command changed application");
+    };
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap(),
+        "fixture arguments"
+    );
+    assert_eq!(shell.debug_error(), None);
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn active_report_matrix_keeps_themed_native_chrome_and_draft() {
+    let directory = tempfile::tempdir().unwrap();
+    let inspection = test_run_inspection_with_session(directory.path());
+    for command in [
+        Command::Context,
+        Command::Cache,
+        Command::Status,
+        Command::Extensions(commands::ExtensionsSubcommand::Status),
+    ] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        shell.begin_run("test");
+        shell.apply_edit(crate::tui::keymap::EditAction::Paste("kept draft".into()));
+        let (queue, quit) = run_active_command(&mut shell, command.clone(), &inspection).await;
+        shell.render();
+        let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+        assert!(
+            frame.contains("\x1b[38;2;"),
+            "theme lost for {command:?}: {frame}"
+        );
+        assert!(!frame.contains("^["), "ANSI escaped for {command:?}");
+        assert!(shell.is_agent_run_active());
+        assert_eq!(shell.pending(), "kept draft");
+        assert!(queue.is_empty());
+        assert!(!quit);
+        assert_eq!(shell.debug_error(), None);
+    }
+}
+
+#[test]
+fn active_thinking_reserves_capacity_and_settles_once_without_claiming_delivery() {
+    let directory = tempfile::tempdir().unwrap();
+    let inspection = test_run_inspection_with_session(directory.path());
+    let mut shell = InteractiveShell::test_shell();
+    let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    let mut queue = VecDeque::from(vec![PendingIdleAction::Compact; MAX_PENDING_IDLE_ACTIONS]);
+    assert!(!stage_active_thinking(&mut queue, &high));
+    assert_eq!(queue.len(), MAX_PENDING_IDLE_ACTIONS);
+    queue.pop_back();
+    assert!(stage_active_thinking(&mut queue, &high));
+    // The latest choice can replace the reserved slot even at capacity.
+    assert!(stage_active_thinking(&mut queue, &ReasoningConfig::Off));
+    assert!(stage_active_thinking(&mut queue, &high));
+    settle_active_thinking(&mut shell, &inspection, &mut queue);
+    assert_eq!(queue.len(), MAX_PENDING_IDLE_ACTIONS);
+    assert_eq!(queue.back(), Some(&PendingIdleAction::ChangeThinking(high)));
+    let before = shell.debug_snapshot();
+    assert!(before.contains("active request unchanged"), "{before}");
+    settle_active_thinking(&mut shell, &inspection, &mut queue);
+    assert_eq!(
+        shell.debug_snapshot(),
+        before,
+        "settlement must announce exactly once"
+    );
+}
+
+#[tokio::test]
+async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
+    use crossterm::event::KeyEvent;
+    for (command, tail, expected) in [
+        ("/theme Cards", vec![], "Cards"),
+        ("/settings theme Still", vec![], "Still"),
+        ("/theme", vec![KeyCode::Up, KeyCode::Enter], "light"),
+        ("/theme", vec![KeyCode::Up, KeyCode::Esc], "dark"),
+        ("/settings images on", vec![], "dark"),
+    ] {
+        let (server, started, release) = HeldApi::start(fast_response()).await;
+        let mut model = scripted_model(&server.uri);
+        Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        let (workspace, mut agent) =
+            scripted_agent_for_route(model.clone(), octet_ai::AiClient::new());
+        let mut inspection = test_run_inspection().clone();
+        inspection.model = model;
+        inspection.session_path = agent.session().path().to_owned();
+        let mut config = terminal_theme_test_config(workspace.path().to_owned());
+        config.color = crate::config::ColorMode::Always;
+        config.theme = Some("dark".into());
+        config.theme_explicit = true;
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        shell.set_theme(crate::tui::theme::load_theme(&config));
+        shell.set_runtime_config(config);
+        let events = std::iter::once(Event::Paste(command.into()))
+            .chain(std::iter::once(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))))
+            .chain(
+                tail.into_iter()
+                    .map(|code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE))),
+            )
+            .chain(std::iter::once(Event::Paste("kept streaming draft".into())))
+            .collect::<Vec<_>>();
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        let (handled_tx, handled) = tokio::sync::oneshot::channel();
+        let mut input = ProbedInput {
+            input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+            remaining: events.len(),
+            handled: Some(handled_tx),
+        };
+        let mut pending = VecDeque::new();
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let id = shell.begin_run("test");
+        let mut run = agent.prompt("keep streaming").await.unwrap();
+        let control = run.control();
+        shell.set_awaiting_provider(id);
+        let mut deadline = None;
+        let mut made_tool_call = false;
+        // Stop polling the driver only after its last input handler returned,
+        // while the real HTTP response is still held. The Run remains owned.
+        {
+            let driver = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            );
+            tokio::pin!(driver);
+            let stimulus = async {
+                started.await.unwrap();
+                for event in events {
+                    sender.send(Ok(event)).await.unwrap();
+                }
+                handled.await.unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    _ = stimulus => {},
+                    result = &mut driver => panic!("run settled before the provider gate: {result:?}"),
+                }
+            }).await.unwrap();
+        }
+        assert!(shell.is_agent_run_active(), "{command}");
+        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            shell.runtime_config().unwrap().theme.as_deref(),
+            Some(expected)
+        );
+        assert_eq!(shell.pending(), "kept streaming draft");
+        assert_eq!(
+            pending.len(),
+            usize::from(command != "/theme" || expected != "dark")
+        );
+        if command.contains("images") {
+            assert!(shell.runtime_config().unwrap().show_images);
+        }
+        for report in [
+            Command::Context,
+            Command::Status,
+            Command::Cache,
+            Command::Extensions(commands::ExtensionsSubcommand::Status),
+        ] {
+            let (queue, quit) = run_active_command(&mut shell, report, &inspection).await;
+            assert!(queue.is_empty());
+            assert!(!quit);
+            shell.render();
+            let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+            assert!(
+                frame.contains("\x1b[38;2;"),
+                "native chrome lost theme for {command}: {frame}"
+            );
+            assert!(!frame.contains("^["));
+            assert_eq!(shell.pending(), "kept streaming draft");
+            shell.close_overlay();
+        }
+        release.send(true).unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(outcome, HostRunOutcome::Completed);
+        drop(run);
+        assert!(!delivered_user_text(&agent)
+            .iter()
+            .any(|text| text.contains("/theme") || text.contains("/settings")));
+    }
+}
+
+#[tokio::test]
+async fn ctrl_s_follow_up_keeps_attachment_recall_and_full_queue_keeps_draft() {
+    use crossterm::event::KeyEvent;
+    let (_server, workspace, mut agent) = scripted_agent().await;
+    let image = workspace.path().join("follow-up.png");
+    std::fs::write(
+        &image,
+        include_bytes!("../../../../tests/fixtures/export_html/one-pixel.png"),
+    )
+    .unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_input_modalities(octet_ai::ModalitySet::none().with(octet_ai::Modality::Image));
+    shell.apply_edit(crate::tui::keymap::EditAction::Paste(
+        image.display().to_string(),
+    ));
+    let before = shell.pending();
+    let (outcome, quit) = drive_scripted_events(
+        &mut agent,
+        &mut shell,
+        vec![
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            dequeue_gesture(),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        ],
+    )
+    .await;
+    assert_eq!(outcome, HostRunOutcome::Aborted);
+    assert!(!quit);
+    assert_eq!(shell.pending(), before);
+    let recalled = shell.drain_composed();
+    assert_eq!(recalled.attachments.len(), 1);
+    shell.restore_unqueued_steering(recalled.display_text, recalled.attachments);
+    assert_eq!(shell.queued_follow_up_len(), 0);
+    assert_eq!(delivered_user_text(&agent), vec!["initial"]);
+
+    let (_server, _workspace, mut agent) = scripted_agent().await;
+    for _ in 0..MAX_PENDING_IDLE_ACTIONS {
+        shell.queue_follow_up(ComposedInput::from_text("occupied".into()));
+    }
+    let (outcome, _) = drive_scripted_events(
+        &mut agent,
+        &mut shell,
+        vec![
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ],
+    )
+    .await;
+    assert_eq!(outcome, HostRunOutcome::Aborted);
+    assert_eq!(shell.queued_follow_up_len(), MAX_PENDING_IDLE_ACTIONS);
+    assert!(shell
+        .debug_error()
+        .unwrap()
+        .contains("follow-up queue is full"));
 }
 
 // -----------------------------------------------------------------------

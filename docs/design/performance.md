@@ -277,7 +277,11 @@ putting timing text on the TUI. `process.enter` is after Tokio runtime creation;
 `--models` scope and resume selector resolution. Catalog phases separate base,
 selected-route, Codex credential/inventory, and deferred fleet work;
 `session.resolve`, `session.replay`, `app.build`, `history.hydrate`, and
-`frame.ready` cover later readiness. Extension startup additionally brackets
+`frame.ready` cover later readiness. `app.build` is an entry boundary;
+`app.config.persisted`, `app.goal.open`, and `app.complete` separate the effective
+configuration's durable append, goal-store preparation, and completed Agent/App
+construction. These traces do not defer durability or admission work. Extension
+startup additionally brackets
 `extensions.digest` (manifest/source hashing) and `extensions.handshake`
 (process launch and initialize), with counters for catalog entries, hashed
 files/bytes, and eligible handshakes. Disabled or untrusted entries do not
@@ -311,6 +315,19 @@ still fails closed on a symlink). This removes one staged write/rename and its
 permission checks from the common warm launch, not the marker read or first
 launch write. No claim about spawn-to-editable-frame or extension-enabled
 startup follows from these in-process phase timestamps.
+
+Manifest discovery yielding no extension flag declarations uses the ordinary
+static parser directly; discovery/trust still run, but redundant command trees
+for collision and subcommand scans are not constructed. Credential migration and
+its absent-credential concurrency/marker checks retain their original locked
+behavior.
+
+Initialized semantic shells and renderer publications use their resolved theme
+without constructing a default theme to discard. Capture clones the retained
+theme once and acceptance moves it into private renderer ownership. Pending
+startup reserves the exact welcome geometry without materializing its invisible
+logo/hints or rendering the composer a second time. These work reductions retain
+the complete atomic ready frame; they are not startup wall-time claims.
 
 Catalog registration checks model identity by indexed resolution rather than
 scanning every model for each discovered/static registration. Credential pruning
@@ -500,26 +517,28 @@ verifier data or hide a correctness loss in successful-run-only latency.
    which responsiveness and resource claims it qualifies. Re-run on material
    renderer/runtime changes and on pinned competitor updates.
 
-The ownership split and complete five-client interactive comparison are release
-qualification work, not implied by a passing library test. Track remaining work
-explicitly; do not mark the whole philosophy complete after the first patches.
+The implemented ownership split and complete interactive comparisons still need
+qualification on the final candidate; neither is established by a passing generic
+renderer test. Track the remaining gates explicitly rather than treating the
+ownership implementation as measured input-to-paint performance.
 
-### Ownership refactor acceptance details
+### Ownership implementation and acceptance details
 
-The current renderer holds `SharedState`'s `Arc<Mutex<ShellState>>` through
-layout. Input also takes that lock; a separate render thread and capacity-one
-paint notification are not isolation. `try_lock` on the renderer cannot undo a
-layout already holding the lock. A transcript-event FIFO can bound memory, but
-when it fills, backpressuring the caller-driven `Run` also delays cancellation
-settlement. Prefer the shared immutable semantic-root design above for the
-stronger control guarantee.
+The production threaded renderer captures an immutable `RenderModel` under
+`SharedState`'s `Arc<Mutex<ShellState>>`, then releases that lock before private
+materialization, layout, diffing and terminal writes. `RenderOwner` retains the
+layout caches and shared semantic roots; completed-frame feedback is
+revision-fenced before returning to the input owner. Input still takes the shared
+lock for semantic mutations, so publication capture and feedback costs remain
+part of the control-path audit. Inline test shells can retain the shared-state
+render path and do not prove production threaded isolation.
 
-The touch set starts in `tui/view.rs`, `view/renderer_runtime.rs`,
-`view/assistant_block.rs`, and `view/transcript_cache.rs`; navigation, semantic
+The implementation centers on `tui/view.rs`, `view/renderer_model.rs`,
+`view/renderer_runtime.rs`, and revision-fenced geometry. Navigation, semantic
 copy, history hydration, panel confirmation visibility, and
-`modes/interactive.rs` must migrate with the ownership contract. Merely cloning
-the current `AssistantBlock`/`StreamingMarkdown` is neither immutable layout
-separation nor cheap publication.
+`modes/interactive.rs` must continue to respect that ownership contract. This is
+not a request to repeat an already implemented ownership refactor or to clone
+`AssistantBlock`/`StreamingMarkdown` as a substitute for shared publication.
 
 Use a test-only gate inside the actual threaded layout path, an independent
 observer with a finite timeout, and an always-releasing cleanup guard. While

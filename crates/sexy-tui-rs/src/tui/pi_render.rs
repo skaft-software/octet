@@ -35,6 +35,19 @@ use super::TUI;
 const PI_LINE_RESET: &str = "\x1b[0m\x1b]8;;\x07";
 const PI_MAX_WRITE_BYTES: usize = 1024 * 1024;
 
+// Most component rows are already normalized. Retain their owned allocation
+// rather than building a normalization temporary and copying it a second time.
+fn normalize_pi_row(line: &mut String) {
+    if line.contains('\t') || line.contains('\u{0e33}') || line.contains('\u{0eb3}') {
+        // The normalizer, not raw replacement, preserves escape payload bytes.
+        *line = crate::utils::normalize_terminal_output(line);
+    }
+    line.push_str(PI_LINE_RESET);
+}
+
+#[cfg(test)]
+mod tests;
+
 /// Main-screen image rows bypass text normalization; legacy paths remain Kitty-only.
 fn is_pi_image_line(line: &str) -> bool {
     is_image_line(line) || line.contains("\x1b]1337;File=")
@@ -75,11 +88,7 @@ impl<'a> TUI<'a> {
             });
         for line in &mut replacement {
             if !is_pi_image_line(line) {
-                *line = format!(
-                    "{}{}",
-                    crate::utils::normalize_terminal_output(line),
-                    PI_LINE_RESET
-                );
+                normalize_pi_row(line);
             }
         }
         let mut rendered = std::mem::take(&mut self.previous_frame);
@@ -190,16 +199,11 @@ impl<'a> TUI<'a> {
                 }
                 let replacement = replacement
                     .into_iter()
-                    .map(|line| {
-                        if is_pi_image_line(&line) {
-                            line
-                        } else {
-                            format!(
-                                "{}{}",
-                                crate::utils::normalize_terminal_output(&line),
-                                PI_LINE_RESET
-                            )
+                    .map(|mut line| {
+                        if !is_pi_image_line(&line) {
+                            normalize_pi_row(&mut line);
                         }
+                        line
                     })
                     .collect::<Vec<_>>();
                 // Move the old frame's strings into two owned vectors rather
@@ -217,11 +221,7 @@ impl<'a> TUI<'a> {
                     extract_logical_cursor_position_from(&mut rendered, 0);
                 for line in &mut rendered {
                     if !is_pi_image_line(line) {
-                        *line = format!(
-                            "{}{}",
-                            crate::utils::normalize_terminal_output(line),
-                            PI_LINE_RESET
-                        );
+                        normalize_pi_row(line);
                     }
                 }
                 (rendered, logical_cursor_position)
@@ -231,11 +231,7 @@ impl<'a> TUI<'a> {
             let logical_cursor_position = extract_logical_cursor_position_from(&mut rendered, 0);
             for line in &mut rendered {
                 if !is_pi_image_line(line) {
-                    *line = format!(
-                        "{}{}",
-                        crate::utils::normalize_terminal_output(line),
-                        PI_LINE_RESET
-                    );
+                    normalize_pi_row(line);
                 }
             }
             (rendered, logical_cursor_position)

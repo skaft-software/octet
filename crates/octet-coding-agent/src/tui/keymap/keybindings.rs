@@ -89,7 +89,6 @@ pub fn default_definitions(platform: &str, wsl: bool) -> Vec<KeybindingDefinitio
                 }],
                 "app.suspend" if platform == "win32" => Vec::new(),
                 "app.model.cycleBackward" if windows => vec!["alt+p".to_owned()],
-                "app.message.followUp" if windows => vec!["ctrl+q".to_owned()],
                 "app.message.dequeue" if windows => vec!["alt+q".to_owned()],
                 "app.clipboard.pasteImage" if windows => vec!["alt+v".to_owned()],
                 _ => strings(keys),
@@ -353,9 +352,8 @@ impl KeybindingsManager {
             .any(|key| normalize_key_id(key) == event_id)
     }
 
-    /// Every id with its resolved keys.
+    /// Every id with its resolved keys, for read-only frontend projection.
     #[must_use]
-    #[cfg(test)]
     pub fn get_resolved_bindings(&self) -> BTreeMap<String, Vec<String>> {
         self.definitions
             .iter()
@@ -683,7 +681,7 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("app.session.toggleNamedFilter", &["ctrl+n"], "Toggle named session filter"),
     ("app.editor.external", &["ctrl+g"], "Open external editor"),
     ("app.message.copy", &["ctrl+x"], "Copy message to clipboard"),
-    ("app.message.followUp", &["alt+enter"], "Queue follow-up message"),
+    ("app.message.followUp", &["ctrl+s"], "Queue follow-up message"),
     ("app.message.dequeue", &["alt+up"], "Restore queued messages"),
     ("app.clipboard.pasteImage", &["ctrl+v"], "Paste image from clipboard (text fallback)"),
     ("app.session.new", &[], "Start a new session"),
@@ -750,7 +748,7 @@ mod tests {
         assert_eq!(win.get_keys("tui.editor.undo"), ["ctrl+z"]);
         assert!(win.get_keys("app.suspend").is_empty());
         assert_eq!(win.get_keys("tui.altScreen.search"), ["ctrl+f"]);
-        assert_eq!(win.get_keys("app.message.followUp"), ["ctrl+q"]);
+        assert_eq!(win.get_keys("app.message.followUp"), ["ctrl+s"]);
 
         let wsl = KeybindingsManager::with_platform("linux", true, BTreeMap::new());
         assert_eq!(wsl.get_keys("tui.editor.undo"), ["alt+z"]);

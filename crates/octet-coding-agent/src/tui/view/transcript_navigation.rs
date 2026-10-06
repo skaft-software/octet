@@ -19,8 +19,9 @@ const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(1000);
 /// history remains terminal-owned until semantic navigation is requested.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TranscriptScrollbar {
-    #[default]
     Hidden,
+    /// Pi's fullscreen default: visible while scrolling, hidden after a second.
+    #[default]
     Auto,
     Always,
 }
@@ -244,6 +245,18 @@ struct NavigationFrame {
     generation: u64,
     scrollbar: Option<ScrollbarGeometry>,
     search_buttons_row: Option<usize>,
+}
+
+#[cfg(test)]
+impl TranscriptNavigation {
+    /// Test shells keep the transient scrollbar column out of row assertions;
+    /// tests about the scrollbar itself opt back in.
+    pub(super) fn without_scrollbar() -> Self {
+        Self {
+            mode: TranscriptScrollbar::Hidden,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -607,6 +620,8 @@ impl ShellState {
         } else {
             None
         };
+        // Like Pi's layout: a thin thumb, solid only while the pointer holds it.
+        let held = nav.hover || nav.drag_offset.is_some();
         if let Some(bar) = scrollbar.filter(|bar| bar.visible) {
             lines.resize_with(lines.len().max(bar.rows), String::new);
             for (row, line) in lines.iter_mut().take(bar.rows).enumerate() {
@@ -614,7 +629,8 @@ impl ShellState {
                 let padding = usize::from(bar.column).saturating_sub(visible_width(&prefix));
                 let thumb = row >= bar.thumb_top && row < bar.thumb_top + bar.thumb_rows;
                 let glyph = match (thumb, self.theme.unicode()) {
-                    (true, true) => "█",
+                    (true, true) if held => "█",
+                    (true, true) => "┃",
                     (true, false) => "#",
                     (false, true) => self.theme.glyph("vertical"),
                     (false, false) if self.theme.glyph("vertical").trim().is_empty() => " ",
@@ -1085,6 +1101,64 @@ mod tests {
     use super::*;
     use crate::tui::keymap::{keybindings::KeybindingsManager, InputAction, PointerGesture};
     use crossterm::event::{KeyEvent, MouseEvent};
+
+    #[test]
+    fn unmodified_mouse_release_displacement_copies_without_a_motion_event() {
+        for with_motion in [true, false] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(80, 20);
+            shell.on_prompt_submitted("hello world");
+            shell.apply_edit(EditAction::Paste("kept draft".into()));
+            shell.state.borrow_mut().application_viewport_requested = true;
+            let rows = frame(&shell, Instant::now());
+            let (row, start) = rows
+                .iter()
+                .enumerate()
+                .find_map(|(row, line)| {
+                    let plain = strip_terminal_sequences(line);
+                    plain
+                        .find("hello world")
+                        .map(|offset| (row as u16, plain[..offset].chars().count() as u16 + 1))
+                })
+                .expect("visible semantic transcript");
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Down(MouseButton::Left), start, row),
+            );
+            if with_motion {
+                dispatch(
+                    &mut shell,
+                    mouse(MouseEventKind::Drag(MouseButton::Left), start + 4, row),
+                );
+            }
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Up(MouseButton::Left), start + 4, row),
+            );
+            assert_eq!(
+                shell.state.borrow().copy_buffer.as_deref(),
+                Some("ello"),
+                "motion={with_motion}"
+            );
+            assert_eq!(shell.pending(), "kept draft");
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Down(MouseButton::Left), start, row),
+            );
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Up(MouseButton::Left), start, row),
+            );
+            assert!(shell.state.borrow().transcript_selection.is_none());
+        }
+    }
+
+    // Pi's fullscreen chat viewport defaults to "auto": the scrollbar appears
+    // while scrolling and hides after a second.
+    #[test]
+    fn scrollbar_defaults_to_pis_transient_auto_mode() {
+        assert_eq!(TranscriptScrollbar::default(), TranscriptScrollbar::Auto);
+    }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))

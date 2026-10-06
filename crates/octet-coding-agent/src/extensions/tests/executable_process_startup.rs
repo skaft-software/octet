@@ -512,3 +512,83 @@ menu = {supports_menu}
         }
     }
 }
+
+/// Two enabled extensions declaring one tool name must not fail startup. The
+/// first-party extension keeps the name; the external one is turned off with a
+/// notice that names the clash, and it never launches.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_clash_turns_off_the_external_extension_instead_of_failing() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let extension_root = temp.path().join("explicit-extensions");
+    for (name, tools) in [
+        ("octet-web-search", r#"["web_search"]"#),
+        ("external-search", r#"["web_search", "external_only"]"#),
+    ] {
+        let directory = extension_root.join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join(EXTENSION_MANIFEST_FILENAME),
+            format!(
+                "name = \"{name}\"\nversion = \"0.1.0\"\napi_version = \"0.1\"\n\n[entrypoint]\ncommand = \"launch.sh\"\n\n[contributes]\ntools = {tools}\n"
+            ),
+        )
+        .unwrap();
+        let executable = directory.join("launch.sh");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf launched > \"$OCTET_WORKSPACE/{name}-launched\"\nexit 1\n"),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+    }
+    let mut config = executable_extension_config(temp.path(), &extension_root, "octet-web-search");
+    config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+    config.enabled_extensions.push("external-search".into());
+    config
+        .invocation_trusted_extensions
+        .push("external-search".into());
+    let session = Session::create(temp.path().join("session.jsonl")).unwrap();
+    let model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let sessions = SessionStore::new(&config.session_dir, temp.path());
+    let mut host = ExtensionHost::new();
+
+    let mut extensions = ExecutableExtensions::discover_and_start(
+        &config,
+        &session,
+        &model,
+        &ReasoningConfig::Off,
+        &sessions,
+        &mut host,
+    );
+
+    assert!(temp.path().join("octet-web-search-launched").exists());
+    assert!(!temp.path().join("external-search-launched").exists());
+    assert!(
+        extensions.diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("\"external-search\" was turned off")
+                && diagnostic.contains("`web_search` (provided by \"octet-web-search\")")
+        }),
+        "{:?}",
+        extensions.diagnostics.iter().collect::<Vec<_>>()
+    );
+    let external = extensions
+        .summaries
+        .iter()
+        .find(|extension| extension.name == "external-search")
+        .unwrap();
+    assert!(!external.running);
+    assert!(external
+        .health
+        .as_ref()
+        .and_then(|health| health.last_error.as_deref())
+        .is_some_and(|error| error.starts_with("turned off:")));
+    extensions.shutdown().await;
+}

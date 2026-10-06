@@ -49,7 +49,7 @@
 //! - `tests` — one module per concern, mirroring the split above.
 
 use std::cell::{Ref, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -686,6 +686,12 @@ pub struct EntryMetadata {
     /// Never provider-visible, frontend-projected or exported implicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_composition: Option<crate::tool_composition::ToolCompositionRecord>,
+    /// Host-captured replay-safe call indices in the original assistant turn.
+    /// `Some(empty)` forbids all replay; `None` identifies older/manual entries
+    /// whose replay safety is resolved from the currently registered tools.
+    /// A restored builtin must never make an unsafe extension call replayable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_safe_tool_calls: Option<BTreeSet<usize>>,
     /// Unix milliseconds just before the tool's effects were admitted
     /// (`null` when the call never reached the effect gate). Together with
     /// `tool_finished_unix_ms` this is the durable per-tool timing window
@@ -812,6 +818,7 @@ impl EntryMetadata {
             || self.run_outcome.is_some()
             || self.tool_output.is_some()
             || self.tool_composition.is_some()
+            || self.replay_safe_tool_calls.is_some()
             || self.local_synthetic_assistant
             || !self.extension_metadata.is_empty())
         .then_some(self)

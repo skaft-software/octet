@@ -7,6 +7,20 @@ use super::*;
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum ExtensionEvent {
+    /// Presentation-only renderer invalidation; never model content.
+    TranscriptInvalidated {
+        /// Validated source and exact issued owner.
+        invalidation: TranscriptInvalidation,
+    },
+    /// A private entry observed only after the sole writer committed it.
+    TranscriptEntryCommitted {
+        /// Namespace that owns this private record.
+        namespace: String,
+        /// Exact process/session owner that committed the entry.
+        owner: ExtensionResourceOwner,
+        /// Namespace-filtered committed record, never renderer-produced text.
+        entry: serde_json::Value,
+    },
     /// Transient registration update routed to the admitted resident MCP bridge.
     McpRegistrationRequested {
         /// Reverse request identity.

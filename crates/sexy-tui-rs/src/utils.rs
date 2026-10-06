@@ -91,9 +91,31 @@ fn is_zero_width(character: char) -> bool {
     )
 }
 
+// Styled ASCII is still one cell per visible byte. Keep escape recognition
+// identical to the general path, and fall back for the *whole* string on any
+// other visible character: Unicode graphemes can span an ANSI boundary.
+fn ascii_ansi_width(text: &str) -> Option<usize> {
+    let mut cursor = 0;
+    let mut width = 0;
+    while let Some(byte) = text.as_bytes().get(cursor) {
+        match byte {
+            0x20..=0x7e => {
+                width += 1;
+                cursor += 1;
+            }
+            0x1b => cursor += extract_ansi_code(text, cursor)?.length,
+            _ => return None,
+        }
+    }
+    Some(width)
+}
+
 pub fn visible_width(text: &str) -> usize {
     if text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
         return text.len();
+    }
+    if let Some(width) = ascii_ansi_width(text) {
+        return width;
     }
     let mut clean = String::with_capacity(text.len());
     let mut cursor = 0;

@@ -7,7 +7,11 @@ const factory = join(root, 'test/fixtures/model-turns.ts');
 const user = { id: 'user', parent: null, timestamp_unix_ms: 1000, value: { type: 'message', User: { content: [{ Text: 'question' }] } } };
 const assistant = { id: 'assistant', parent: 'user', timestamp_unix_ms: 1100, value: { type: 'message', Assistant: { model: 'native-model', protocol: 'open_ai_chat', content: [{ Text: 'answer' }] } } };
 const start = (index = 0) => ({ kind: 'model_turn_start', run_id: 'run:user', turn_index: index, timestamp_ms: 1050 + index });
-const end = (entry = assistant, results = []) => ({ kind: 'model_turn_end', run_id: 'run:user', turn_index: 0, timestamp_ms: 1200, assistant_entry: entry, tool_result_entries: results });
+const end = (entry = assistant, results = [], stopReason = 'end_turn') => ({ kind: 'model_turn_end', run_id: 'run:user', turn_index: 0, timestamp_ms: 1200, assistant_entry: entry,
+  assistant_metadata: { assistant_entry_id: entry.id, model: entry.value.Assistant.model, stop_reason: stopReason,
+    usage: { input_tokens: 9, output_tokens: 7, cache_read_tokens: 2, cache_write_tokens: 0, cache_write_1h_tokens: 0, reasoning_tokens: 1, total_tokens: 18 },
+    cost: { input: 9, output: 6, reasoning: 1, cache_read: 2, cache_write: 0, total: 18, total_picodollars_remainder: 0 } },
+  tool_result_entries: results });
 function params(peer, payload, mode = 'Synthetic') {
   const entries = payload.kind === 'model_turn_start' ? [user] : [user, payload.assistant_entry, ...payload.tool_result_entries];
   const head = entries.at(-1).id;
@@ -16,17 +20,21 @@ function params(peer, payload, mode = 'Synthetic') {
 }
 const notification = (peer, prefix) => peer.wait(frame => frame.method === 'notification' && frame.params.message.startsWith(prefix));
 const expected = { disposition: { action: 'continue' }, context: [], notifications: [], session_operation: { action: 'continue' } };
+const issueNotice = frame => frame.method === 'notification' && frame.params.title === '[Extension issues]';
+const committedUsage = { input: 9, output: 7, cacheRead: 2, cacheWrite: 0, totalTokens: 18, reasoning: 1,
+  cost: { input: 9 / 1e6, output: 7 / 1e6, cacheRead: 2 / 1e6, cacheWrite: 0, total: 18 / 1e6 } };
 
 test('per-model hooks carry real iteration and entry timestamps; whole-run notifications stay separate', async t => {
-  const peer = launch(t, [factory]); await peer.init(['session_entries', 'lifecycle_events']);
-  assert.deepEqual(peer.metadata.hooks, ['model_turn_end', 'model_turn_start']);
+  const peer = launch(t, [factory]); await peer.init(['session_entries', 'lifecycle_events']); await peer.start();
+  assert.deepEqual(peer.metadata.hooks, ['before_prompt', 'model_turn_end', 'model_turn_start', 'session_end', 'session_start']);
+  assert.deepEqual(peer.metadata.events, ['agent_end', 'agent_start', 'turn_end', 'turn_start']);
   for (let index = 0; index < 2; index++) {
     assert.deepEqual((await peer.request('hook/run', params(peer, start(index))).response).result, expected);
     assert.equal((await notification(peer, 'model-start:')).params.message, `model-start:${index}:${1050 + index}`);
     const payload = end(); payload.turn_index = index;
     assert.deepEqual((await peer.request('hook/run', params(peer, payload)).response).result, expected);
     const value = JSON.parse((await notification(peer, 'model-end:')).params.message.slice('model-end:'.length));
-    assert.deepEqual(value, { index, message: { role: 'assistant', model: 'native-model', api: 'openai-completions', content: [{ type: 'text', text: 'answer' }], timestamp: 1100 }, tools: [] });
+    assert.deepEqual(value, { index, message: { role: 'assistant', model: 'native-model', api: 'openai-completions', content: [{ type: 'text', text: 'answer' }], timestamp: 1100, usage: committedUsage, stopReason: 'stop' }, tools: [] });
   }
   peer.notify('turn/started', { resource_owner: owner });
   await notification(peer, 'whole-run-start');
@@ -38,27 +46,34 @@ test('per-model hooks carry real iteration and entry timestamps; whole-run notif
 });
 
 test('one durable native tool-result batch supplies every Pi tool result without fabricated entry IDs', async t => {
-  const peer = launch(t, [factory]); await peer.init(['session_entries']);
+  const peer = launch(t, [factory]); await peer.init(['session_entries']); await peer.start();
   const entry = structuredClone(assistant);
   entry.value.Assistant.content.push(...['one', 'two'].map(id => ({ ToolCall: { id, name: `tool-${id}`, arguments_json: '{}' } })));
   const result = { id: 'results', parent: entry.id, timestamp_unix_ms: 1150, value: { type: 'message', User: { content: ['one', 'two'].map(id => ({ ToolResult: { tool_call_id: id, content: [{ Text: `result-${id}` }], is_error: id === 'two' } })) } } };
-  assert.deepEqual((await peer.request('hook/run', params(peer, end(entry, [result]))).response).result, expected);
+  assert.deepEqual((await peer.request('hook/run', params(peer, end(entry, [result], 'tool_use'))).response).result, expected);
   const value = JSON.parse((await notification(peer, 'model-end:')).params.message.slice('model-end:'.length));
+  assert.equal(value.message.stopReason, 'toolUse');
+  assert.deepEqual(value.message.usage, committedUsage);
   assert.deepEqual(value.tools, ['one', 'two'].map(id => ({ role: 'toolResult', toolCallId: id, toolName: `tool-${id}`, content: [{ type: 'text', text: `result-${id}` }], isError: id === 'two', timestamp: 1150 })));
   const missing = structuredClone(result); missing.value.User.content.pop();
-  assert.match((await peer.request('hook/run', params(peer, end(entry, [missing]))).response).error.message, /unsettled tool calls/);
+  // Like Pi, a turn observation that cannot be shown is reported, never a failed turn.
+  assert.deepEqual((await peer.request('hook/run', params(peer, end(entry, [missing], 'tool_use'))).response).result, expected);
+  const issue = await peer.wait(issueNotice);
+  assert.ok(issue.params.message.includes(factory));
+  assert.match(issue.params.message, /turn_end: octet could not convert/);
+  assert.match(issue.params.message, /Next:/);
   await peer.close();
 });
 
 test('model-end preserves the Pi tool details already stored in the durable native result', async t => {
-  const peer = launch(t, [factory]); await peer.init(['session_entries']);
+  const peer = launch(t, [factory]); await peer.init(['session_entries']); await peer.start();
   const entry = structuredClone(assistant);
   entry.value.Assistant.content.push({ ToolCall: { id: 'one', name: 'tool-one', arguments_json: '{}' } });
   for (const details of [{ source: 'actual-tool', nested: [1, false, 'é'] }, null]) {
     const result = { id: 'result', parent: entry.id, timestamp_unix_ms: 1150,
       value: { type: 'message', User: { content: [{ ToolResult: { tool_call_id: 'one', content: [{ Text: 'real result' }], is_error: false } }] } },
       metadata: { tool_output: { metadata: { pi_details: details } } } };
-    assert.deepEqual((await peer.request('hook/run', params(peer, end(entry, [result]))).response).result, expected);
+    assert.deepEqual((await peer.request('hook/run', params(peer, end(entry, [result], 'tool_use'))).response).result, expected);
     const value = JSON.parse((await notification(peer, 'model-end:')).params.message.slice('model-end:'.length));
     assert.deepEqual(value.tools[0].details, details);
   }
@@ -66,7 +81,7 @@ test('model-end preserves the Pi tool details already stored in the durable nati
 });
 
 test('model-end synchronous private append awaits the actual leaf receipt before hook success', async t => {
-  const peer = launch(t, [factory], { hold: ['session/append_entry'] }); await peer.init(['session_entries']);
+  const peer = launch(t, [factory], { hold: ['session/append_entry'] }); await peer.init(['session_entries']); await peer.start();
   const request = peer.request('hook/run', params(peer, end(), 'append'));
   const append = await peer.wait(frame => frame.method === 'session/append_entry');
   assert.deepEqual(append.params.data, { index: 0, text: 'answer' });
@@ -78,19 +93,27 @@ test('model-end synchronous private append awaits the actual leaf receipt before
   await peer.close();
 });
 
-test('turn observations refuse veto, absent native usage, opaque content and missing leaf consumers', async t => {
-  const peer = launch(t, [factory]); await peer.init(['session_entries']);
-  assert.match((await peer.request('hook/run', params(peer, start(), 'veto')).response).error.message, /unsupported_feature turn_start result/);
-  assert.match((await peer.request('hook/run', params(peer, end(), 'usage')).response).error.message, /model turn message.usage/);
+test('turn observations ignore results and report problems once per extension/event; a missing leaf consumer is refused', async t => {
+  const peer = launch(t, [factory]); await peer.init(['session_entries']); await peer.start();
+  // Pi's emit ignores an observation handler's return value.
+  assert.deepEqual((await peer.request('hook/run', params(peer, start(), 'veto')).response).result, expected);
+  // Only explicitly absent native accounting makes this field unavailable.
+  const unavailable = { ...end(), assistant_metadata: null };
+  assert.deepEqual((await peer.request('hook/run', params(peer, unavailable, 'usage')).response).result, expected);
+  const skipped = await peer.wait(issueNotice);
+  assert.ok(skipped.params.message.includes(factory));
+  assert.match(skipped.params.message, /turn_end callback.*API or event field.*not support/);
   const opaque = structuredClone(assistant); opaque.value.Assistant.content.push({ Reasoning: { text: 'reason', state: { secret: 'opaque' } } });
-  assert.match((await peer.request('hook/run', params(peer, end(opaque))).response).error.message, /opaque reasoning/);
+  assert.deepEqual((await peer.request('hook/run', params(peer, end(opaque))).response).result, expected);
+  assert.deepEqual((await peer.request('hook/run', params(peer, unavailable, 'usage')).response).result, expected);
+  assert.equal(peer.seen.filter(issueNotice).length, 1, 'the same extension/event was already reported');
   const noLeaf = params(peer, start()); delete noLeaf.session_leaf;
   assert.match((await peer.request('hook/run', noLeaf).response).error.message, /actual native session_leaf consumer required/);
   await peer.close();
 });
 
 test('cancelled model hook cannot publish a late successful turn reply', async t => {
-  const peer = launch(t, [factory], { hold: ['confirmation/request'] }); await peer.init(['session_entries']);
+  const peer = launch(t, [factory], { hold: ['confirmation/request'] }); await peer.init(['session_entries']); await peer.start();
   const request = peer.request('hook/run', params(peer, start(), 'wait'));
   const barrier = await peer.wait(frame => frame.method === 'confirmation/request');
   peer.notify('$/cancelRequest', { id: request.id });

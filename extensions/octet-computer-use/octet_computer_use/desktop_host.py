@@ -33,12 +33,14 @@ SIGNING_REQUIREMENT = (
 
 
 def _download(url: str, destination: Path, limit: int) -> str:
+    driver._check_cancelled()
     digest = hashlib.sha256()
     size = 0
     deadline = time.monotonic() + DOWNLOAD_TIMEOUT_SECONDS
     with urllib.request.urlopen(url, timeout=20) as response, destination.open("xb") as output:
         destination.chmod(0o600)
         while True:
+            driver._check_cancelled()
             if time.monotonic() >= deadline:
                 raise driver.ProvisionError("signed Cua app download timed out")
             chunk = response.read(65536)
@@ -49,6 +51,7 @@ def _download(url: str, destination: Path, limit: int) -> str:
                 raise driver.ProvisionError("signed Cua app download exceeds its size limit")
             digest.update(chunk)
             output.write(chunk)
+    driver._check_cancelled()
     return digest.hexdigest()
 
 
@@ -58,6 +61,7 @@ def _extract_app(archive: Path, destination: Path, version: str) -> Path:
     count = 0
     with tarfile.open(archive, "r|gz") as source:
         for member in source:
+            driver._check_cancelled()
             count += 1
             if count > 4096:
                 raise driver.ProvisionError("signed Cua app archive has too many members")
@@ -126,9 +130,8 @@ def provision(
 
     driver._ensure_directories(paths)
     directory = paths.root / "desktop"
+    driver._reject_link(directory)
     directory.mkdir(mode=0o700, exist_ok=True)
-    if directory.is_symlink():
-        raise driver.ProvisionError("Cua desktop host directory must not be a symlink")
     destination = directory / "CuaDriver.app"
     if destination.is_symlink():
         raise driver.ProvisionError("Cua desktop host destination must not be a symlink")
@@ -145,12 +148,13 @@ def provision(
             digest = asset["sha256"]
             size = asset["bytes"]
             if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                    or not isinstance(size, int) or not 0 < size <= MAX_ARCHIVE_BYTES):
+                    or type(size) is not int or not 0 < size <= MAX_ARCHIVE_BYTES):
                 raise ValueError("invalid archive metadata")
         except (KeyError, TypeError, ValueError, StopIteration) as error:
             raise driver.ProvisionError("Cua release manifest does not describe its signed app") from error
         archive = staging / "host.tar.gz"
-        if _download(release + "/" + archive_name, archive, size) != digest:
+        if (_download(release + "/" + archive_name, archive, size) != digest
+                or archive.stat().st_size != size):
             raise driver.ProvisionError("signed Cua app archive checksum mismatch")
         report("Verifying the signed Cua desktop host…")
         try:
@@ -162,6 +166,7 @@ def provision(
             raise driver.ProvisionError("signed Cua app does not match the provisioned driver version")
         # Replace only octet-owned state, retaining the old app until validation
         # succeeds and rolling its rename back if the final handoff fails.
+        driver._check_cancelled()
         previous = staging / "previous.app"
         if destination.exists():
             destination.rename(previous)

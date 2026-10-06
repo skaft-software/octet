@@ -1,24 +1,39 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 export const root = fileURLToPath(new URL('../', import.meta.url));
 export const owner = { session_id: 'host-issued-owner', extension_instance_id: 'host-issued-instance', process_generation: 2 };
-export const host = { session_id: 'actual-session', session_name: 'Synthetic', model: 'test-model', model_view: { id: 'test-model', name: 'Test Model', api: 'openai-responses', provider: 'test', reasoning: false, input: ['text'], context_window: 32768, max_tokens: 1024, cost: { input: 1000000, output: 2000000, cache_read: 100000, cache_write: 200000 } }, reasoning: null, active_skills: [] };
+import { TUI_KEYBINDINGS } from '../node_modules/@earendil-works/pi-tui/dist/keybindings.js';
+const keybindings = Object.fromEntries(Object.entries(TUI_KEYBINDINGS).map(([action, definition]) => [action, Array.isArray(definition.defaultKeys) ? definition.defaultKeys : [definition.defaultKeys]]));
+Object.assign(keybindings, { 'app.clipboard.pasteImage': ['ctrl+v'], 'app.interrupt': ['escape'], 'app.exit': ['ctrl+d'], 'app.clear': ['ctrl+c'], 'app.message.followUp': ['ctrl+s'] });
+export const host = { keybindings, session_id: 'actual-session', session_name: 'Synthetic', model: 'test-model', model_view: { id: 'test-model', name: 'Test Model', api: 'openai-responses', provider: 'test', reasoning: false, input: ['text'], context_window: 32768, max_tokens: 1024, cost: { input: 1000000, output: 2000000, cache_read: 100000, cache_write: 200000 } }, reasoning: null, active_skills: [] };
 export function inspect(extensions) {
   const result = spawnSync(process.execPath, [join(root, 'runner.mjs'), '--inspect', ...extensions], { encoding: 'utf8', timeout: 10000, maxBuffer: 1048576 });
   assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout).result;
 }
 export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], options = {}) {
-  const metadata = inspect(extensions);
+  const metadata = options.metadata ?? inspect(extensions);
   const child = spawn(process.execPath, [options.runner || join(root, 'runner.mjs'), ...(options.config ? ['--config', options.config] : extensions)], { cwd: options.cwd || root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...options.env } });
   let stderr = '', next = 1;
   const queue = [], waiters = [], seen = [], editors = new Map();
   child.stderr.on('data', b => { stderr = (stderr + b).slice(-65536); });
   child.stdin.on('error', () => {});
-  createInterface({ input: child.stdout }).on('line', line => {
+  // JSON-RPC is LF-delimited. Node 26 readline also splits U+2028/U+2029,
+  // which are valid data inside a JSON string, not protocol frame boundaries.
+  let stdout = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => {
+    stdout += chunk;
+    let end;
+    while ((end = stdout.indexOf('\n')) >= 0) {
+      const line = stdout.slice(0, end);
+      stdout = stdout.slice(end + 1);
+      receive(line);
+    }
+  });
+  function receive(line) {
     let frame;
     try { frame = JSON.parse(line); } catch { assert.fail(`protocol stdout corrupted: ${line.slice(0, 200)}`); }
     seen.push(frame); if (seen.length > 128) seen.shift();
@@ -38,7 +53,7 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
         const { input_revision, checkpoint_revision } = frame.params.editor_checkpoint;
         result = { input_revision, checkpoint_revision };
       }
-      else if (['ui/close', 'composer/set', 'composer/insert', 'session/set_name', 'shortcut/register', 'session/set_label', 'session/send_user_message', 'session/send_message', 'tools/set_active'].includes(frame.method)) result = {};
+      else if (['ui/close', 'composer/set', 'composer/insert', 'composer/history', 'session/set_name', 'shortcut/register', 'session/set_label', 'session/send_user_message', 'session/send_message', 'tools/set_active'].includes(frame.method)) result = {};
       if (result !== undefined) send({ jsonrpc: '2.0', id: frame.id, result });
     }
     const at = waiters.findIndex(w => w.match(frame));
@@ -47,7 +62,7 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
       if (frame.method === 'ui/frame') { const old = queue.findIndex(f => f.method === 'ui/frame' && f.params.surface_id === frame.params.surface_id); if (old >= 0) queue.splice(old, 1); }
       queue.push(frame); if (queue.length > 128) queue.shift();
     }
-  });
+  }
   t.after(() => { child.kill(); for (const w of waiters.splice(0)) { clearTimeout(w.timer); w.reject(new Error('test ended')); } });
   function send(frame) { child.stdin.write(JSON.stringify(frame) + '\n'); }
   function wait(match, timeout = 7000) {

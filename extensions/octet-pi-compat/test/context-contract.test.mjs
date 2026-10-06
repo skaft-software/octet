@@ -1,16 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Runtime } from '../lib/runtime.mjs';
+import { createContext } from '../lib/api.mjs';
 import { contextFacts, getSettings, transformInput } from '../lib/context-api.mjs';
 import { projectContext } from '../lib/provider-context.mjs';
 import { owner } from './helper.mjs';
 
 function harness(method = 'hook/run', host = {}) {
-  const runtime = new Runtime({ extensions: [] }, { notify: async () => {} });
+  const errors = [];
+  const runtime = new Runtime({ extensions: ['/reviewed/first.ts', '/reviewed/second.ts'] }, {
+    notify: async (method, params) => { if (method === 'notification') errors.push(params); },
+  });
   runtime.uninstallChildren(); // This harness does not exercise the child facade.
-  const errors = []; runtime.backgroundError = error => errors.push(error);
+  runtime.backgroundError = error => errors.push(error);
   const store = { id: 1, method, controller: new AbortController(), pending: new Set(), errors: [], live: true };
-  runtime.bind({ context: { workspace: '/actual', resource_owner: owner, host } }, store);
+  runtime.bind({ context: { workspace: '/actual', resource_owner: owner, host } }, store, { foreground: true });
   return { runtime, store, errors };
 }
 const image = { Image: { source: { Inline: 'eA==' }, media_type: 'image/png', detail: null } };
@@ -36,7 +40,8 @@ test('ordinary input handler errors continue without leaking the input', async (
   runtime.events.set('input', [{ factory: 0, handler: () => { throw Error('secret input'); } },
     { factory: 1, handler: () => ({ action: 'transform', text: 'survived' }) }]);
   assert.deepEqual(await transformInput(runtime, input, store), { action: 'transform', text: 'survived', images: [image] });
-  assert.equal(errors.length, 1); assert.doesNotMatch(errors[0].message, /secret input/);
+  assert.equal(errors.length, 1); assert.equal(errors[0].title, '[Extension issues]');
+  assert.match(errors[0].message, /input callback failed/); assert.doesNotMatch(errors[0].message, /secret input/);
 });
 test('input snapshots handlers once; unsubscribe does not alter an active dispatch', async () => {
   const { runtime, store } = harness(); let second = false;
@@ -49,6 +54,53 @@ test('image replacement uses real canonical image bytes and MIME type', async ()
   runtime.events.set('input', [{ factory: 0, handler: () => ({ action: 'transform', text: 'image', images: [{ type: 'image', data: 'eQ==', mimeType: 'image/jpeg' }] }) }]);
   assert.deepEqual(await transformInput(runtime, input, store), { action: 'transform', text: 'image', images: [{ Image: { source: { Inline: 'eQ==' }, media_type: 'image/jpeg', detail: null } }] });
 });
+test('session directory derives only from the authoritative native session file', () => {
+  const { runtime, store } = harness();
+  const manager = createContext(runtime, store).sessionManager;
+  assert.throws(() => manager.getSessionDir(), /session_file snapshot not supplied/);
+  store.state.host.session_file = null;
+  assert.throws(() => manager.getSessionDir(), /no persistent session directory/);
+  store.state.host.session_file = '/actual/native-sessions/session.jsonl';
+  assert.equal(manager.getSessionDir(), '/actual/native-sessions');
+  assert.equal(manager.getSessionFile(), '/actual/native-sessions/session.jsonl');
+  store.state.alive = false;
+  assert.throws(() => manager.getSessionDir(), /not_foreground_owner/);
+});
+
+test('hasUI respects the native frontend consumer as well as negotiated support', () => {
+  const { runtime, store } = harness('hook/run', { has_ui: false });
+  runtime.features.add('remote_ui');
+  const ctx = createContext(runtime, store);
+  assert.equal(ctx.hasUI, false);
+  store.state.host.has_ui = true;
+  assert.equal(ctx.hasUI, true);
+  runtime.features.delete('remote_ui');
+  assert.equal(ctx.hasUI, false);
+});
+
+test('observation failures report the factory and continue without weakening veto or owner fences', async () => {
+  const { runtime, store, errors } = harness();
+  runtime.config.extensions = ['/reviewed/broken.ts', '/reviewed/kept.ts'];
+  const failure = Object.assign(new Error('unsupported_feature ctx.missing: private text'), { code: -32601 });
+  let kept = 0;
+  const handlers = [{ factory: 0, handler() { throw failure; } }, { factory: 1, handler() { kept++; } }];
+  runtime.events.set('turn_start', handlers);
+  assert.deepEqual(await runtime.runEvent('turn_start', {}, store), { action: 'continue' });
+  assert.equal(kept, 1);
+  assert.equal(errors[0].title, '[Extension issues]');
+  assert.ok(errors[0].message.includes('/reviewed/broken.ts'));
+  assert.match(errors[0].message, /turn_start callback.*API or event field.*not support/);
+  assert.match(errors[0].message, /Next:/);
+  assert.doesNotMatch(errors[0].message, /private text|ctx\.missing/);
+  runtime.events.set('tool_call', handlers);
+  await assert.rejects(runtime.runEvent('tool_call', {}, store, { veto: true }), error => error === failure);
+  handlers[0].handler = () => { throw Object.assign(new Error('owner lost'), { code: -32002 }); };
+  await assert.rejects(runtime.runEvent('turn_start', {}, store), /owner lost/);
+  handlers[0].handler = () => { store.controller.abort(); throw new Error('ordinary error'); };
+  await assert.rejects(runtime.runEvent('turn_start', {}, store), /abort/i);
+  assert.equal(kept, 1);
+});
+
 test('facts refuse absent snapshots and preserve false project trust', () => {
   const { runtime, store } = harness('command/execute');
   const facts = contextFacts(runtime, store);

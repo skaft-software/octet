@@ -1174,7 +1174,7 @@ fn markdown_projection_collapses_stacked_blank_lines_but_preserves_fences() {
 }
 
 #[test]
-fn user_prompt_is_a_native_card_tern_sizes_at_any_width() {
+fn user_prompt_is_a_left_aligned_native_card_tern_sizes_at_any_width() {
     for cols in [60, 200] {
         let (mut shell, mut surface, _) = setup(2);
         shell.set_size(cols, 20);
@@ -1192,13 +1192,75 @@ fn user_prompt_is_a_native_card_tern_sizes_at_any_width() {
         assert_eq!(card.k, Kind::Card, "{cols}");
         let props = card.p.as_ref().unwrap().as_map();
         assert_eq!(props["tone"], "user");
-        assert_eq!(props["role"], "omp.user");
+        assert_eq!(props["role"], "octet.user");
+        assert_eq!(props["max"]["w"], 1.0);
         let body = find_node(&surface.sent.main, &id(identity, "user.body")).unwrap();
         assert_eq!(body.k, Kind::Md, "{cols}");
         let text = body.p.as_ref().unwrap().as_map()["text"].as_str().unwrap();
         assert_eq!(text, "hey what's **octet**?");
         assert!(!text.contains('\u{1b}'), "{text:?}");
     }
+}
+
+#[test]
+fn working_stays_above_queued_input_through_active_phases_until_settlement() {
+    use crate::presentation::RunPhase;
+    use crate::tui::view::ComposedInput;
+
+    let (mut shell, mut surface, output) = setup(2);
+    let run = shell.begin_run("fixture");
+    shell.queue_steering(&ComposedInput::from_text("steer".into()));
+    shell.queue_follow_up(ComposedInput::from_text("follow up".into()));
+    for (index, phase) in [
+        RunPhase::Preparing {
+            summary: "Preparing".into(),
+        },
+        RunPhase::AwaitingProvider {
+            provider: "fixture".into(),
+        },
+        RunPhase::Thinking,
+        RunPhase::StreamingResponse,
+        RunPhase::PreparingToolCall,
+        RunPhase::RunningTool {
+            summary: "Bash".into(),
+        },
+        RunPhase::AwaitingApproval {
+            prompt: "Approval required".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        shell.state.borrow_mut().run.set_phase(run, phase);
+        surface.flush(&shell.state).unwrap();
+        let children = find_node(&surface.sent.dock, "dock.content")
+            .unwrap()
+            .c
+            .as_ref()
+            .unwrap();
+        let work = children.iter().position(|node| node.id == "work").unwrap();
+        let pending = children
+            .iter()
+            .position(|node| node.id == "pending")
+            .unwrap();
+        let composer = children
+            .iter()
+            .position(|node| node.id == "composer")
+            .unwrap();
+        assert!(work < pending && pending < composer);
+        if index > 0 {
+            assert!(!output.last_frame()["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|op| op[0] == "del" && op[1] == "work"));
+        }
+        ack(&shell, (index + 1) as u64);
+    }
+    shell.interrupt_run(run);
+    surface.flush(&shell.state).unwrap();
+    assert!(find_node(&surface.sent.dock, "work").is_none());
+    assert!(find_node(&surface.sent.dock, "pending").is_some());
 }
 
 #[test]
@@ -1721,7 +1783,8 @@ fn native_agents_keep_one_retained_transcript_with_authoritative_live_token_line
         assert!(!node.id.contains("subagent"), "no duplicate dock roster");
     });
     let transcript = find_node(&surface.sent.main, &root_id).unwrap();
-    assert_eq!(transcript.k, Kind::Row);
+    assert_eq!(transcript.k, Kind::Card);
+    assert_eq!(transcript.p.as_ref().unwrap().as_map()["variant"], "bare");
     assert_eq!(
         transcript.p.as_ref().unwrap().as_map()["role"],
         "octet.subagents"
@@ -1742,9 +1805,14 @@ fn native_agents_keep_one_retained_transcript_with_authoritative_live_token_line
             .as_map()["spans"][0]["t"],
         "Inspect"
     );
-    assert!(find_node(&surface.sent.main, &id(identity, "subagents.stop")).is_some());
+    assert!(serde_json::to_string(transcript)
+        .unwrap()
+        .contains("stop: /subagents stop all"));
     walk(std::slice::from_ref(transcript), &mut |node| {
-        assert!(matches!(node.k, Kind::Row | Kind::Col | Kind::Text));
+        assert!(matches!(
+            node.k,
+            Kind::Card | Kind::Row | Kind::Col | Kind::Text
+        ));
         let props = node.p.as_ref().unwrap().as_map();
         for forbidden in ["model", "cost", "stats", "prompt", "tool", "age", "took"] {
             assert!(
@@ -1812,19 +1880,89 @@ fn native_agents_keep_one_retained_transcript_with_authoritative_live_token_line
     assert!(serde_json::to_string(settled)
         .unwrap()
         .contains("1 completed"));
-    let marker = find_node(&surface.sent.main, &id(identity, "subagents.marker")).unwrap();
-    assert_eq!(
-        marker.p.as_ref().unwrap().as_map()["spans"][0]["s"],
-        "success"
-    );
-    assert!(marker.p.as_ref().unwrap().as_map()["spans"][0]
-        .get("fx")
-        .is_none());
+    let marker = &settled.p.as_ref().unwrap().as_map()["head"][0];
+    assert_eq!(marker["s"], "success");
+    assert!(marker.get("fx").is_none());
+    assert!(!serde_json::to_string(settled)
+        .unwrap()
+        .contains("stop: /subagents stop all"));
     assert!(!output.last_frame()["ops"]
         .as_array()
         .unwrap()
         .iter()
         .any(|op| matches!(op[0].as_str(), Some("add" | "del")) && op[1] == root_id));
+}
+
+#[test]
+fn transcript_extension_snapshots_feed_native_ansi_and_markdown_without_changing_sources() {
+    use octet_agent::extension_process::{
+        ExtensionResourceOwner, TranscriptRenderContent, TranscriptRenderResponse,
+    };
+    let (mut shell, mut surface, _) = setup(8);
+    let owner = ExtensionResourceOwner {
+        session_id: "session".into(),
+        extension_instance_id: "renderer".into(),
+        process_generation: 1,
+    };
+    shell.set_transcript_render_owners(vec![owner.clone()]);
+    shell.append_custom_transcript_message(
+        &octet_agent::EntryId("actual-entry".into()),
+        &octet_agent::session::CustomMessage {
+            custom_type: "test".into(),
+            content: octet_agent::session::CustomMessageContent::Text("canonical notice".into()),
+            display: true,
+            details: Some(json!({"n":5})),
+        },
+        123,
+    );
+    shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Assistant(Box::new(
+            AssistantBlock::finalized("canonical markdown".into()),
+        )));
+    for candidate in shell.transcript_render_candidates() {
+        let response = match candidate.render {
+            TranscriptRenderContent::Message { .. } => TranscriptRenderResponse {
+                registered: true,
+                lines: Some(vec!["\x1b[32mCUSTOM ANSI\x1b[0m".into()]),
+                markdown: None,
+                render_shell: None,
+            },
+            TranscriptRenderContent::Markdown { .. } => TranscriptRenderResponse {
+                registered: true,
+                lines: None,
+                markdown: Some("**TRANSFORMED MARKDOWN**".into()),
+                render_shell: None,
+            },
+            _ => unreachable!(),
+        };
+        assert!(shell.accept_transcript_render(&candidate, owner.clone(), response));
+    }
+    surface.flush(&shell.state).unwrap();
+    let mut ansi = false;
+    let mut markdown = false;
+    walk(&surface.sent.main, &mut |node| {
+        if let Some(text) = node
+            .p
+            .as_ref()
+            .and_then(|props| props.as_map().get("text"))
+            .and_then(serde_json::Value::as_str)
+        {
+            ansi |= node.k == Kind::Ansi && text.contains("CUSTOM ANSI");
+            markdown |= node.k == Kind::Md && text.contains("TRANSFORMED MARKDOWN");
+        }
+    });
+    assert!(ansi && markdown);
+    assert!(
+        matches!(&shell.state.borrow().transcript[1], TranscriptBlock::Assistant(block) if block.text == "canonical markdown")
+    );
+    shell.set_size(60, 30);
+    surface.flush(&shell.state).unwrap();
+    let snapshot = serde_json::to_string(&surface.sent.main).unwrap();
+    assert!(!snapshot.contains("CUSTOM ANSI"));
+    assert!(!snapshot.contains("TRANSFORMED MARKDOWN"));
+    assert!(snapshot.contains("canonical markdown"));
 }
 
 #[path = "tern_rail_tests.rs"]

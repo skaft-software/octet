@@ -1,7 +1,8 @@
 // Opt-in "installed Pi" runtime (path B). Path A (the default) aliases Pi
 // package names to Octet's shims. Path B is selected only by an explicit
-// `pi_runtime: "installed"` bridge field or `--pi-runtime installed`, after the
-// host obtained the user's approval. It never activates implicitly.
+// `pi_runtime: "installed"` bridge field, `--pi-runtime installed`, or a
+// per-extension route recorded by `--from-pi --reviewed`. Setup requires explicit
+// authorization to run the enabled Pi factories and fallback imports.
 //
 // Path B keeps every Octet shim export (shim names always win, so the host
 // boundary for sessions, providers, UI, settings, tools and the `pi` object is
@@ -241,14 +242,26 @@ function resolveRelative(from, specifier) {
   }
   return null;
 }
+// Detect direct execution as well as a saved execute callback. These factories
+// can load successfully with child-only shims until a later branch runs. This is
+// a bounded source heuristic, not execution qualification or a sandbox.
+function directlyUsesToolExecution(text, binding) {
+  const escaped = binding.replace(/\$/g, '\\$');
+  if (new RegExp(`\\b${escaped}\\s*\\([^;]*?\\)\\s*\\.\\s*execute\\b`).test(text)) return true;
+  const assigned = new RegExp(`\\b(?:const|let|var)\\s+([\\w$]+)(?:\\s*:[^=;\\n]+)?\\s*=\\s*${escaped}\\s*\\(`, 'g');
+  for (const [, name] of text.matchAll(assigned)) {
+    if (new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\s*\\.\\s*execute\\b`).test(text)) return true;
+  }
+  return false;
+}
+
 // Static scan of the entry and its relative-import closure for named imports
-// of Pi packages that the shims do not export, or export only as path A
-// refusals (REAL_OVERRIDES). Heuristic and bounded; it runs
-// only after path A already failed, and only classifies that failure.
+// the shims lack/refuse, plus direct execution of child-only tool factories.
+// Used before shim factory activation and to classify other load failures.
 export async function scanPiImportGaps(entry, jiti) {
   const shimNames = {};
   for (const key of Object.keys(PACKAGES)) shimNames[key] = new Set(Object.keys(await jiti.import(shimPath(key))));
-  const missing = [], subpaths = [], seen = new Set(), queue = [entry];
+  const missing = [], subpaths = [], directTools = [], seen = new Set(), queue = [entry];
   while (queue.length && seen.size < MAX_FILES) {
     const file = queue.shift(); if (seen.has(file)) continue; seen.add(file);
     let text;
@@ -263,8 +276,13 @@ export async function scanPiImportGaps(entry, jiti) {
       if (!braces) continue;
       for (let item of braces[1].split(',')) {
         item = item.trim(); if (!item || /^type\s/.test(item)) continue;
-        const name = item.split(/\s+as\s+/)[0].trim();
-        if (/^[\w$]+$/.test(name) && name !== 'default' && (!shimNames[pi.key].has(name) || REAL_OVERRIDES[pi.key].has(name))) missing.push({ specifier: m[4], name, file });
+        const [name, local = name] = item.split(/\s+as\s+/).map(value => value.trim());
+        if (/^[\w$]+$/.test(name) && name !== 'default' && (!shimNames[pi.key].has(name) || REAL_OVERRIDES[pi.key].has(name))) {
+          const gap = { specifier: m[4], name, file };
+          missing.push(gap);
+          if (m[1] === 'import' && REAL_OVERRIDES[pi.key].has(name) && /^[\w$]+$/.test(local)
+              && directlyUsesToolExecution(text, local)) directTools.push(gap);
+        }
       }
     }
     for (const m of text.matchAll(/\b(?:import|require)\s*\(\s*['"]([^'"\n]+)['"]\s*\)|\bimport\s+['"]([^'"\n]+)['"]/g)) specifiers.push(m[1] ?? m[2]);
@@ -275,7 +293,7 @@ export async function scanPiImportGaps(entry, jiti) {
     }
   }
   const unique = list => [...new Map(list.map(x => [JSON.stringify(x), x])).values()].slice(0, MAX_REPORTED);
-  return { missing: unique(missing), subpaths: unique(subpaths) };
+  return { missing: unique(missing), subpaths: unique(subpaths), direct_tools: unique(directTools) };
 }
 // Returns the error to throw for a path A load failure: the original error
 // unchanged unless the scan found Pi exports the shims lack.

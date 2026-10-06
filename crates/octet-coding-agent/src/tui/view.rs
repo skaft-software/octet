@@ -1,5 +1,8 @@
 #![allow(missing_docs)]
 
+#[cfg(test)]
+mod desktop_notification_tests;
+
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write as IoWrite};
@@ -986,6 +989,8 @@ pub(crate) enum PanelAction {
     SelectSession(Vec<std::path::PathBuf>),
     /// Select a thinking level.
     SelectThinking(Vec<crate::config::ThinkingLevel>),
+    /// Select a terminal theme without suspending an active run.
+    SelectTheme { keys: Vec<String>, previews: Arc<[OctetTheme]> },
     /// Select a reasoning execution mode.
     SelectReasoningMode(Vec<octet_ai::ReasoningMode>),
     /// Select an installed executable-extension bundle.
@@ -1223,7 +1228,6 @@ pub(crate) struct PendingExtensionMessage {
     pub(crate) context_only: bool,
 }
 
-#[derive(Default)]
 pub(crate) struct ShellState {
     render_revision: u64,
     transcript_semantic_revision: u64,
@@ -1356,6 +1360,7 @@ pub(crate) struct ShellState {
     /// Cached wrapped transcript lines. Scrolling only slices this cache, and
     /// streaming updates re-render only the changed block.
     transcript_cache: RefCell<TranscriptCache>,
+    extension_transcript: transcript_extensions::State,
     transcript_navigation: RefCell<transcript_navigation::TranscriptNavigation>,
     /// Persistent rich renderers: their syntax caches survive token updates.
     rich_renderer: RefCell<Option<RichRenderer>>,
@@ -1407,6 +1412,8 @@ pub(crate) struct ShellState {
     /// Current host-projected extension UI. It contains only semantic text and
     /// finite roles; rendering remains owned by the shell theme and layout.
     extension_ui: ShellExtensionUi,
+    /// Bounded one-shot intents, drained only by the owning renderer.
+    desktop_notifications: Vec<(String, String)>,
     /// One bounded extension autocomplete result awaiting explicit host accept.
     extension_autocomplete: Option<ShellAutocompleteOverlay>,
     /// Native selection, fenced to the same draft revision as the overlay.
@@ -1542,6 +1549,12 @@ pub(crate) struct ShellState {
     /// than terminal construction or time spent in onboarding. It remains
     /// mutable until the first real conversation block.
     startup_card_started_at: Option<Instant>,
+}
+
+impl Default for ShellState {
+    fn default() -> Self {
+        Self::with_theme(OctetTheme::default())
+    }
 }
 
 const STATUS_RAINBOW_DURATION: Duration = Duration::from_secs(2);
@@ -1699,6 +1712,165 @@ fn navigate_prompt_history(state: &mut ShellState, action: &EditAction) -> bool 
 }
 
 impl ShellState {
+    /// Initialize a shell with an already-resolved theme, without rediscovering
+    /// terminal capabilities or constructing a default theme to discard.
+    pub(crate) fn with_theme(theme: OctetTheme) -> Self {
+        Self {
+            render_revision: Default::default(),
+            transcript_semantic_revision: Default::default(),
+            render_geometry: Default::default(),
+            render_threaded: Default::default(),
+            rendered_animation_addressability: Default::default(),
+            panel_epoch: Default::default(),
+            overlay_epoch: Default::default(),
+            native_keys: Default::default(),
+            pending_panel_document_top: Default::default(),
+            painted_panel: Default::default(),
+            painted_report: Default::default(),
+            #[cfg(test)]
+            render_gate: Default::default(),
+            render_publication: Default::default(),
+            available_update: Default::default(),
+            late_update_notice: Default::default(),
+            panel: Default::default(),
+            pending_panel_requests: Default::default(),
+            picker_selection: Default::default(),
+            message_picker_selection: Default::default(),
+            theme,
+            safe_mode: Default::default(),
+            show_cache_miss_notices: Default::default(),
+            image_rendering: Default::default(),
+            image_registry: Default::default(),
+            terminal_images: Default::default(),
+            tool_image_budget: Default::default(),
+            theme_epoch: Default::default(),
+            transcript_epoch: Default::default(),
+            transcript_commit_ids: Default::default(),
+            next_transcript_commit_id: Default::default(),
+            model_lab: Default::default(),
+            prompt_color: Default::default(),
+            transcript: Default::default(),
+            event_dot_visible: Default::default(),
+            event_spinner_frame: Default::default(),
+            status_shimmer_frame: Default::default(),
+            active_event_blocks: Default::default(),
+            native_animation_viewport_top: Default::default(),
+            deferred_session_history: Default::default(),
+            history_prepended: Default::default(),
+            block_revisions: Default::default(),
+            steering_queue: Default::default(),
+            follow_up_queue: Default::default(),
+            next_pending_sequence: Default::default(),
+            follow_up_ready: Default::default(),
+            extension_messages: Default::default(),
+            next_turn_messages: Default::default(),
+            follow_up_session: Default::default(),
+            parked_follow_ups: Default::default(),
+            prompt_history: Default::default(),
+            prompt_history_navigation: Default::default(),
+            ledger: Default::default(),
+            input_modalities: Default::default(),
+            workspace: Default::default(),
+            file_index: Default::default(),
+            file_index_scanning: Default::default(),
+            file_index_generation: Default::default(),
+            file_index_tx: Default::default(),
+            file_index_rx: Default::default(),
+            file_index_ready: Default::default(),
+            path_selection: Default::default(),
+            transcript_cache: Default::default(),
+            extension_transcript: Default::default(),
+            transcript_navigation: Default::default(),
+            rich_renderer: Default::default(),
+            reasoning_renderer: Default::default(),
+            editor: Default::default(),
+            composer_editor_cache: Default::default(),
+            composer_preferred_column: Default::default(),
+            tool_input_revision: Default::default(),
+            tool_input_prompt: Default::default(),
+            tool_input_epoch: Default::default(),
+            tool_input_editor: Default::default(),
+            tool_input_overflowed: Default::default(),
+            close_requested: Default::default(),
+            prompt_templates: Default::default(),
+            skill_commands: Default::default(),
+            extension_commands: Default::default(),
+            subagent_activity: Default::default(),
+            subagent_committed_costs: Default::default(),
+            hidden_subagent_calls: Default::default(),
+            hidden_hydrated_subagent_calls: Default::default(),
+            hydrated_pending_subagent_calls: Default::default(),
+            slash_selection: Default::default(),
+            slash_scroll: Default::default(),
+            slash_popup_dismissed: Default::default(),
+            extension_ui: Default::default(),
+            desktop_notifications: Default::default(),
+            extension_autocomplete: Default::default(),
+            extension_autocomplete_selection: Default::default(),
+            status_detail: Default::default(),
+            error: Default::default(),
+            overlay: Default::default(),
+            tool_panels: Default::default(),
+            activity_groups: Default::default(),
+            pending_activity_groups: Default::default(),
+            active_text: Default::default(),
+            provisional_blocks: Default::default(),
+            active_reasoning: Default::default(),
+            application_viewport_requested: Default::default(),
+            scroll_from_bottom: Default::default(),
+            viewport_anchor: Default::default(),
+            follow_tail: Default::default(),
+            new_output_count: Default::default(),
+            transcript_selection: Default::default(),
+            pending_selection_anchor: Default::default(),
+            selection_dragging: Default::default(),
+            copy_buffer: Default::default(),
+            context_estimate: Default::default(),
+            last_turn_usage: Default::default(),
+            last_turn_tokens_per_second: Default::default(),
+            last_turn_generated_tokens: Default::default(),
+            turn_generation_started_at: Default::default(),
+            turn_requested_at: Default::default(),
+            last_turn_first_token: Default::default(),
+            last_turn_provider_elapsed: Default::default(),
+            last_turn_inference: Default::default(),
+            tool_durations: Default::default(),
+            turn_streamed_output_bytes: Default::default(),
+            turn_output_tokens_before_generation: Default::default(),
+            session_cost_microdollars: Default::default(),
+            usage_uncertain: Default::default(),
+            max_session_cost_microdollars: Default::default(),
+            cache_hit_rate_basis_points: Default::default(),
+            run_cost_microdollars: Default::default(),
+            run_cost_available: Default::default(),
+            run: Default::default(),
+            session_work_elapsed: Default::default(),
+            provider: Default::default(),
+            model: Default::default(),
+            model_display: Default::default(),
+            model_compact_names: Default::default(),
+            run_model: Default::default(),
+            run_model_lab: Default::default(),
+            run_prompt_color: Default::default(),
+            run_model_display: Default::default(),
+            run_model_compact_names: Default::default(),
+            run_reasoning: Default::default(),
+            run_price_display: Default::default(),
+            run_context_estimate: Default::default(),
+            telemetry_model: Default::default(),
+            price_display: Default::default(),
+            latest_compaction_summary: Default::default(),
+            reasoning: Default::default(),
+            session_name: Default::default(),
+            run_label: Default::default(),
+            verbose_tools: Default::default(),
+            size: Default::default(),
+            resize_epoch: Default::default(),
+            startup_pending: Default::default(),
+            startup_card_started_at: Default::default(),
+        }
+    }
+
     pub(crate) fn begin_tool_input(&mut self, prompt: &str, secret: bool) {
         self.tool_input_epoch = self.tool_input_epoch.saturating_add(1);
         self.tool_input_prompt = Some(sanitize_for_terminal(prompt));
@@ -1826,13 +1998,13 @@ impl ShellState {
             .iter()
             .enumerate()
             .filter_map(|(index, block)| {
-                matches!(
+                (matches!(
                     block,
                     TranscriptBlock::Reasoning(_)
                         | TranscriptBlock::Compaction(_)
                         | TranscriptBlock::Tool(_)
                         | TranscriptBlock::Shell(_)
-                )
+                ) || self.extension_transcript.frames.contains_key(&self.transcript_commit_ids[index]))
                 .then_some(index)
             })
             .collect::<Vec<_>>();
@@ -2262,6 +2434,11 @@ impl ShellState {
     }
 
     fn touch_block(&mut self, index: usize) {
+        self.extension_transcript.touch_source(self.transcript_commit_ids[index]);
+        self.touch_presentation_block(index);
+    }
+
+    fn touch_presentation_block(&mut self, index: usize) {
         self.transcript_semantic_revision = self.transcript_semantic_revision.wrapping_add(1);
         self.render_publication.touch(index);
         if let Some(revision) = self.block_revisions.get_mut(index) {
@@ -2974,7 +3151,7 @@ impl ShellState {
             })
             .collect::<Vec<_>>();
         for index in active {
-            self.touch_block(index);
+            self.touch_presentation_block(index);
         }
     }
 
@@ -3008,7 +3185,7 @@ impl ShellState {
                 _ => false,
             };
             if visible && self.animation_block_is_addressable(index) {
-                self.touch_block(index);
+                self.touch_presentation_block(index);
             }
         }
     }
@@ -3412,6 +3589,11 @@ pub struct InteractiveShell {
     /// Shared with the one input stream: while set, the host reads no raw bytes
     /// because an extension grant owns the terminal.
     terminal_ceded: Arc<AtomicBool>,
+    /// Exact display discovery/configuration roots, retained by the input owner
+    /// only; never cloned into renderer publications.
+    runtime_config: Option<Config>,
+    theme_preview: Option<(OctetTheme, Option<usize>)>,
+    extension_themes: RefCell<Option<Vec<(String, OctetTheme)>>>,
     /// Best-effort Herdr pane lifecycle reporting. Inert outside Herdr.
     herdr: crate::herdr::PaneReporter,
 }
@@ -3436,7 +3618,6 @@ impl InteractiveShell {
         let image_capabilities = terminal.image_capabilities();
         let initial_size = *size.lock().expect("terminal size mutex poisoned");
         let state = SharedState::new(ShellState {
-            theme,
             size: initial_size,
             follow_tail: true,
             application_viewport_requested: capture_mouse,
@@ -3446,7 +3627,7 @@ impl InteractiveShell {
                 capabilities: image_capabilities,
             },
             terminal_images: image_store,
-            ..ShellState::default()
+            ..ShellState::with_theme(theme)
         });
         let (render_tx, render_rx) = mpsc::sync_channel(1);
         let render_state = state.clone();
@@ -3477,6 +3658,9 @@ impl InteractiveShell {
             remote_mouse_capture: false,
             remote_keyboard_events: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
+            runtime_config: None,
+            theme_preview: None,
+            extension_themes: RefCell::new(None),
             herdr: crate::herdr::PaneReporter::detect(),
         })
     }
@@ -3523,10 +3707,12 @@ impl InteractiveShell {
         let size = Arc::new(Mutex::new((120, 40)));
         let initial_size = *size.lock().expect("terminal size mutex poisoned");
         let state = SharedState::new(ShellState {
-            theme,
             size: initial_size,
             follow_tail: true,
-            ..ShellState::default()
+            transcript_navigation: RefCell::new(
+                transcript_navigation::TranscriptNavigation::without_scrollbar(),
+            ),
+            ..ShellState::with_theme(theme)
         });
         let mut tui = TUI::new(Box::new(TestTerminal { size: size.clone() }));
         tui.add_child(Box::new(ShellComponent::new(state.clone(), false)));
@@ -3546,6 +3732,9 @@ impl InteractiveShell {
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             // Renderer tests must never report to a real Herdr pane, even when
             // the test process inherits one.
+            runtime_config: None,
+            theme_preview: None,
+            extension_themes: RefCell::new(None),
             herdr: crate::herdr::PaneReporter::disabled(),
         }
     }
@@ -3817,6 +4006,60 @@ impl InteractiveShell {
         .flatten()
     }
 
+    pub(crate) fn queue_desktop_notification(
+        &mut self,
+        title: String,
+        body: String,
+    ) -> Result<
+        (),
+        (
+            octet_agent::extension_process::ExtensionRequestFailure,
+            String,
+        ),
+    > {
+        use octet_agent::extension_process::ExtensionRequestFailure as Failure;
+        if self.terminal_ceded.load(Ordering::Acquire) {
+            return Err((Failure::NotForegroundOwner, "terminal is ceded".into()));
+        }
+        if let Some(tui) = self.tui.as_mut() {
+            return tui
+                .desktop_notification(&title, &body)
+                .then_some(())
+                .ok_or((
+                    Failure::InvalidRequest,
+                    "desktop notification unavailable".into(),
+                ));
+        }
+        let sender = self
+            .render_tx
+            .lock()
+            .expect("renderer sender mutex poisoned")
+            .clone()
+            .ok_or((
+                Failure::NotForegroundOwner,
+                "terminal renderer is unavailable".into(),
+            ))?;
+        let mut state = self.state.borrow_mut();
+        if state.desktop_notifications.len() >= 16 {
+            return Err((
+                Failure::BoundsExceeded,
+                "desktop notification queue is full".into(),
+            ));
+        }
+        state.desktop_notifications.push((title, body));
+        if matches!(
+            sender.try_send(RenderCommand::Render),
+            Err(mpsc::TrySendError::Disconnected(_))
+        ) {
+            state.desktop_notifications.clear();
+            return Err((
+                Failure::NotForegroundOwner,
+                "terminal renderer is unavailable".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Queue a retained-frame render without doing layout on the async loop.
     /// The bounded renderer queue coalesces bursts of model/tool events.
     pub fn render(&mut self) {
@@ -4059,6 +4302,9 @@ impl InteractiveShell {
             }
         }
         match event {
+            AgentEvent::ExtensionObservationWarning { message } => {
+                state.push_block(TranscriptBlock::Notice(format!("warning: {message}")));
+            }
             AgentEvent::CacheWarmed { .. } => {}
             AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
             AgentEvent::RecoveredOutput { channel, text } => {
@@ -4380,6 +4626,9 @@ impl InteractiveShell {
                         }
                     }
                 }
+                if let ToolProgress::PartialResult(result) = progress {
+                    state.retain_tool_presentation(id, transcript_extensions::tool_result(result));
+                }
                 if state.verbose_tools || refreshes_compact_tail {
                     if let Some(index) = index {
                         state.touch_block(index);
@@ -4441,6 +4690,12 @@ impl InteractiveShell {
                             panel.output.push_str(&error.message);
                         }
                     }
+                }
+                if let Ok(output) = result {
+                    state.retain_tool_presentation(id, transcript_extensions::tool_result(output));
+                } else if let Some(index) = index {
+                    let identity = state.transcript_commit_ids[index];
+                    state.extension_transcript.remove_source(&identity);
                 }
                 if let Some(index) = index {
                     state.unregister_active_event(index);
@@ -4552,7 +4807,10 @@ impl InteractiveShell {
                 state.run_cost_available = true;
             }
             // Applied before the acceptance gate: see `on_run_event`.
-            AgentEvent::CustomMessageCommitted { .. } | AgentEvent::DelegationUpdated { .. } => {}
+            AgentEvent::CustomMessageCommitted { entry_id, message, timestamp_unix_ms } => {
+                state.retain_custom_message(entry_id, message, Some(*timestamp_unix_ms));
+            }
+            AgentEvent::DelegationUpdated { .. } => {}
             AgentEvent::RunFinished { .. } => {
                 state.close_streaming_blocks();
                 state.seal_activity_group();
@@ -4720,7 +4978,7 @@ impl InteractiveShell {
         }
     }
 
-    /// Queue an Enter-submitted follow-up without admitting it to the Agent.
+    /// Queue an explicitly submitted follow-up without admitting it to the Agent.
     /// Keeping its typed parts here makes Option+Up genuinely retractable.
     pub fn queue_follow_up(&mut self, composed: ComposedInput) {
         if !composed.is_empty() {
@@ -4839,7 +5097,7 @@ impl InteractiveShell {
         });
     }
 
-    /// Record Ctrl+S steering only after the active run has synchronously
+    /// Record Enter steering only after the active run has synchronously
     /// reserved its capacity. The caller retains the prepared payload to send;
     /// this shell owns only its receipt and reversible editor projection.
     /// Sticky `/answer` must use `queue_steering` instead.
@@ -5399,6 +5657,7 @@ impl InteractiveShell {
             return;
         }
         state.verbose_tools = verbose;
+        state.extension_transcript.expanded.clear();
         // Keep the existing width/layout caches and invalidate only blocks
         // whose disclosure actually changes. The old full-layout reset made
         // Ctrl+O reparse every assistant answer in long sessions.
@@ -5494,6 +5753,10 @@ impl InteractiveShell {
         self::panel_render::document_content_width(&self.state.borrow().theme, width)
     }
 
+    pub(crate) fn runtime_config(&self) -> Option<&Config> {
+        self.runtime_config.as_ref()
+    }
+
     pub fn set_runtime_config(&mut self, config: Config) {
         let show_images = config.show_images;
         let mut state = self.state.borrow_mut();
@@ -5502,6 +5765,8 @@ impl InteractiveShell {
         state.show_cache_miss_notices = config.show_cache_miss_notices;
         drop(state);
         self.set_show_images(show_images);
+        self.runtime_config = Some(config);
+        self.preload_extension_themes();
     }
 
     /// Toggle opt-in inline image placement for the current interactive shell.
@@ -5608,6 +5873,32 @@ impl InteractiveShell {
     }
 
     /// Approval/picker/search/tool input ownership always takes priority.
+    /// Whether opening a remote surface of this placement conflicts with the
+    /// current input owner. Passive surfaces never take input. Before the first
+    /// frame nothing holds input yet, so Pi's session_start mounts (footer,
+    /// widgets, an editor replacement) install then; a focus-taking fullscreen
+    /// surface still waits for the first frame.
+    pub(crate) fn remote_ui_open_blocked(
+        &self,
+        placement: octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement,
+    ) -> bool {
+        use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
+        match placement {
+            Placement::Fullscreen => self.remote_ui_input_blocked(),
+            Placement::Editor => {
+                let state = self.state.borrow();
+                state.panel.is_some()
+                    || state.tool_input_prompt.is_some()
+                    || state.transcript_search_active()
+                    || (state.overlay.is_some() && !state.extension_ui.remote_fullscreen_overlay)
+            }
+            Placement::Header
+            | Placement::Footer
+            | Placement::AboveEditor
+            | Placement::BelowEditor => false,
+        }
+    }
+
     pub(crate) fn remote_ui_input_blocked(&self) -> bool {
         let state = self.state.borrow();
         state.startup_pending
@@ -5795,6 +6086,20 @@ impl InteractiveShell {
         self.state.borrow().editor.text().to_owned()
     }
 
+    pub(crate) fn has_prompt_template(&self, name: &str) -> bool {
+        self.state.borrow().prompt_templates.iter().any(|template| template.name == name)
+    }
+
+    pub(crate) fn prompt_templates_report(&self) -> String {
+        let state = self.state.borrow();
+        let mut text = String::from("Prompt templates:\n");
+        for template in state.prompt_templates.iter() {
+            text.push_str(&format!("  /{} — {}\n", template.name, template.description));
+        }
+        if state.prompt_templates.is_empty() { text.push_str("  (none discovered)"); }
+        text
+    }
+
     /// Start an exclusive request without touching the parent draft or chips.
     pub(crate) fn begin_tool_input(&mut self, prompt: &str, secret: bool) {
         self.close_transcript_navigation();
@@ -5858,6 +6163,34 @@ impl InteractiveShell {
 
     pub fn set_input_modalities(&mut self, modalities: ModalitySet) {
         self.state.borrow_mut().input_modalities = modalities;
+    }
+
+    /// Prepend older prompts supplied newest-first without changing the draft
+    /// or the newer native history (including its authorized attachments).
+    pub fn seed_prompt_history(&mut self, entries: Vec<String>) {
+        let mut state = self.state.borrow_mut();
+        let mut seen: std::collections::HashSet<String> = state
+            .prompt_history
+            .iter()
+            .map(|entry| entry.display_text.clone())
+            .collect();
+        let mut older: Vec<_> = entries
+            .into_iter()
+            .filter(|text| !text.trim().is_empty() && seen.insert(text.clone()))
+            .map(|display_text| PromptHistoryEntry {
+                display_text,
+                attachments: Vec::new(),
+            })
+            .collect();
+        older.reverse();
+        let inserted = older.len();
+        older.append(&mut state.prompt_history);
+        let excess = older.len().saturating_sub(MAX_PROMPT_HISTORY_ENTRIES);
+        older.drain(..excess);
+        state.prompt_history = older;
+        if let Some(navigation) = &mut state.prompt_history_navigation {
+            navigation.index += inserted - excess;
+        }
     }
 
     /// Drain the editor and resolve chips into ordered parts.
@@ -6216,6 +6549,10 @@ impl InteractiveShell {
         // composer, and footer never enter the payload. The retained buffer
         // remains available even when OSC 52 transport is unavailable.
         //
+        // Release coordinates are also movement evidence: terminals can coalesce
+        // all intermediate motion events. Promote the pending anchor before
+        // deciding whether this was a stationary click.
+        self.extend_transcript_selection(row, col);
         let had_pending = self.state.borrow().pending_selection_anchor.is_some();
         if had_pending {
             // Clear any previous selection and discard the pending anchor.
@@ -6226,7 +6563,6 @@ impl InteractiveShell {
             return;
         }
 
-        self.extend_transcript_selection(row, col);
         if self.state.borrow().transcript_selection.is_some() {
             let _ = self.copy_selected_plain_text();
         }
@@ -6642,8 +6978,37 @@ impl InteractiveShell {
         self.state.borrow().close_requested
     }
 
+    pub(crate) fn open_theme_preview_panel(&mut self, panel: Panel) {
+        self.open_panel(panel);
+        // Opening a replacement panel restores an earlier preview first.
+        // Snapshot the committed theme, never the abandoned highlighted row.
+        let original = self.theme();
+        self.theme_preview = Some((original, None));
+        self.preview_highlighted_theme();
+    }
+
+    pub(crate) fn preview_highlighted_theme(&mut self) {
+        let Some(index) = self.highlighted_panel_index() else { return; };
+        let Some((_, last)) = self.theme_preview.as_mut() else { return; };
+        if *last == Some(index) { return; }
+        *last = Some(index);
+        let theme = {
+            let state = self.state.borrow();
+            match state.panel.as_ref() {
+                Some(Panel::SelectList { action: PanelAction::SelectTheme { previews, .. }, .. }) => previews.get(index).cloned(),
+                _ => None,
+            }
+        };
+        if let Some(theme) = theme { self.set_theme(theme); }
+    }
+
+    fn restore_theme_preview(&mut self) {
+        if let Some((original, _)) = self.theme_preview.take() { self.set_theme(original); }
+    }
+
     /// Open an interactive panel.
     pub fn open_panel(&mut self, panel: Panel) {
+        self.restore_theme_preview();
         self.close_transcript_navigation();
         self.reset_input_interaction();
         let mut state = self.state.borrow_mut();
@@ -6660,6 +7025,8 @@ impl InteractiveShell {
         state.painted_panel = None;
         state.pending_panel_document_top = None;
         state.panel = None;
+        drop(state);
+        self.restore_theme_preview();
     }
 
     pub fn has_panel(&self) -> bool {
@@ -7708,10 +8075,12 @@ impl InteractiveShell {
         // Native terminal history cannot be recoloured in place. Materialize a
         // deferred resume before the swap so the replay below includes every
         // persisted tool card, not just the first-paint tail.
-        if let Err(error) = self.materialize_deferred_history() {
-            self.state.borrow_mut().error = Some(format!(
-                "could not load older session history before theme change: {error}"
-            ));
+        if !self.state.borrow().application_viewport_requested {
+            if let Err(error) = self.materialize_deferred_history() {
+                self.state.borrow_mut().error = Some(format!(
+                    "could not load older session history before theme change: {error}"
+                ));
+            }
         }
         let mut state = self.state.borrow_mut();
         if let Some(lab) = state.model_lab {
@@ -7800,6 +8169,7 @@ impl InteractiveShell {
         state.tool_image_budget = image_budget;
         state.render_publication.reset();
         state.transcript.clear();
+        state.extension_transcript = Default::default();
         state.transcript_navigation.get_mut().reset_session();
         state.provisional_blocks.clear();
         state.active_event_blocks.clear();
@@ -7951,6 +8321,12 @@ struct TestTerminal {
 
 #[cfg(test)]
 impl sexy_tui_rs::Terminal for TestTerminal {
+    fn capabilities(&self) -> sexy_tui_rs::TerminalCapabilities {
+        // Match test_theme's deterministic interactive terminal, not the test
+        // process's often-redirected stdin/stdout and inherited environment.
+        sexy_tui_rs::TerminalCapabilities::interactive(sexy_tui_rs::ColorDepth::TrueColor, true)
+    }
+
     fn start_events(
         &mut self,
         _on_input: Box<dyn FnMut(sexy_tui_rs::TerminalInput)>,
@@ -8046,9 +8422,11 @@ mod tern_picker;
 pub(crate) mod tern_prompt;
 mod tern_sessions;
 mod tern_theme;
+mod extension_theme;
 mod tern_welcome;
 mod tool_render;
 mod transcript_cache;
+pub(crate) mod transcript_extensions;
 mod transcript_navigation;
 
 #[path = "view/viewport.rs"]

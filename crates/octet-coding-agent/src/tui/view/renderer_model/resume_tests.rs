@@ -2,10 +2,105 @@ use super::*;
 
 fn state() -> ShellState {
     ShellState {
-        theme: crate::tui::theme::test_theme(),
         size: (80, 24),
         follow_tail: true,
-        ..Default::default()
+        ..ShellState::with_theme(crate::tui::theme::test_theme())
+    }
+}
+
+#[test]
+fn resolved_shell_initialization_and_publication_have_exact_theme_work() {
+    use crate::tui::theme::{take_theme_work, test_theme};
+
+    let theme = test_theme();
+    let renderer_theme = theme.clone();
+    take_theme_work();
+    let mut semantic = ShellState::with_theme(theme);
+    assert_eq!(
+        take_theme_work(),
+        (0, 0),
+        "shell discarded a resolved theme"
+    );
+    let mut renderer = RenderOwner::new(renderer_theme);
+    assert_eq!(take_theme_work(), (0, 0), "renderer rediscovered its theme");
+
+    for revision in 0..32 {
+        semantic.render_revision = revision;
+        semantic.editor.set_text(&format!("draft {revision}"));
+        let model = RenderModel::capture(&mut semantic);
+        assert_eq!(
+            take_theme_work(),
+            (0, 1),
+            "capture must clone only its retained theme"
+        );
+        renderer.accept(model);
+        assert_eq!(
+            take_theme_work(),
+            (0, 0),
+            "accept must move the published theme"
+        );
+        assert_eq!(renderer.revision, revision);
+        assert_eq!(renderer.state.editor.text(), semantic.editor.text());
+    }
+}
+
+#[test]
+fn shell_default_keeps_resolved_theme_and_nontrivial_field_defaults() {
+    use crate::tui::theme::take_theme_work;
+
+    take_theme_work();
+    let shell = ShellState::default();
+    assert_eq!(take_theme_work(), (1, 0));
+    assert!(shell.theme.is_compiled_default());
+    assert_eq!(shell.next_transcript_commit_id.0, 1_u64 << 63);
+    assert!(shell.editor.text().is_empty());
+    assert!(shell.transcript.is_empty());
+    assert!(shell.render_geometry.is_none());
+    assert!(!shell.follow_tail);
+    assert!(!shell.image_rendering.enabled);
+    assert!(shell.transcript_cache.borrow().width.is_none());
+    assert_eq!(shell.render_publication.root.capacity, 1);
+}
+
+#[test]
+fn initialized_test_shell_does_not_construct_a_discarded_theme() {
+    use crate::tui::theme::{take_theme_work, test_theme};
+
+    let theme = test_theme();
+    take_theme_work();
+    let shell = super::super::InteractiveShell::test_shell_with_theme(theme);
+    // The first frame may clone styling for its own caches, but it must not
+    // rediscover terminal capabilities or resolve another theme.
+    assert_eq!(take_theme_work().0, 0);
+    assert_eq!(shell.state.borrow().size, (120, 40));
+    assert!(shell.state.borrow().follow_tail);
+}
+
+#[test]
+fn resolved_theme_publication_preserves_encoded_frames_and_theme_swaps() {
+    use super::super::{native_scrollback::render_shell_at, OutputChannel};
+
+    let mut semantic = state();
+    semantic.append_text_block(OutputChannel::Text, "**styled** `code`\n\nplain β");
+    let mut renderer = RenderOwner::new(semantic.theme.clone());
+    let now = std::time::Instant::now();
+    for replacement in [false, true] {
+        if replacement {
+            semantic.theme.override_token("accent", "#b347cd");
+            semantic.theme.override_token("text", "#589a78");
+            semantic.theme_epoch += 1;
+            semantic.invalidate_rich_text();
+        }
+        for size in [(46, 8), (80, 24), (120, 40)] {
+            semantic.size = size;
+            semantic.editor.set_text("editable β draft");
+            renderer.accept(RenderModel::capture(&mut semantic));
+            assert_eq!(
+                render_shell_at(&semantic, size.0, now),
+                render_shell_at(&renderer.state, size.0, now),
+                "encoded frame changed at {size:?}, replacement={replacement}",
+            );
+        }
     }
 }
 
@@ -131,7 +226,7 @@ fn an_emptied_publication_retains_capacity_for_later_append_and_materialization(
     for index in 0..9 {
         semantic.push_block(TranscriptBlock::Notice(format!("old {index}")));
     }
-    let mut renderer = RenderOwner::default();
+    let mut renderer = RenderOwner::new(semantic.theme.clone());
     let first = RenderModel::capture(&mut semantic);
     let capacity = first.root.capacity;
     renderer.accept(first);
@@ -160,7 +255,7 @@ fn renderer_replacements_only_dirty_valid_cached_positions() {
     for _ in 0..4 {
         semantic.push_block(TranscriptBlock::Notice("initial".into()));
     }
-    let mut renderer = RenderOwner::default();
+    let mut renderer = RenderOwner::new(semantic.theme.clone());
     renderer.accept(RenderModel::capture(&mut semantic));
     for round in 0..16 {
         for index in 0..4 {

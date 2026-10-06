@@ -66,9 +66,9 @@ test('header/footer/widget placements mount and restore without keeping normal r
   assert.ok((await clear.response).result);
 });
 test('void setters expose host refusal; synchronous read-after-write uses local mirrors', async t => {
-  const peer = launch(t); await peer.init();
+  const peer = launch(t); await peer.init(); await peer.start();
   assert.equal((await peer.call('mutate').response).result.content[0].text, 'local|renamed');
-  const refused = launch(t, undefined, { hold: ['composer/set'] }); await refused.init();
+  const refused = launch(t, undefined, { hold: ['composer/set'] }); await refused.init(); await refused.start();
   const call = refused.call('mutate'); const set = await refused.wait(f => f.method === 'composer/set');
   refused.send({ jsonrpc: '2.0', id: set.id, error: { code: -32002, message: 'not_foreground_owner synthetic refusal' } });
   assert.match((await call.response).error.message, /synthetic refusal/);
@@ -83,7 +83,7 @@ test('ordered async hook callbacks and queued cancellation remain serviceable', 
   assert.equal((await peer.request('hook/run', { hook: 'before_tool_call', payload: { name: 'blocked', arguments: {} }, context: peer.context() }).response).result.disposition.action, 'deny');
 });
 test('cancelling tools and reverse calls rejects once, ignores late response, and preserves other calls', async t => {
-  const peer = launch(t); await peer.init();
+  const peer = launch(t); await peer.init(); await peer.start();
   const pending = peer.call('wait'); await peer.wait(f => f.method === '$/progress'); peer.notify('$/cancelRequest', { id: pending.id });
   assert.equal((await pending.response).error.code, -32800);
   const confirm = peer.call('confirm'); const question = await peer.wait(f => f.method === 'confirmation/request');
@@ -98,7 +98,7 @@ test('EOF, crash transport and active shutdown are bounded without model/runtime
   const malformed = launch(t); const malformedExit = once(malformed.child, 'exit'); malformed.child.stdin.write('{bad json}\n'); assert.equal((await malformedExit)[0], 1);
 });
 test('unsupported options/results and unnegotiated child calls never silently disappear', async t => {
-  const peer = launch(t); await peer.init();
+  const peer = launch(t); await peer.init(); await peer.start();
   for (const [mode, reason] of [['unsafe-output', /direct terminal control/], ['runtime', /unsupported_feature agent_sessions: feature was not negotiated/], ['media', /unsupported_feature artifacts/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
 });
 test('native chrome refuses calls without a negotiated UI consumer', async t => {

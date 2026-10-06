@@ -410,6 +410,30 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     },
                 )?;
             }
+            "transcript/invalidate" => {
+                let accepted = (|| {
+                    require_feature(state, EXTENSION_FEATURE_TRANSCRIPT_RENDER)?;
+                    require_remote_ui(state)?;
+                    validate_remote_ui_envelope(object, false)?;
+                    let invalidation: TranscriptInvalidation = serde_json::from_value(params)
+                        .map_err(|error| format!("invalid transcript invalidation: {error}"))?;
+                    if invalidation.source_id.as_ref().is_some_and(|id| {
+                        id.is_empty() || id.len() > 256 || id.chars().any(char::is_control)
+                    }) {
+                        return Err("invalid transcript source identity".into());
+                    }
+                    validate_explicit_request_owner(state, &invalidation.resource_owner)
+                        .map_err(|(_, detail)| detail)?;
+                    let _ = state
+                        .events
+                        .send(ExtensionEvent::TranscriptInvalidated { invalidation });
+                    state.remote_ui.wake();
+                    Ok::<(), String>(())
+                })();
+                if let Err(message) = accepted {
+                    let _ = state.events.send(ExtensionEvent::Diagnostic { message });
+                }
+            }
             methods::UI_FRAME => {
                 if object.contains_key("id") {
                     let id = parse_child_request_id(object, method)?;
@@ -998,6 +1022,32 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         generation: admitted.generation,
                         owner: Some(admitted.owner.clone()),
                         operation: ExtensionComposerOperation::Get,
+                    }
+                })?;
+            }
+            methods::COMPOSER_HISTORY => {
+                let Some((request, admitted)) = admit_host_request::<ComposerHistoryRequest>(
+                    state,
+                    object,
+                    method,
+                    EXTENSION_FEATURE_COMPOSER,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if let Err(failure) = ExtensionComposerOperation::validate_history(&request.entries)
+                {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::ComposerRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionComposerOperation::History {
+                            entries: request.entries,
+                        },
                     }
                 })?;
             }
@@ -2066,6 +2116,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     };
     let request = {
         let mut pending = lock_std_mutex(&state.pending);
+        // This recognized terminal settles execution-held request capacity too,
+        // even when cancellation already removed the ordinary pending waiter.
+        state.session_leaf.settle_execution(id);
         // This recognized terminal settles native execution even if the caller
         // has gone away or its bounded late-response tombstone was pruned.
         if lock_std_mutex(&state.resources).settle_execution(id) {

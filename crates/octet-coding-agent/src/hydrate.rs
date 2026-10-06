@@ -461,9 +461,22 @@ pub enum TranscriptItem {
     },
     /// Visible extension message, distinct from user-authored prompts.
     CustomMessage {
+        id: octet_agent::EntryId,
+        timestamp_unix_ms: Option<u64>,
+        content: octet_agent::session::CustomMessageContent,
         custom_type: String,
         text: String,
         details: Option<serde_json::Value>,
+    },
+    /// Inert private record, visible only through its namespace's renderer.
+    PrivateEntry {
+        namespace: String,
+        entry: serde_json::Value,
+    },
+    /// Exact non-model tool details retained independently of the display text.
+    ToolPresentation {
+        id: ToolCallId,
+        result: Option<serde_json::Value>,
     },
     Assistant(String),
     Reasoning(String),
@@ -626,6 +639,48 @@ fn push_message(
                                 prompt_color: prompt_color.clone(),
                             });
                         }
+                        let details = metadata.and_then(|metadata| metadata.tool_output.as_ref());
+                        let presentation = if details.is_some()
+                            || !adjacent_tool_media.is_empty()
+                            || !matches!(result.content.as_slice(), [ToolResultPart::Text(_)])
+                        {
+                            let output = octet_agent::ToolOutput::from_content_parts(
+                                result
+                                    .content
+                                    .iter()
+                                    .map(|part| match part {
+                                        ToolResultPart::Text(text) => {
+                                            octet_agent::ToolOutputContentPart::Text(text.clone())
+                                        }
+                                        ToolResultPart::Media(media) => {
+                                            octet_agent::ToolOutputContentPart::Media(media.clone())
+                                        }
+                                    })
+                                    .chain(adjacent_tool_media.iter().filter_map(
+                                        |part| match part {
+                                            UserPart::Media(media) => {
+                                                Some(octet_agent::ToolOutputContentPart::Media(
+                                                    media.clone(),
+                                                ))
+                                            }
+                                            _ => None,
+                                        },
+                                    )),
+                            )
+                            .with_is_error(result.is_error)
+                            .try_with_details(
+                                details
+                                    .and_then(|details| details.structured_content())
+                                    .cloned(),
+                                details.and_then(|details| details.metadata()).cloned(),
+                            )
+                            .expect("validated durable tool details");
+                            Some(crate::tui::view::transcript_extensions::tool_result(
+                                &output,
+                            ))
+                        } else {
+                            None
+                        };
                         items.push(TranscriptItem::ToolResult {
                             id: result.tool_call_id.clone(),
                             text: tool_result_text(&result.content),
@@ -648,7 +703,13 @@ fn push_message(
                                     )),
                                 image_budget,
                             ),
-                        })
+                        });
+                        if let Some(presentation) = presentation {
+                            items.push(TranscriptItem::ToolPresentation {
+                                id: result.tool_call_id.clone(),
+                                result: presentation,
+                            });
+                        }
                     }
                     UserPart::Media(Media::Image(_)) if !adjacent_tool_media.is_empty() => {}
                     UserPart::Media(media) => text.push_str(&media_marker(media)),
@@ -817,6 +878,18 @@ fn hydrate_entries_with_image_budget(
     let mut items = Vec::new();
     let mut image_budget = ToolImageBudget::default();
     for entry in entries {
+        if let Some(metadata) = &entry.metadata {
+            for namespace in metadata.extension_metadata.keys() {
+                if let Some(value) =
+                    octet_agent::extension_process::transcript_private_entry(entry, namespace)
+                {
+                    items.push(TranscriptItem::PrivateEntry {
+                        namespace: namespace.clone(),
+                        entry: value,
+                    });
+                }
+            }
+        }
         if let Some(custom) = entry
             .metadata
             .as_ref()
@@ -824,6 +897,9 @@ fn hydrate_entries_with_image_budget(
         {
             if custom.display {
                 items.push(TranscriptItem::CustomMessage {
+                    id: entry.id.clone(),
+                    timestamp_unix_ms: entry.timestamp_unix_ms,
+                    content: custom.content.clone(),
                     custom_type: custom.custom_type.clone(),
                     text: custom.text(),
                     details: custom.details.clone(),
@@ -1208,7 +1284,10 @@ mod tests {
                 .append(EntryValue::Message(Message::User(UserMessage { content })))
                 .unwrap();
             let items = hydrate_transcript(&session).unwrap();
-            assert_eq!(items.len(), 1, "{protocol:?}");
+            assert_eq!(items.len(), 2, "{protocol:?}");
+            assert!(
+                matches!(&items[1], TranscriptItem::ToolPresentation { result: Some(result), .. } if result["content"].as_array().is_some_and(|parts| parts.iter().any(|part| part["type"] == "image")))
+            );
             let TranscriptItem::ToolResult { images, .. } = &items[0] else {
                 panic!("tool result")
             };
@@ -1460,6 +1539,7 @@ mod tests {
                     prompt_model: Some(ModelId("local-alias-a".into())),
                     prompt_model_source: Some("deepseek".into()),
                     prompt_color: Some("#123456".into()),
+                    replay_safe_tool_calls: None,
                     tool_composition: None,
                     display_text: None,
                     run_outcome: None,
@@ -1487,6 +1567,7 @@ mod tests {
                     prompt_model: Some(ModelId("local-alias-b".into())),
                     prompt_model_source: Some("anthropic".into()),
                     prompt_color: Some("#abcdef".into()),
+                    replay_safe_tool_calls: None,
                     tool_composition: None,
                     display_text: None,
                     run_outcome: None,

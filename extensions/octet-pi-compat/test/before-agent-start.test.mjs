@@ -25,7 +25,7 @@ test('before_agent_start requires native feature and configure records actual sy
   assert.match(readFileSync(join(output, 'extension.toml'), 'utf8'), /system_prompt = true/);
 });
 test('cancelled before_agent_start cannot publish a late effective system', async t => {
-  const peer = launch(t, [fixture], { hold: ['confirmation/request'] }); await peer.init(['before_prompt_state_v1', 'remote_ui']);
+  const peer = launch(t, [fixture], { hold: ['confirmation/request'] }); await peer.init(['before_prompt_state_v1', 'remote_ui']); await peer.start();
   const request = peer.request('hook/run', params(peer, 'chain', { session_name: 'wait' }));
   const pending = await peer.wait(frame => frame.method === 'confirmation/request'); peer.notify('$/cancelRequest', { id: request.id });
   assert.equal((await request.response).error.code, -32800);

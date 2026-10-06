@@ -22,6 +22,8 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
+#[cfg(unix)]
+use std::os::{fd::OwnedFd, unix::fs::OpenOptionsExt};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -31,6 +33,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{Stream, StreamExt};
 use sexy_tui_rs::terminal_colors::{parse_osc11_background_color, RgbColor};
+#[cfg(unix)]
+use tokio::io::{unix::AsyncFd, Interest};
 use tokio::time::Sleep;
 
 // A valid reply remains recognizable until the outstanding query is answered.
@@ -402,7 +406,7 @@ fn candidate_status(text: &str) -> Candidate {
     }
 }
 
-/// Timer-driven foreground polling, with no detached or armed terminal reader.
+/// Foreground polling, with no detached or armed terminal reader.
 ///
 /// Crossterm's EventStream keeps a background read armed after next() is
 /// cancelled. A terminal grant cannot quiesce that reader with an atomic flag.
@@ -410,34 +414,159 @@ fn candidate_status(text: &str) -> Candidate {
 /// yield, the terminal has no pending host read and may be handed to another
 /// owner. The supported level-triggered tty reader needs a positive timeout;
 /// its zero-timeout path does not inspect even already-buffered input.
+///
+/// On Unix a separate descriptor watches readiness ONLY, so incoming bytes can
+/// wake the foreground poll before its 10 ms fallback timer. It never reads,
+/// including while TerminalInput is ceded. The timer still discovers resize,
+/// crossterm-internal events and input on platforms without this optional wake.
 #[derive(Default)]
 pub struct ForegroundEvents {
     wake: Option<Pin<Box<Sleep>>>,
+    // Open/register lazily: construction must not need a tty or Tokio runtime.
+    #[cfg(unix)]
+    tty: std::sync::OnceLock<Option<AsyncFd<OwnedFd>>>,
+}
+
+impl ForegroundEvents {
+    #[cfg(unix)]
+    fn open_tty_notifier() -> Option<OwnedFd> {
+        use std::os::fd::FromRawFd;
+
+        // Match crossterm 0.29's tty_fd(): tty stdin is authoritative even
+        // when it is NOT the controlling terminal; otherwise use /dev/tty.
+        // SAFETY: isatty only inspects the process's standard input descriptor.
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+            // macOS kqueue rejects the /dev/tty alias with EINVAL. Duplicating
+            // the actual reader descriptor avoids both that alias and a named
+            // device reopen/identity race. This shares stdin's file description:
+            // NEVER change its status flags (especially O_NONBLOCK) or termios.
+            // AsyncFd is used ONLY for readiness, never read/try_io, so observing
+            // a blocking descriptor cannot block the frontend on a byte read.
+            // SAFETY: fcntl creates a new owned, close-on-exec descriptor.
+            let fd = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 0) };
+            if fd < 0 {
+                return None;
+            }
+            // SAFETY: fd is the newly owned descriptor returned by fcntl.
+            return Some(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+        // Only redirected stdin uses crossterm's /dev/tty source. This is an
+        // independent open; its flags do not affect another reader descriptor.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open("/dev/tty")
+            .ok()
+            .map(Into::into)
+    }
+
+    #[cfg(unix)]
+    fn tty_readable(&mut self, cx: &mut Context<'_>) -> bool {
+        let tty = self.tty.get_or_init(|| {
+            let fd = Self::open_tty_notifier()?;
+            // Polling runs on the frontend's I/O-enabled Tokio runtime.
+            // OwnedFd closes only after AsyncFd deregisters it.
+            AsyncFd::with_interest(fd, Interest::READABLE).ok()
+        });
+        let Some(tty) = tty else { return false };
+        match Self::poll_tty_readiness(tty, cx) {
+            Poll::Ready(Ok(())) => true,
+            Poll::Pending => false,
+            Poll::Ready(Err(_)) => {
+                // A failed/hung-up notifier is not an input error. Keep the
+                // original crossterm/timer path, without repeated ready wakes.
+                self.tty.get_mut().expect("initialized above").take();
+                false
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn tty_readable(&mut self, _cx: &mut Context<'_>) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn poll_tty_readiness(tty: &AsyncFd<OwnedFd>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        use std::os::fd::AsRawFd;
+
+        // Crossterm (or a ceded owner) may already have drained the bytes that
+        // produced Tokio's cached readiness. Check without consuming anything,
+        // then clear only the observed stale generation and register the waker
+        // again. Bound retries if readiness changes during this check.
+        for _ in 0..2 {
+            let mut ready = std::task::ready!(tty.poll_read_ready(cx))?;
+            let mut fd = libc::pollfd {
+                fd: tty.get_ref().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: fd is one initialized pollfd, owned for this call; timeout
+            // zero only inspects readiness and cannot read or wait for input.
+            if unsafe { libc::poll(&mut fd, 1, 0) } < 0 {
+                return Poll::Ready(Err(io::Error::last_os_error()));
+            }
+            if fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                return Poll::Ready(Err(io::Error::other("terminal notifier closed")));
+            }
+            if fd.revents & libc::POLLIN != 0 {
+                return Poll::Ready(Ok(()));
+            }
+            ready.clear_ready();
+        }
+        Poll::Pending
+    }
+
+    // The injected synchronous read keeps tests off process-global stdin and
+    // crossterm state; production still has exactly one poll/read byte owner.
+    fn poll_next_with(
+        &mut self,
+        cx: &mut Context<'_>,
+        read_event: impl FnOnce() -> io::Result<Option<Event>>,
+    ) -> Poll<Option<io::Result<Event>>> {
+        let readable = self.tty_readable(cx);
+        if let Some(wake) = &mut self.wake {
+            if wake.as_mut().poll(cx).is_pending() && !readable {
+                return Poll::Pending;
+            }
+            self.wake = None;
+        }
+        match read_event() {
+            Ok(Some(event)) => Poll::Ready(Some(Ok(event))),
+            Err(error) => Poll::Ready(Some(Err(error))),
+            Ok(None) => {
+                let mut wake = Box::pin(tokio::time::sleep(Duration::from_millis(10)));
+                let _ = wake.as_mut().poll(cx);
+                self.wake = Some(wake);
+                // Rearm after a partial/filtered read drained the tty. If bytes
+                // arrived during the read, retry once; a readiness wake that
+                // made no progress must fall back to the timer, not self-spin.
+                if self.tty_readable(cx) && !readable {
+                    cx.waker().wake_by_ref();
+                }
+                Poll::Pending
+            }
+        }
+    }
 }
 
 impl Stream for ForegroundEvents {
     type Item = io::Result<Event>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        if let Some(wake) = &mut this.wake {
-            if wake.as_mut().poll(cx).is_pending() {
-                return Poll::Pending;
+        self.get_mut().poll_next_with(cx, || {
+            if crossterm::event::poll(Duration::from_millis(1))? {
+                crossterm::event::read().map(Some)
+            } else {
+                Ok(None)
             }
-            this.wake = None;
-        }
-        match crossterm::event::poll(Duration::from_millis(1)) {
-            Ok(true) => Poll::Ready(Some(crossterm::event::read())),
-            Err(error) => Poll::Ready(Some(Err(error))),
-            Ok(false) => {
-                let mut wake = Box::pin(tokio::time::sleep(Duration::from_millis(10)));
-                let _ = wake.as_mut().poll(cx);
-                this.wake = Some(wake);
-                Poll::Pending
-            }
-        }
+        })
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "terminal_input/foreground_tests.rs"]
+mod foreground_tests;
 
 /// Filtered, cancellation-safe interactive input. Pass this same owner to every
 /// panel and lifecycle loop; raw crossterm events must never reach extensions.

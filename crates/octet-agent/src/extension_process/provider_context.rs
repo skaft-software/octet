@@ -10,6 +10,44 @@ use crate::session_leaf::{SessionLeafBinding, SessionLeafConsumer};
 
 static NEXT_CONTEXT_ACTIVATION: AtomicU64 = AtomicU64::new(1);
 
+fn binding_activation_refusal(error: ExtensionRuntimeError) -> String {
+    match error {
+        ExtensionRuntimeError::Closed(_) => "session_append_process_retired",
+        ExtensionRuntimeError::Protocol(ref message)
+            if message == "private session leaf activation already bound" =>
+        {
+            "session_append_lease_busy"
+        }
+        _ => "session_append_authority_unavailable",
+    }
+    .to_owned()
+}
+
+fn snapshot_activation_refusal(error: ExtensionRuntimeError) -> String {
+    match error {
+        ExtensionRuntimeError::Closed(_) => "session_append_process_retired",
+        ExtensionRuntimeError::MessageTooLarge { .. } => "session_snapshot_too_large",
+        ExtensionRuntimeError::Protocol(ref message)
+            if matches!(
+                message.as_str(),
+                "session snapshot exceeds wire bound; no entries truncated"
+                    | "session snapshot exceeds entry bound; no entries truncated"
+                    | "session metadata exceeds namespace limit"
+                    | "session metadata exceeds durable bounds"
+            ) =>
+        {
+            "session_snapshot_too_large"
+        }
+        ExtensionRuntimeError::Protocol(ref message)
+            if message == "session snapshot owner changed" =>
+        {
+            "session_append_authority_unavailable"
+        }
+        _ => "session_snapshot_unavailable",
+    }
+    .to_owned()
+}
+
 struct ProcessContextWait {
     process: ExtensionProcess,
     consumer: SessionLeafConsumer,
@@ -108,7 +146,7 @@ impl ProviderContextHook for ExtensionProcess {
                 .contains(&ExtensionHook::ProviderContext)
             || context.resource_owner != session.resource_owner_key()
         {
-            return Err("process context preparation authority unavailable".into());
+            return Err("session_append_authority_unavailable".into());
         }
         let execution = self.current_context_for_resource_owner(session.resource_owner_key());
         let owner = execution
@@ -122,11 +160,12 @@ impl ProviderContextHook for ExtensionProcess {
             operation_id: format!("provider-context:{epoch}"),
         };
         let (consumer, producer, grant) = SessionLeafConsumer::new(session, binding.clone())
-            .map_err(|_| "process context session consumer refused".to_owned())?;
+            .map_err(|_| "session_append_authority_unavailable".to_owned())?;
         let lease = self
             .bind_session_leaf(producer, consumer.revoker(), grant)
-            .and_then(|lease| lease.with_session_snapshot(session))
-            .map_err(|_| "process context session binding refused".to_owned())?;
+            .map_err(binding_activation_refusal)?
+            .with_session_snapshot(session)
+            .map_err(snapshot_activation_refusal)?;
         Ok(Some(Box::new(ProcessContextWait {
             process: self.clone(),
             consumer,

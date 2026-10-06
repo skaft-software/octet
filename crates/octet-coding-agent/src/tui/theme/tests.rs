@@ -23,6 +23,7 @@ fn config(workspace: PathBuf) -> Config {
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox: SandboxPolicy::default(),
         theme: None,
+        theme_explicit: false,
         system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,

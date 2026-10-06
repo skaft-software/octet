@@ -103,6 +103,38 @@ pub(super) struct RemoteUi {
 
 type Refusal = (ExtensionRequestFailure, String);
 
+/// Metadata only: count before allocating the response tree and count encoded
+/// bytes without building a second potentially oversized serialized buffer.
+fn validate_theme_list(themes: &[serde_json::Value]) -> Result<(), Refusal> {
+    const MAX_THEMES: usize = 128;
+    const MAX_THEME_LIST_BYTES: usize = 512 * 1024;
+    if themes.len() > MAX_THEMES {
+        return Err((
+            ExtensionRequestFailure::BoundsExceeded,
+            "theme catalog exceeds 128 metadata records".into(),
+        ));
+    }
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            if self.0 > MAX_THEME_LIST_BYTES {
+                return Err(std::io::Error::other("theme metadata exceeds frame budget"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Counter(0), themes).map_err(|_| {
+        (
+            ExtensionRequestFailure::BoundsExceeded,
+            "theme metadata exceeds the bounded physical frame budget".into(),
+        )
+    })
+}
+
 impl RemoteUi {
     pub(super) fn is_empty(&self) -> bool {
         self.mounts.is_empty() && self.chrome.is_none()
@@ -129,8 +161,54 @@ impl RemoteUi {
             ExtensionRemoteUiOperation::Chrome { chrome } => {
                 use octet_agent::extension_remote_ui::ExtensionRemoteUiChrome as Chrome;
                 match chrome {
-                    Chrome::Get => {}
+                    Chrome::Get => {
+                        return Ok(serde_json::json!({
+                            "tools_expanded": shell.verbose_tools(),
+                            "theme": shell.extension_theme_get(None),
+                        }));
+                    }
+                    Chrome::ThemeGet { name } => {
+                        return Ok(serde_json::json!({
+                            "theme": shell.extension_theme_get(name.as_deref()),
+                        }));
+                    }
+                    Chrome::ThemeList => {
+                        let themes = shell.extension_theme_list();
+                        validate_theme_list(&themes)?;
+                        return Ok(serde_json::json!({"themes": themes}));
+                    }
+                    Chrome::ThemeSet { name } => {
+                        if terminal_ceded {
+                            return Err((
+                                ExtensionRequestFailure::NotForegroundOwner,
+                                "terminal is ceded".into(),
+                            ));
+                        }
+                        return Ok(match shell.extension_theme_set(&name) {
+                            Ok(theme) => {
+                                // Native selection and the palette replacement are
+                                // committed before the synchronous receipt. This
+                                // sends only observations, never factory RPCs.
+                                self.publish_theme(&process, &owner, &theme);
+                                serde_json::json!({"success": true, "theme": theme})
+                            }
+                            Err(error) => serde_json::json!({
+                                "success": false,
+                                "error": error,
+                                "theme": shell.extension_theme_get(None),
+                            }),
+                        });
+                    }
                     Chrome::ToolsExpanded { expanded } => shell.set_verbose_tools(expanded),
+                    Chrome::DesktopNotification { title, body } => {
+                        if terminal_ceded {
+                            return Err((
+                                ExtensionRequestFailure::NotForegroundOwner,
+                                "terminal is ceded".into(),
+                            ));
+                        }
+                        shell.queue_desktop_notification(title, body)?;
+                    }
                     change => {
                         if self
                             .chrome
@@ -158,7 +236,12 @@ impl RemoteUi {
                                 state.working.interval_ms = interval_ms;
                             }
                             Chrome::HiddenThinking { label } => state.hidden_thinking_label = label,
-                            Chrome::Get | Chrome::ToolsExpanded { .. } => unreachable!(),
+                            Chrome::Get
+                            | Chrome::ThemeGet { .. }
+                            | Chrome::ThemeList
+                            | Chrome::ThemeSet { .. }
+                            | Chrome::ToolsExpanded { .. }
+                            | Chrome::DesktopNotification { .. } => unreachable!(),
                         }
                     }
                 }
@@ -176,7 +259,7 @@ impl RemoteUi {
                         "mouse capture requires a fullscreen lease".into(),
                     ));
                 }
-                if terminal_ceded || shell.remote_ui_input_blocked() {
+                if terminal_ceded || shell.remote_ui_open_blocked(placement) {
                     return Err((
                         ExtensionRequestFailure::InvalidRequest,
                         "remote UI conflicts with the current host input or terminal owner".into(),
@@ -266,6 +349,34 @@ impl RemoteUi {
                     shell.notice(notice);
                 }
                 Ok(serde_json::json!({}))
+            }
+        }
+    }
+
+    fn publish_theme(
+        &self,
+        requesting: &ExtensionProcess,
+        owner: &ExtensionResourceOwner,
+        theme: &serde_json::Value,
+    ) {
+        let publish = |process: &ExtensionProcess| {
+            if process.descriptor().manifest.runtime.sharing
+                != octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
+            {
+                return;
+            }
+            let mut state = process.current_context().host;
+            state.theme = Some(theme.clone());
+            process.set_host_state(state);
+        };
+        publish(requesting);
+        for mount in &self.mounts {
+            if mount.owner.session_id == owner.session_id
+                && mount.process.is_running()
+                && mount.process.extension_instance_id() == mount.owner.extension_instance_id
+                && mount.process.health_snapshot().generation == mount.owner.process_generation
+            {
+                publish(&mount.process);
             }
         }
     }

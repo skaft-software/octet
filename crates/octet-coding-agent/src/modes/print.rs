@@ -158,7 +158,7 @@ async fn run_prompt(
         .await?;
     let pending_context_count = composition.pending_context_count;
     for notification in composition.notifications {
-        crate::output::stderr!("extension: {notification}");
+        crate::output::stderr_multiline(format!("extension: {notification}"));
     }
     app.agent.set_system_prompt(composition.system);
     app.agent.set_prompt_display_text(Some(display_prompt));
@@ -268,6 +268,9 @@ async fn run_prompt(
                     ));
                 }
             }
+            AgentEvent::ExtensionObservationWarning { message } => {
+                crate::output::stderr!("warning: {message}");
+            }
             AgentEvent::ProviderUsageUncertain => {
                 crate::output::stderr!("warning: provider usage and cost are uncertain for this session; all subsequent numeric usage/cost values are known subtotals, not complete totals (including after resume).");
             }
@@ -368,7 +371,7 @@ async fn run_prompt(
             .after_response(&response_text)
             .await
         {
-            crate::output::stderr!("extension: {notification}");
+            crate::output::stderr_multiline(format!("extension: {notification}"));
         }
     }
     let presentation = app.executable_extensions.presentation_text();

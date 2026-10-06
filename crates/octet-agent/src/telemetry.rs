@@ -496,6 +496,16 @@ impl EventObserver for TelemetryObserver {
                     fields,
                 );
             }
+            AgentEvent::ExtensionObservationWarning { message } => {
+                let mut fields = Map::new();
+                fields.insert("message".into(), Value::String(bounded_text(message)));
+                inner.emit(
+                    Some(resource_owner),
+                    Some(&run_id),
+                    "extension_observation_warning",
+                    fields,
+                );
+            }
             AgentEvent::ProviderUsageUncertain => {
                 inner.emit(
                     Some(resource_owner),
@@ -1069,6 +1079,7 @@ fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::ProviderInference { .. } => "provider_inference",
         AgentEvent::ProviderWaitingForNetwork { .. } => "provider_waiting_for_network",
         AgentEvent::ProviderOperationRetry { .. } => "provider_operation_retry",
+        AgentEvent::ExtensionObservationWarning { .. } => "extension_observation_warning",
         AgentEvent::ProviderUsageUncertain => "provider_usage_uncertain",
         AgentEvent::CacheWarmed { .. } => "cache_warmed",
         AgentEvent::ToolStarted { .. } => "tool_started",

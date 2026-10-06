@@ -171,6 +171,17 @@ fn build_config_for_extension_flags(cli: Cli, cwd: &Path) -> anyhow::Result<Conf
     build_config_with_global_path_and_diagnostics(cli, cwd, global.as_deref(), false)
 }
 
+#[cfg(test)]
+thread_local! {
+    static EXTENSION_COMMAND_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn static_extension_command() -> Command {
+    #[cfg(test)]
+    EXTENSION_COMMAND_BUILDS.with(|count| count.set(count.get() + 1));
+    Cli::command()
+}
+
 fn collect_static_long_options(command: &Command, options: &mut BTreeSet<String>) {
     for argument in command.get_arguments() {
         if let Some(long) = argument.get_long() {
@@ -191,7 +202,7 @@ pub(super) fn register_extension_flags(
     // clap adds these built-ins while building the command, after
     // `get_arguments()` exposes derive-declared arguments.
     let mut occupied = BTreeSet::from(["help".to_owned(), "version".to_owned()]);
-    collect_static_long_options(&Cli::command(), &mut occupied);
+    collect_static_long_options(&static_extension_command(), &mut occupied);
     let mut registered = Vec::with_capacity(declarations.len());
     for (extension, declaration) in declarations {
         let argument_id = format!("extension-flag::{extension}::{}", declaration.name);
@@ -219,7 +230,7 @@ pub(super) fn register_extension_flags(
 }
 
 pub(super) fn extension_flag_command(registered: &[RegisteredExtensionFlag]) -> Command {
-    let mut command = Cli::command();
+    let mut command = static_extension_command();
     for flag in registered {
         let help = flag
             .declaration
@@ -319,7 +330,7 @@ pub(super) fn invocation_has_top_level_subcommand(
     args: &[OsString],
     registered: &[RegisteredExtensionFlag],
 ) -> bool {
-    let command = Cli::command();
+    let command = static_extension_command();
     let mut dynamic_flags = BTreeMap::<String, ExtensionFlagType>::new();
     for flag in registered {
         dynamic_flags.insert(flag.declaration.name.clone(), flag.declaration.kind);
@@ -405,10 +416,24 @@ pub(crate) fn parse_with_extension_flags(
     args: Vec<OsString>,
     cwd: &Path,
 ) -> anyhow::Result<(Cli, ExtensionFlagValues)> {
-    let static_args = args.clone();
     let declarations = bootstrap_extension_config(&args, cwd)
         .map(|config| crate::extensions::selected_extension_flag_declarations(&config))
         .unwrap_or_default();
+    parse_declared_extension_flags(args, declarations)
+}
+
+fn parse_declared_extension_flags(
+    args: Vec<OsString>,
+    declarations: Vec<(String, ExtensionFlag)>,
+) -> anyhow::Result<(Cli, ExtensionFlagValues)> {
+    // Manifest discovery and its trust checks still run before this boundary.
+    // Without declarations, there is nothing to register or scan around: use
+    // the existing static parser without rebuilding its command for collision
+    // enumeration and subcommand detection first.
+    if declarations.is_empty() {
+        return Ok((parse_static_or_exit(args), BTreeMap::new()));
+    }
+    let static_args = args.clone();
     let registered = register_extension_flags(declarations)?;
     if invocation_has_top_level_subcommand(&args, &registered) {
         return Ok((parse_static_or_exit(static_args), BTreeMap::new()));
@@ -502,7 +527,7 @@ pub(crate) fn uses_runtime_extension_flag_parser(args: &[OsString]) -> bool {
     if has_static_early_exit_option(args) {
         return false;
     }
-    let command = Cli::command();
+    let command = static_extension_command();
     let mut index = 1;
     while index < args.len() {
         let Some(value) = args[index].to_str() else {
@@ -545,4 +570,53 @@ pub(crate) fn uses_runtime_extension_flag_parser(args: &[OsString]) -> bool {
         return true;
     }
     true
+}
+
+#[cfg(test)]
+mod fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn no_declarations_preserve_static_parse_without_extension_command_builds() {
+        for invocation in [
+            vec!["octet"],
+            vec!["octet", "--offline", "--model", "custom/bench/model-00000"],
+            vec!["octet", "--workspace", "/tmp", "--", "--literal-prompt"],
+            vec!["octet", "-p", "hello"],
+            vec!["octet", "doctor"],
+        ] {
+            let args: Vec<OsString> = invocation
+                .iter()
+                .map(|argument| OsString::from(*argument))
+                .collect();
+            let expected = Cli::try_parse_from(args.clone()).unwrap();
+            EXTENSION_COMMAND_BUILDS.with(|count| count.set(0));
+            let (actual, values) = parse_declared_extension_flags(args, Vec::new()).unwrap();
+            assert!(values.is_empty());
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            EXTENSION_COMMAND_BUILDS.with(|count| assert_eq!(count.get(), 0));
+        }
+    }
+
+    #[test]
+    fn declared_flags_still_register_and_resolve_after_discovery() {
+        let declarations = vec![(
+            "fixture".to_owned(),
+            ExtensionFlag {
+                name: "fixture-count".to_owned(),
+                kind: ExtensionFlagType::Integer,
+                default: serde_json::json!(2),
+                description: None,
+            },
+        )];
+        let args = ["octet", "--fixture-count", "-7", "hello"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        EXTENSION_COMMAND_BUILDS.with(|count| count.set(0));
+        let (cli, values) = parse_declared_extension_flags(args, declarations).unwrap();
+        assert_eq!(cli.message.as_deref(), Some("hello"));
+        assert_eq!(values["fixture"]["fixture-count"], serde_json::json!(-7));
+        EXTENSION_COMMAND_BUILDS.with(|count| assert!(count.get() > 0));
+    }
 }

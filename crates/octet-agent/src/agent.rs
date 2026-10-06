@@ -960,6 +960,7 @@ impl Agent {
             run_outcome: None,
             tool_output: None,
             tool_composition: None,
+            replay_safe_tool_calls: None,
             tool_started_unix_ms: None,
             tool_finished_unix_ms: None,
             native_steering: None,

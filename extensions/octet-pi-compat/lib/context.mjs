@@ -82,7 +82,7 @@ function sessionEntryToContextMessages(entry) {
   return [];
 }
 
-function buildContextEntries(path) {
+function contextEntriesForPath(path) {
   const compactionIdx = path.findLastIndex((entry) => entry.type === 'compaction');
   if (compactionIdx < 0) return path;
   const compaction = path[compactionIdx];
@@ -110,7 +110,11 @@ function projectContextEntry(entry, edit) {
 }
 
 /** Pi's pure tree projection; does not read, edit, or persist native session state. */
-export function buildSessionContext(entries, leafId, byId) {
+export function buildContextEntries(entries, leafId, byId) {
+  return contextEntriesForPath(buildSessionPath(entries, leafId, byId));
+}
+
+export function buildSessionProjection(entries, leafId, byId) {
   const path = buildSessionPath(entries, leafId, byId);
   let thinkingLevel = 'off';
   let model = null;
@@ -121,13 +125,18 @@ export function buildSessionContext(entries, leafId, byId) {
       model = { provider: entry.message.provider, modelId: entry.message.model };
     }
   }
-  const contextEntries = buildContextEntries(path);
+  const contextEntries = contextEntriesForPath(path);
   const latestEdits = new Map();
   for (const entry of contextEntries) {
     if (entry.type === 'context_edit') latestEdits.set(entry.targetId, entry);
   }
-  const messages = contextEntries.flatMap((entry, index) =>
-    entry.type === 'compaction' && index > 0 ? [] : projectContextEntry(entry, latestEdits.get(entry.id)));
+  const projectedEntries = contextEntries.map((sourceEntry, index) => ({
+    sourceEntry, messages: sourceEntry.type === 'compaction' && index > 0 ? [] : projectContextEntry(sourceEntry, latestEdits.get(sourceEntry.id)),
+  }));
+  return { entries: projectedEntries, messages: projectedEntries.flatMap(entry => entry.messages), thinkingLevel, model };
+}
 
+export function buildSessionContext(entries, leafId, byId) {
+  const { messages, thinkingLevel, model } = buildSessionProjection(entries, leafId, byId);
   return { messages, thinkingLevel, model };
 }

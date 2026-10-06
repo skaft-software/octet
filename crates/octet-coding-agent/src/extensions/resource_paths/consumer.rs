@@ -118,6 +118,10 @@ impl ExecutableExtensions {
                 .collect(),
         })
     }
+    pub(crate) fn has_pending_session_starts(&self) -> bool {
+        !self.pending_session_hook_starts.is_empty() || !self.session_hook_start_tasks.is_empty()
+    }
+
     pub(crate) fn resource_session_starts(
         &mut self,
     ) -> anyhow::Result<impl Future<Output = anyhow::Result<ResourceLease>> + Send + 'static> {

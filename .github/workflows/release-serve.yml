@@ -282,9 +282,11 @@ jobs:
             archive="$RUNNER_TEMP/octet-extension-release/$extension-$version.tar.gz"
             python3 - "$extension" "$archive" <<'PY'
           import pathlib
+          import shutil
           import subprocess
           import sys
           import tarfile
+          import tempfile
 
           extension, archive = sys.argv[1:3]
           prefix = f"extensions/{extension}/"
@@ -299,6 +301,29 @@ jobs:
               files = {member.name for member in bundle.getmembers() if member.isfile()}
               if any(not (member.isfile() or member.isdir()) for member in bundle.getmembers()):
                   raise SystemExit(f"{extension} bundle contains a link or special file")
+              if extension == "octet-pi-compat":
+                  # Reproduce exact lockfile-derived files, not a node_modules prefix allowlist.
+                  source = pathlib.Path(prefix)
+                  with tempfile.TemporaryDirectory() as temporary:
+                      staging = pathlib.Path(temporary)
+                      for name in ("package.json", "package-lock.json"):
+                          shutil.copyfile(source / name, staging / name)
+                      subprocess.run([
+                          "npm", "ci", "--omit=dev", "--ignore-scripts", "--no-audit",
+                          "--no-fund", "--bin-links=false",
+                      ], cwd=staging, check=True)
+                      modules = staging / "node_modules"
+                      for path in modules.rglob("*"):
+                          if path.is_symlink():
+                              raise SystemExit("locked npm dependencies contain a link")
+                      shutil.copyfile(source / "LICENSE.pi", modules / "@earendil-works/pi-tui/LICENSE")
+                      for path in modules.rglob("*"):
+                          if not path.is_file():
+                              continue
+                          name = f"{extension}/{path.relative_to(staging).as_posix()}"
+                          expected.add(name)
+                          if name in files and bundle.extractfile(name).read() != path.read_bytes():
+                              raise SystemExit(f"{extension} locked dependency content mismatch: {name}")
           if files != expected:
               missing = sorted(expected - files)
               unexpected = sorted(files - expected)

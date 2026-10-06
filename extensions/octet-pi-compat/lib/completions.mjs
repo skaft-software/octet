@@ -1,5 +1,6 @@
 import { fields, invalid, rpcError, unsupported } from './errors.mjs';
 import { applyPiCompletion, autocompleteSnapshot, completionResponse, completionText, piPosition } from './autocomplete-edits.mjs';
+import { fuzzyFilter } from '../node_modules/@earendil-works/pi-tui/dist/fuzzy.js';
 
 // Command/attachment parsing adapted from Pi 1.0.2 (cd32f7725fdbddbaecdff5b1e68491563394e0ca),
 // packages/tui/src/{autocomplete,utils}.ts. Copyright (c) 2025 Mario Zechner.
@@ -60,13 +61,30 @@ function baseProvider(runtime) {
     async getSuggestions(lines, cursorLine, cursorCol, options = {}) {
       const { text, index } = piPosition(lines, cursorLine, cursorCol);
       if (options.force) return null; // Filesystem completion remains the native fallback.
+      options.signal?.throwIfAborted();
+      const line = lines[cursorLine].slice(0, cursorCol), commandText = line.trimStart();
+      if (!atAttachment(line) && commandText.startsWith('/') && !commandText.includes(' ')) {
+        const items = [...runtime.commands].map(([name, { definition }]) => ({
+          name, label: name, description: definition.description,
+        }));
+        const prefix = commandText.slice(1);
+        const bare = fuzzyFilter(items, prefix, item => item.name.startsWith('skill:') ? item.name.slice(6) : item.name);
+        const matched = new Set(bare);
+        const full = fuzzyFilter(items.filter(item => item.name.startsWith('skill:') && !matched.has(item)), prefix, item => item.name);
+        const matches = [...bare, ...full].map(item => ({ value: item.name, label: item.label,
+          ...(item.description ? { description: item.description } : {}) }));
+        return matches.length ? { prefix: commandText, items: matches } : null;
+      }
       const query = commandArgumentRequest({ text, cursor: Buffer.byteLength(text.slice(0, index)), revision: 0 });
       const command = query && runtime.commands.get(query.name);
       if (!command?.definition.getArgumentCompletions) return null;
       const store = runtime.scope.getStore();
-      const result = await cancellable(runtime.scope.run({ ...store, factory: command.factory },
-        () => command.definition.getArgumentCompletions(query.prefix)), options.signal);
+      // Keep the invocation alive until the actual callback settles, including
+      // cancellation. A signal is not proof that extension JS has stopped.
+      const result = await runtime.scope.run({ ...store, factory: command.factory },
+        () => command.definition.getArgumentCompletions(query.prefix));
       options.signal?.throwIfAborted();
+      if (store?.state) runtime.assertOwner(store);
       // This is the pinned Pi command-callback policy, not the provider-result grammar.
       return Array.isArray(result) && result.length ? { prefix: query.prefix, items: result } : null;
     },
@@ -128,7 +146,7 @@ export function addAutocompleteProvider(runtime, store, factory) {
   if (triggers.length) provider.triggerCharacters = [...new Set(triggers)];
   chains.set(store.state, { entries, provider });
   const editor = runtime.ui.activeEditor(store);
-  if (editor?.component) runtime.scope.run(editor.store, () => editor.component.setAutocompleteProvider?.(provider));
+  if (editor?.component) runtime.scope.run(editor.store, () => editor.component.setAutocompleteProvider?.(getAutocompleteProvider(runtime, editor.store)));
   if (!runtime.autocompleteRegistration) {
     // A dynamic provider may be the first completion contribution. Initialization
     // has already settled; this remains a process-owned registration, never a fake parent.
@@ -144,7 +162,42 @@ export function addAutocompleteProvider(runtime, store, factory) {
 /** Component-only Pi interface; no force/trigger fields are invented on the native wire. */
 export function getAutocompleteProvider(runtime, store) {
   runtime.assertOwner(store);
-  return chains.get(store.state)?.provider ?? baseProvider(runtime);
+  const state = store.state, chain = chains.get(state), provider = chain?.provider ?? baseProvider(runtime);
+  const live = () => {
+    runtime.assertOwner(store);
+    store.controller.signal.throwIfAborted();
+    if (store.surface?.closed) throw rpcError(-32800, 'autocomplete editor retired');
+    if (chains.get(state) !== chain) throw rpcError(-32800, 'autocomplete provider chain replaced');
+  };
+  const call = (method, args) => { live(); return runtime.scope.run(store, () => provider[method](...args)); };
+  return {
+    ...(provider.triggerCharacters === undefined ? {} : { triggerCharacters: [...provider.triggerCharacters] }),
+    async getSuggestions(lines, cursorLine, cursorCol, options = {}) {
+      const controller = new AbortController();
+      const signal = AbortSignal.any([controller.signal, store.controller.signal, ...(options.signal ? [options.signal] : [])]);
+      let active = activeQueries.get(state);
+      if (!active) { active = new Set(); activeQueries.set(state, active); }
+      active.add(controller);
+      try {
+        live(); signal.throwIfAborted();
+        // Editor requests have no new native parent. Preserve the real surface
+        // origin, but fence retained API effects with this query's cancellation.
+        const scope = { ...store, controller: { signal, abort: reason => controller.abort(reason) } };
+        const result = await runtime.scope.run(scope, () => provider.getSuggestions(lines, cursorLine, cursorCol, { ...options, signal }));
+        live(); signal.throwIfAborted(); return result;
+      } catch (error) {
+        // Pi's editor does not catch provider rejections. Expected cancellation
+        // and retirement yield no menu; actual callback failures are reported.
+        if (!signal.aborted && state.alive && runtime.foreground === state
+            && !store.surface?.closed && chains.get(state) === chain) runtime.backgroundError(error);
+        return null;
+      } finally { activeQueries.get(state)?.delete(controller); }
+    },
+    applyCompletion: (...args) => call('applyCompletion', args),
+    ...(provider.shouldTriggerFileCompletion === undefined ? {} : {
+      shouldTriggerFileCompletion: (...args) => call('shouldTriggerFileCompletion', args),
+    }),
+  };
 }
 
 /** Runtime.retire(state) must call this; it changes no editor/remote-UI lifetime. */
@@ -178,8 +231,8 @@ export async function commandCompletions(runtime, params, store) {
     const scope = { ...store, ...(state ? { state } : {}) };
     // Native requests do not carry natural/forced trigger information. In
     // particular, do not reinterpret every native query as Pi's forced-file Tab.
-    const suggestions = await cancellable(runtime.scope.run(scope, () => provider.getSuggestions(
-      [...snapshot.lines], snapshot.cursorLine, snapshot.cursorCol, { signal: store.controller.signal })), store.controller.signal);
+    const suggestions = await runtime.scope.run(scope, () => provider.getSuggestions(
+      [...snapshot.lines], snapshot.cursorLine, snapshot.cursorCol, { signal: store.controller.signal }));
     live();
     const response = runtime.scope.run(scope, () => completionResponse(snapshot, suggestions, provider, runtime.features.has('autocomplete_edit_v1')));
     live(); return response;

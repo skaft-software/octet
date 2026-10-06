@@ -7,6 +7,65 @@ use super::support::*;
 use super::*;
 
 #[test]
+fn seeded_prompt_history_is_older_newest_first_deduplicated_and_preserves_the_draft() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_prompt_submitted("native");
+    shell.extension_set_editor("draft".into());
+    shell.seed_prompt_history(vec![
+        "newer".into(),
+        "native".into(),
+        "older".into(),
+        "newer".into(),
+    ]);
+    assert_eq!(shell.pending(), "draft");
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .prompt_history
+            .iter()
+            .map(|entry| entry.display_text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["older", "newer", "native"]
+    );
+    shell.state.borrow_mut().editor.set_cursor(0);
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "native");
+    shell.seed_prompt_history(vec!["oldest".into()]);
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(
+        shell.pending(),
+        "newer",
+        "seeding shifted the active history index"
+    );
+    shell.apply_edit(EditAction::Down);
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(
+        shell.pending(),
+        "draft",
+        "seeding discarded the saved draft"
+    );
+}
+
+#[test]
+fn seeded_prompt_history_keeps_the_most_recent_entries_and_native_attachments() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.apply_edit(EditAction::Paste("native line\n".repeat(20)));
+    let sent = shell.drain_composed();
+    shell.on_composed_prompt_submitted(&sent);
+    let mut entries: Vec<_> = (0..100).rev().map(|i| format!("imported {i}")).collect();
+    entries.insert(0, sent.display_text.clone());
+    shell.seed_prompt_history(entries);
+    let state = shell.state.borrow();
+    assert_eq!(state.prompt_history.len(), MAX_PROMPT_HISTORY_ENTRIES);
+    assert_eq!(state.prompt_history[0].display_text, "imported 1");
+    assert_eq!(state.prompt_history.last().unwrap().attachments.len(), 1);
+    drop(state);
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.drain_composed().attachments.len(), 1);
+}
+
+#[test]
 fn prompt_history_repeats_with_bounds_and_restores_an_empty_draft() {
     let mut shell = InteractiveShell::test_shell();
     shell.on_prompt_submitted("first");

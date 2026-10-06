@@ -113,6 +113,14 @@ pub(crate) async fn translate(
                 )
                 .await?;
         }
+        AgentEvent::ExtensionObservationWarning { message } => {
+            emitter
+                .emit(
+                    "extension_observation_warning",
+                    serde_json::json!({"message":message}),
+                )
+                .await?;
+        }
         AgentEvent::ProviderUsageUncertain => {
             emitter
                 .emit("provider_usage_uncertain", serde_json::json!({}))

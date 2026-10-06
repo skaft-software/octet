@@ -21,6 +21,11 @@ enum InputEventResult {
     },
 }
 
+pub(crate) struct AfterResponseOutput {
+    messages: Vec<String>,
+    queued_context: Vec<(String, ContextContribution)>,
+}
+
 impl ExecutableExtensions {
     /// Run ordered early input handlers. `None` means handled: do not persist
     /// a prompt or start a provider request. Images omitted by a transform stay.
@@ -178,7 +183,9 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
-        self.transition_active_session_with_setup(session, model, reasoning, sessions, None);
+        self.transition_active_session_with_setup(
+            session, model, reasoning, sessions, "resume", None,
+        );
     }
 
     pub fn transition_active_session_with_setup(
@@ -187,8 +194,10 @@ impl ExecutableExtensions {
         model: &Model,
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
+        reason: &'static str,
         setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
     ) {
+        self.session_start_reason = reason;
         self.pending_session_setup = setup;
         self.retire_active_resources();
         self.cancel_session_hook_starts();
@@ -266,10 +275,13 @@ impl ExecutableExtensions {
 
     /// Start only after setup writes are complete; return the exact process
     /// handles whose deferred session_start callbacks the caller must await.
-    pub fn complete_session_setup(&mut self) -> Vec<(ExtensionProcess, String)> {
+    pub fn complete_session_setup(&mut self) -> Vec<(ExtensionProcess, String, &'static str)> {
         self.pending_session_setup = None;
         self.start_session_lifecycle();
         std::mem::take(&mut self.pending_session_hook_starts)
+            .into_iter()
+            .map(|(process, owner)| (process, owner, self.session_start_reason))
+            .collect()
     }
 
     /// The launch already projected skills and session metadata for initialize.
@@ -288,10 +300,35 @@ impl ExecutableExtensions {
         let unchanged = initial.model.as_deref() == Some(&model.spec.id.0)
             && initial.model_view == extension_model_view(model)
             && initial.reasoning
-                == pi_thinking_level(model, reasoning).map(serde_json::Value::String);
+                == pi_thinking_level(model, reasoning).map(serde_json::Value::String)
+            && initial.context_usage
+                == Some(model_control::context_usage(session, model).unwrap_or(Value::Null));
         drop(initial);
         if !unchanged {
             self.refresh_host_state(session, model, reasoning, sessions);
+        }
+    }
+
+    /// Publish the actual shell manager, including user overrides, to retained UI.
+    pub(crate) fn refresh_frontend_keybindings(&self, shell: &InteractiveShell) {
+        let keybindings = Some(shell.extension_keybindings());
+        let state = {
+            let mut state = self
+                .host_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.keybindings == keybindings {
+                return;
+            }
+            state.keybindings = keybindings;
+            state.clone()
+        };
+        for process in &self.processes {
+            if process.descriptor().manifest.runtime.sharing
+                == octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
+            {
+                process.set_host_state(state.clone());
+            }
         }
     }
 
@@ -303,12 +340,18 @@ impl ExecutableExtensions {
         sessions: &SessionStore,
     ) {
         let mut state = host_state(session, model, reasoning, sessions);
-        state.pi_models = self
-            .host_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pi_models
-            .clone();
+        {
+            let previous = self
+                .host_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.pi_models = previous.pi_models.clone();
+            state.project_trusted = previous.project_trusted;
+            state.has_ui = previous.has_ui;
+            state.keybindings = previous.keybindings.clone();
+            state.theme = previous.theme.clone();
+            state.mode = previous.mode.clone();
+        }
         self.session_id = state.session_id.clone();
         for process in &self.processes {
             if process.descriptor().manifest.runtime.sharing
@@ -364,6 +407,26 @@ impl ExecutableExtensions {
         }
     }
 
+    /// Keep reverse host requests live while a prompt contributor is awaiting
+    /// its response. This uses the headless drain's admission/refusal policy;
+    /// it never borrows a shell or dispatches foreground session mutations.
+    async fn await_prompt_work<F: std::future::Future>(
+        &mut self,
+        work: F,
+        notifications: &mut Vec<String>,
+    ) -> F::Output {
+        tokio::pin!(work);
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut work => return result,
+                _ = tick.tick() => notifications.extend(self.drain_events()),
+            }
+        }
+    }
+
     pub async fn compose_prompt(
         &mut self,
         base_system: &str,
@@ -384,24 +447,29 @@ impl ExecutableExtensions {
         }
         let mut rejected_context = Vec::new();
 
-        for process in &self.processes {
-            let execution = extension_execution_context(process, self.resource_owner.as_deref());
+        // Process handles are shared; release the fleet borrow so the same
+        // bounded event consumer can answer requests made by these hooks.
+        for process in self.processes.clone() {
+            let execution = extension_execution_context(&process, self.resource_owner.as_deref());
             if process
                 .contributions()
                 .hooks
                 .contains(&ExtensionHook::BeforePrompt)
             {
-                let output = tokio::time::timeout(
-                    PROMPT_RPC_DEADLINE,
-                    process.run_hook(
-                        ExtensionHook::BeforePrompt,
-                        if process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1) {
-                            serde_json::json!({"prompt": &prompt, "system_prompt": &effective_system})
-                        } else {
-                            before_prompt_hook_payload(&prompt)
-                        },
-                        execution.clone(),
+                let output = self.await_prompt_work(
+                    tokio::time::timeout(
+                        PROMPT_RPC_DEADLINE,
+                        process.run_hook(
+                            ExtensionHook::BeforePrompt,
+                            if process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1) {
+                                serde_json::json!({"prompt": &prompt, "system_prompt": &effective_system})
+                            } else {
+                                before_prompt_hook_payload(&prompt)
+                            },
+                            execution.clone(),
+                        ),
                     ),
+                    &mut notifications,
                 )
                 .await
                 .map_err(|_| {
@@ -456,24 +524,28 @@ impl ExecutableExtensions {
                 }));
             }
             if process.contributions().context {
-                let collected = tokio::time::timeout(
-                    PROMPT_RPC_DEADLINE,
-                    process.collect_context(Some(prompt.clone()), execution),
-                )
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "extension {:?} context collection exceeded {:?}",
-                        process.descriptor().manifest.name,
-                        PROMPT_RPC_DEADLINE,
+                let collected = self
+                    .await_prompt_work(
+                        tokio::time::timeout(
+                            PROMPT_RPC_DEADLINE,
+                            process.collect_context(Some(prompt.clone()), execution),
+                        ),
+                        &mut notifications,
                     )
-                })?
-                .with_context(|| {
-                    format!(
-                        "extension {:?} context collection failed",
-                        process.descriptor().manifest.name
-                    )
-                })?;
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "extension {:?} context collection exceeded {:?}",
+                            process.descriptor().manifest.name,
+                            PROMPT_RPC_DEADLINE,
+                        )
+                    })?
+                    .with_context(|| {
+                        format!(
+                            "extension {:?} context collection failed",
+                            process.descriptor().manifest.name
+                        )
+                    })?;
                 let mut dropped = 0usize;
                 let mut last_error = None;
                 for contribution in collected {
@@ -513,57 +585,105 @@ impl ExecutableExtensions {
         self.pending_context.commit(pending_context_count);
     }
 
-    pub async fn after_response(&mut self, response: &str) -> Vec<String> {
-        let mut messages = Vec::new();
-        let mut queued_context = Vec::new();
-        for process in &self.processes {
-            if !process
-                .contributions()
-                .hooks
-                .contains(&ExtensionHook::AfterResponse)
-            {
-                continue;
-            }
-            let execution = extension_execution_context(process, self.resource_owner.as_deref());
-            match tokio::time::timeout(
-                AFTER_RESPONSE_RPC_DEADLINE,
-                process.run_hook(
-                    ExtensionHook::AfterResponse,
-                    after_response_hook_payload(response),
-                    execution,
-                ),
-            )
-            .await
-            {
-                Err(_) => messages.push(format!(
-                    "extension {:?} after_response hook exceeded {:?}",
-                    process.descriptor().manifest.name,
-                    AFTER_RESPONSE_RPC_DEADLINE,
-                )),
-                Ok(Ok(output)) => {
-                    let extension_name = process.descriptor().manifest.name.clone();
-                    messages.extend(
-                        output.notifications.into_iter().map(|notification| {
-                            format_notification(&extension_name, &notification)
-                        }),
-                    );
-                    queued_context.extend(
-                        output
-                            .context
-                            .into_iter()
-                            .map(|contribution| (extension_name.clone(), contribution)),
-                    );
+    /// Capture ordered hook work without borrowing the frontend consumer.
+    pub(crate) fn begin_after_response(
+        &self,
+        response: &str,
+    ) -> impl std::future::Future<Output = AfterResponseOutput> + Send + 'static {
+        let processes = self.processes.clone();
+        let resource_owner = self.resource_owner.clone();
+        let response = response.to_owned();
+        async move {
+            let mut messages = Vec::new();
+            let mut queued_context = Vec::new();
+            for process in &processes {
+                if !process
+                    .contributions()
+                    .hooks
+                    .contains(&ExtensionHook::AfterResponse)
+                {
+                    continue;
                 }
-                Ok(Err(error)) => messages.push(format!(
-                    "extension {:?} after_response hook failed: {error}",
-                    process.descriptor().manifest.name
-                )),
+                let execution = extension_execution_context(process, resource_owner.as_deref());
+                match tokio::time::timeout(
+                    AFTER_RESPONSE_RPC_DEADLINE,
+                    process.run_hook(
+                        ExtensionHook::AfterResponse,
+                        after_response_hook_payload(&response),
+                        execution,
+                    ),
+                )
+                .await
+                {
+                    Err(_) => messages.push(format!(
+                        "extension {:?} after_response hook exceeded {:?}",
+                        process.descriptor().manifest.name,
+                        AFTER_RESPONSE_RPC_DEADLINE,
+                    )),
+                    Ok(Ok(output)) => {
+                        let extension_name = process.descriptor().manifest.name.clone();
+                        messages.extend(output.notifications.into_iter().map(|notification| {
+                            format_notification(&extension_name, &notification)
+                        }));
+                        queued_context.extend(
+                            output
+                                .context
+                                .into_iter()
+                                .map(|contribution| (extension_name.clone(), contribution)),
+                        );
+                    }
+                    Ok(Err(error)) => messages.push(format!(
+                        "extension {:?} after_response hook failed: {error}",
+                        process.descriptor().manifest.name
+                    )),
+                }
+            }
+            AfterResponseOutput {
+                messages,
+                queued_context,
             }
         }
-        for (extension_name, contribution) in queued_context {
+    }
+
+    /// Publish the contributions only after the complete hook boundary settles.
+    pub(crate) fn finish_after_response(&mut self, output: AfterResponseOutput) -> Vec<String> {
+        for (extension_name, contribution) in output.queued_context {
             self.enqueue_context(&extension_name, contribution);
         }
+        output.messages
+    }
+
+    pub async fn after_response(&mut self, response: &str) -> Vec<String> {
+        let output = self.begin_after_response(response).await;
+        let mut messages = self.finish_after_response(output);
         messages.extend(self.drain_events());
         messages
+    }
+}
+
+#[cfg(test)]
+mod keybinding_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn host_refresh_preserves_native_frontend_keybinding_overrides() {
+        let (_directory, app) = crate::compaction::tests::app_for_estimate();
+        let mut extensions = ExecutableExtensions::default();
+        let keys = BTreeMap::from([("app.tools.expand".to_owned(), vec!["ctrl+x".to_owned()])]);
+        {
+            let mut state = extensions.host_state.lock().unwrap();
+            state.has_ui = Some(true);
+            state.keybindings = Some(keys.clone());
+        }
+        extensions.refresh_host_state(
+            app.agent.session(),
+            &app.model,
+            &app.reasoning,
+            &app.sessions,
+        );
+        assert_eq!(
+            extensions.host_state.lock().unwrap().keybindings,
+            Some(keys)
+        );
     }
 }

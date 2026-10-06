@@ -388,6 +388,11 @@ pub enum ExtensionComposerOperation {
         /// Text to insert at the cursor.
         text: String,
     },
+    /// Seed older native prompt history, in newest-first order.
+    History {
+        /// Plain-text prompts, at most 100 and 256 KiB in aggregate.
+        entries: Vec<String>,
+    },
     /// Commit a recovery checkpoint for a currently owned API 0.4 editor mount.
     Checkpoint {
         /// Complete replacement text.
@@ -400,6 +405,32 @@ pub enum ExtensionComposerOperation {
 }
 
 impl ExtensionComposerOperation {
+    /// Validate the bounded, terminal-safe native history seed.
+    pub fn validate_history(entries: &[String]) -> Result<(), (ExtensionRequestFailure, String)> {
+        if entries.len() > 100 {
+            return Err((
+                ExtensionRequestFailure::BoundsExceeded,
+                "composer history exceeds 100 entries".into(),
+            ));
+        }
+        let mut bytes = 0;
+        for entry in entries {
+            bounded_plain_text_failure(
+                "composer history entry",
+                entry,
+                MAX_EXTENSION_COMPOSER_TEXT_BYTES,
+            )?;
+            bytes += entry.len();
+            if bytes > MAX_EXTENSION_COMPOSER_TEXT_BYTES {
+                return Err((
+                    ExtensionRequestFailure::BoundsExceeded,
+                    "composer history exceeds 256 KiB".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validates every bounded field, mirroring
     /// [`ExtensionEditorRequest::validate`].
     pub fn validate(&self) -> Result<(), String> {
@@ -410,6 +441,10 @@ impl ExtensionComposerOperation {
             } => {
                 checkpoint.validate().map_err(|(_, detail)| detail)?;
                 Some(text)
+            }
+            Self::History { entries } => {
+                Self::validate_history(entries).map_err(|(_, detail)| detail)?;
+                None
             }
             Self::Get => None,
         };

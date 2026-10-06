@@ -363,6 +363,10 @@ impl CompositionDispatcher {
         let progress = ToolProgressSink::live(tx)
             .for_nested_call()
             .with_tool_call_identity(id.0.clone(), Some(self.parent_id.0.clone()));
+        let progress = match self.progress.session_driver() {
+            Some(route) => progress.with_session_driver(route),
+            None => progress,
+        };
         let context = ToolContext {
             workspace: &self.sandbox.workspace,
             sandbox: &self.sandbox,

@@ -55,6 +55,11 @@ impl WidthPolicy {
 
     /// Width of a line beginning at `start_column`.
     pub fn line_width_from(self, text: &str, start_column: usize) -> usize {
+        if text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+            return start_column
+                .saturating_add(text.len())
+                .saturating_sub(start_column);
+        }
         let mut column = start_column;
         for grapheme in text.graphemes(true) {
             if grapheme == "\n" || grapheme == "\r" {

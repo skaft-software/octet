@@ -10,8 +10,15 @@ const protocols = { 'openai-completions': 'openai_chat', 'openai-responses': 'op
 const runtimes = new WeakMap();
 function providers(runtime) {
   let value = runtimes.get(runtime);
-  if (!value) { value = { desired: new Map(), committed: new Map(), jobs: new Map(), tail: Promise.resolve() }; runtimes.set(runtime, value); }
+  // registered mirrors Pi's synchronous extensionProviders map: name -> config as given.
+  if (!value) { value = { desired: new Map(), committed: new Map(), registered: new Map(), jobs: new Map(), tail: Promise.resolve() }; runtimes.set(runtime, value); }
   return value;
+}
+// Loading is sequential and no providers have been committed yet. Restore the
+// preceding declarations, including ones a failing factory replaced or removed.
+export function checkpointFactoryProviders(runtime) {
+  const before = new Map(providers(runtime).desired);
+  return () => { providers(runtime).desired = before; };
 }
 function snapshot(host, key, api) {
   const value = host.pi_models?.[key];
@@ -48,9 +55,11 @@ export function scopedModels(host) {
     model: modelView(entry.model), ...(entry.thinkingLevel === undefined ? {} : { thinkingLevel: entry.thinkingLevel }),
   }));
 }
-export function modelRegistry(getHost) {
+export function modelRegistry(getHost, runtime) {
   const all = () => snapshot(getHost(), 'all_models', 'ctx.modelRegistry.getAll');
   return strict({
+    getRegisteredProviderIds: () => [...providers(runtime).registered.keys()],
+    getRegisteredProviderConfig: name => providers(runtime).registered.get(name),
     getAvailable: () => snapshot(getHost(), 'available_models', 'ctx.modelRegistry.getAvailable').map(modelView),
     getAll: () => all().map(modelView),
     find: (provider, id) => modelView(all().find(model => model.provider === provider && model.id === id)),
@@ -120,6 +129,7 @@ async function commit(runtime, entry) {
 }
 export function registerProvider(runtime, factory, name, config) {
   const entry = declaration(name, config, factory), state = providers(runtime);
+  state.registered.set(name, config);
   if (!runtime.initialized) { state.desired.set(name, entry); return; }
   runtime.require('provider_proxy_v1');
   const store = runtime.current(factory); store.controller.signal.throwIfAborted();
@@ -127,6 +137,7 @@ export function registerProvider(runtime, factory, name, config) {
 }
 export function unregisterProvider(runtime, factory, name) {
   identifier(name, 'provider name'); const state = providers(runtime);
+  state.registered.delete(name);
   if (!runtime.initialized) { state.desired.delete(name); return; }
   runtime.require('provider_proxy_v1');
   const store = runtime.current(factory); store.controller.signal.throwIfAborted();

@@ -22,7 +22,7 @@ Response (not the generic hook disposition envelope):
 {"resource_paths":{"skill_paths":["/reviewed/pkg/skills"],"prompt_paths":[],"theme_paths":[]}}
 ```
 
-`resource_paths` is mandatory; omitted arrays mean empty. Unknown keys, nulls,
+`resource_paths` is mandatory; omitted arrays mean empty. Unknown keys, null arrays,
 wrong types, relative paths, parent components and controls fail validation.
 Paths are absolute UTF-8, at most 4096 bytes each, at most 64 entries / 64 KiB
 across all three arrays before deduplication. No arbitrary JSON or objects cross
@@ -30,6 +30,19 @@ this boundary. The host request deadline is at most 5 seconds. A product pass
 allows 16 contributing processes and retains at most 256 paths / 512 KiB,
 in deterministic extension-name and returned-array order. Over-budget or failed
 contributors produce diagnostics; an empty response is a genuine withdrawal.
+
+An optional `default_theme` string may reference an exact file entry in the same
+`theme_paths` array (not a directory or bare selector). Once admitted and parsed,
+its native filename selector is a session-only startup preference. It may replace
+saved appearance, but never `--theme`, `OCTET_THEME`, or a subsequent `/theme`
+choice. The first valid preference in extension-name order wins; normal native
+root precedence still determines its palette. Omitted/null means no preference.
+Reload/withdrawal restores saved appearance unless the user made an explicit
+choice. This never rewrites host settings. For example:
+
+```json
+{"resource_paths":{"theme_paths":["/reviewed/pkg/themes/pi-ghostty-dark.toml"],"default_theme":"/reviewed/pkg/themes/pi-ghostty-dark.toml"}}
+```
 
 Only an enabled, trusted, admitted extension process can contribute. The feature
 is not an extension sandbox or additional shell/network authority. Local external

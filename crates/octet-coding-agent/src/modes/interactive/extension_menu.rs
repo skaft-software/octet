@@ -301,6 +301,7 @@ enum ExtensionMenuActionDisposition {
 }
 
 enum MenuEntry {
+    SetupRuntime,
     Item(usize),
     Disable,
     HostAuthority(bool),
@@ -394,6 +395,15 @@ pub(super) async fn extension_options_menu(
         let mut labels = Vec::new();
         let mut descriptions = Vec::new();
         let mut entries = Vec::new();
+        // Host bootstrap is available even when no Python process/factory can
+        // start. Creating (but never polling) a cancelled future only validates
+        // the selected source, activation and execution policy.
+        if path.is_empty() && python_runtime_setup_available(app, extension) {
+            labels.push("Set up runtime".to_owned());
+            descriptions.push(Some("Provision this trusted extension's private Python runtime; no credentials or OS grants".to_owned()));
+            entries.push(MenuEntry::SetupRuntime);
+        }
+        let host_prefix = entries.len();
         for (index, item) in items.iter().enumerate() {
             let mut label = item.label.clone();
             if item.recommended {
@@ -453,8 +463,8 @@ pub(super) async fn extension_options_menu(
 
         let preselected = remembered
             .get(&path)
-            .and_then(|id| items.iter().position(|item| &item.id == id))
-            .or_else(|| items.iter().position(|item| item.recommended))
+            .and_then(|id| items.iter().position(|item| &item.id == id).map(|index| index + host_prefix))
+            .or_else(|| items.iter().position(|item| item.recommended).map(|index| index + host_prefix))
             .unwrap_or(0);
         let surface = match menu_purpose(menu, detail.as_deref()) {
             Some(purpose) => OrdinarySurfaceMetadata::with_purpose(title.clone(), purpose),
@@ -469,6 +479,11 @@ pub(super) async fn extension_options_menu(
             continue;
         };
         let item = match entries[index] {
+            MenuEntry::SetupRuntime => {
+                setup_python_runtime(app, shell, input, extension).await?;
+                if shell.close_requested() { return Ok(ExtensionMenuOutcome::Back); }
+                continue;
+            }
             MenuEntry::Disable => return Ok(ExtensionMenuOutcome::Disable),
             MenuEntry::HostAuthority(true) => return Ok(ExtensionMenuOutcome::GrantHostAuthority),
             MenuEntry::HostAuthority(false) => {
@@ -497,6 +512,158 @@ pub(super) async fn extension_options_menu(
         }
         if shell.close_requested() {
             return Ok(ExtensionMenuOutcome::Back);
+        }
+    }
+}
+
+struct PythonSetupWork {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    future: Pin<Box<dyn Future<Output = anyhow::Result<PathBuf>> + Send>>,
+}
+
+impl Drop for PythonSetupWork {
+    fn drop(&mut self) {
+        // Drop runs before fields, even if the whole owning UI task is dropped.
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub(super) fn python_runtime_setup_available(app: &App, extension: &str) -> bool {
+    let setup = octet_agent::extension_process::PythonRuntimeSetup {
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        progress: std::sync::Arc::new(|_| {}),
+    };
+    app.executable_extensions
+        .python_runtime_setup(extension, &app.config, setup)
+        .is_ok()
+}
+
+/// Explicit native setup owns no extension factory and no mutable App borrow in
+/// its download future. Dropping any wait path cancels before dropping that future.
+pub(super) async fn setup_python_runtime(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    extension: &str,
+) -> anyhow::Result<bool> {
+    let request = octet_agent::extension_process::ConfirmationRequest {
+        parent_request_id: None,
+        prompt: format!("Set up {extension}'s private Python runtime?"),
+        detail: Some("Download and verify the platform-pinned private Python runtime and this extension's declared Python dependencies. This does not grant host authority, ask for credentials, install a desktop driver or grant OS permissions.".to_owned()),
+        destructive: false,
+        default: false,
+    };
+    if !extension_confirmation_picker(shell, input, "octet", &request).await? {
+        shell.notice("runtime setup cancelled; no download started");
+        return Ok(false);
+    }
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::<String>::new()));
+    let progress_lines = lines.clone();
+    let setup = octet_agent::extension_process::PythonRuntimeSetup {
+        cancelled: cancelled.clone(),
+        progress: std::sync::Arc::new(move |line| {
+            let mut lines = progress_lines
+                .lock()
+                .expect("native runtime setup progress");
+            if lines.back().is_some_and(|last| last == line) {
+                return;
+            }
+            if lines.len() == ACTION_LOG_LINES {
+                lines.pop_front();
+            }
+            lines.push_back(
+                crate::tui::view::sanitize_for_terminal(line)
+                    .chars()
+                    .take(1024)
+                    .collect(),
+            );
+        }),
+    };
+    let owner = app.agent.session().resource_owner_key();
+    let mut work =
+        match app
+            .executable_extensions
+            .python_runtime_setup(extension, &app.config, setup)
+        {
+            Ok(future) => PythonSetupWork { cancelled, future },
+            Err(error) => {
+                shell.error(format!("runtime setup not admitted: {error:#}"));
+                return Ok(false);
+            }
+        };
+    let dialogs = app.executable_extensions.lifecycle_snapshot();
+    let result = {
+        let mut console = ExtensionActionConsole::new(
+            shell,
+            input,
+            &dialogs,
+            format!("{extension} · Set up runtime"),
+        );
+        console.show();
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let result = loop {
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                    console.shell.request_close();
+                    break None;
+                }
+                event = console.input.next() => match event {
+                    Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
+                        console.shell.request_close();
+                        break None;
+                    }
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press && (key.code == KeyCode::Esc || is_ctrl_c(&key)) => break None,
+                    Some(Ok(Event::Resize(columns, rows))) => { console.shell.set_size(columns, rows); console.show(); }
+                    Some(Ok(_)) => {},
+                    Some(Err(error)) => break Some(Err(error.into())),
+                    None => break None,
+                },
+                result = &mut work.future => break Some(result),
+                _ = tick.tick() => {
+                    let progress = lines.lock().expect("native runtime setup progress").iter().cloned().collect::<Vec<_>>();
+                    console.lines = progress;
+                    console.frame = console.frame.wrapping_add(1);
+                    console.show();
+                }
+            }
+        };
+        console.close();
+        result
+    };
+    // Flag first, then retire the future and its supervised child/download.
+    drop(work);
+    match result {
+        None => {
+            shell.notice("runtime setup cancelled; desktop setup has not run");
+            Ok(false)
+        }
+        Some(Err(error)) => {
+            shell.error(format!("runtime setup failed: {error:#}"));
+            Ok(false)
+        }
+        Some(Ok(_))
+            if shell.close_requested() || app.agent.session().resource_owner_key() != owner =>
+        {
+            shell.notice("runtime setup completed for a retired owner; not activating it");
+            Ok(false)
+        }
+        Some(Ok(_)) => {
+            let report = reload_resource_processes(app, shell, input).await?;
+            for (_, result) in report.processes {
+                if let Err(problem) = result {
+                    shell.notice_error(problem);
+                }
+            }
+            for notice in report.details.into_iter().chain(report.events) {
+                shell.notice(notice);
+            }
+            request_extension_ui(shell, app);
+            shell.notice(format!("{extension}: Python runtime provisioned; desktop driver and OS permissions are separate setup steps"));
+            Ok(true)
         }
     }
 }

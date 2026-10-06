@@ -34,6 +34,16 @@ test('module: Pi schema and sampling fields are mapped, no inert unsupported def
   }
 });
 
+test('module: unsupported tool schema constraints fail before publication without being stripped', () => {
+  const parameters = { type: 'object', properties: { pattern: { type: 'string' }, nested: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'null' }] } } } };
+  validateTool(definition({ parameters }));
+  const bad = structuredClone(parameters); bad.properties.nested.items.anyOf[0].pattern = '^[a-z]+$';
+  assert.throws(() => validateTool(definition({ parameters: bad })), /anyOf\[0\].pattern.*not supported/);
+  assert.equal(bad.properties.nested.items.anyOf[0].pattern, '^[a-z]+$');
+  assert.throws(() => validateTool(definition({ parameters: { type: 'object', deprecated: 'yes' } })), /deprecated.*boolean/);
+  assert.throws(() => validateTool(definition({ parameters: { type: 'array', items: false } })), /must be a schema object/);
+});
+
 test('module: runtime registration waits for an actual host ACK, replaces names, and preserves local state on refusal', () => {
   const rt = runtime(); registerTool(rt, '/actual/probe.ts', definition());
   rt.loaded = true; let calls = 0;

@@ -441,6 +441,7 @@ pub enum Reconfig {
     },
     NewSession,
     Resume(PathBuf),
+    Fork(PathBuf),
 }
 
 /// Apply one consuming configuration transition at an idle boundary.
@@ -479,6 +480,13 @@ pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
             None,
             None,
             Some(bootstrap::SessionSelection::OpenExisting(path)),
+        ),
+        Reconfig::Fork(path) => bootstrap::rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(bootstrap::SessionSelection::Forked(path)),
         ),
     }
 }
