@@ -1,4 +1,3 @@
-import { contextBytes, contextItems } from './context-limits.mjs';
 // Pi context ordering/custom-message conversion follows pinned Pi 1.0
 // cd32f7725fdbddbaecdff5b1e68491563394e0ca (runner.ts/messages.ts), MIT LICENSE.pi.
 // Canonical request projection only: never mutate tools, routing or the Session.
@@ -8,9 +7,9 @@ import { prepareToolLoadout } from './tools.mjs';
 
 const apis = { open_ai_responses: 'openai-responses', open_ai_chat: 'openai-completions', anthropic_messages: 'anthropic-messages', bedrock_converse: 'bedrock-converse-stream', google_generative_ai: 'google-generative-ai', mistral_conversations: 'mistral-conversations', pi_messages: 'pi-messages' };
 const protocols = Object.fromEntries(Object.entries(apis).map(([key, value]) => [value, key]));
-const text = value => bounded(value, 'context text', contextBytes(), { controls: true });
+const text = value => bounded(value, 'context text', 786432, { controls: true });
 function array(value, label) {
-  if (!Array.isArray(value) || value.length > contextItems()) invalid(`${label} must be a bounded array`);
+  if (!Array.isArray(value) || value.length > 8192) invalid(`${label} must be a bounded array`);
   for (let i = 0; i < value.length; i++) if (!Object.hasOwn(value, i)) invalid(`${label} must not be sparse`);
   for (const key of Reflect.ownKeys(value)) if (key !== 'length' && !(typeof key === 'string' && /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length)) invalid(`${label} has extra properties`);
   return value;
@@ -30,7 +29,7 @@ const name = value => bounded(value, 'context name', 256);
 // Pi 1.0.2 ImageContent can represent inline images only. URL/provider references,
 // detail hints and audio need a native replay binding, not an invented Pi field.
 function imageData(value) {
-  const data = bounded(value, 'context image data', contextBytes());
+  const data = bounded(value, 'context image data', 786432);
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
       || Buffer.from(data, 'base64').toString('base64') !== data) invalid('context image base64');
   return data;
@@ -147,7 +146,7 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
       if (!body.content.length) output.push({ role: 'user', content: [] });
     } else unsupported(`canonical context role ${role}`);
     const projected = output.slice(start);
-    const origin = { replay, canonical: plainJSON(message, 'canonical source message', contextBytes()), projected: JSON.stringify(projected), count: projected.length };
+    const origin = { replay, canonical: plainJSON(message, 'canonical source message', 786432), projected: JSON.stringify(projected), count: projected.length };
     projected.forEach((item, index) => projectionOrigins.set(item, { origin, index }));
   }
   return output;
@@ -244,7 +243,7 @@ export function piToCanonical(messages) {
     }
     restored.push(piMessageToCanonical(messages[index]));
   }
-  return plainJSON(restored, 'canonical context projection', contextBytes());
+  return plainJSON(restored, 'canonical context projection', 786432);
 }
 
 export async function cancellable(work, signal) {

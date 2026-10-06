@@ -294,9 +294,6 @@ pub enum ExtensionRequestId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionProtocolLimits {
-    /// Effective physical JSON envelope bytes, excluding LF (paired session profile).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_message_bytes: Option<usize>,
     /// Maximum number of concurrently admitted host requests.
     pub max_concurrent_requests: usize,
     /// Optional API 0.4 native registry bounds; absent on older wires.
@@ -327,9 +324,6 @@ impl Default for ResourceProtocolLimits {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionProtocolRequest {
-    /// Exact host-selected session-repair.v2 encoded-byte/record profile.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_snapshot_transport_v1: Option<session_leaf::transport::SessionSnapshotProfile>,
     /// Exact framing version selected by the manifest.
     pub version: String,
     /// Features without which the extension cannot be registered.
@@ -348,9 +342,6 @@ pub struct ExtensionProtocolRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionProtocolResponse {
-    /// Exact host-selected session-repair.v2 encoded-byte/record profile.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_snapshot_transport_v1: Option<session_leaf::transport::SessionSnapshotProfile>,
     /// Exact negotiated framing version.
     pub version: String,
     /// Advertised subset of the host's required and optional features.
