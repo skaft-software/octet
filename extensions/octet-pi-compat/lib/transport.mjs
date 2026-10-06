@@ -12,8 +12,12 @@ export const SYNC_REPLY = 2;
 export const SYNC_UNKNOWN = 3;
 export const SYNC_CANCELLED = 4;
 const MAX_QUEUE = 128, MAX_QUEUE_BYTES = 4194304;
+// A worker that cannot be stopped (pending inherited-pipe read) must not hold
+// shutdown open; see Transport.close().
+const TERMINATE_DEADLINE = 250;
 const nativeTimeout = globalThis.setTimeout;
 const nativeClearTimeout = globalThis.clearTimeout;
+const terminateDeadline = () => new Promise(resolve => { nativeTimeout(resolve, TERMINATE_DEADLINE).unref?.(); });
 
 // Capture the only protocol writer before loading ANY foreign factory. Neither
 // console nor process.stdout.write from an extension can enter this writer.
@@ -298,7 +302,13 @@ export class Transport {
   async close() {
     if (!this.worker) return;
     this.closed = true;
-    await this.worker.terminate();
+    // Termination is best effort. Bun has to read the inherited stdin pipe with
+    // a pending `fs.read` (it cannot open an inherited pipe fd as a socket), and
+    // `worker.terminate()` cannot resolve while that read is outstanding — the
+    // same limit applies to a pending callback read under Node. The host owns
+    // final process-tree cleanup, and the caller (the runner) bounds this call
+    // too, so shutdown must never wait forever on a worker that is already idle.
+    await Promise.race([this.worker.terminate().catch(() => {}), terminateDeadline()]);
   }
   fail(error, eof = false) {
     if (this.closed) return;

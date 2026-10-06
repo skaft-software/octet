@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch, owner } from './helper.mjs';
+import { Transport } from '../lib/transport.mjs';
 
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-transport-cancel-'));
@@ -66,4 +67,15 @@ test('cancelling only the issuing hook still survives the request reply', async 
   });
   await probe(peer);
   await peer.close();
+});
+
+test('close is bounded when a worker cannot be terminated (Bun pending fd read)', async () => {
+  // Bun reads the inherited stdin pipe with fs.read, and worker.terminate()
+  // cannot resolve while that read is outstanding. Shutdown must not wait.
+  const transport = new Transport({ write() {}, output: {} }, { onMessage() {}, onLost() {} });
+  transport.worker = { terminate: () => new Promise(() => {}) };
+  const started = Date.now();
+  await transport.close();
+  assert.equal(transport.closed, true);
+  assert.ok(Date.now() - started < 2000, 'close waited on an unstoppable worker');
 });
