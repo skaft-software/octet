@@ -6,6 +6,7 @@
 use super::*;
 
 use super::support::*;
+use crate::tui::theme::ThemeSource;
 
 #[tokio::test]
 async fn terminal_theme_picker_confirms_compiled_previews_without_changing_config() {
@@ -186,16 +187,38 @@ fn direct_theme_name_loads_only_valid_selectable_files() {
     std::fs::write(themes.join("picker-broken.toml"), "[invalid").unwrap();
     std::fs::write(themes.join("dark.toml"), "accent = '#123456'").unwrap();
     for name in ["picker-custom", "picker-custom.toml"] {
-        let (key, loaded) = requested_file_theme(name, &config, TerminalBackground::Dark).unwrap();
-        assert_eq!(key, "picker-custom");
+        let (selection, loaded) =
+            requested_theme_selection(name, &config, TerminalBackground::Dark).unwrap();
+        assert_eq!(selection, ThemeSelection::File("picker-custom".into()));
+        assert_eq!(selection.key(), "picker-custom");
         assert_eq!(
             loaded.resolve::<String>("accent").as_deref(),
             Some("#aabbcc")
         );
-        config.theme = Some(key);
+        config.theme = Some(selection.key().to_owned());
         assert_eq!(
             load_theme_for_background(&config, TerminalBackground::Dark).source_path(),
             loaded.source_path()
+        );
+    }
+    // Every advertised compiled built-in resolves through the same path the
+    // picker offers, including a lowercase or suffixed spelling.
+    for (name, canonical, source) in [
+        ("Cards", "Cards", ThemeSource::CompiledCards),
+        ("cards.toml", "Cards", ThemeSource::CompiledCards),
+        ("Still", "Still", ThemeSource::CompiledStill),
+        ("still.json", "Still", ThemeSource::CompiledStill),
+    ] {
+        let (selection, loaded) =
+            requested_theme_selection(name, &config, TerminalBackground::Dark).unwrap();
+        assert_eq!(selection, ThemeSelection::File(canonical.into()), "{name}");
+        assert_eq!(*loaded.source(), source, "{name}");
+        assert_eq!(
+            load_named_theme_for_background(canonical, &config, TerminalBackground::Dark)
+                .unwrap()
+                .source(),
+            loaded.source(),
+            "direct selection must install the same theme as startup for {name}"
         );
     }
     for name in [
@@ -206,7 +229,7 @@ fn direct_theme_name_loads_only_valid_selectable_files() {
         "default",
     ] {
         assert!(
-            requested_file_theme(name, &config, TerminalBackground::Dark).is_none(),
+            requested_theme_selection(name, &config, TerminalBackground::Dark).is_none(),
             "accepted {name}"
         );
     }
@@ -234,7 +257,15 @@ async fn direct_builtin_theme_selection_matches_picker_and_startup() {
             "direct /theme {name} should select advertised built-in"
         );
         assert_eq!(config.theme.as_deref(), Some(name));
-        assert!(shell.theme().source_path().is_some());
+        assert_eq!(
+            *shell.theme().source(),
+            if name == "Still" {
+                ThemeSource::CompiledStill
+            } else {
+                ThemeSource::CompiledCards
+            },
+            "direct /theme {name} must install the compiled built-in"
+        );
     }
 }
 
