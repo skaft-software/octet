@@ -99,3 +99,30 @@ test('real adapter command completes async model and synchronous thinking receip
   assert.deepEqual(JSON.parse(readFileSync(trace,'utf8')), {selected:true,id:'chosen-model',level:'low'});
   await adapter.close();
 });
+
+test('queued receipts acknowledge admission without changing effective facts', async () => {
+  const { runtime, store } = fixture();
+  const before = structuredClone(store.state.host);
+  runtime.reply = Promise.resolve({ selected: true, queued: true });
+  assert.equal(await setModel(runtime, store, { provider: 'test', id: 'chosen-model' }), true);
+  runtime.receipt = { selected: true, queued: true };
+  setThinkingLevel(runtime, store, 'high');
+  assert.deepEqual(store.state.host, before);
+  runtime.receipt = { ...receipt, queued: true };
+  assert.throws(() => setThinkingLevel(runtime, store, 'high'), /queued model selection receipt/);
+});
+
+test('retained thinking uses its issued owner without a fabricated live parent', () => {
+  const { runtime, store } = fixture();
+  store.live = false;
+  runtime.active.clear();
+  runtime.transport.requestSync = (method, params, options) => {
+    assert.equal(method, 'model/select');
+    assert.deepEqual(params.resource_owner, owner);
+    assert.equal(params.parent_request_id, 17);
+    assert.equal(options.parent, undefined);
+    return { selected: true, queued: true };
+  };
+  setThinkingLevel(runtime, store, 'high');
+  assert.equal(store.state.host.reasoning, null);
+});
