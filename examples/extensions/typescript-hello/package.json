@@ -1,0 +1,16 @@
+{
+  "name": "typescript-hello",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pack:sdk": "npm pack ../../../sdk/typescript/process --pack-destination . --ignore-scripts",
+    "manifest": "octet-extension manifest extension.ts --name typescript-hello --version 0.1.0 --out extension.toml"
+  },
+  "dependencies": {
+    "@skaft-software/octet-extension-sdk": "file:skaft-software-octet-extension-sdk-0.9.0.tgz"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

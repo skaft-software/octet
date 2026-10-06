@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+dir=${OCTET_EXTENSION_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$dir/vendor" exec python3 -B "$dir/extension.py"
