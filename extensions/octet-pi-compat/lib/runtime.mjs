@@ -783,9 +783,13 @@ export class Runtime {
       const result = await this.scope.run(store, () => this.dispatch(message, store));
       store.controller.signal.throwIfAborted();
       if (!this.stopping) {
-        await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
+        const reply = this.transport.send({ jsonrpc: '2.0', id: message.id, result });
+        // Queue registration after the initialize reply, but install its promise
+        // before yielding: the host can query before the writer receipt arrives.
+        if (message.method === 'initialize') this.registerAutocomplete();
+        await reply;
         settlementError = undefined;
-        if (message.method === 'initialize') { this.registerAutocomplete(); startProviderRegistration(this); this.reportStartupIssues(); }
+        if (message.method === 'initialize') { startProviderRegistration(this); this.reportStartupIssues(); }
         if (message.method === 'provider/stream') startProviderStream(this, message.params.stream_id);
       }
     } catch (error) {
