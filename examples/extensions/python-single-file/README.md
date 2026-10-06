@@ -26,11 +26,11 @@ the deterministic-format archive without publishing, use the existing packager
 and pass that exact host version:
 
 ```sh
-bash scripts/package-octet-extension-release.sh wait-extension /tmp/bundles v0.8.2 /tmp/wait-extension
+bash scripts/package-octet-extension-release.sh wait-extension /tmp/bundles v0.9.0 /tmp/wait-extension
 ```
 
 Substitute the current `[workspace.package].version` from the root `Cargo.toml`
-for `v0.8.2`. The archive is still not a published/catalog-qualified asset.
+for `v0.9.0`. The archive is still not a published/catalog-qualified asset.
 Installation remains separate and never enables or trusts it. To exercise host
 discovery, explicit test enablement and the real process lifecycle on an unpacked
 package:

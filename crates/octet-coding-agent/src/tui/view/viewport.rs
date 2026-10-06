@@ -587,6 +587,7 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
     let start = end.saturating_sub(capacity);
     let mut lines = transcript[start..end].to_vec();
     state.decorate_transcript_search(&mut lines, start);
+    super::transcript_selection::decorate_selection(state, &mut lines, start);
     if scrolled || !state.follow_tail {
         capture_viewport_anchor(state, start, end);
     } else if state.follow_tail {

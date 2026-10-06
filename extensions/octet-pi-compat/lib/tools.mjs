@@ -7,7 +7,7 @@ import { bounded, fields, invalid, plainJSON, unsupported } from './errors.mjs';
 export const BUILTIN_TOOL_NAMES = Object.freeze(['read', 'search', 'edit', 'write', 'bash', 'powershell']);
 const builtinToolNames = new Set(BUILTIN_TOOL_NAMES);
 
-// Match octet 0.8.2's bounded schema profile (octet-ai/json_repair.rs).
+// Match octet 0.9.0's bounded schema profile (octet-ai/json_repair.rs).
 // Never strip a constraint to make a Pi tool load: reject its factory so import
 // can report it, instead of poisoning every subsequent provider request.
 const schemaKeywords = new Set(['$schema', 'title', 'description', 'default', 'examples', 'type', 'properties', 'required',
@@ -60,7 +60,7 @@ function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0) {
   if (depth > 32) invalid(`tool ${tool} schema depth`);
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) invalid(`tool ${tool} ${path} must be a schema object`);
   for (const [key, value] of Object.entries(schema)) {
-    if (!schemaKeywords.has(key)) unsupported(`tool ${tool} ${path}.${key}`, 'JSON Schema keyword is not supported by octet 0.8.2');
+    if (!schemaKeywords.has(key)) unsupported(`tool ${tool} ${path}.${key}`, 'JSON Schema keyword is not supported by octet 0.9.0');
     if (key === 'pattern' && !supportedPattern(value)) unsupported(`tool ${tool} ${path}.pattern`, 'pattern syntax is not supported: require bounded ^...$ ASCII literals/classes with finite repetitions (1024 bytes/maximum characters)');
     if (key === 'deprecated' && typeof value !== 'boolean') invalid(`tool ${tool} ${path}.deprecated must be boolean`);
     if (key === 'properties') {

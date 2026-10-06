@@ -19,7 +19,7 @@ const tools = [
   { name: "plain", description: "Text result", parameters },
 ];
 const context = (store = {}, catalog = tools) => ({ tools: catalog, store, limits: { timeout_ms: 30000, max_calls: 256 } });
-const offer = (flags = []) => ({ api_version: "0.4", octet_version: "0.8.2", extension: { name: "octet-codemode", version: "0.8.2" },
+const offer = (flags = []) => ({ api_version: "0.4", octet_version: "0.9.0", extension: { name: "octet-codemode", version: "0.9.0" },
   protocol: { version: "0.4", required_features: ["request_cancellation", "content_parts"],
     optional_features: ["tool_composition_v1", "request_progress", "artifacts"], limits: { max_concurrent_requests: 8 } }, flag_values: flags });
 const text = (result) => result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");

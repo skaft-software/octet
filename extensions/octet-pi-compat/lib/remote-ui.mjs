@@ -365,7 +365,8 @@ export class RemoteUI {
   }
   async push(surface) {
     if (surface.closed) return;
-    await this.runtime.sessionTransport?.ready(surface.store);
+    // Painting a frame is presentation only: it never waits on session-view
+    // readiness or a publication barrier, which would delay frames under load.
     const columns = surface.columns, rows = surface.rows;
     const lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns));
     // Capture lines and this exact barrier in the same synchronous turn. Never

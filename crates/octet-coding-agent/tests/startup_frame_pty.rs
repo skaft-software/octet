@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 use sexy_tui_rs::{ColorDepth, Component, Terminal, TerminalCapabilities, TerminalInput, TUI};
 use tempfile::TempDir;
 
+#[path = "startup_frame_pty/mouse.rs"]
+mod mouse;
+
 const INITIAL_COLUMNS: u16 = 96;
 const INITIAL_ROWS: u16 = 18;
 const RESIZED_COLUMNS: u16 = 64;
@@ -211,6 +214,8 @@ enum StartupFixture<'a> {
     DiscoveringModel(&'a str, bool),
     /// Fresh/resumed/forked startup against one synthetic saved conversation.
     Session(&'a [&'a str]),
+    /// Long Markdown history for raw mouse/clipboard acceptance.
+    MouseHistory,
     /// A persisted selection, resolved through the real registry with no auth.
     ConfiguredGemma,
     /// Empty inventory and no appearance preference: both onboarding owners run.
@@ -346,7 +351,7 @@ impl PtyOctet {
                 )
                 .unwrap();
             }
-            StartupFixture::Session(_) => {
+            StartupFixture::Session(_) | StartupFixture::MouseHistory => {
                 // The on-disk session store uses the workspace's stable FNV-1a key.
                 let mut key = 0xcbf2_9ce4_8422_2325u64;
                 for byte in workspace.to_string_lossy().as_bytes() {
@@ -363,6 +368,26 @@ impl PtyOctet {
                         },
                     )))
                     .unwrap();
+                if matches!(fixture, StartupFixture::MouseHistory) {
+                    let mut text = String::from("MOUSE-BEGIN\n");
+                    for index in 1..=400 {
+                        text.push_str(&format!(
+                            "{index}. MOUSE-ROW-{index:03} clipboard line with unique words\n"
+                        ));
+                    }
+                    text.push_str("\nMOUSE-WRAPPED ");
+                    text.push_str(&"wrapped Unicode 界é text ".repeat(12));
+                    text.push_str("\n\nMOUSE-END\n");
+                    session
+                        .append(octet_agent::EntryValue::Message(
+                            octet_ai::Message::Assistant(octet_ai::AssistantMessage {
+                                content: vec![octet_ai::AssistantPart::Text(text)],
+                                model: octet_ai::ModelId("custom/probe".into()),
+                                protocol: octet_ai::Protocol::OpenAiChat,
+                            }),
+                        ))
+                        .unwrap();
+                }
             }
             StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_, _) => {}
         }
@@ -432,6 +457,10 @@ impl PtyOctet {
                 command
                     .args(["--model", "custom/probe", "--theme", "dark"])
                     .args(args);
+            }
+            StartupFixture::MouseHistory => {
+                command.args(["--model", "custom/probe", "--theme", "dark", "--continue"]);
+                command.env("SSH_CONNECTION", "192.0.2.1 12345 192.0.2.2 22");
             }
             StartupFixture::Changelog { model, initial } => {
                 command.args(["--theme", "dark"]);

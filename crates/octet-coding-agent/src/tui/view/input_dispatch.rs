@@ -292,15 +292,23 @@ impl InteractiveShell {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 let hit = {
                     let state = self.state.borrow();
-                    let chrome = shell_chrome(&state, state.size.0, Instant::now());
-                    let length = state.rendered_transcript(state.size.0).len();
-                    let scroll =
-                        resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
-                    let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
-                    scroll > 0
-                        && capacity < chrome.transcript_rows
-                        && usize::from(mouse.row) == capacity
-                        && mouse.column < state.size.0
+                    if state.render_threaded {
+                        state.retained_render_geometry().is_some_and(|geometry| {
+                            state.scroll_from_bottom.get() > 0
+                                && usize::from(mouse.row) == geometry.viewport_rows
+                                && mouse.column < state.size.0
+                        })
+                    } else {
+                        let chrome = shell_chrome(&state, state.size.0, Instant::now());
+                        let length = state.rendered_transcript(state.size.0).len();
+                        let scroll =
+                            resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
+                        let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
+                        scroll > 0
+                            && capacity < chrome.transcript_rows
+                            && usize::from(mouse.row) == capacity
+                            && mouse.column < state.size.0
+                    }
                 };
                 if hit {
                     return InputAction::JumpToTail;

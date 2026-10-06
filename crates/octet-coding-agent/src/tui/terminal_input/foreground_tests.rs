@@ -492,7 +492,7 @@ async fn real_pty_child_contract(mut master: std::fs::File) {
     awakened(&task).await;
     assert!(tokio::time::Instant::now() < deadline);
     assert_eq!(event(task.poll_next()), key(b'x'));
-    // Actual crossterm drained x; stale readiness must not self-spin.
+    // The actual decoder drained x; stale readiness must not self-spin.
     assert!(task.poll_next().is_pending());
     for _ in 0..32 {
         assert!(task.poll_next().is_pending());
@@ -537,7 +537,9 @@ async fn real_pty_child_contract(mut master: std::fs::File) {
         task.poll_next().is_pending(),
         "duplicated or retained ceded input"
     );
-    drop(task);
+    let mut input = task.into_inner();
+    mouse_tests::real_pty_mouse_decoder_contract(&mut master, &mut input).await;
+    drop(input);
     // Notifier lifetime, cancellation, cede and rearm preserve reader flags
     // and raw-mode termios. RestoreRaw then restores the parent's attributes.
     assert_eq!(
@@ -546,3 +548,6 @@ async fn real_pty_child_contract(mut master: std::fs::File) {
     );
     assert_same_termios(&raw, &termios(libc::STDIN_FILENO));
 }
+
+#[path = "mouse_tests.rs"]
+mod mouse_tests;

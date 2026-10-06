@@ -6,13 +6,14 @@
 
 ## Install native binaries
 
-**0.8.2 is a source candidate, not a published release.** Its GitHub tag, release
+**0.9.0 is a source release candidate, not a published release.** Its GitHub tag, release
 assets and npm packages are unavailable. Use [a checkout](#build-from-a-checkout)
 until qualification and publication are approved. The commands in the native
-and npm sections below apply only after verified publication.
+and npm sections below apply only after verified publication, and until promotion
+they keep naming the preceding 0.8.2 candidate, whose assets are also unavailable.
 
 Planned native release packages target macOS Apple silicon and Intel and GNU/Linux
-x86-64. The [v0.8.2 notes](releases/v0.8.2.md) list the candidate changes.
+x86-64. The [v0.9.0 notes](releases/v0.9.0.md) list the candidate changes.
 After publication, signed assets and public-install verification must be recorded
 on the version-pinned
 [GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.2).
@@ -103,7 +104,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets the octet 0.8.2 candidate. Check `octet --version`, and use matching
+This checkout targets the octet 0.9.0 candidate. Check `octet --version`, and use matching
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -128,7 +129,7 @@ need Git for Windows or another Bash-compatible shell.
 ## Optional packages
 
 Executable extension bundles are pinned to
-the host version. After publication, install assets matching octet `0.8.2` from
+the host version. After publication, install assets matching octet `0.9.0` from
 its version-pinned release. Until then, run reviewed source extensions from this
 checkout with `--extension-dir ./extensions`. The 0.8.0 bundles need their 0.8.0 host.
 
@@ -164,7 +165,7 @@ reference](cli.md#packages).
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
 
 The six executable-bundle manifests declare API `0.4`, distribution version
-`0.8.2`, and require octet `=0.8.2`. Older bundles stay pinned to their host.
+`0.9.0`, and require octet `=0.9.0`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
 the Python API 0.4 process recipe and the retained API 0.3 conformance example.

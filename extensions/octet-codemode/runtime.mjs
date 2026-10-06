@@ -12,9 +12,9 @@ Optional first line: // @options: {"max_output_tokens":10000,"timeout_ms":25000}
 Defaults: 10000 estimated output tokens; 25000 ms total local deadline (host maximum 30000 ms, lower host limits win); 256 calls, four concurrent nested calls, 256 MiB VM heap. Output retains its head/tail within 50 KiB; full truncated UTF-8 text is saved in private scratch. Discovery uses BM25 (default 8); aliases replace non-identifier characters with _, first collision wins. image() accepts base64 PNG/JPEG/GIF/WebP and requires negotiated host artifacts. Classifier/image operations may be provided by separately enabled tools; octet's chat-only host supplies no models helper.`;
 
 export function negotiate(init) {
-  params(isObject(init) && init.api_version === "0.4" && init.octet_version === "0.8.2" &&
-    isObject(init.extension) && init.extension.name === "octet-codemode" && init.extension.version === "0.8.2",
-    "requires API 0.4, octet 0.8.2 and octet-codemode 0.8.2");
+  params(isObject(init) && init.api_version === "0.4" && init.octet_version === "0.9.0" &&
+    isObject(init.extension) && init.extension.name === "octet-codemode" && init.extension.version === "0.9.0",
+    "requires API 0.4, octet 0.9.0 and octet-codemode 0.9.0");
   const offer = init.protocol;
   params(exactKeys(offer, ["version", "required_features", "optional_features", "limits", "bulk_objects_v1"]) && offer.version === "0.4" &&
     Array.isArray(offer.required_features) && Array.isArray(offer.optional_features), "feature-negotiated API 0.4 offer required (not canonical contract)");

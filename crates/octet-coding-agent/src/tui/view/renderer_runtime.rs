@@ -1454,41 +1454,42 @@ impl Drop for RenderStateGuard<'_> {
         let Self::Private { owner, shared } = self else {
             return;
         };
-        let geometry = super::renderer_geometry::RenderedGeometry::capture(
+        let mut geometry = super::renderer_geometry::RenderedGeometry::capture(
             &owner.state,
             owner.geometry_fence.expect("accepted model"),
         );
-        *shared.1.lock().expect("geometry receipt poisoned") = Some(geometry);
         let mut state = shared.0.lock().expect("shell state mutex poisoned");
         // Every mutable semantic borrow advances this fence, including input,
         // resize, disclosure, hydration and transcript changes. Never let an
         // old layout overwrite a newer draft/navigation decision.
-        if state.render_revision != owner.revision {
-            return;
+        if state.render_revision == owner.revision {
+            state.rendered_animation_addressability = owner
+                .state
+                .active_event_blocks
+                .iter()
+                .filter_map(|index| {
+                    owner
+                        .state
+                        .transcript_commit_ids
+                        .get(*index)
+                        .map(|id| (*id, owner.state.animation_block_is_addressable(*index)))
+                })
+                .collect();
+            state
+                .native_animation_viewport_top
+                .set(owner.state.native_animation_viewport_top.get());
+            state.viewport_anchor.set(owner.state.viewport_anchor.get());
+            state
+                .scroll_from_bottom
+                .set(owner.state.scroll_from_bottom.get());
+            state
+                .transcript_navigation
+                .borrow_mut()
+                .apply_render_feedback(&owner.state.transcript_navigation.borrow());
+            geometry.accepted_scroll_feedback(state.scroll_from_bottom.get());
         }
-        state.rendered_animation_addressability = owner
-            .state
-            .active_event_blocks
-            .iter()
-            .filter_map(|index| {
-                owner
-                    .state
-                    .transcript_commit_ids
-                    .get(*index)
-                    .map(|id| (*id, owner.state.animation_block_is_addressable(*index)))
-            })
-            .collect();
-        state
-            .native_animation_viewport_top
-            .set(owner.state.native_animation_viewport_top.get());
-        state.viewport_anchor.set(owner.state.viewport_anchor.get());
-        state
-            .scroll_from_bottom
-            .set(owner.state.scroll_from_bottom.get());
-        state
-            .transcript_navigation
-            .borrow_mut()
-            .apply_render_feedback(&owner.state.transcript_navigation.borrow());
+        drop(state);
+        *shared.1.lock().expect("geometry receipt poisoned") = Some(Arc::new(geometry));
     }
 }
 
