@@ -73,5 +73,5 @@ test('ctx is a facade: optional members are absent while refusing operations sti
   assert.equal(typeof ctx.abort, 'function');
   assert.throws(() => ctx.abort(), /unsupported_feature ctx.abort/);
   assert.throws(() => ctx.shutdown(), /unsupported_feature ctx.shutdown/);
-  assert.throws(() => ctx.ui.onTerminalInput(), /unsupported_feature ctx\.ui\.onTerminalInput/);
+  assert.throws(() => ctx.ui.onTerminalInput(), /unsupported_feature terminal_input_intercept_v1/);
 });

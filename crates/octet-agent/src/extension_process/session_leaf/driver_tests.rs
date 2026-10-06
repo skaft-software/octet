@@ -9,38 +9,12 @@ use octet_ai::{
 };
 use serde_json::json;
 
-const SCRIPT: &str = r#"#!/usr/bin/env python3
-import json,sys,os,time,threading
-pending={}
-count=0
-def send(v): print(json.dumps(v,separators=(',',':')),flush=True)
-def reply(m,r): send({'jsonrpc':'2.0','id':m['id'],'result':r})
-for line in sys.stdin:
- m=json.loads(line); method=m.get('method'); p=m.get('params',{})
- if method=='initialize':
-  reply(m,{'api_version':'0.4','tools':[{'name':'compose','description':'Compose','parameters':{'type':'object'},'composition':{'mode':'on','inline_budget':3000}}],'commands':[],
-   'protocol':{'version':'0.4','features':p['protocol']['required_features']+['session_entries','tool_composition_v1'],'limits':{'max_concurrent_requests':4}}})
- elif method=='hook/run':
-  assert p['session_leaf']['expected_head']==p['context']['host']['session_leaf_id']
-  assert len(p['context']['host']['session_entries'])==len(p['context']['host']['session_branch'])
-  count+=1; cid='append:'+str(count); pending[cid]=('hook',m)
-  send({'jsonrpc':'2.0','id':cid,'method':'session/append_entry','params':{'parent_request_id':m['id'],'entry_type':'driver-checkpoint','data':{'hook':p['hook'],'name':p['payload']['name'],'count':count},'session_leaf':{k:p['session_leaf'][k] for k in ['grant_id','activation_epoch','operation_id']}}})
- elif method=='tool/call':
-  cid='nested:'+str(m['id']); pending[cid]=('tool',m)
-  send({'jsonrpc':'2.0','id':cid,'method':'composition/call','params':{'parent_request_id':m['id'],'name':'tiny','arguments':{}}})
- elif method=='probe':
-  def delayed(original=m):
-   time.sleep(0.75); reply(original,{})
-  threading.Thread(target=delayed,daemon=True).start()
- elif method=='shutdown': reply(m,{}); break
- elif method in ['context/updated','$/cancelRequest']: pass
- elif method is None:
-  kind,original=pending.pop(m['id'])
-  assert 'result' in m,m
-  if kind=='hook': reply(original,{'disposition':{'action':'continue'}})
-  else: reply(original,{'content':[{'type':'text','text':'nested complete'}],'is_error':False})
- else: raise AssertionError(m)
-"#;
+// The routed peer reads both descriptors through parent-bound chunk handles.
+const SCRIPT: &str = include_str!("driver_peer.py");
+
+fn peer_error(temp: &tempfile::TempDir) -> String {
+    std::fs::read_to_string(temp.path().join("peer-error.txt")).unwrap_or_default()
+}
 
 async fn process(temp: &tempfile::TempDir) -> ExtensionProcess {
     write_executable_script(&temp.path().join("extension.py"), SCRIPT);
@@ -333,7 +307,7 @@ async fn two_native_owner_drivers_share_process_without_foreground_promotion() {
                 process.current_context_for_resource_owner(root_owner.clone()),
             )
             .await
-            .unwrap()
+            .unwrap_or_else(|error| panic!("root hook: {error}\npeer: {}", peer_error(&temp)))
     };
     let child_work = async {
         let invocation = child_route.prepare(&process, &child_owner).await.unwrap();
@@ -344,7 +318,7 @@ async fn two_native_owner_drivers_share_process_without_foreground_promotion() {
                 process.current_context_for_resource_owner(child_owner.clone()),
             )
             .await
-            .unwrap()
+            .unwrap_or_else(|error| panic!("child hook: {error}\npeer: {}", peer_error(&temp)))
     };
     tokio::time::timeout(Duration::from_secs(10), async {
         let cancellation = CancellationToken::default();
@@ -366,14 +340,26 @@ async fn two_native_owner_drivers_share_process_without_foreground_promotion() {
     assert!(child_text.contains("\"name\":\"child\""));
     assert!(!child_text.contains("\"name\":\"root\""));
     let connection = read_std_lock(&process.inner.connection).clone();
-    assert_eq!(
-        lock_std_mutex(&connection.session_leaf.mirror)
-            .as_ref()
-            .unwrap()
-            .owner
-            .session_id,
-        root_owner
-    );
+    // The routed profile keeps its current view in the transport, not the
+    // legacy mirror, and only for the owner it was published for.
+    let owner = process
+        .current_context_for_resource_owner(root_owner.clone())
+        .resource_owner
+        .unwrap();
+    {
+        let store = lock_std_mutex(&connection.session_leaf.transport);
+        // The current view is the immutable publication (taken before the hook
+        // append); the append advanced the activation view and its session.
+        assert_eq!(
+            store.current.len(),
+            1,
+            "only the published owner has a current view"
+        );
+        let view = store.current.get(&owner).and_then(Option::as_ref).unwrap();
+        assert_eq!(view.descriptor.owner, owner);
+        assert!(view.descriptor.head.is_none());
+        assert_eq!(view.descriptor.entry_count, 0);
+    }
     assert_eq!(lock_std_mutex(&connection.session_leaf.bound).len(), 2);
     drop(root_driver);
     drop(child_driver);
