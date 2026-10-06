@@ -379,13 +379,13 @@ impl PtyOctet {
                     text.push_str(&"wrapped Unicode 界é text ".repeat(12));
                     text.push_str("\n\nMOUSE-END\n");
                     session
-                        .append(octet_agent::EntryValue::Message(octet_ai::Message::Assistant(
-                            octet_ai::AssistantMessage {
+                        .append(octet_agent::EntryValue::Message(
+                            octet_ai::Message::Assistant(octet_ai::AssistantMessage {
                                 content: vec![octet_ai::AssistantPart::Text(text)],
                                 model: octet_ai::ModelId("custom/probe".into()),
                                 protocol: octet_ai::Protocol::OpenAiChat,
-                            },
-                        )))
+                            }),
+                        ))
                         .unwrap();
                 }
             }

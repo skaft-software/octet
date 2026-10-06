@@ -1,4 +1,4 @@
-use sexy_tui_rs::{strip_terminal_sequences, visible_width, wrap_text_with_ansi};
+use sexy_tui_rs::{slice_by_column, strip_terminal_sequences, visible_width, wrap_text_with_ansi};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::presentation::{format_duration, RunOutcome};
@@ -131,6 +131,80 @@ pub(super) fn semantic_selected_text(state: &ShellState) -> Option<String> {
     Some(blocks.join("\n\n"))
 }
 
+/// Apply selection only to semantic text cells in the visible transcript.
+/// Layout and row-to-copy mapping remain renderer-owned; neither chrome nor
+/// decorative separators can acquire the selection's rendition.
+pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start_row: usize) {
+    let Some(selection) = state.transcript_selection.as_ref() else {
+        return;
+    };
+    if state.theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
+        return;
+    }
+    let (start, end) = if (selection.anchor.block, selection.anchor.offset)
+        <= (selection.focus.block, selection.focus.offset)
+    {
+        (selection.anchor, selection.focus)
+    } else {
+        (selection.focus, selection.anchor)
+    };
+    let cache = state.transcript_cache.borrow();
+    for index in start.block..=end.block {
+        let Some(&block_start) = cache.block_starts.get(index) else {
+            continue;
+        };
+        let block_end = block_start + cache.block_lengths[index];
+        if block_end <= start_row || block_start >= start_row + lines.len() {
+            continue;
+        }
+        let text = block_copy_text(&state.transcript[index]);
+        let from = if index == start.block {
+            start.offset
+        } else {
+            0
+        };
+        let to = if index == end.block {
+            end.offset
+        } else {
+            text.len()
+        };
+        let geometry = cache.block_geometries[index];
+        let rows = CopyRows::build(&cache.lines[block_start..block_end], &text, geometry);
+        let first = block_start + geometry.transition_rows + geometry.leading_rows;
+        for (row_index, row) in rows.rows.iter().enumerate() {
+            let Some(line) = (first + row_index)
+                .checked_sub(start_row)
+                .and_then(|row| lines.get_mut(row))
+            else {
+                continue;
+            };
+            let left = from.saturating_sub(row.offset).min(row.text.len());
+            let right = to.saturating_sub(row.offset).min(row.text.len());
+            if left >= right {
+                continue;
+            }
+            let left = clamp_copy_offset(&row.text, left);
+            let right = clamp_copy_offset(&row.text, right);
+            let column = usize::from(row.painted_cells) + visible_width(&row.text[..left]);
+            let cells = visible_width(&row.text[left..right]);
+            let selected = strip_terminal_sequences(&slice_by_column(line, column, cells, true));
+            *line = format!(
+                "{}\x1b[0;7m{selected}\x1b[0m{}",
+                slice_by_column(line, 0, column, true),
+                slice_by_column(
+                    line,
+                    column + cells,
+                    visible_width(line).saturating_sub(column + cells),
+                    true
+                )
+            );
+            if line.contains("\x1b]8;") {
+                line.push_str("\x1b]8;;\x1b\\");
+            }
+        }
+    }
+}
+
 fn clamp_copy_offset(text: &str, mut offset: usize) -> usize {
     offset = offset.min(text.len());
     while offset > 0 && !text.is_char_boundary(offset) {
@@ -214,8 +288,9 @@ struct CopyRow {
 /// copy text, so a selection names the text on screen. A row that carries no
 /// source text (a separator or a frame) keeps the next unconsumed offset
 /// instead of stealing the following line.
-#[derive(Default)]
-struct CopyRows {
+#[derive(Clone, Debug, Default)]
+pub(super) struct CopyRows {
+    first_row: usize,
     /// Painted cell where the block's content inset starts.
     content_left: u16,
     rows: Vec<CopyRow>,
@@ -279,6 +354,7 @@ impl CopyRows {
             rows.push(row);
         }
         Self {
+            first_row: 0,
             content_left: geometry.content_left,
             rows,
         }
@@ -291,7 +367,7 @@ impl CopyRows {
     /// Copy offset for one cell of a painted content row. `col` is relative to
     /// the block's content inset, the same cell the renderer used.
     fn offset_for(&self, content_row: usize, col: u16) -> Option<usize> {
-        let row = self.rows.get(content_row)?;
+        let row = self.rows.get(content_row.checked_sub(self.first_row)?)?;
         let absolute = usize::from(col).saturating_add(usize::from(self.content_left));
         let within = absolute.saturating_sub(usize::from(row.painted_cells));
         Some(row.offset + visual_col_to_offset(&row.text, within))
@@ -452,7 +528,23 @@ fn is_frame_glyph(character: char) -> bool {
     )
 }
 
-/// The painted content rows of one block, aligned with its copy text.
+/// Copy mapping for the visible part of a block, captured by the renderer.
+/// The receipt retains at most viewport-height rows even for a huge block.
+pub(super) fn visible_copy_rows(
+    painted: &[String],
+    text: &str,
+    geometry: SurfaceGeometry,
+    visible: std::ops::Range<usize>,
+) -> Option<CopyRows> {
+    let mut rows = CopyRows::build(painted, text, geometry);
+    let first = geometry.transition_rows + geometry.leading_rows;
+    let from = visible.start.saturating_sub(first).min(rows.rows.len());
+    let to = visible.end.saturating_sub(first).min(rows.rows.len());
+    rows.rows = rows.rows[from..to].to_vec();
+    rows.first_row = from;
+    (!rows.is_empty()).then_some(rows)
+}
+
 /// The painted content rows of one block, aligned with its copy text.
 fn painted_copy_rows(
     state: &ShellState,
@@ -460,6 +552,15 @@ fn painted_copy_rows(
     copy_text: &str,
     geometry: SurfaceGeometry,
 ) -> Option<CopyRows> {
+    if state.render_threaded {
+        return state
+            .retained_render_geometry()?
+            .blocks
+            .iter()
+            .find(|geometry| geometry.index == block)?
+            .copy_rows
+            .clone();
+    }
     let (start, length) = {
         let cache = state.transcript_cache.borrow();
         (

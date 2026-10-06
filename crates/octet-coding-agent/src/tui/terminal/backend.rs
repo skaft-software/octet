@@ -228,6 +228,17 @@ pub struct OctetTerminal<W: FrameSink = Stdout> {
     in_synchronized_frame_depth: usize,
 }
 
+/// SGR 1006 and 1016 have identical byte shapes but different coordinate units.
+/// Always establish cell coordinates; inherited pixel/alternate-scroll modes
+/// must not turn pointer positions into pixels or wheel reports into arrows.
+fn enable_cell_mouse_capture(out: &mut impl Write) -> io::Result<()> {
+    execute!(
+        out,
+        crossterm::style::Print("\x1b[?1016l\x1b[?1007l"),
+        event::EnableMouseCapture
+    )
+}
+
 impl OctetTerminal<Stdout> {
     /// Request repeat/release kinds only while a remote component owns focus.
     /// The ordinary text-preserving profile is restored when the lease ends.
@@ -255,7 +266,7 @@ impl OctetTerminal<Stdout> {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         if enabled {
-            execute!(out, event::EnableMouseCapture)?;
+            enable_cell_mouse_capture(&mut out)?;
         } else {
             execute!(out, event::DisableMouseCapture)?;
         }
@@ -331,7 +342,7 @@ impl OctetTerminal<Stdout> {
             cursor::MoveTo(0, 0),
         )?;
         if capture_mouse {
-            execute!(out, event::EnableMouseCapture)?;
+            enable_cell_mouse_capture(&mut out)?;
         }
         // Native Tern can change pane/OS focus without changing visibility.
         // Request the standard notifications consumed by the shared frontend;

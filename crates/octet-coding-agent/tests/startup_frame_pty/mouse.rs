@@ -123,7 +123,11 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
     );
     settle(&mut octet, &mut parser, &mut consumed);
     assert!(!parser.screen().contents().contains("rows back"));
-    assert!(parser.screen().contents().contains("draft-kept"), "{}", parser.screen().contents());
+    assert!(
+        parser.screen().contents().contains("draft-kept"),
+        "{}",
+        parser.screen().contents()
+    );
     // Keyboard Up still belongs to the editor, not transcript wheel routing.
     octet.pty.write_input(b"\x1b[D!");
     await_screen(

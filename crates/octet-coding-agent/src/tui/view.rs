@@ -14,8 +14,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use octet_agent::{
     AgentEvent, EntryValue, OutputChannel, Session, ToolProgress, ToolProgressDecoration,
 };
@@ -6644,6 +6642,13 @@ impl InteractiveShell {
     /// - Drag that created a selection -> copy to clipboard, keep selection.
     /// - Stationary click (no drag)    -> clear any prior selection.
     pub fn end_transcript_selection(&mut self, row: u16, col: u16) {
+        let state = self.state.borrow();
+        if !state.selection_dragging && state.pending_selection_anchor.is_none() {
+            // A release without a transcript-owned press (chrome, scrollbar,
+            // or stale geometry) cannot recopy a previous selection.
+            return;
+        }
+        drop(state);
         // Copy is semantic and application-owned: terminal padding, ANSI, the
         // composer, and footer never enter the payload. The retained buffer
         // remains available even when OSC 52 transport is unavailable.
@@ -6707,40 +6712,12 @@ impl InteractiveShell {
                 });
         }
 
-        if !std::io::stdout().is_terminal() {
-            return;
+        if std::io::stdout().is_terminal() {
+            // One stdout lock keeps the complete OSC 52 command outside the
+            // renderer's synchronized frames, including its flush.
+            let mut out = std::io::stdout().lock();
+            let _ = clipboard_transport::write_osc52(&mut out, text);
         }
-        // OSC 52 is best-effort transport; `copy_buffer` remains authoritative
-        // when stdout is redirected or the terminal declines the sequence.
-        let encoded = BASE64.encode(text);
-        // Stay below the common 64 KiB OSC payload limit. Trim the source on a
-        // UTF-8 boundary and re-encode so the transmitted payload stays valid.
-        // The first encoding keeps the normal, untruncated path allocation-free
-        // apart from the payload itself.
-        let payload = if encoded.len() <= 64 * 1024 {
-            encoded
-        } else {
-            let mut end = text.len();
-            while end > 0 {
-                let candidate = &text[..end];
-                if BASE64.encode(candidate).len() <= 64 * 1024 {
-                    break;
-                }
-                // Move back to the preceding complete scalar before retrying.
-                end = end.saturating_sub(1);
-                while end > 0 && !text.is_char_boundary(end) {
-                    end = end.saturating_sub(1);
-                }
-            }
-            // Re-encode only after the largest transport-safe UTF-8 prefix is
-            // known; slicing encoded base64 would produce invalid padding.
-            BASE64.encode(&text[..end])
-        };
-        // BEL termination is widely supported and avoids exposing a printable
-        // suffix if a terminal does not implement OSC 52.
-        let osc = format!("\x1b]52;c;{payload}\x07");
-        let _ = std::io::stdout().write_all(osc.as_bytes());
-        let _ = std::io::stdout().flush();
     }
 
     /// Select the complete semantic transcript. This is deliberately separate
@@ -8494,6 +8471,7 @@ mod assistant_block;
 mod bash_render;
 #[path = "view/shell_chrome.rs"]
 mod builtin_shell_chrome;
+mod clipboard_transport;
 mod codemode_render;
 mod input_dispatch;
 mod input_overlays;

@@ -18,7 +18,6 @@ pub(super) struct GeometryFence {
     overlay: bool,
     scroll: usize,
     follow_tail: bool,
-    anchor: Option<super::ViewportAnchor>,
 }
 impl GeometryFence {
     pub(super) fn capture(state: &ShellState) -> Self {
@@ -36,7 +35,6 @@ impl GeometryFence {
             overlay: state.overlay.is_some(),
             scroll: state.scroll_from_bottom.get(),
             follow_tail: state.follow_tail,
-            anchor: state.viewport_anchor.get(),
         }
     }
 }
@@ -48,6 +46,7 @@ pub(super) struct VisibleBlockGeometry {
     pub(super) start: usize,
     pub(super) rows: usize,
     pub(super) surface: SurfaceGeometry,
+    pub(super) copy_rows: Option<super::transcript_selection::CopyRows>,
 }
 
 /// Panel geometry has its own ownership fence. Background transcript output
@@ -219,7 +218,6 @@ impl RenderedGeometry {
         let end = total_rows.saturating_sub(scroll);
         let start = end.saturating_sub(viewport_rows);
         fence.scroll = state.scroll_from_bottom.get();
-        fence.anchor = state.viewport_anchor.get();
         let cache = state.transcript_cache.borrow();
         let first_block = cache
             .block_starts
@@ -234,6 +232,14 @@ impl RenderedGeometry {
                     start: cache.block_starts[index],
                     rows: cache.block_lengths[index],
                     surface: cache.block_geometries[index],
+                    copy_rows: super::transcript_selection::visible_copy_rows(
+                        &cache.lines[cache.block_starts[index]
+                            ..cache.block_starts[index] + cache.block_lengths[index]],
+                        &super::transcript_selection::block_copy_text(&state.transcript[index]),
+                        cache.block_geometries[index],
+                        start.saturating_sub(cache.block_starts[index])
+                            ..end.saturating_sub(cache.block_starts[index]),
+                    ),
                 })
             })
             .collect();
@@ -261,6 +267,9 @@ impl RenderedGeometry {
         })
     }
     pub(super) fn is_current(&self, state: &ShellState) -> bool {
+        // The renderer may promote a visual anchor to its semantic equivalent
+        // while unrelated input prevents render feedback. The resolved scroll
+        // and layout fence, not the anchor's representation, determine cells.
         self.fence == GeometryFence::capture(state)
     }
 
