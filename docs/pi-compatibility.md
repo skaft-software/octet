@@ -84,7 +84,8 @@ adapter, and Pi skills, prompt templates, themes, `keybindings.json`, the global
 context file and the selected model become native session resources. Discovery
 is bounded; missing, linked, oversized or pattern-filtered inputs are reported,
 never guessed at, and packages are only used if they are already installed —
-nothing is written to `~/.pi` or `~/.octet`.
+discovery never writes the Pi setup, and it never rewrites Octet configuration
+(the generated mirror stays in the import directory you chose above).
 
 Everything the mirror contributes is session state owned by the process that
 enabled the extension, so disabling `octet-pi-compat` returns exactly to the
