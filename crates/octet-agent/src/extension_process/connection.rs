@@ -1039,6 +1039,7 @@ impl ProcessConnection {
             let _views = session_leaf::transport::attach(
                 &connection,
                 id,
+                method,
                 resource_owner.as_ref(),
                 &mut params,
             )?;
