@@ -7,9 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod driver;
 mod session_operations;
 mod visible;
-pub(crate) mod driver;
 
 #[cfg(all(test, unix))]
 mod driver_tests;
@@ -346,7 +346,9 @@ impl ExtensionProcess {
             ));
         }
         if slot.len() >= read_std_lock(&connection.protocol).max_concurrent_requests {
-            return Err(ExtensionRuntimeError::Protocol("private session leaf owner quota exceeded".into()));
+            return Err(ExtensionRuntimeError::Protocol(
+                "private session leaf owner quota exceeded".into(),
+            ));
         }
         slot.insert(binding.owner.clone(), Arc::clone(&bound));
         drop(slot);
@@ -553,17 +555,25 @@ fn session_snapshot(
     // Admit the complete visible serialization BEFORE cloning any history.
     // This includes duplicate legacy branch bodies and all header/label facts.
     visible::legacy_snapshot_bytes(session, namespace, limit)?;
-    let entries = session.entries().iter()
-        .map(|entry| serde_json::to_value(visible::VisibleEntry { entry, namespace })
-            .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into())))
+    let entries = session
+        .entries()
+        .iter()
+        .map(|entry| {
+            serde_json::to_value(visible::VisibleEntry { entry, namespace })
+                .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut branch = Vec::new();
     let mut cursor = session.head();
     while let Some(id) = cursor {
-        let entry = session.entry(&id)
-            .ok_or_else(|| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))?;
-        branch.push(serde_json::to_value(visible::VisibleEntry { entry, namespace })
-            .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))?);
+        let entry = session.entry(&id).ok_or_else(|| {
+            ExtensionRuntimeError::Protocol("session snapshot unavailable".into())
+        })?;
+        branch.push(
+            serde_json::to_value(visible::VisibleEntry { entry, namespace }).map_err(|_| {
+                ExtensionRuntimeError::Protocol("session snapshot unavailable".into())
+            })?,
+        );
         cursor = entry.parent.clone();
     }
     branch.reverse();
@@ -736,16 +746,27 @@ fn refusal(error: SessionLeafError) -> (i64, &'static str) {
     }
 }
 
-fn append_receipt_fits(id: &ExtensionRequestId, snapshot: &SessionLeafGrantSnapshot, max_message_bytes: usize) -> bool {
+fn append_receipt_fits(
+    id: &ExtensionRequestId,
+    snapshot: &SessionLeafGrantSnapshot,
+    max_message_bytes: usize,
+) -> bool {
     // Native IDs are decimal u64 with minimum width three; twenty digits bound
     // every possible successor. Tokens are exactly 64 lowercase ASCII hex.
     let entry_id = "9".repeat(20);
     let mut successor = snapshot.clone();
     successor.grant_id = "f".repeat(64);
     successor.expected_head = Some(entry_id.clone());
-    let result = SessionLeafAppendResult { entry_id: entry_id.clone(), head: entry_id, successor: Some(successor) };
-    validate_session_snapshot_size(&serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}),
-        max_message_bytes.saturating_sub(1)).is_ok()
+    let result = SessionLeafAppendResult {
+        entry_id: entry_id.clone(),
+        head: entry_id,
+        successor: Some(successor),
+    };
+    validate_session_snapshot_size(
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}),
+        max_message_bytes.saturating_sub(1),
+    )
+    .is_ok()
 }
 
 pub(super) fn dispatch_append_request(
@@ -753,7 +774,8 @@ pub(super) fn dispatch_append_request(
     object: &serde_json::Map<String, serde_json::Value>,
     params: serde_json::Value,
 ) -> Result<bool, String> {
-    if lock_std_mutex(&state.session_leaf.bound).is_empty() && params.get("session_leaf").is_none() {
+    if lock_std_mutex(&state.session_leaf.bound).is_empty() && params.get("session_leaf").is_none()
+    {
         return Ok(false);
     }
     parse_child_request_id(object, methods::SESSION_APPEND_ENTRY)?;
@@ -771,16 +793,28 @@ pub(super) fn dispatch_append_request(
     };
     // Authenticate numeric parent first. Neither caller grant nor explicit owner
     // selects a foreign mailbox, and there is no sole/foreground fallback.
-    let parent_matches = lock_std_mutex(&state.pending).get(&request.parent_request_id)
-        .is_some_and(|parent| parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
-            && parent.resource_owner.as_ref() == Some(&admitted.owner));
-    let bound = parent_matches.then(|| lock_std_mutex(&state.session_leaf.bound)
-        .get(&admitted.owner).cloned()).flatten();
+    let parent_matches = lock_std_mutex(&state.pending)
+        .get(&request.parent_request_id)
+        .is_some_and(|parent| {
+            parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
+                && parent.resource_owner.as_ref() == Some(&admitted.owner)
+        });
+    let bound = parent_matches
+        .then(|| {
+            lock_std_mutex(&state.session_leaf.bound)
+                .get(&admitted.owner)
+                .cloned()
+        })
+        .flatten();
     let Some(bound) = bound else {
-        refuse_admitted_request(state, &admitted, (
-            ExtensionRequestFailure::NotForegroundOwner,
-            "private session leaf parent authority unavailable".into(),
-        ))?;
+        refuse_admitted_request(
+            state,
+            &admitted,
+            (
+                ExtensionRequestFailure::NotForegroundOwner,
+                "private session leaf parent authority unavailable".into(),
+            ),
+        )?;
         return Ok(true);
     };
     if state.closed.load(Ordering::Acquire) || state.draining.load(Ordering::Acquire) {
@@ -796,11 +830,19 @@ pub(super) fn dispatch_append_request(
     }
     // Refuse before queue admission/claim if even the conservative complete
     // escaped receipt envelope cannot fit this physical connection's bound.
-    if !append_receipt_fits(&admitted.request_id, &bound.snapshot, state.max_message_bytes()) {
-        refuse_admitted_request(state, &admitted, (
-            ExtensionRequestFailure::BoundsExceeded,
-            "private session leaf receipt exceeds wire bound".into(),
-        ))?;
+    if !append_receipt_fits(
+        &admitted.request_id,
+        &bound.snapshot,
+        state.max_message_bytes(),
+    ) {
+        refuse_admitted_request(
+            state,
+            &admitted,
+            (
+                ExtensionRequestFailure::BoundsExceeded,
+                "private session leaf receipt exceeds wire bound".into(),
+            ),
+        )?;
         return Ok(true);
     }
     let receipt = {
@@ -866,7 +908,9 @@ pub(super) fn dispatch_append_request(
             Ok(commit) => {
                 // One synced successor is shared by the native activation; a
                 // linked callback never reuses the activation's initial grant.
-                *lock_std_mutex(&bound.current_grant) = commit.successor.as_ref()
+                *lock_std_mutex(&bound.current_grant) = commit
+                    .successor
+                    .as_ref()
                     .map(SessionLeafGrantSnapshot::from);
                 if transcript_enabled {
                     if let Some(entry) =
@@ -982,12 +1026,15 @@ mod tests {
                 .features
                 .insert(EXTENSION_FEATURE_SESSION_ENTRIES.into());
         }
-        lock_std_mutex(&state.session_leaf.bound).insert(binding.owner.clone(), Arc::new(BoundLeaf {
-            producer: SessionLeafProcessProducer::new(producer, binding.clone()),
-            revoker,
-            snapshot: SessionLeafGrantSnapshot::from(grant),
-            current_grant: StdMutex::new(Some(SessionLeafGrantSnapshot::from(grant))),
-        }));
+        lock_std_mutex(&state.session_leaf.bound).insert(
+            binding.owner.clone(),
+            Arc::new(BoundLeaf {
+                producer: SessionLeafProcessProducer::new(producer, binding.clone()),
+                revoker,
+                snapshot: SessionLeafGrantSnapshot::from(grant),
+                current_grant: StdMutex::new(Some(SessionLeafGrantSnapshot::from(grant))),
+            }),
+        );
         super::super::tests::insert_test_parent(&state, 1, Some(binding.owner.clone()));
         (state, frames, received)
     }
