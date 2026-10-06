@@ -63,7 +63,7 @@ configuration below.
 
 See [Getting started](getting-started.md#3-choose-one-provider-lane) and the
 [CLI alternatives](cli.md#provider-setup). This setup flow is part of the current
-0.8.2 source candidate; availability in older published versions differs.
+0.9.0 source candidate; availability in older published versions differs.
 
 ## Cloud setup
 

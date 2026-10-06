@@ -129,7 +129,7 @@ need Git for Windows or another Bash-compatible shell.
 ## Optional packages
 
 Executable extension bundles are pinned to
-the host version. After publication, install assets matching octet `0.8.2` from
+the host version. After publication, install assets matching octet `0.9.0` from
 its version-pinned release. Until then, run reviewed source extensions from this
 checkout with `--extension-dir ./extensions`. The 0.8.0 bundles need their 0.8.0 host.
 
@@ -165,7 +165,7 @@ reference](cli.md#packages).
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
 
 The six executable-bundle manifests declare API `0.4`, distribution version
-`0.8.2`, and require octet `=0.8.2`. Older bundles stay pinned to their host.
+`0.9.0`, and require octet `=0.9.0`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
 the Python API 0.4 process recipe and the retained API 0.3 conformance example.
