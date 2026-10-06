@@ -31,12 +31,14 @@ const MAX_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
 const RECEIPT: &str = ".octet-python-runtime.json";
 const SOURCE_ARCHIVE: &str = ".octet-python-source.tar.gz";
 
+type SourceManifest = BTreeMap<String, String>;
+type SourceManifestCache = BTreeMap<String, Arc<SourceManifest>>;
+
 // Only manifests derived from digest-verified source bytes enter this cache.
 // Actual installed files are still checked on every launch; no mutable receipt
 // or filesystem pathname can authorize the source manifest.
-static SOURCE_MANIFESTS: std::sync::LazyLock<
-    std::sync::Mutex<BTreeMap<String, Arc<BTreeMap<String, String>>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+static SOURCE_MANIFESTS: std::sync::LazyLock<std::sync::Mutex<SourceManifestCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
 
 /// Host-owned private runtime location. Constructing it performs no I/O.
 /// The coding host must derive this from its authoritative user home (including
@@ -109,7 +111,10 @@ const ASSETS: &[Asset] = &[
 
 impl Asset {
     fn url(self) -> String {
-        format!("https://github.com/astral-sh/python-build-standalone/releases/download/{RELEASE}/cpython-{VERSION}%2B{RELEASE}-{}-install_only_stripped.tar.gz", self.target)
+        format!(
+            "https://github.com/astral-sh/python-build-standalone/releases/download/{RELEASE}/cpython-{VERSION}%2B{RELEASE}-{}-install_only_stripped.tar.gz",
+            self.target
+        )
     }
 
     fn directory(self, root: &Path) -> PathBuf {
@@ -142,7 +147,11 @@ fn asset_for_environment(os: &str, arch: &str, environment: &str) -> io::Result<
         ("linux", "x86_64") if environment == "gnu" => "x86_64-unknown-linux-gnu",
         ("windows", "aarch64") => "aarch64-pc-windows-msvc",
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        _ => return Err(io::Error::other(format!("no verified private Python runtime is catalogued for {os}/{arch}; Linux requires glibc, not musl"))),
+        _ => {
+            return Err(io::Error::other(format!(
+                "no verified private Python runtime is catalogued for {os}/{arch}; Linux requires glibc, not musl"
+            )));
+        }
     };
     ASSETS
         .iter()
@@ -218,7 +227,9 @@ pub async fn provision_python_runtime(config: &PythonRuntimeConfig) -> io::Resul
         prepare_candidate(bytes, staging, lock, asset, setup.clone(), extract_archive).await?;
     // Only verified source bytes are executed, in a private candidate directory.
     if !probe_python(&runtime.join(asset.interpreter()), &[], Some(setup)).await? {
-        return Err(io::Error::other("verified private Python could not run with venv/ensurepip; check this platform's OS/library requirements and retry"));
+        return Err(io::Error::other(
+            "verified private Python could not run with venv/ensurepip; check this platform's OS/library requirements and retry",
+        ));
     }
     progress(setup, "Publishing the verified private Python runtime…")?;
     let destination = asset.directory(&config.root);
@@ -231,7 +242,9 @@ pub async fn provision_python_runtime(config: &PythonRuntimeConfig) -> io::Resul
     cancellation_guard.armed = false;
     // Publication is the local commit point. No cancellation/error after it is
     // misrepresented as rollback; readiness of Cua still needs separate checks.
-    (setup.progress)("Private Python and its bundled venv tooling are installed. Desktop driver setup and OS permission checks are still required.");
+    (setup.progress)(
+        "Private Python and its bundled venv tooling are installed. Desktop driver setup and OS permission checks are still required.",
+    );
     Ok(destination.join(asset.interpreter()))
 }
 
@@ -471,10 +484,13 @@ fn open_private_runtime_member(path: &Path) -> io::Result<std::fs::File> {
         let metadata = file.metadata()?;
         // SAFETY: geteuid has no preconditions and accepts no pointers.
         let owner = unsafe { libc::geteuid() };
-        if metadata.uid() != owner || metadata.nlink() != 1
+        if metadata.uid() != owner
+            || metadata.nlink() != 1
             || !matches!(metadata.mode() & 0o7777, 0o600 | 0o700)
         {
-            return Err(io::Error::other("runtime member is not an owner-only 0600/0700 regular file"));
+            return Err(io::Error::other(
+                "runtime member is not an owner-only 0600/0700 regular file",
+            ));
         }
         Ok(file)
     }
@@ -652,9 +668,12 @@ fn inventory(
                 safe_relative(&relative)?;
                 let file = open_private_runtime_member(&path)?;
                 let mut bytes = Vec::new();
-                file.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+                file.take(MAX_FILE_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
                 if bytes.len() > MAX_FILE_BYTES {
-                    return Err(io::Error::other("private Python runtime member exceeds its size limit"));
+                    return Err(io::Error::other(
+                        "private Python runtime member exceeds its size limit",
+                    ));
                 }
                 expanded = expanded
                     .checked_add(bytes.len() as u64)
@@ -828,7 +847,9 @@ fn cached_runtime(
         || receipt.archive_sha256 != asset.digest
         || !receipt.files.contains_key(asset.interpreter())
     {
-        return Err(io::Error::other("private Python runtime provenance changed; existing files were not executed or replaced"));
+        return Err(io::Error::other(
+            "private Python runtime provenance changed; existing files were not executed or replaced",
+        ));
     }
     let source = crate::secure_fs::read_private_file_bounded(
         &runtime.join(SOURCE_ARCHIVE),
@@ -837,7 +858,9 @@ fn cached_runtime(
     .map_err(io::Error::other)?;
     let expected = source_manifest(asset, &source, setup)?;
     if receipt.files != *expected || inventory(&runtime, setup)? != *expected {
-        return Err(io::Error::other("private Python runtime integrity changed; existing files were not executed or replaced"));
+        return Err(io::Error::other(
+            "private Python runtime integrity changed; existing files were not executed or replaced",
+        ));
     }
     Ok(Some(runtime.join(asset.interpreter())))
 }
@@ -1336,11 +1359,13 @@ mod tests {
                 "Verified private Python is already installed."
             ]
         );
-        assert!(std::fs::read_dir(&root).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with("python-setup")));
+        assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("python-setup")
+        }));
     }
 
     #[tokio::test]

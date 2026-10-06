@@ -487,17 +487,25 @@ impl EventObserver for ExtensionProcess {
 }
 
 impl ExtensionProcess {
-    async fn run_tool_session_hook(&self, hook: ExtensionHook, payload: serde_json::Value,
-        context: &ToolContext<'_>) -> Result<ExtensionHookOutput, ExtensionRuntimeError>
-    {
+    async fn run_tool_session_hook(
+        &self,
+        hook: ExtensionHook,
+        payload: serde_json::Value,
+        context: &ToolContext<'_>,
+    ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
         let connection = read_std_lock(&self.inner.connection).clone();
         let execution = self.tool_execution_context(context, connection.generation);
         let routed = session_leaf::owner_routes_enabled(&read_std_lock(&connection.protocol));
         if routed {
-            let route = context.progress.session_driver().ok_or_else(||
-                ExtensionRuntimeError::Protocol("session hook requires active causal driver".into()))?;
-            let invocation = route.prepare(self, context.resource_owner).await
-                .map_err(|_| ExtensionRuntimeError::Protocol("session hook causal driver unavailable".into()))?;
+            let route = context.progress.session_driver().ok_or_else(|| {
+                ExtensionRuntimeError::Protocol("session hook requires active causal driver".into())
+            })?;
+            let invocation = route
+                .prepare(self, context.resource_owner)
+                .await
+                .map_err(|_| {
+                    ExtensionRuntimeError::Protocol("session hook causal driver unavailable".into())
+                })?;
             invocation.run_hook(hook, payload, execution).await
         } else {
             self.run_hook(hook, payload, execution).await

@@ -26,10 +26,17 @@ for line in sys.stdin:
     if method == "initialize":
         protocol = params["protocol"]
         assert "remote_ui" in protocol["optional_features"]
-        reply(request["id"], {"api_version":"0.4", "tools":[], "commands":[],
-            "protocol":{"version":"0.4",
+        if mode == "retry-probe" and not (os.path.exists(log_path + ".ready") and os.path.exists(log_path + ".retry-ok")):
+            send({"jsonrpc":"2.0", "id":request["id"], "error":{"code":-32000,"message":"fixture not ready"}})
+            continue
+        reply(request["id"], {"api_version":"0.4", "tools":[
+            {"name":"probe", "description":"probe", "parameters":{"type":"object"}}],
+            "commands":[], "protocol":{"version":"0.4",
                 "features":protocol["required_features"] + ["remote_ui"],
                 "limits":{"max_concurrent_requests":2}}})
+    elif method == "tool/call":
+        reply(request["id"], {"content":[{"type":"text", "text":"callable"}],
+            "is_error":False, "metadata":{}})
     elif method == "hook/run":
         record({"hook":params["hook"], "payload":params["payload"]})
         if params["hook"] == "session_start":
@@ -72,6 +79,12 @@ async fn fixture(mode: &str) -> Fixture {
     std::fs::write(&script, PROBE).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
     let log = root.path().join("wire.jsonl");
+    if mode == "retry-probe" {
+        // `.ready` models the published private runtime; `.retry-ok` models a
+        // failure of the first activation attempt after setup succeeded.
+        std::fs::write(format!("{}.ready", log.display()), b"ready").unwrap();
+        std::fs::write(format!("{}.retry-ok", log.display()), b"ready").unwrap();
+    }
     let manifest_text = format!(
         r#"name = "lifecycle-exit-probe"
 version = "0.1.0"
@@ -80,6 +93,7 @@ api_version = "0.4"
 command = "probe.py"
 args = [{mode}, {log}]
 [contributes]
+tools = ["probe"]
 hooks = ["session_start", "session_end"]
 notifications = true
 [runtime]
@@ -146,6 +160,100 @@ fn records(path: &Path) -> Vec<serde_json::Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+/// Models a Python extension that failed its cold start: the runtime catalogue
+/// and session binding exist, but no process is live in the host.
+async fn activation_fixture() -> Fixture {
+    let mut f = fixture("retry-probe").await;
+    f.extensions.processes.clear();
+    f.extensions.workspace = f._root.path().to_path_buf();
+    f.extensions.tool_host = Some(ExtensionHost::new());
+    f.extensions.session_id = Some("session-exit-probe".to_owned());
+    f.extensions.resource_owner = Some("session-exit-probe".to_owned());
+    f
+}
+
+fn local_python_runtime(f: &Fixture) -> octet_agent::extension_process::PythonRuntimeConfig {
+    octet_agent::extension_process::PythonRuntimeConfig {
+        root: f._root.path().join("local-python-fixture"),
+        setup: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn python_runtime_setup_activates_extension_and_registers_its_tool() {
+    let mut f = activation_fixture().await;
+    let python_runtime = local_python_runtime(&f);
+    // Cold start: the local fixture runtime has not been provisioned yet.
+    std::fs::remove_file(format!("{}.ready", f.log.display())).unwrap();
+    assert!(f
+        .extensions
+        .activate_python_extension_with_runtime("lifecycle-exit-probe", python_runtime.clone())
+        .await
+        .is_err());
+    // `/extensions setup <name>` published the verified runtime. Activation in
+    // the same session must register the tool instead of requiring a restart.
+    std::fs::write(format!("{}.ready", f.log.display()), b"ready").unwrap();
+    f.extensions
+        .activate_python_extension_with_runtime("lifecycle-exit-probe", python_runtime)
+        .await
+        .unwrap();
+
+    assert!(f
+        .extensions
+        .tool_host
+        .as_ref()
+        .unwrap()
+        .tool_definitions()
+        .iter()
+        .any(|definition| definition.name == "probe"));
+    let process = f.extensions.processes.last().unwrap().clone();
+    assert!(process.is_running());
+    let result = process
+        .call_tool("probe", serde_json::json!({}), process.current_context())
+        .await
+        .unwrap();
+    assert!(result.content.contains("callable"));
+    process.shutdown().await;
+    f.process.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activation_failure_after_setup_can_be_retried_in_the_current_host() {
+    let mut f = activation_fixture().await;
+    let python_runtime = local_python_runtime(&f);
+    // Runtime setup is published, but the first activation attempt fails; the
+    // caller must receive the error and be able to retry without a restart.
+    std::fs::remove_file(format!("{}.retry-ok", f.log.display())).unwrap();
+    let error = f
+        .extensions
+        .activate_python_extension_with_runtime("lifecycle-exit-probe", python_runtime.clone())
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().is_empty());
+    assert!(f.extensions.processes.is_empty());
+    std::fs::write(format!("{}.retry-ok", f.log.display()), b"ready").unwrap();
+    f.extensions
+        .activate_python_extension_with_runtime("lifecycle-exit-probe", python_runtime)
+        .await
+        .unwrap();
+
+    let process = f.extensions.processes.last().unwrap().clone();
+    assert!(process.is_running());
+    let result = process
+        .call_tool("probe", serde_json::json!({}), process.current_context())
+        .await
+        .unwrap();
+    assert!(result.content.contains("callable"));
+    // Setup for an already-live extension is a no-op, not a second launch.
+    f.extensions
+        .activate_python_extension_with_runtime("lifecycle-exit-probe", local_python_runtime(&f))
+        .await
+        .unwrap();
+    assert_eq!(f.extensions.processes.len(), 1);
+    process.shutdown().await;
+    f.process.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -220,7 +328,9 @@ async fn session_end_reverse_ui_receives_a_terminal_reply_before_shutdown() {
         .iter()
         .position(|entry| entry.get("shutdown").is_some());
     assert!(
-        reply.zip(shutdown).is_some_and(|(reply, shutdown)| reply < shutdown),
+        reply
+            .zip(shutdown)
+            .is_some_and(|(reply, shutdown)| reply < shutdown),
         "UI cleanup must receive success or a truthful typed refusal, not be left awaiting an unpumped frontend: {wire:?}",
     );
     let response = &wire[reply.unwrap()]["end_ui_response"];
