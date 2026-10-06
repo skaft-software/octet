@@ -61,6 +61,6 @@ Native-backed execution still requires the production Editor facade and its
 owner-fenced synchronous native editor-operation service. Once that seam exists,
 the geometry fixture must bind to the real native service, not a JavaScript editor
 stub. The exports/ownership test must pass without changing the upstream cases.
-Native state/caret/undo/paste/history/key handling/autocomplete/submit and the
-native registry argument-completion seam remain unimplemented, rather than
-individual upstream cases being silently excluded.
+Facade-backed native state/caret/undo/paste/history/key handling/autocomplete/
+submit and the custom-editor native registry argument-completion seam remain
+unimplemented, rather than individual upstream cases being silently excluded.
