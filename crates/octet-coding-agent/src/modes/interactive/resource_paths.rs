@@ -96,7 +96,8 @@ where
     shell.set_theme(theme);
     shell.set_runtime_config(app.config.clone());
     shell.set_session_keybindings(&app.user_keybindings);
-    app.executable_extensions.refresh_frontend_keybindings(shell);
+    app.executable_extensions
+        .refresh_frontend_keybindings(shell);
     for diagnostic in diagnostics {
         shell.notice(diagnostic);
     }
@@ -254,7 +255,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let (mut app, process, _) = fixture(&root).await;
-        std::fs::write(root.join("keybindings.json"), "{\"app.exit\": [\"ctrl+q\"]}").unwrap();
+        std::fs::write(
+            root.join("keybindings.json"),
+            "{\"app.exit\": [\"ctrl+q\"]}",
+        )
+        .unwrap();
         std::fs::write(root.join("AGENTS.md"), "SESSION-CONTEXT-SENTINEL\n").unwrap();
         std::fs::write(
             root.join("reply.json"),

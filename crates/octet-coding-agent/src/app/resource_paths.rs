@@ -80,7 +80,11 @@ impl ResourcePathConsumer {
 
 /// The session-only system-prompt suffix: contributed context files followed by
 /// the live skill catalog. Both are replaced atomically at publication.
-fn dynamic_suffix(context: &[(PathBuf, String)], skills: &dyn octet_agent::SkillRegistry) -> String {    let mut suffix = String::new();
+fn dynamic_suffix(
+    context: &[(PathBuf, String)],
+    skills: &dyn octet_agent::SkillRegistry,
+) -> String {
+    let mut suffix = String::new();
     if !context.is_empty() {
         let blocks = context
             .iter()
@@ -88,7 +92,9 @@ fn dynamic_suffix(context: &[(PathBuf, String)], skills: &dyn octet_agent::Skill
             .collect::<Vec<_>>();
         suffix.push_str(&crate::resources::wrap_project_context(&blocks));
     }
-    suffix.push_str(&crate::resources::format_skills_for_prompt(&skills.descriptors()));
+    suffix.push_str(&crate::resources::format_skills_for_prompt(
+        &skills.descriptors(),
+    ));
     suffix
 }
 
@@ -195,7 +201,9 @@ impl App {
         // choose one explicitly, and restored to the saved route on withdrawal.
         if !self.config.model_explicit {
             let desired = match loaded.default_model.as_ref() {
-                Some(selection) => self.resolve_contributed_model(&selection.provider, &selection.model),
+                Some(selection) => {
+                    self.resolve_contributed_model(&selection.provider, &selection.model)
+                }
                 None => self.resource_paths.model.clone(),
             };
             if let Some(id) = desired {
@@ -212,7 +220,8 @@ impl App {
                                 self.reasoning = reasoning;
                             }
                             Err(error) => diagnostics.push(format!(
-                                "warning: contributed default model {} was not selected: {error}", id.0
+                                "warning: contributed default model {} was not selected: {error}",
+                                id.0
                             )),
                         }
                     }

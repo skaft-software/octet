@@ -3,7 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bounded, invalid, ownerKey, rpcError, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
-import { discoverPiSetup, resolveThemeFile } from './pi-setup.mjs';
+import { discoverPiSetup, resolveThemeFile, themeCandidates } from './pi-setup.mjs';
 
 const pathFields = { skillPaths: 'skill_paths', promptPaths: 'prompt_paths', themePaths: 'theme_paths' };
 function record(value, allowed, label) {
@@ -91,13 +91,19 @@ export async function discoverResources(runtime, params, store) {
     if (runtime.mirrorPiSetup) {
       const setup = discoverPiSetup({ agentDir: runtime.config.pi_agent_dir, env: process.env, cwd });
       for (const diagnostic of setup.diagnostics.slice(0, 32)) runtime.diagnostic(`mirror ${diagnostic}`);
-      appendPaths(paths, { skillPaths: setup.skillsPaths, promptPaths: setup.promptsPaths, themePaths: setup.themesPaths }, budget);
+      // Theme roots are flattened to individual palettes: a directory plus the
+      // exact selected file would register one name twice, and the exact file
+      // must be an entry for `default_theme` admission.
+      const themeFiles = themeCandidates(setup.themesPaths, setup.diagnostics);
+      appendPaths(paths, {
+        skillPaths: setup.skillsPaths,
+        promptPaths: setup.promptsPaths,
+        themePaths: themeFiles,
+      }, budget);
       // Pi's selected palette becomes the session-only native preference; the
-      // native loader still parses and admits it. The exact file must also be a
-      // contributed entry, not just a member of a contributed directory.
-      const theme = resolveThemeFile(paths.theme_paths, setup.defaultTheme, setup.diagnostics);
+      // native loader still parses and admits it.
+      const theme = resolveThemeFile(themeFiles, setup.defaultTheme, setup.diagnostics);
       if (theme) {
-        appendPaths(paths, { themePaths: [theme] }, budget);
         const preferred = normalizeResourcePath(theme, cwd);
         if (paths.theme_paths.includes(preferred)) paths.default_theme = preferred;
         else runtime.diagnostic(`mirror theme ${theme} exceeded the resource path budget; no native preference`);

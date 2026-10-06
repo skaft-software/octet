@@ -94,7 +94,10 @@ fn tree_contents(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
             if metadata.is_dir() {
                 walk(root, &path, files);
             } else {
-                files.push((path.strip_prefix(root).unwrap().to_owned(), std::fs::read(&path).unwrap()));
+                files.push((
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    std::fs::read(&path).unwrap(),
+                ));
             }
         }
     }
@@ -148,7 +151,8 @@ fn app_for(root: &Path, workspace: &Path, enabled: bool) -> App {
         config.enabled_extensions.clear();
     }
     let boot = crate::app::bootstrap::bootstrap(config).unwrap();
-    let launch = crate::app::bootstrap::resolve_launch_print(&boot, "pi-mirror-acceptance").unwrap();
+    let launch =
+        crate::app::bootstrap::resolve_launch_print(&boot, "pi-mirror-acceptance").unwrap();
     crate::app::bootstrap::build_app_with_resource_consumer(
         boot,
         launch,
@@ -222,8 +226,14 @@ fn app_state(app: &App) -> Vec<String> {
             app.model.spec.api_name
         ),
         format!("extension-commands:{}", extension_commands(app).join(",")),
-        format!("system-has-pi-context:{}", app.agent.system_prompt().contains("PI-SETUP-CONTEXT")),
-        format!("system-has-pi-catalog:{}", app.agent.system_prompt().contains("PI-SETUP-SKILL-CATALOG")),
+        format!(
+            "system-has-pi-context:{}",
+            app.agent.system_prompt().contains("PI-SETUP-CONTEXT")
+        ),
+        format!(
+            "system-has-pi-catalog:{}",
+            app.agent.system_prompt().contains("PI-SETUP-SKILL-CATALOG")
+        ),
     ];
     state.extend(skills);
     state.extend(prompts.into_iter().map(|name| format!("prompt:{name}")));
@@ -236,10 +246,7 @@ fn assert_pi_setup_active(app: &App, pi: &PiHome) {
     // Skills: the real native registry loaded the Pi skill.
     let skill = app.skills.load(&"pi-setup-skill".into()).unwrap();
     assert!(skill.instructions.contains("PI-SETUP-SKILL-BODY"));
-    assert!(app
-        .agent
-        .system_prompt()
-        .contains("PI-SETUP-SKILL-CATALOG"));
+    assert!(app.agent.system_prompt().contains("PI-SETUP-SKILL-CATALOG"));
     // Prompt templates: native expansion.
     assert!(render(app, "pi-setup-prompt").contains("PI-SETUP-PROMPT argument"));
     // Theme selection from Pi settings.json, parsed by the native Pi JSON projection.

@@ -315,15 +315,7 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
 /// stem is Octet's native selector; a Pi palette's `name` is the fallback.
 export function resolveThemeFile(themePaths, selection, diagnostics = []) {
   if (!selection) return undefined;
-  const files = [];
-  for (const path of themePaths) {
-    let stat;
-    try { stat = lstatSync(path); } catch { continue; }
-    if (stat.isFile()) files.push(path);
-    else if (stat.isDirectory()) {
-      for (const child of directoryEntries(path, diagnostics)) if (/\.(json|toml)$/i.test(child)) files.push(child);
-    }
-  }
+  const files = themeCandidates(themePaths, diagnostics);
   const byStem = files.find(file => basename(file).replace(/\.(json|toml)$/i, '') === selection);
   if (byStem) return byStem;
   for (const file of files) {
@@ -337,4 +329,38 @@ export function resolveThemeFile(themePaths, selection, diagnostics = []) {
     } catch { continue; }
   }
   return undefined;
+}
+
+/// Flatten discovered theme roots to individual palette files. Native theme
+/// discovery treats a contributed directory and the file inside it as two
+/// definitions of one name, so contributing the exact selected file as well
+/// would register every palette twice (a shadow warning) and still be required
+/// for `default_theme` admission. Contribute each palette once instead.
+export function themeCandidates(paths, diagnostics = []) {
+  const files = [], seen = new Set();
+  for (const path of paths) {
+    let stat;
+    try { stat = lstatSync(path); } catch { continue; }
+    if (stat.isFile()) {
+      if (/\.(json|toml)$/i.test(path) && !seen.has(path) && files.length < MAX_RESOURCE_ENTRIES) {
+        seen.add(path);
+        files.push(path);
+      }
+      continue;
+    }
+    if (!stat.isDirectory()) continue;
+    for (const child of directoryEntries(path, diagnostics)) {
+      let childStat;
+      try { childStat = lstatSync(child); } catch { continue; }
+      if (childStat.isFile() && /\.(json|toml)$/i.test(child)) {
+        if (!seen.has(child) && files.length < MAX_RESOURCE_ENTRIES) {
+          seen.add(child);
+          files.push(child);
+        }
+      } else if (childStat.isDirectory()) {
+        diagnostics.push(`themes ${child}: nested theme directories are not mirrored; list the palette files explicitly`);
+      }
+    }
+  }
+  return files;
 }

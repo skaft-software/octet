@@ -172,7 +172,7 @@ test('pi setup: a generated mirror bridge discovers the fixture items through th
   const paths = reply.result.resource_paths;
   assert.deepEqual(paths.skill_paths, [join(agent, 'skills')]);
   assert.deepEqual(paths.prompt_paths, [join(agent, 'prompts')]);
-  assert.deepEqual(paths.theme_paths, [join(agent, 'themes'), join(agent, 'themes/pi-setup-theme.json')]);
+  assert.deepEqual(paths.theme_paths, [join(agent, 'themes/pi-setup-theme.json')]);
   assert.equal(paths.default_theme, join(agent, 'themes/pi-setup-theme.json'));
   assert.deepEqual(paths.keybindings_paths, [join(agent, 'keybindings.json')]);
   assert.deepEqual(paths.context_paths, [join(agent, 'AGENTS.md')]);

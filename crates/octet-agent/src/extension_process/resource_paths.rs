@@ -103,9 +103,7 @@ impl ExtensionResourcePaths {
         }
         if let Some(selection) = &self.default_model {
             let bounded = |value: &str| {
-                !value.is_empty()
-                    && value.len() <= 256
-                    && !value.chars().any(char::is_control)
+                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
             };
             if !bounded(&selection.provider) || !bounded(&selection.model) {
                 return Err(ExtensionRuntimeError::Protocol(
