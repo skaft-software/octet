@@ -6,7 +6,8 @@ use super::terminal_text::sanitize_for_terminal;
 use super::{tern_controls, ShellState};
 
 pub(super) fn node(shell: &ShellState) -> Option<Node> {
-    let count = shell.steering_queue.len() + shell.follow_up_queue.len() + shell.pending_controls.len();
+    let count =
+        shell.steering_queue.len() + shell.follow_up_queue.len() + shell.pending_controls.len();
     if count == 0 {
         return None;
     }
@@ -66,7 +67,10 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
     let display = if !controls.is_empty() {
         controls.as_str()
     } else {
-        shell.steering_queue.first().map(|entry| entry.display.as_str())
+        shell
+            .steering_queue
+            .first()
+            .map(|entry| entry.display.as_str())
             .unwrap_or_else(|| shell.follow_up_queue[0].composed.transcript_text.as_str())
     };
     let display = sanitize_for_terminal(display).replace('\n', " ↵ ");

@@ -617,7 +617,10 @@ impl ExtensionSessionLifecycleReceiver {
     /// Other lifecycle operations remain with the idle driver, in order.
     pub fn try_next_model_control(&mut self) -> Option<ExtensionSessionLifecycleRequest> {
         let request = self.try_next()?;
-        if matches!(request.operation(), ExtensionSessionLifecycleOperation::ModelControl(_)) {
+        if matches!(
+            request.operation(),
+            ExtensionSessionLifecycleOperation::ModelControl(_)
+        ) {
             Some(request)
         } else {
             self.deferred = Some(request);

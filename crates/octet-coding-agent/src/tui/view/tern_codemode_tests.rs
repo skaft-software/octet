@@ -235,12 +235,19 @@ fn queued_input_native_key_hint_respects_remapped_and_disabled_bindings() {
 #[test]
 fn safe_boundary_controls_share_native_queue_chrome_without_input_authority() {
     let (mut shell, mut surface, _) = setup(8);
-    shell.set_pending_controls(vec!["model local/next · idle".into(), "thinking high · next response".into()]);
+    shell.set_pending_controls(vec![
+        "model local/next · idle".into(),
+        "thinking high · next response".into(),
+    ]);
     surface.flush(&shell.state).unwrap();
-    let preview = serde_json::to_string(find_node(&surface.sent.dock, "pending.preview").unwrap()).unwrap();
+    let preview =
+        serde_json::to_string(find_node(&surface.sent.dock, "pending.preview").unwrap()).unwrap();
     assert!(preview.contains("model local/next"));
     assert!(preview.contains("thinking high"));
-    assert!(find_node(&surface.sent.dock, "pending.key").is_none(), "controls are not recallable input");
+    assert!(
+        find_node(&surface.sent.dock, "pending.key").is_none(),
+        "controls are not recallable input"
+    );
     assert!(shell.debug_pending_controls().contains("model local/next"));
     shell.set_pending_controls(Vec::new());
     surface.flush(&shell.state).unwrap();

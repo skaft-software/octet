@@ -65,8 +65,10 @@ pub(crate) fn apply_idle_model_control(
 pub(crate) fn resolve_model(catalog: &ModelCatalog, provider: &str, id: &str) -> Option<Model> {
     catalog.models().find_map(|spec| {
         let model = catalog.resolve(&spec.id).ok()?;
-        (model.spec.api_name == id && pi_provider_id(&model) == provider
-            && model.endpoint.auth.is_configured()).then_some(model)
+        (model.spec.api_name == id
+            && pi_provider_id(&model) == provider
+            && model.endpoint.auth.is_configured())
+        .then_some(model)
     })
 }
 

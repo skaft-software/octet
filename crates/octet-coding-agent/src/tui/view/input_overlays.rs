@@ -587,11 +587,16 @@ pub(super) fn render_pending_steering(
     width: u16,
     max_rows: usize,
 ) -> Vec<String> {
-    if (state.steering_queue.is_empty() && state.follow_up_queue.is_empty() && state.pending_controls.is_empty()) || max_rows == 0 {
+    if (state.steering_queue.is_empty()
+        && state.follow_up_queue.is_empty()
+        && state.pending_controls.is_empty())
+        || max_rows == 0
+    {
         return Vec::new();
     }
     let max_rows = max_rows.min(crate::tui::layout::MAX_STEERING_PREVIEW_ROWS);
-    let count = state.steering_queue.len() + state.follow_up_queue.len() + state.pending_controls.len();
+    let count =
+        state.steering_queue.len() + state.follow_up_queue.len() + state.pending_controls.len();
     let label = if !state.pending_controls.is_empty() {
         "Controls"
     } else if state.follow_up_queue.is_empty() {
@@ -663,7 +668,10 @@ pub(super) fn render_pending_steering(
     let display = if !controls.is_empty() {
         controls.as_str()
     } else {
-        state.steering_queue.first().map(|entry| entry.display.as_str())
+        state
+            .steering_queue
+            .first()
+            .map(|entry| entry.display.as_str())
             .unwrap_or_else(|| state.follow_up_queue[0].composed.transcript_text.as_str())
     };
     let preview = steering_preview_text(state, display);

@@ -2459,10 +2459,13 @@ fn settle_active_thinking(
     inspection: &ActiveRunInspection,
     queue: &mut VecDeque<PendingIdleAction>,
 ) {
-    if !queue
-        .iter()
-        .any(|action| matches!(action, PendingIdleAction::ActiveThinkingSelection(_) | PendingIdleAction::ExtensionActiveThinking { .. }))
-    {
+    if !queue.iter().any(|action| {
+        matches!(
+            action,
+            PendingIdleAction::ActiveThinkingSelection(_)
+                | PendingIdleAction::ExtensionActiveThinking { .. }
+        )
+    }) {
         return;
     }
     let effective = inspection
@@ -4746,10 +4749,13 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
     // Owning &mut App proves no Run can have an in-flight request. Startup and
     // other idle hook pumps need the same consumer as an idle command; never
     // leave a synchronous setter waiting behind the hook which called it.
-    let model_control = app.executable_extensions.next_model_control_request().map(|request| {
-        let result = model_controls::apply_idle_request(app, &request);
-        (request, result)
-    });
+    let model_control = app
+        .executable_extensions
+        .next_model_control_request()
+        .map(|request| {
+            let result = model_controls::apply_idle_request(app, &request);
+            (request, result)
+        });
     app.executable_extensions.refresh_host_state(
         app.agent.session(),
         &app.model,
@@ -7806,7 +7812,9 @@ async fn apply_pending_actions(
             PendingIdleAction::ExtensionModelControl { owner, selection } => {
                 model_controls::apply_queued_control(&mut app, shell, &owner, &selection);
             }
-            PendingIdleAction::ExtensionActiveThinking { .. } => unreachable!("run settlement converts active controls"),
+            PendingIdleAction::ExtensionActiveThinking { .. } => {
+                unreachable!("run settlement converts active controls")
+            }
             PendingIdleAction::Login(provider) => match validate_provider(provider.as_deref()) {
                 Ok("codex") => login_codex(&mut app, shell, input).await?,
                 Ok("custom") => login_custom(shell)?,
