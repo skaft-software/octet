@@ -146,6 +146,34 @@
   economic decisions and refresh spend; cache-miss/refresh notices are opt-in via
   `show_cache_miss_notices = true` (default false). Replaces the experimental
   synthetic-suffix warm API. Live cache-hit or savings qualification is not claimed.
+- Real-binary end-to-end regression suite (`scripts/e2e/`): one command drives the
+  published binary through disposable PTY sessions with a VT screen model and a
+  loopback mock provider, prints PASS/FAIL per check, and covers resume, long-session
+  scroll, mouse selection/OSC 52 copy, direct and picker themes, busy slash and
+  extension queueing, Enter steering, Ctrl+S follow-up, streaming typing latency,
+  and Pi compat on/off with three real matrix packages.
+- Extension command argument completions (U12). Reviewed Pi commands that register
+  `getArgumentCompletions` now activate without the host refusal, and their
+  completions appear in the composer's slash UI with bounded, cancellable results
+  that never block typing.
+- Visible safe-boundary queue for model and thinking controls (U7). Changes
+  submitted while a run or extension hook is active are shown in the UI queue and
+  applied exactly once at the next request boundary; theme changes still apply
+  immediately, and nothing mutates an in-flight request.
+- Python extension setup activation (U4). After an explicit runtime setup, the
+  extension that failed cold start is started through the normal activation path,
+  so its tools, hooks and commands register in the same session without a restart.
+- Theme, selection and clipboard acceptance repairs (U14). `/theme <built-in>`
+  resolves every advertised name through the same resolver as startup and the
+  picker, and app-owned pointer hit testing now matches the rendered viewport, so
+  drag selection copies the painted row across scroll, wrapped markdown and chrome.
+- Pi ordered-hook cancellation and session replacement (U3, U2). Ordered callbacks
+  settle before the terminal response and slot release, so a second callback cannot
+  run concurrently with a cancelled one; `ctx.newSession`/`ctx.switchSession`/fork
+  commit parent linkage and writable setup against the replacement session.
+- Release packaging: the native linux packager no longer requires tracked private
+  workstation records (`docs/rc/…`) in the public documentation inventory, with a
+  regression that runs the producer against the real tracked listing.
 
 ## [0.8.2] - 2026-09-30
 
