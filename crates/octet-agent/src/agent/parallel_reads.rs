@@ -6,6 +6,10 @@ pub(super) struct DeferredParallelAfterToolCall {
     pub(super) name: String,
     pub(super) arguments: serde_json::Value,
     pub(super) progress_sink: ToolProgressSink,
+    /// Whether the tool reached execution. Calls denied at an admission
+    /// boundary are still observed by result transformations, but not by
+    /// execution observers.
+    pub(super) executed: bool,
 }
 
 pub(super) struct ParallelReadWaveExecution {
@@ -19,6 +23,7 @@ impl ParallelReadWaveExecution {
             name: name.to_owned(),
             arguments: arguments.clone(),
             progress_sink: self.execution.progress_sink.clone(),
+            executed: self.execution.started_unix_ms.is_some(),
         });
         self
     }
@@ -376,6 +381,7 @@ pub(super) async fn execute_admitted_parallel_read(
             name,
             arguments,
             progress_sink,
+            executed: true,
         }),
     }
 }
@@ -486,6 +492,7 @@ pub(super) async fn run_parallel_after_tool_hooks(
         name,
         arguments,
         progress_sink,
+        executed,
     } = after;
     let tool_ctx = ToolContext {
         workspace: &sandbox.workspace,
@@ -497,5 +504,5 @@ pub(super) async fn run_parallel_after_tool_hooks(
         progress: progress_sink,
         cancellation,
     };
-    settle_tool_result_hooks(hooks, &name, &arguments, result, &tool_ctx).await
+    settle_tool_result_hooks(hooks, &name, &arguments, result, &tool_ctx, executed).await
 }

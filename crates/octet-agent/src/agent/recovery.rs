@@ -1175,7 +1175,8 @@ pub(super) async fn execute_recovery_call(
                     }
                 }
             }
-            settle_tool_result_hooks(hooks, &call.name, &hook_arguments, result, &context).await
+            settle_tool_result_hooks(hooks, &call.name, &hook_arguments, result, &context, true)
+                .await
         }
     };
     Ok(result)
