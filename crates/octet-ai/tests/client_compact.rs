@@ -489,16 +489,20 @@ async fn compact_rejects_oversized_chunked_body_while_streaming() {
 
 #[tokio::test]
 async fn compact_response_header_timeout_is_classified_separately() {
+    // The endpoint timeout must cover the request/headers window without
+    // racing connection setup on a loaded host: the response is held far
+    // beyond the timeout, while the deadline still leaves room for the request
+    // to be accepted by the server.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/responses/compact"))
-        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(100)))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
         .expect(1)
         .mount(&server)
         .await;
 
     let mut model = model(&format!("{}/", server.uri()), Protocol::OpenAiResponses);
-    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(10);
+    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(250);
     let error = AiClient::new()
         .compact_responses(&model, compact_request(ResponsesInput::default(), None))
         .await
