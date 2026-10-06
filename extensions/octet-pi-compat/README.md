@@ -642,7 +642,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The complete adapter run is **836 tests: 809 passed, 27 optional skips, zero
+The complete adapter run is **839 tests: 812 passed, 27 optional skips, zero
 failures**. Editor fixtures require the compiled native test peer above (or
 `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing peers fail explicitly,
 never substitute a JS model. The immutable 193 upstream cases plus the separate
