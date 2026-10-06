@@ -270,11 +270,16 @@ Reading unavailable Pi fields or returning an unapplied transformation/veto fail
 explicitly. Command argument arrays join with spaces; the wire cannot reconstruct
 original shell quoting.
 
-A synchronous reverse request the host drops (it cancels the hook together with
-its child request) is terminal cancellation: the factory thread is woken with
-`request cancelled`, a reply that arrives after the wait settled is dropped, and
-the connection keeps serving later hooks. Only a local deadline stays an unknown
-outcome, which terminalizes the connection and is never replayed.
+A synchronous reverse request that the host drops (it cancels the hook together
+with the child request it issued) no longer takes the extension down. A dropped
+*read-only* request (`tools/snapshot`, `composition/context`) is terminal
+cancellation: the factory thread is woken with `request cancelled` instead of
+waiting on a reply that will never arrive. A durable or effectful request keeps
+waiting for its native outcome, because only that outcome decides whether the
+append/registration committed. Replies that arrive after a wait settled are
+dropped, and the connection keeps serving later hooks. Only a local deadline
+stays an unknown outcome, which terminalizes the connection and is never
+replayed.
 
 **pi-clm 1.0.0 is not qualified.** Unchanged pinned registration capture now
 succeeds with native per-model-turn mappings; no whole-run aliases are installed
