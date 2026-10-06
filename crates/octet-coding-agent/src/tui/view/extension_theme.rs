@@ -170,21 +170,28 @@ impl InteractiveShell {
         }
         Some(palette(&theme, selector))
     }
+    /// Catalog of selectable native palettes, in picker order.
+    ///
+    /// Records carry metadata only: an extension asks for the one palette it
+    /// needs with `theme_get`, so a listing can neither become a palette
+    /// channel nor exceed its metadata bound.
     pub(crate) fn extension_theme_list(&self) -> Vec<Value> {
         if self.extension_themes.borrow().is_none() {
             self.preload_extension_themes();
         }
-        let names = self
-            .extension_themes
-            .borrow()
+        let themes = self.extension_themes.borrow();
+        themes
             .as_ref()
             .unwrap()
             .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        names
-            .iter()
-            .filter_map(|name| self.extension_theme_get(Some(name)))
+            .map(|(name, theme)| {
+                serde_json::json!({
+                    "name": name,
+                    "path": theme
+                        .source_path()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                })
+            })
             .collect()
     }
     pub(crate) fn extension_theme_set(&mut self, name: &str) -> Result<Value, String> {

@@ -7,6 +7,7 @@
 //! policy-derived trust, startup diagnostics, host-state refresh, slash commands,
 //! context composition, semantic status collection, and reload.
 
+mod autocomplete;
 mod mutation_resources;
 pub(crate) mod remote_ui;
 pub(crate) mod resource_paths;
@@ -195,7 +196,6 @@ const INPUT_CANCELLATION_QUEUE_CAPACITY: usize = 64;
 const INPUT_CANCELLATION_CONCURRENCY: usize = 8;
 const EXTENSION_UI_EDITOR_RESPONSE_DEADLINE: Duration = Duration::from_millis(500);
 const EXTENSION_AUTOCOMPLETE_DEADLINE: Duration = Duration::from_millis(500);
-const MAX_EXTENSION_AUTOCOMPLETE_TASKS: usize = 1;
 const MAX_PROJECTED_EXTENSION_UI_LINES: usize = if MAX_EXTENSION_UI_ENTRIES > MAX_EXTENSION_UI_LINES
 {
     MAX_EXTENSION_UI_ENTRIES
@@ -326,7 +326,8 @@ pub struct ExecutableExtensions {
     transcript_renderers: transcript_renderers::TranscriptRenderers,
     // One session-owned overlay in the already admitted resident bridge.
     pi_mcp_binding: Arc<tokio::sync::Mutex<Option<mcp::PiMcpBinding>>>,
-    autocomplete_tasks: Vec<JoinHandle<()>>,
+    autocomplete_query: Option<autocomplete::AutocompleteQuery>,
+    autocomplete_sync: autocomplete::AutocompleteSync,
     pending_editor_requests: VecDeque<PendingEditorRequest>,
     pending_host_requests: VecDeque<PendingHostRequest>,
     pending_session_requests: VecDeque<PendingHostRequest>,
@@ -421,7 +422,8 @@ impl Default for ExecutableExtensions {
             renderer_tasks: Vec::new(),
             transcript_renderers: Default::default(),
             pi_mcp_binding: Arc::new(tokio::sync::Mutex::new(None)),
-            autocomplete_tasks: Vec::new(),
+            autocomplete_query: None,
+            autocomplete_sync: Default::default(),
             pending_editor_requests: VecDeque::new(),
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),

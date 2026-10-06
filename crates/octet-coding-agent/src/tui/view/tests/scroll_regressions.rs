@@ -212,10 +212,17 @@ fn semantic_scroll_navigation_round_trips_markdown_spacing() {
         for paint_navigation in [false, true] {
             let mut shell = InteractiveShell::test_shell();
             shell.set_size(WIDTH, HEIGHT);
-            let markdown = (0..40)
+            let mut markdown = (0..40)
                 .map(|index| format!("{HISTORY}-{index:03}"))
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            // A boxed table paints several rows for one semantic line, and a
+            // table taller than the viewport keeps such non-round-tripping rows
+            // under the anchor as the reader scrolls through it.
+            markdown.push_str("\n\n| head | value |\n| --- | --- |\n");
+            for index in 0..20 {
+                markdown.push_str(&format!("| {HISTORY}-table-{index:03} | {index} |\n"));
+            }
             shell
                 .state
                 .borrow_mut()
