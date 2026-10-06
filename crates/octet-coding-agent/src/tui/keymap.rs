@@ -643,6 +643,24 @@ pub fn encode(key: &KeyEvent) -> String {
     }
 }
 
+/// Classify the native composer's completed draft for both slot editors.
+/// Whitespace-only drafts are not admitted and leave the editor unchanged.
+pub(crate) fn composer_action(text: &str, active: bool, follow_up: bool) -> InputAction {
+    if text.trim().is_empty() {
+        return InputAction::Ignore;
+    }
+    let skill = text.starts_with("/skill:");
+    if text.starts_with('/') && !skill && !crate::tui::composer::looks_like_absolute_path(text) {
+        InputAction::Command(text.to_owned())
+    } else if !active {
+        InputAction::Submit(text.to_owned())
+    } else if follow_up || skill {
+        InputAction::Queue(text.to_owned())
+    } else {
+        InputAction::Steer(text.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1444,25 +1462,5 @@ mod tests {
             encode(&KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
             "\x1b[13;3u"
         );
-    }
-}
-
-/// Shared native composer classification for keyboard and fenced remote editors.
-///
-/// An empty draft is not an admission: the native composer never submits one,
-/// and a remote submission of empty text is refused without clearing the mount.
-pub(crate) fn composer_action(text: &str, active: bool, follow_up: bool) -> InputAction {
-    if text.trim().is_empty() {
-        return InputAction::Ignore;
-    }
-    let skill = text.starts_with("/skill:");
-    if text.starts_with('/') && !skill && !crate::tui::composer::looks_like_absolute_path(text) {
-        InputAction::Command(text.to_owned())
-    } else if !active {
-        InputAction::Submit(text.to_owned())
-    } else if follow_up || skill {
-        InputAction::Queue(text.to_owned())
-    } else {
-        InputAction::Steer(text.to_owned())
     }
 }
