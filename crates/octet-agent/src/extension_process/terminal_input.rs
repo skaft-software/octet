@@ -21,6 +21,13 @@ impl ExtensionProcess {
 
     /// Run the remote listener chain within the caller's remaining input budget.
     /// Empty output consumes input. Cancellation never replays a late reply.
+    ///
+    /// The owner travels in `params.resource_owner`, not as an owner-routed
+    /// request: routing attaches a session-history view to the request, so a
+    /// listener deciding one keystroke would drag a history transfer (and its
+    /// hydration) onto the typing path. Liveness stays enforced here before and
+    /// after the round trip, and the adapter revalidates the owner against its
+    /// own foreground state.
     pub async fn intercept_terminal_input(
         &self,
         data: &str,
@@ -39,11 +46,10 @@ impl ExtensionProcess {
             ));
         }
         let result = connection
-            .request_with_resource_owner(
+            .request(
                 "ui/terminal-input/intercept",
                 serde_json::json!({"data":data,"resource_owner":owner}),
                 timeout,
-                Some(owner.clone()),
             )
             .await?;
         let reply: Reply = serde_json::from_value(result)
