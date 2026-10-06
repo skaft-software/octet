@@ -15,7 +15,7 @@ export function palette(name = 'native-dark', color = '#102030', overrides = {})
 function harness() {
   const store = { id: 7, live: true, controller: new AbortController(), state: { owner, alive: true, host: { theme: palette() } } };
   const calls = [];
-  const runtime = { scope: new AsyncLocalStorage(), ui: { surfaces: new Map() }, require: feature => assert.equal(feature, 'remote_ui'),
+  const runtime = { scope: new AsyncLocalStorage(), ui: { surfaces: new Map() }, features: new Set(['remote_ui']), require: feature => assert.equal(feature, 'remote_ui'),
     assertOwner: s => assert.equal(s.state, store.state), assertSessionOwner: s => assert.ok(s.state.alive),
     transport: { requestSync(method, params, options) { calls.push({ method, params, options }); return runtime.receipt; } } };
   const ui = chromeAPI(runtime, store), current = contextTheme(runtime, store);
