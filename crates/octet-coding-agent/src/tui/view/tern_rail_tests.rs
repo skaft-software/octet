@@ -286,6 +286,7 @@ fn remote(
             columns: size.0,
             rows: size.1,
             mouse_capture: false,
+            native_editor: false,
         }],
     });
 }

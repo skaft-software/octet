@@ -5,7 +5,7 @@ export { Text } from '../node_modules/@earendil-works/pi-tui/dist/components/tex
 export { TruncatedText } from '../node_modules/@earendil-works/pi-tui/dist/components/truncated-text.js';
 export { Spacer } from '../node_modules/@earendil-works/pi-tui/dist/components/spacer.js';
 export { Input } from '../node_modules/@earendil-works/pi-tui/dist/components/input.js';
-export { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
+export { Editor } from '../lib/editor.mjs';
 export { SelectList } from '../node_modules/@earendil-works/pi-tui/dist/components/select-list.js';
 export { SettingsList } from '../node_modules/@earendil-works/pi-tui/dist/components/settings-list.js';
 export { Markdown } from '../node_modules/@earendil-works/pi-tui/dist/components/markdown.js';

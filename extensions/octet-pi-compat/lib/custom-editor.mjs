@@ -1,7 +1,7 @@
 // Pi 1.0.2 CustomEditor, imported component source only (no agent runtime).
 // Copyright (c) 2025 Mario Zechner. MIT, see ../LICENSE.pi.
 // Reviewed installed module sha256 000b0056f2bf645537537468bdd6f6ee0c82e4110f5417c1c70c2e8fefc04f29.
-import { Editor } from "../node_modules/@earendil-works/pi-tui/dist/components/editor.js";
+import { Editor } from "./editor.mjs";
 import { visibleWidth } from "../node_modules/@earendil-works/pi-tui/dist/utils.js";
 /**
  * Custom editor that handles app-level keybindings for coding-agent.

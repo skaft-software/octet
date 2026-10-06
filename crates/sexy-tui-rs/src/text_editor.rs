@@ -263,22 +263,22 @@ impl TextEditorProjection {
         let current = self.layout.lines.get(self.cursor.row)?;
         match action {
             TextEditAction::Up | TextEditAction::Down => {
-                let target_column = preferred_column.unwrap_or(self.cursor.column);
-                *preferred_column = Some(target_column);
                 let last_row = self.layout.lines.len().saturating_sub(1);
                 match action {
                     TextEditAction::Up if self.cursor.row == 0 => Some(0),
                     TextEditAction::Down if self.cursor.row == last_row => Some(text.len()),
-                    TextEditAction::Up => Some(offset_at_column(
+                    TextEditAction::Up => self.vertical_row_target(
                         text,
-                        &self.layout.lines[self.cursor.row - 1],
-                        target_column,
-                    )),
-                    TextEditAction::Down => Some(offset_at_column(
+                        self.cursor.row - 1,
+                        self.cursor.column,
+                        preferred_column,
+                    ),
+                    TextEditAction::Down => self.vertical_row_target(
                         text,
-                        &self.layout.lines[self.cursor.row + 1],
-                        target_column,
-                    )),
+                        self.cursor.row + 1,
+                        self.cursor.column,
+                        preferred_column,
+                    ),
                     _ => unreachable!("matched visual vertical action"),
                 }
             }
@@ -292,6 +292,43 @@ impl TextEditorProjection {
             }
             _ => None,
         }
+    }
+    /// Map a visual row using sticky-column affinity. Embeddings with atomic
+    /// source spans can supply a pre-snap column and skip continuation rows.
+    #[must_use]
+    pub fn vertical_row_target(
+        &self,
+        text: &str,
+        row: usize,
+        source_column: usize,
+        preferred: &mut Option<usize>,
+    ) -> Option<usize> {
+        let source = self.layout.lines.get(self.cursor.row)?;
+        let target = self.layout.lines.get(row)?;
+        let max_column = |line: &TextEditorVisualLine| {
+            let width = column_at(text, line, line.visible_end);
+            if line.end < text.len() && !text[line.end..].starts_with('\n') {
+                width.saturating_sub(1)
+            } else {
+                width
+            }
+        };
+        let source_max = max_column(source);
+        let target_max = max_column(target);
+        let column = if preferred.is_none() || source_column < source_max {
+            if target_max < source_column {
+                *preferred = Some(source_column);
+                target_max
+            } else {
+                *preferred = None;
+                source_column
+            }
+        } else if target_max < source_column || target_max < preferred.unwrap() {
+            target_max
+        } else {
+            preferred.take().unwrap()
+        };
+        Some(offset_at_column(text, target, column))
     }
 }
 
@@ -467,6 +504,12 @@ impl TextEditor {
         self.text.is_empty()
     }
 
+    /// Retained undo and redo snapshot counts, for embedding diagnostics.
+    #[must_use]
+    pub fn history_depths(&self) -> (usize, usize) {
+        (self.undo.len(), self.redo.len())
+    }
+
     /// Return whether the cursor satisfies this model's grapheme invariant.
     #[must_use]
     pub fn cursor_is_valid(&self) -> bool {
@@ -579,6 +622,27 @@ impl TextEditor {
     /// without touching history. Caret-only edits preserve undo and redo.
     /// Unlike [`Self::replace_range`], this is not a programmatic buffer reset.
     pub fn edit_range(&mut self, range: Range<usize>, replacement: &str, cursor: usize) -> bool {
+        self.apply_range_edit(range, replacement, cursor, true)
+    }
+
+    /// Continue an already-captured atomic edit (for example history browsing)
+    /// without adding intermediate preview states to the undo stack.
+    pub fn continue_range_edit(
+        &mut self,
+        range: Range<usize>,
+        replacement: &str,
+        cursor: usize,
+    ) -> bool {
+        self.apply_range_edit(range, replacement, cursor, false)
+    }
+
+    fn apply_range_edit(
+        &mut self,
+        range: Range<usize>,
+        replacement: &str,
+        cursor: usize,
+        capture: bool,
+    ) -> bool {
         if range.start > range.end
             || !is_grapheme_boundary(&self.text, range.start)
             || !is_grapheme_boundary(&self.text, range.end)
@@ -587,7 +651,9 @@ impl TextEditor {
         }
         let changed = &self.text[range.clone()] != replacement;
         if changed {
-            self.push_undo();
+            if capture {
+                self.push_undo();
+            }
             self.text.replace_range(range, replacement);
         }
         self.finish_after_edit(cursor, changed);
@@ -666,6 +732,38 @@ impl TextEditor {
     #[must_use]
     pub fn projection(&self, wrap_width: usize) -> TextEditorProjection {
         project_layout(&self.text, self.layout(wrap_width))
+    }
+
+    /// Project validated, sorted, disjoint atomic source spans. A span that
+    /// cannot fit starts on a fresh row, then wraps normally if oversized.
+    /// Invalid or newline-spanning ranges are rejected without changing state.
+    #[must_use]
+    pub fn projection_with_atoms(
+        &self,
+        wrap_width: usize,
+        atoms: &[Range<usize>],
+    ) -> Option<TextEditorProjection> {
+        if atoms.is_empty() {
+            return Some(self.projection(wrap_width));
+        }
+        let mut end = 0;
+        for atom in atoms {
+            if atom.start < end
+                || atom.start >= atom.end
+                || !is_grapheme_boundary(&self.text, atom.start)
+                || !is_grapheme_boundary(&self.text, atom.end)
+                || self.text[atom.clone()].contains('\n')
+            {
+                return None;
+            }
+            end = atom.end;
+        }
+        let width = normalize_wrap_width(wrap_width);
+        let lines = Arc::from(visual_lines_with_atoms(&self.text, width, atoms));
+        Some(project_layout(
+            &self.text,
+            layout_from_lines(&self.text, self.cursor, width, lines),
+        ))
     }
 
     /// Layout arbitrary safe display text with the same editor rules.
@@ -1150,6 +1248,14 @@ fn is_whitespace_grapheme(grapheme: &str) -> bool {
 }
 
 fn visual_lines(text: &str, wrap_width: usize) -> Vec<TextEditorVisualLine> {
+    visual_lines_with_atoms(text, wrap_width, &[])
+}
+
+fn visual_lines_with_atoms(
+    text: &str,
+    wrap_width: usize,
+    atoms: &[Range<usize>],
+) -> Vec<TextEditorVisualLine> {
     let mut lines = Vec::new();
     let mut logical_start = 0;
     let policy = WidthPolicy::default();
@@ -1186,6 +1292,15 @@ fn visual_lines(text: &str, wrap_width: usize) -> Vec<TextEditorVisualLine> {
 
                 for (relative, grapheme) in text[start..logical_end].grapheme_indices(true) {
                     let offset = start + relative;
+                    let atom = atoms.iter().find(|atom| atom.contains(&offset));
+                    let atom_width = atom.map_or(0, |atom| policy.line_width(&text[atom.clone()]));
+                    if consumed_any
+                        && atom.is_some_and(|atom| atom.start == offset)
+                        && columns.saturating_add(atom_width) > wrap_width
+                    {
+                        hard_end = offset;
+                        break;
+                    }
                     let grapheme_width = policy.grapheme_width(grapheme, columns);
                     if consumed_any && columns.saturating_add(grapheme_width) > wrap_width {
                         hard_end = offset;
@@ -1194,7 +1309,9 @@ fn visual_lines(text: &str, wrap_width: usize) -> Vec<TextEditorVisualLine> {
                     }
                     columns = columns.saturating_add(grapheme_width);
                     consumed_any = true;
-                    if is_whitespace_grapheme(grapheme) {
+                    if is_whitespace_grapheme(grapheme)
+                        && !(atom.is_some() && atom_width <= wrap_width)
+                    {
                         if saw_non_whitespace {
                             let separator_end = offset + grapheme.len();
                             match word_break.as_mut() {

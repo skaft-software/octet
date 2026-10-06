@@ -572,10 +572,28 @@ authorizing unrelated panel writes. Closing/crashing/reloading the component
 reveals the last acknowledged native recovery draft without replaying raw keys.
 
 pi-tui remains an extension-side library for Text, Box, Markdown, SelectList,
-width helpers and other components. The next editor phase replaces its host-work
-Editor implementation with a public-shape facade backed by native sexy-tui-rs
-state; that facade is distinct from retaining pi-tui's component-library role.
-See [the wire contract](../extensions/remote-ui.md) for ownership and bounds.
+width helpers and other components. Its public `Editor` export is instead the
+adapter's synchronous native facade, shared with `CustomEditor`; it inherits no
+Pi editing model. Each admitted surface owns a bounded Rust `EditorService`
+using sexy-tui-rs `TextEditor`. Rust owns text, caret, undo/redo, history, paste
+recovery and autocomplete query/menu selection; JS retains styles, component
+hooks and provider callback handles. Rendering still consumes cached lines,
+never synchronous JS calls from the native renderer.
+
+The mounted facade binds its opaque primary editor handle. Recovery checkpoints
+read that native model's actual caret, rather than moving the mirror to the end
+of every draft. Registry argument queries, display and acceptance additionally
+fence the mount, editor handle and native revision. The native popup owns Up/Down
+and Tab before component hooks/terminal consumers; its accepted edit reaches the
+same native model and preserves text after the caret. Component-local command
+menus are suppressed, while symbol/attachment providers retain their library
+role. A clear, caret change or retirement invalidates outstanding results.
+
+The immutable Pi 1.0.2 Editor/history corpus runs the actual facade against the
+compiled production service, with separate real App/adapter ownership and
+registry acceptance. See [the corpus fixture](../../extensions/octet-pi-compat/test/pi-v1.0.2/README.md)
+and [the wire contract](../extensions/remote-ui.md) for reproduction, ownership
+and bounds; this does not qualify every Pi API or arbitrary editor override.
 
 ## Active-run controls
 

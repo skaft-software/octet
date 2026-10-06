@@ -16,6 +16,8 @@ enum Class {
     Space,
     /// A word-like grapheme: a Unicode alphanumeric or `_`.
     Word,
+    /// An ideographic run, kept separate from adjacent alphabetic words.
+    Ideograph,
     /// Any other grapheme (punctuation, symbols, emoji).
     Punct,
 }
@@ -23,6 +25,11 @@ enum Class {
 fn classify(grapheme: &str) -> Class {
     if grapheme.chars().all(char::is_whitespace) {
         Class::Space
+    } else if grapheme
+        .chars()
+        .any(|c| matches!(c as u32,0x3400..=0x4dbf | 0x4e00..=0x9fff | 0x20000..=0x323af))
+    {
+        Class::Ideograph
     } else if grapheme.chars().any(|c| c.is_alphanumeric() || c == '_') {
         Class::Word
     } else {

@@ -6005,9 +6005,24 @@ impl InteractiveShell {
     /// Attachments are deliberately cleared because extension text cannot refer
     /// to opaque attachment ledger entries.
     pub fn extension_set_editor(&mut self, text: String) -> ShellEditorSnapshot {
+        self.extension_set_editor_at(text, None)
+    }
+
+    pub(crate) fn extension_set_editor_at(
+        &mut self,
+        text: String,
+        cursor: Option<usize>,
+    ) -> ShellEditorSnapshot {
         let mut state = self.state.borrow_mut();
-        if normal_editor_focused(&state) {
+        if normal_editor_focused(&state)
+            && !(cursor.is_some()
+                && state.editor.text() == text
+                && cursor == Some(state.editor.cursor()))
+        {
             state.editor.set_text(text);
+            if let Some(cursor) = cursor {
+                state.editor.set_cursor(cursor);
+            }
             state.ledger.clear();
             state.slash_selection = 0;
             state.slash_scroll = 0;
@@ -6074,7 +6089,7 @@ impl InteractiveShell {
                     .extension_ui
                     .remote
                     .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
-                    .is_none()
+                    .is_none_or(|mount| mount.native_editor)
                 && editor.revision() == snapshot.revision
                 && editor.text() == snapshot.text.as_str()
                 && editor.cursor() == snapshot.cursor
@@ -6162,7 +6177,7 @@ impl InteractiveShell {
                     .extension_ui
                     .remote
                     .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
-                    .is_none()
+                    .is_none_or(|mount| mount.native_editor)
                 && editor.revision() == overlay.revision
                 && editor.text() == overlay.text.as_str()
                 && editor.cursor() == overlay.cursor
@@ -6201,7 +6216,10 @@ impl InteractiveShell {
             return false;
         };
         state.editor = candidate;
+        let text = state.editor.text().to_owned();
         invalidate_editor_autocomplete(&mut state);
+        drop(state);
+        self.set_composer_slot_text(text);
         true
     }
 

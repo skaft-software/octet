@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { nativeEditorHost } from './native-editor-host.mjs';
 export const root = fileURLToPath(new URL('../', import.meta.url));
 export const owner = { session_id: 'host-issued-owner', extension_instance_id: 'host-issued-instance', process_generation: 2 };
 import { TUI_KEYBINDINGS } from '../node_modules/@earendil-works/pi-tui/dist/keybindings.js';
@@ -33,10 +34,23 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
       receive(line);
     }
   });
+  let nativePeer;
+  const nativeMounts = new Map();
+  const nativeCall = params => {
+    if (!nativePeer) {
+      nativePeer = nativeEditorHost(t);
+      for (const mount of nativeMounts.values()) nativePeer.call('ui/open', mount);
+    }
+    return nativePeer.call('ui/chrome', params);
+  };
   function receive(line) {
     let frame;
     try { frame = JSON.parse(line); } catch { assert.fail(`protocol stdout corrupted: ${line.slice(0, 200)}`); }
     seen.push(frame); if (seen.length > 128) seen.shift();
+    if (frame.method === 'ui/open') {
+      nativeMounts.set(frame.params.surface_id, frame.params);
+      nativePeer?.call('ui/open', frame.params);
+    }
     if (options.auto !== false && frame.id !== undefined && frame.method && !options.hold?.includes(frame.method)) {
       let result;
       if (frame.method === 'ui/open') {
@@ -45,6 +59,14 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
           result.editor_mount_id = `host-editor-${frame.params.surface_id}`;
           editors.set(frame.params.surface_id, { mount_id: result.editor_mount_id, input_revision: 0 });
         }
+      }
+      else if (frame.method === 'ui/chrome' && frame.params.chrome.kind === 'editor') {
+        try { result = nativeCall(frame.params); }
+        catch (error) { send({jsonrpc: '2.0', id: frame.id, error: {code: error.code ?? -32603, message: error.message}}); }
+      }
+      else if (frame.method === 'ui/close') {
+        nativeMounts.delete(frame.params.surface_id);
+        nativePeer?.call('ui/close', frame.params); result = {};
       }
       else if (frame.method === 'ui/autocomplete/register') result = { accepted: options.completionAccepted ?? true };
       else if (frame.method === 'composer/get') result = { text: options.composer ?? 'existing draft' };

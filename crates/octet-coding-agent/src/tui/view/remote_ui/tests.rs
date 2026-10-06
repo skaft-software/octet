@@ -21,6 +21,7 @@ fn projection(size: (u16, u16), entries: &[(Placement, &str)]) -> Projection {
             columns: size.0,
             rows: size.1,
             mouse_capture: false,
+            native_editor: false,
         });
     }
     Projection {
