@@ -116,7 +116,6 @@ transport.response = message => {
 };
 parentPort.on('message', packet => {
   try {
-    if (packet.kind === 'frame-limit') { transport.setFrameLimit(packet.bytes); return; }
     if (packet.kind === 'received') {
       const size = forwarded.get(packet.token);
       if (size === undefined) throw rpcError(-32600, 'unknown worker input acknowledgement');

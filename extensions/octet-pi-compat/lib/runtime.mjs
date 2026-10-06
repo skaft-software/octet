@@ -1,6 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { SessionTransport, SESSION_FEATURES } from './session-transport.mjs';
-import { withContextLimits } from './context-limits.mjs';
 import { createJiti } from 'jiti';
 import { readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -32,8 +30,8 @@ import { ExtensionIssues } from './issues.mjs';
 import { installHostKeybindings } from './keybindings.mjs';
 import { bindHostTheme, nativeTheme } from './theme.mjs';
 
-const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active']);
-const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
+const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select']);
+const supportedFeatures = new Set([...CHILD_FEATURES, 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -157,14 +155,12 @@ export class Runtime {
       ...(grant ? { session_leaf: { grant_id: grant.grant_id, activation_epoch: grant.activation_epoch, operation_id: grant.operation_id } } : {}),
     }, { parent: store.id, signal: store.controller.signal, onCancel: () => store.controller.abort(cancelled()) });
     let committed;
-    try { committed = appendReply(result, grant, store.state.owner, Boolean(this.sessionTransport));
-      if (this.sessionTransport && grant) this.sessionTransport.append(store, result, grant, committed.successor); }
+    try { committed = appendReply(result, grant, store.state.owner); }
     catch (error) {
       const ambiguous = rpcError(-32002, `session append outcome unknown: invalid commit reply (${error.message})`);
       this.transport.fail(ambiguous); throw ambiguous;
     }
     if (store.leaf) store.leaf.grant = committed.successor;
-    if (this.sessionTransport && grant) return undefined;
     const host = store.state.host;
     const entry = { id: committed.entryId, type: 'custom', customType: type, data: clean, ...(grant ? { parentId: grant.expected_head } : {}) };
     // A durable ACK is the only source of local read-after-write success.
@@ -323,13 +319,6 @@ export class Runtime {
       this.features.delete('builtin_tool_overrides_v1');
     }
     this.maxConcurrent = Math.min(8, params.protocol.limits?.max_concurrent_requests || 1);
-    const routed = SESSION_FEATURES.filter(f => this.features.has(f));
-    if (routed.length && (routed.length !== 2 || this.maxConcurrent < 2 || !this.features.has('session_entries'))) invalid('paired session transport requirements');
-    if (routed.length) {
-      const frame = params.protocol.limits?.max_message_bytes;
-      this.sessionTransport = new SessionTransport(this, params.protocol.session_snapshot_transport_v1, frame);
-      this.transport.setFrameLimit(frame);
-    } else if (params.protocol.session_snapshot_transport_v1 !== undefined) invalid('session transport without paired features');
     this.namespace = params.extension?.name;
     this.scratchDirectory = params.artifact_directory;
     this.initialHost = params.host || {}; this.workspace = params.workspace; this.initializingId = store.id;
@@ -375,8 +364,7 @@ export class Runtime {
       // Shortcuts are static on the host wire. Keep the reviewed declarations;
       // invoking one from a skipped factory refuses instead of running stale JS.
       api_version: '0.4', tools: metadata.tools, commands: metadata.commands, shortcuts: skipped ? (declared.shortcuts || []) : metadata.shortcuts,
-      protocol: { version: '0.4', features: [...this.features], limits: { max_concurrent_requests: this.maxConcurrent, ...(this.sessionTransport ? { max_message_bytes: this.sessionTransport.frame } : {}) },
-        ...(this.sessionTransport ? { session_snapshot_transport_v1: this.sessionTransport.profile } : {}),
+      protocol: { version: '0.4', features: [...this.features], limits: { max_concurrent_requests: this.maxConcurrent },
         ...(this.features.has('lifecycle_events') ? { lifecycle_events: ['turn/started', 'turn/settled', 'tool/started', 'tool/settled'] } : {}) },
     };
   }
@@ -425,7 +413,7 @@ export class Runtime {
     if (!lifecycle && this.foreground && (owner.extension_instance_id !== this.foreground.owner.extension_instance_id || owner.process_generation !== this.foreground.owner.process_generation)) throw rpcError(-32002, 'not_foreground_owner process binding');
     // Commands/shortcuts are foreground actions, not a way to switch a live
     // foreground owner. Their first binding supports hosts without start hooks.
-    foreground ||= !this.sessionTransport && !this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method);
+    foreground ||= !this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method);
     if (!foreground && this.foreground && state !== this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method)) throw rpcError(-32002, 'not_foreground_owner command belongs to an inactive session');
     if (!state || !state.alive) {
       state = { key, owner: Object.freeze({ ...owner }), alive: true, workspace: context.workspace || this.workspace, host: { ...this.initialHost, ...(context.host || {}) }, statuses: new Map(), branchListeners: new Set(), uiQueues: new Map(), parent: store.id };
@@ -435,7 +423,7 @@ export class Runtime {
       state.host = { ...state.host, ...(context.host || {}) }; state.parent = store.id;
     }
     store.state = state;
-    if (grant) store.leaf = store.activation?.leaf ?? { grant };
+    if (grant) store.leaf = { grant };
     if (foreground) {
       if (this.foreground && this.foreground !== state) this.retire(this.foreground).catch(e => this.backgroundError(e));
       this.foreground = state;
@@ -482,7 +470,6 @@ export class Runtime {
   async retire(state) {
     cancelProviderStream(this, undefined, state);
     this.transcript.retire(state);
-    this.sessionTransport?.retire(state);
     state.alive = false; retireMcpSession(state); retireAutocomplete(state); retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
     // Session-scoped hooks are cancelled on their own owner retirement, never
     // another hook's private binding. Replacement commands retain their parent.
@@ -490,12 +477,6 @@ export class Runtime {
     await this.ui.ownerEnded(state);
   }
   updated(params) {
-    if (this.sessionTransport && params.host?.session_view_revision !== undefined) {
-      const revision = params.host.session_view_revision;
-      if (!Number.isSafeInteger(revision) || revision < 1) invalid('session view revision');
-      this.sessionTransport.invalidate(params.resource_owner, revision);
-      return;
-    }
     this.require('remote_ui'); const key = ownerKey(params.resource_owner), state = this.states.get(key);
     if (!state || !state.alive || state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context/updated');
     const next = plainJSON(params.host, 'host snapshot', 524288);
@@ -593,11 +574,6 @@ export class Runtime {
     const p = message.params;
     if (message.method === 'initialize') return this.initialize(p, store);
     if (!this.initialized) invalid('not initialized');
-    if (message.method === 'session/snapshot/prepare') {
-      this.require('session_snapshot_transport_v1');
-      return this.sessionTransport.prepare(p, store);
-    }
-    await this.sessionTransport?.hydrate(p, store);
     if (message.method === 'provider/stream') return prepareProviderStream(this, p, store);
     if (message.method === 'ui/autocomplete/complete') return commandCompletions(this, p, store);
     if (message.method === 'hook/run' && p.hook === 'resources_discover') return discoverResources(this, p, store);
@@ -763,8 +739,7 @@ export class Runtime {
     this.active.set(message.id, store);
     let settlementError = rpcError(-32002, 'originating request did not complete');
     try {
-      let result = await withContextLimits(this.sessionTransport?.profile, () => this.scope.run(store, () => this.dispatch(message, store)));
-      if (this.sessionTransport && store.hook === 'provider_context') result = await this.sessionTransport.projection(result, store);
+      const result = await this.scope.run(store, () => this.dispatch(message, store));
       store.controller.signal.throwIfAborted();
       if (!this.stopping) {
         await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
@@ -780,7 +755,6 @@ export class Runtime {
         ...(!store.controller.signal.aborted && fallbackData(error) ? { data: fallbackData(error) } : {}),
       } });
     } finally {
-      this.sessionTransport?.settle(store, settlementError);
       store.live = false; this.active.delete(message.id); this.transport.settleParent(message.id);
       settleCompactions(this, store, settlementError);
     }

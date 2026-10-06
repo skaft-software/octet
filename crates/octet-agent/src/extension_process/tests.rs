@@ -785,11 +785,9 @@ system_prompt = {system_prompt}
             tool_renderers: Vec::new(),
             shortcuts: Vec::new(),
             protocol: Some(ExtensionProtocolResponse {
-                session_snapshot_transport_v1: None,
                 version: EXTENSION_API_VERSION_0_2.to_owned(),
                 features,
                 limits: ExtensionProtocolLimits {
-                    max_message_bytes: None,
                     resource_refs_v1: None,
                     max_concurrent_requests: 4,
                 },
@@ -811,7 +809,6 @@ system_prompt = {system_prompt}
         session_compaction: false,
         approvals: false,
         secrets: false,
-        max_message_bytes: 0,
     };
 
     // An undeclared extension that echoes the feature fails negotiation, so
@@ -3960,14 +3957,12 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
         tool_renderers: Vec::new(),
         shortcuts: manifest.contributes.shortcuts.clone(),
         protocol: Some(ExtensionProtocolResponse {
-            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_4.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
                 .map(|feature| (*feature).to_owned())
                 .collect(),
             limits: ExtensionProtocolLimits {
-                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 4,
             },
@@ -4035,14 +4030,12 @@ shortcuts = [{ key = "ctrl+shift+p", name = "open_panel", description = "Open th
         tool_renderers: Vec::new(),
         shortcuts,
         protocol: Some(ExtensionProtocolResponse {
-            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
                 .map(|feature| (*feature).to_owned())
                 .collect(),
             limits: ExtensionProtocolLimits {
-                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
@@ -5523,7 +5516,6 @@ command = "runtime-command-validation"
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
@@ -5532,7 +5524,6 @@ command = "runtime-command-validation"
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
-                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
@@ -5587,7 +5578,6 @@ command = "agent-service"
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
@@ -5596,7 +5586,6 @@ command = "agent-service"
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
-                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
@@ -5661,7 +5650,6 @@ command = "octet-subagents"
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
@@ -5670,7 +5658,6 @@ command = "octet-subagents"
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
-                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
@@ -5763,7 +5750,6 @@ secrets = ["browser.api_token"]
         tool_renderers: Vec::new(),
         shortcuts: Vec::new(),
         protocol: Some(ExtensionProtocolResponse {
-            session_snapshot_transport_v1: None,
             version: EXTENSION_API_VERSION_0_2.into(),
             features: API_0_2_REQUIRED_FEATURES
                 .iter()
@@ -5772,7 +5758,6 @@ secrets = ["browser.api_token"]
                 .map(str::to_owned)
                 .collect(),
             limits: ExtensionProtocolLimits {
-                max_message_bytes: None,
                 resource_refs_v1: None,
                 max_concurrent_requests: 1,
             },
