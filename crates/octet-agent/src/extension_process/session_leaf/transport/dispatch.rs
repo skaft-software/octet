@@ -58,6 +58,12 @@ pub(in crate::extension_process) fn attach(
     } else {
         "session_snapshot"
     };
+    // History is attached only where a dispatched callback actually reads it:
+    // hook payloads (and the invocation snapshots they already carry). Every
+    // other request (transcript render, UI, tools) must never pay a document
+    // read, and its retained facts stay available through the peer's own
+    // prepared view exactly like the legacy mirror.
+    let carries_payload = params.get("payload").is_some();
     let view = if let Some(descriptor) = params.get(field) {
         let descriptor: Descriptor =
             serde_json::from_value(descriptor.clone()).map_err(|_| unavailable())?;
@@ -70,12 +76,14 @@ pub(in crate::extension_process) fn attach(
         }
         transfer.parent = id;
         Some(Arc::clone(&transfer.view))
-    } else {
+    } else if carries_payload {
         match store.current.get(owner) {
             Some(Some(view)) => Some(Arc::clone(view)),
             Some(None) => return Err(unavailable()),
             None => None,
         }
+    } else {
+        None
     };
     if let Some(view) = view {
         if params.get(field).is_none() {
