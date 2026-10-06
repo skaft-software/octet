@@ -463,18 +463,8 @@ pub(super) async fn extension_options_menu(
 
         let preselected = remembered
             .get(&path)
-            .and_then(|id| {
-                items
-                    .iter()
-                    .position(|item| &item.id == id)
-                    .map(|index| index + host_prefix)
-            })
-            .or_else(|| {
-                items
-                    .iter()
-                    .position(|item| item.recommended)
-                    .map(|index| index + host_prefix)
-            })
+            .and_then(|id| items.iter().position(|item| &item.id == id).map(|index| index + host_prefix))
+            .or_else(|| items.iter().position(|item| item.recommended).map(|index| index + host_prefix))
             .unwrap_or(0);
         let surface = match menu_purpose(menu, detail.as_deref()) {
             Some(purpose) => OrdinarySurfaceMetadata::with_purpose(title.clone(), purpose),
@@ -491,9 +481,7 @@ pub(super) async fn extension_options_menu(
         let item = match entries[index] {
             MenuEntry::SetupRuntime => {
                 setup_python_runtime(app, shell, input, extension).await?;
-                if shell.close_requested() {
-                    return Ok(ExtensionMenuOutcome::Back);
-                }
+                if shell.close_requested() { return Ok(ExtensionMenuOutcome::Back); }
                 continue;
             }
             MenuEntry::Disable => return Ok(ExtensionMenuOutcome::Disable),
