@@ -303,7 +303,7 @@ fn context_projection_accepts_tool_omissions_but_refuses_host_owned_request_fiel
     }
 }
 
-struct Capture(Arc<StdMutex<Vec<Request>>>);
+pub(super) struct Capture(pub(super) Arc<StdMutex<Vec<Request>>>);
 #[async_trait::async_trait]
 impl HostStreamTransport for Capture {
     async fn stream(
