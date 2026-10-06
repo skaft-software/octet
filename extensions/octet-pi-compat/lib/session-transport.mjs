@@ -33,7 +33,7 @@ export class SessionTransport {
   constructor(runtime, profile, frame) {
     exact(profile, profileKeys, 'session transport profile');
     if (profile.profile !== 'json-chunks.v1' || profileKeys.slice(1).some(key => !integer(profile[key], 1))
-        || profile.chunk_bytes > 65536 || profile.projection_bytes !== 67108864 || !integer(frame, 1)) invalid('session transport profile');
+        || profile.chunk_bytes > 65536 || !integer(frame, 1)) invalid('session transport profile');
     this.runtime = runtime; this.profile = Object.freeze({ ...profile }); this.frame = frame;
     this.bytes = 0; this.records = 0; this.views = 0; this.transfers = 0; this.projectionBytes = 0; this.projections = 0;
     this.current = new Map(); this.activations = new Map();

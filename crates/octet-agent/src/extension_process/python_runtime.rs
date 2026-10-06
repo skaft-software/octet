@@ -34,9 +34,9 @@ const SOURCE_ARCHIVE: &str = ".octet-python-source.tar.gz";
 // Only manifests derived from digest-verified source bytes enter this cache.
 // Actual installed files are still checked on every launch; no mutable receipt
 // or filesystem pathname can authorize the source manifest.
-static SOURCE_MANIFESTS: std::sync::LazyLock<
-    std::sync::Mutex<BTreeMap<String, Arc<BTreeMap<String, String>>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+type SourceManifests = BTreeMap<String, Arc<BTreeMap<String, String>>>;
+static SOURCE_MANIFESTS: std::sync::LazyLock<std::sync::Mutex<SourceManifests>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
 
 /// Host-owned private runtime location. Constructing it performs no I/O.
 /// The coding host must derive this from its authoritative user home (including

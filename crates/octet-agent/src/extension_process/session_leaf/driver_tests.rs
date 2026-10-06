@@ -346,19 +346,20 @@ async fn two_native_owner_drivers_share_process_without_foreground_promotion() {
         .current_context_for_resource_owner(root_owner.clone())
         .resource_owner
         .unwrap();
-    let store = lock_std_mutex(&connection.session_leaf.transport);
-    // The current view is the immutable publication (taken before the hook
-    // append); the append advanced the activation view and its durable session.
-    assert_eq!(
-        store.current.len(),
-        1,
-        "only the published owner has a current view"
-    );
-    let view = store.current.get(&owner).and_then(Option::as_ref).unwrap();
-    assert_eq!(view.descriptor.owner, owner);
-    assert!(view.descriptor.head.is_none());
-    assert_eq!(view.descriptor.entry_count, 0);
-    drop(store);
+    {
+        let store = lock_std_mutex(&connection.session_leaf.transport);
+        // The current view is the immutable publication (taken before the hook
+        // append); the append advanced the activation view and its session.
+        assert_eq!(
+            store.current.len(),
+            1,
+            "only the published owner has a current view"
+        );
+        let view = store.current.get(&owner).and_then(Option::as_ref).unwrap();
+        assert_eq!(view.descriptor.owner, owner);
+        assert!(view.descriptor.head.is_none());
+        assert_eq!(view.descriptor.entry_count, 0);
+    }
     assert_eq!(lock_std_mutex(&connection.session_leaf.bound).len(), 2);
     drop(root_driver);
     drop(child_driver);
