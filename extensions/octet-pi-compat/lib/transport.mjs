@@ -6,11 +6,9 @@ import { notificationIntent } from './desktop-notifications.mjs';
 
 export const MAX_FRAME = 1048576;
 // Synchronous reverse-request completion statuses shared with the transport
-// worker: a real reply, an unknown outcome (fatal, never replayed) and a
-// host-cancelled request (terminal cancellation, no commit ambiguity).
+// worker: a real reply, and an unknown outcome (fatal, never replayed).
 export const SYNC_REPLY = 2;
 export const SYNC_UNKNOWN = 3;
-export const SYNC_CANCELLED = 4;
 const MAX_QUEUE = 128, MAX_QUEUE_BYTES = 4194304;
 const nativeTimeout = globalThis.setTimeout;
 const nativeClearTimeout = globalThis.clearTimeout;
@@ -285,11 +283,6 @@ export class Transport {
     const reply = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(this.syncBuffer, 16, length)));
     Atomics.store(this.syncHeader, 0, 0);
     if (status === SYNC_UNKNOWN) { const error = rpcError(reply.code, `session append outcome unknown: ${reply.message}`); this.fail(error); throw error; }
-    // A host-cancelled synchronous request was dropped as a unit: its outcome
-    // is cancelled, not unknown, so the healthy connection and other requests
-    // survive it. A local timeout instead keeps waiting for the authoritative
-    // outcome and still terminalizes as unknown above when that never arrives.
-    if (status === SYNC_CANCELLED) throw rpcError(reply.code, reply.message);
     this.validate(reply);
     if (status !== SYNC_REPLY || reply.id !== id) { const error = rpcError(-32600, 'invalid synchronous response identity'); this.fail(error); throw error; }
     if (Atomics.load(this.syncHeader, 2)) onCancel?.();

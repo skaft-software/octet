@@ -10,6 +10,7 @@ import { Spacer } from '../node_modules/@earendil-works/pi-tui/dist/components/s
 import { Loader } from '../node_modules/@earendil-works/pi-tui/dist/components/loader.js';
 import { CancellableLoader } from '../node_modules/@earendil-works/pi-tui/dist/components/cancellable-loader.js';
 import { getKeybindings } from '../node_modules/@earendil-works/pi-tui/dist/keybindings.js';
+import { keyHint } from './keybinding-hints.mjs';
 
 // Public Pi authoring helpers, adapted from Pi 1.0.2's interactive components.
 // Copyright (c) 2025 Mario Zechner; MIT, see ../LICENSE.pi.
@@ -17,11 +18,6 @@ export class DynamicBorder {
   constructor(color = text => theme.fg('border', text)) { this.color = color; }
   invalidate() {}
   render(width) { return [this.color('─'.repeat(Math.max(1, width)))]; }
-}
-export function keyHint(binding, description) {
-  const keys = getKeybindings().getKeys(binding).join('/').split('/').map(key => key.split('+')
-    .map(part => process.platform === 'darwin' && part.toLowerCase() === 'alt' ? 'option' : part).join('+')).join('/');
-  return theme.fg('dim', keys) + theme.fg('muted', ` ${description}`);
 }
 export function getSettingsListTheme() {
   return {

@@ -195,7 +195,13 @@ export function installedPiAliases(env = process.env) {
 // Installs the overlay registry. Shim namespaces are preloaded through the
 // runtime's jiti so they are the same module instances path A would use; real
 // Pi loads lazily, natively (outside jiti aliases), and only when imported.
+// The managed Pi package directory the overlay actually serves, or null on the
+// emulated path. Used by the Pi config helpers so a factory sees real Pi's own
+// package root whenever real Pi provides the module.
+let activePackageDir = null;
+export const installedPiPackageDir = () => activePackageDir;
 export async function activateInstalledPi(jiti, install) {
+  activePackageDir = install.packages['coding-agent'].dir;
   const shims = {};
   for (const key of Object.keys(PACKAGES)) shims[key] = await jiti.import(shimPath(key));
   const nativeRequire = createRequire(import.meta.url), cache = new Map();

@@ -2,7 +2,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { read, write } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import { Socket } from 'node:net';
-import { Transport, MAX_FRAME, SYNC_REPLY, SYNC_UNKNOWN, SYNC_CANCELLED } from './transport.mjs';
+import { Transport, MAX_FRAME, SYNC_REPLY, SYNC_UNKNOWN } from './transport.mjs';
 import { rpcError } from './errors.mjs';
 
 const header = new Int32Array(workerData.syncBuffer, 0, 4);
@@ -69,20 +69,10 @@ function complete(value, status) {
   sync = undefined;
   Atomics.store(header, 0, status); Atomics.notify(header, 0);
 }
-// The host dropped a synchronous reverse request as a unit, so its outcome is
-// terminal cancellation: request cancellation is still announced, but the
-// factory thread is woken as cancelled instead of waiting for a reply that will
-// never arrive (a late reply is tolerated through `issued`).
+// Cancellation of a synchronous request is announced, but the wait continues:
+// only the native outcome decides whether the append committed. The watchdog
+// below terminalizes an outcome that never arrives as unknown, never replayed.
 function cancelSync() {
-  if (!sync || sync.cancelled) return;
-  sync.cancelled = true; Atomics.store(header, 2, 1);
-  const id = sync.id;
-  transport.notify('$/cancelRequest', { id, reason: 'cancelled' }).catch(error => transport.fail(error));
-  complete({ code: -32800, message: 'request cancelled: the host dropped this synchronous request' }, SYNC_CANCELLED);
-}
-// A local deadline instead keeps waiting for the authoritative outcome; the
-// watchdog below terminalizes as unknown, and the request is never replayed.
-function deadlineSync() {
   if (!sync || sync.cancelled) return;
   sync.cancelled = true; Atomics.store(header, 2, 1);
   transport.notify('$/cancelRequest', { id: sync.id, reason: 'cancelled' }).catch(error => transport.fail(error));
@@ -130,7 +120,7 @@ parentPort.on('message', packet => {
     if (packet.kind === 'sync') {
       if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
       sync = { id: packet.message.id, parent: packet.parent };
-      sync.timer = setTimeout(deadlineSync, packet.timeout);
+      sync.timer = setTimeout(cancelSync, packet.timeout);
       sync.watchdog = setTimeout(() => transport.fail(rpcError(-32002, 'session append outcome unknown: reply deadline')), packet.timeout + 29000);
       transport.send(packet.message).catch(error => transport.fail(error));
       if (shutdownRequested || cancelledParents.has(sync.parent)) cancelSync();

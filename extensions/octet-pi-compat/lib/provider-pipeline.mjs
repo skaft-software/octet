@@ -1,5 +1,5 @@
 // Actual encoded provider phases only; never substitute a canonical Request.
-import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { cancellable } from './provider-context.mjs';
 export const pipelineHooks = ['before_provider_request', 'before_provider_headers', 'after_provider_response'];
@@ -42,7 +42,7 @@ export async function providerPipeline(runtime, params, store) {
         : hook === 'before_provider_headers' ? { type: hook, headers: mutableHeaders }
         : { type: hook, status: body.status, headers: Object.fromEntries(Object.entries(originalHeaders).map(([key, value]) => [key, Array.isArray(value) ? value.join(', ') : value])) };
       let result;
-      try { result = await cancellable(runtime.scope.run(child, () => entry.handler(strict(event, `${hook} event`), createContext(runtime, child))), signal); }
+      try { result = await cancellable(runtime.scope.run(child, () => entry.handler(facade(event, `${hook} event`), createContext(runtime, child))), signal); }
       catch (error) {
         live();
         // These callbacks see private wire material. Never echo their exception

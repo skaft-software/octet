@@ -1,4 +1,4 @@
-import { bounded, fields, invalid, strict } from './errors.mjs';
+import { bounded, facade, fields, invalid } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { cancellable } from './provider-context.mjs';
 import { customMessage } from './custom-messages.mjs';
@@ -22,7 +22,7 @@ export async function beforeAgentStart(runtime, payload, store) {
   for (const entry of [...runtime.events.get('before_agent_start') || []]) {
     store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
     const child = { ...store, factory: entry.factory };
-    const event = strict({ type: 'before_agent_start', prompt: payload.prompt, systemPrompt: effective, images: undefined }, 'before_agent_start event');
+    const event = facade({ type: 'before_agent_start', prompt: payload.prompt, systemPrompt: effective, images: undefined }, 'before_agent_start event');
     let result;
     const trace = process.env.OCTET_PI_TRACE_HOOKS === '1';
     const entrypoint = runtime.config.extensions[entry.factory];

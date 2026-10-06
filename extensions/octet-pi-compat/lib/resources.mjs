@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bounded, invalid, ownerKey, rpcError, strict, unsupported } from './errors.mjs';
+import { bounded, facade, invalid, ownerKey, rpcError, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 
 const pathFields = { skillPaths: 'skill_paths', promptPaths: 'prompt_paths', themePaths: 'theme_paths' };
@@ -100,7 +100,7 @@ export async function discoverResources(runtime, params, store) {
       let contribution;
       try {
         contribution = await cancellable(runtime.scope.run(child, () => entry.handler(
-          strict({ type: 'resources_discover', cwd, reason }, 'resources_discover event'), createContext(runtime, child))), signal);
+          facade({ type: 'resources_discover', cwd, reason }, 'resources_discover event'), createContext(runtime, child))), signal);
       } catch (error) {
         live();
         // Ordinary callback failures are diagnosed and later handlers still run,
