@@ -1,6 +1,6 @@
 // Pi 1.0.2 context facts and raw-input transforms. Rust supplies every fact;
 // extension request cancellation is not a substitute for aborting the agent.
-import { bounded, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable, piToCanonical } from './provider-context.mjs';
 
@@ -61,7 +61,7 @@ export async function transformInput(runtime, payload, store) {
     const child = { ...store, factory: entry.factory };
     let result;
     try {
-      result = await cancellable(runtime.scope.run(child, () => entry.handler(strict({
+      result = await cancellable(runtime.scope.run(child, () => entry.handler(facade({
         type: 'input', text, images, source: payload.source, streamingBehavior: payload.streaming_behavior ?? undefined,
       }, 'input event'), createContext(runtime, child))), signal);
     } catch (error) {

@@ -23,7 +23,8 @@ mod windows_console;
 pub use backend::OctetTerminal;
 pub(crate) use backend::TerminalImageStore;
 pub use capabilities::{ColorDepth, ColorMode, TerminalCapabilities};
-pub use input::TerminalInput;
+pub(crate) use input::InputInterceptors;
+pub use input::{Packet as InputPacket, TerminalInput};
 pub use lifecycle::{force_restore, install_panic_hook};
 pub use signal::{
     exit_if_signaled, install_signal_restore, received_shutdown_signal,
@@ -43,12 +44,12 @@ pub type TerminalSize = Arc<Mutex<(u16, u16)>>;
 /// text in a shape the reply filter did not recognize. The theme stays on the
 /// Unknown-background default there; `OCTET_COLOR_SCHEME` and the theme picker
 /// still choose explicitly.
-pub(crate) async fn query_terminal_background_color<S>(
+pub(crate) async fn query_terminal_background_color<S, E: Into<InputPacket>>(
     input: &mut TerminalInput<S>,
     timeout: Duration,
 ) -> Option<(u8, u8, u8)>
 where
-    S: futures_util::Stream<Item = std::io::Result<crossterm::event::Event>> + Unpin,
+    S: futures_util::Stream<Item = std::io::Result<E>> + Unpin,
 {
     if cfg!(windows) {
         return None;

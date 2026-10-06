@@ -26,7 +26,8 @@ export function registerResource(pi, label) {
       if (mode === 'hold') await hold(label, ctx);
       if (mode === 'reverse') await pi.setSessionName('discovery reverse call');
       if (mode === 'throw') throw new Error('ordinary discovery callback failure');
-      if (mode === 'unsupported') ctx.unimplementedContextMethod();
+      // An explicit octet refusal, not an absent member: absence now follows Pi.
+      if (mode === 'unsupported') ctx.abort();
       if (mode === 'remove') removeMiddle();
       if (mode === 'mutate-event') { event.cwd = '/not-the-native-cwd'; event.reason = 'not-a-native-reason'; }
       if (mode === 'sparse') return { skillPaths: Array(1) };
