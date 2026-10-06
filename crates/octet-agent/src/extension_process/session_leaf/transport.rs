@@ -17,7 +17,7 @@ pub(in crate::extension_process) use wire::{Descriptor, Preparation};
 
 pub(crate) const OWNER_ROUTES: &str = "session_owner_routes_v1";
 pub(crate) const SNAPSHOT_TRANSPORT: &str = "session_snapshot_transport_v1";
-pub(crate) const PREPARE: &str = "session/snapshot/prepare";
+pub(in crate::extension_process) const PREPARE: &str = "session/snapshot/prepare";
 const READ: &str = "session/snapshot/read";
 const RELEASE: &str = "session/snapshot/release";
 const PROJECTION_BEGIN: &str = "session/projection/begin";
@@ -62,6 +62,22 @@ pub(in crate::extension_process) struct Store {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(in crate::extension_process) fn transfer_offset(&self, parent: u64) -> Option<usize> {
+        self.transfers.values().find(|t| t.parent == parent).map(|t| t.offset)
+    }
+
+    #[cfg(test)]
+    pub(in crate::extension_process) fn in_flight(&self, parent: u64) -> usize {
+        self.transfers.values().filter(|t| t.parent == parent).count()
+    }
+
+    #[cfg(test)]
+    pub(in crate::extension_process) fn retained(&self) -> (usize, usize, usize) {
+        let accounting = lock_std_mutex(&self.accounting);
+        (accounting.bytes, accounting.records, accounting.views)
+    }
+
     pub(in crate::extension_process) fn next_revision(&mut self) -> Result<u64, ExtensionRuntimeError> {
         self.revision = self.revision.checked_add(1).filter(|v| *v <= MAX_SAFE).ok_or_else(unavailable)?;
         Ok(self.revision)

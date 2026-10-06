@@ -1,5 +1,6 @@
 //! Real native owner dispatch and the reviewed adapter; no model/network calls.
 use super::tests::Capture;
+use crate::extension_process::session_leaf::transport;
 use super::*;
 use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};
 use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningMode};
@@ -89,3 +90,112 @@ async fn real_adapter_complete_history_40_messages() { complete_history(40, true
 
 #[tokio::test]
 async fn real_adapter_complete_history_80_messages() { complete_history(80, false).await; }
+
+#[tokio::test]
+async fn real_adapter_mid_transfer_cancel_leaves_no_stale_or_partial_view() {
+    let temp = tempfile::tempdir().unwrap();
+    let process = adapter(&temp).await;
+    let mut session = Session::create(temp.path().join("history.jsonl")).unwrap();
+    for index in 0..200 {
+        session
+            .append(crate::session::EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text(format!(
+                        "{index:04}{}",
+                        "x".repeat(7996)
+                    ))],
+                },
+            )))
+            .unwrap();
+    }
+    let namespace = process.descriptor().manifest.name.clone();
+    let owner = process
+        .current_context_for_resource_owner(session.resource_owner_key())
+        .resource_owner
+        .unwrap();
+    let connection = read_std_lock(&process.inner.connection).clone();
+    let profile = connection.session_profile().unwrap();
+    // The real publication path invalidates first, then prepares the complete
+    // counted document on the wire.
+    process
+        .set_host_state_with_session(ExtensionHostState::default(), &session)
+        .expect("counted publication is never a whole-frame mirror");
+    let parent = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = lock_std_mutex(&connection.pending);
+            if let Some(id) = pending
+                .iter()
+                .find(|(_, request)| request.method == transport::PREPARE)
+                .map(|(id, _)| *id)
+            {
+                return id;
+            }
+            drop(pending);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if lock_std_mutex(&connection.session_leaf.transport)
+                .transfer_offset(parent)
+                .is_some_and(|offset| offset > 0)
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    connection.cancel_request(parent, "mid-transfer cancel");
+    // Cancellation settles every staged handle and releases the exact
+    // reservation. The owner stays explicitly unavailable, never partial.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let transport = lock_std_mutex(&connection.session_leaf.transport);
+            if transport.in_flight(parent) == 0 && transport.retained() == (0, 0, 0) {
+                return;
+            }
+            drop(transport);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        lock_std_mutex(&connection.session_leaf.transport)
+            .current
+            .get(&owner)
+            .is_some_and(Option::is_none),
+        "a failed preparation publishes unavailable, never a previous or partial view"
+    );
+    // The same complete document still publishes exactly on the next attempt.
+    let reference = lock_std_mutex(&connection.session_leaf.transport)
+        .history(&session, &namespace, owner.clone(), &profile, None)
+        .unwrap();
+    process
+        .set_host_state_with_session(ExtensionHostState::default(), &session)
+        .expect("bounded failfast, never truncation");
+    let current = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(Some(view)) = lock_std_mutex(&connection.session_leaf.transport)
+                .current
+                .get(&owner)
+                .cloned()
+            {
+                return view;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the complete document publishes after cancellation");
+    assert_eq!(current.descriptor.bytes, reference.descriptor.bytes);
+    assert_eq!(current.descriptor.sha256, reference.descriptor.sha256);
+    assert_eq!(current.descriptor.entry_count, session.entries().len());
+    assert_eq!(current.descriptor.branch_count, session.entries().len());
+    drop(reference);
+    assert!(process.shutdown().await);
+}
