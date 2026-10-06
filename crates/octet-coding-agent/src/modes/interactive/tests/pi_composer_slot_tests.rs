@@ -478,3 +478,17 @@ async fn native_pi_custom_editor_busy_slot_steers_queues_and_keeps_refused_draft
     }
 }
 
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_burst_enter_waits_for_its_completed_checkpoint() {
+    let (_directory, mut app, mut shell) = live_slot_app().await;
+    pump_until(&mut app, &mut shell, |frame| frame.contains("NATIVE-SLOT-EDITOR")).await;
+    let events = "burst prompt".chars().map(|c| (0, key(KeyCode::Char(c), KeyModifiers::NONE)))
+        .chain([(0, key(KeyCode::Enter, KeyModifiers::NONE))]).collect();
+    let mut input = scripted(events);
+    let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+        .await.next_idle(&mut input).await;
+    assert!(matches!(idle, Idle::Submit(ref composed) if composed.display_text == "burst prompt"),
+        "Enter must admit its whole completed draft, never an empty or partial checkpoint");
+    app.executable_extensions.shutdown().await;
+}
