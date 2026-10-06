@@ -207,7 +207,7 @@ pub(super) struct RenderedGeometry {
     pub(super) animation_block_starts: Vec<(u64, usize)>,
 }
 impl RenderedGeometry {
-    pub(super) fn capture(state: &ShellState, mut fence: GeometryFence) -> Arc<Self> {
+    pub(super) fn capture(state: &ShellState, fence: GeometryFence) -> Self {
         let chrome =
             super::shell_chrome::shell_chrome(state, state.size.0, std::time::Instant::now());
         let total_rows = state.transcript_cache.borrow().lines.len();
@@ -217,7 +217,8 @@ impl RenderedGeometry {
             super::viewport::transcript_viewport_capacity(chrome.transcript_rows, scroll > 0);
         let end = total_rows.saturating_sub(scroll);
         let start = end.saturating_sub(viewport_rows);
-        fence.scroll = state.scroll_from_bottom.get();
+        // Private anchor rebasing is not new semantic navigation intent.
+        // Update the fence's delta only when that feedback is accepted.
         let cache = state.transcript_cache.borrow();
         let first_block = cache
             .block_starts
@@ -232,18 +233,25 @@ impl RenderedGeometry {
                     start: cache.block_starts[index],
                     rows: cache.block_lengths[index],
                     surface: cache.block_geometries[index],
-                    copy_rows: super::transcript_selection::visible_copy_rows(
-                        &cache.lines[cache.block_starts[index]
-                            ..cache.block_starts[index] + cache.block_lengths[index]],
-                        &super::transcript_selection::block_copy_text(&state.transcript[index]),
-                        cache.block_geometries[index],
-                        start.saturating_sub(cache.block_starts[index])
-                            ..end.saturating_sub(cache.block_starts[index]),
-                    ),
+                    copy_rows: state
+                        .application_viewport_requested
+                        .then(|| {
+                            super::transcript_selection::visible_copy_rows(
+                                &cache.lines[cache.block_starts[index]
+                                    ..cache.block_starts[index] + cache.block_lengths[index]],
+                                &super::transcript_selection::block_copy_text(
+                                    &state.transcript[index],
+                                ),
+                                cache.block_geometries[index],
+                                start.saturating_sub(cache.block_starts[index])
+                                    ..end.saturating_sub(cache.block_starts[index]),
+                            )
+                        })
+                        .flatten(),
                 })
             })
             .collect();
-        Arc::new(Self {
+        Self {
             fence,
             panel: PanelRenderReceipt::capture(state, &chrome.panel),
             report: ReportRenderReceipt::capture(state),
@@ -264,12 +272,17 @@ impl RenderedGeometry {
                     ))
                 })
                 .collect(),
-        })
+        }
     }
+
+    pub(super) fn accepted_scroll_feedback(&mut self, scroll: usize) {
+        self.fence.scroll = scroll;
+    }
+
     pub(super) fn is_current(&self, state: &ShellState) -> bool {
         // The renderer may promote a visual anchor to its semantic equivalent
-        // while unrelated input prevents render feedback. The resolved scroll
-        // and layout fence, not the anchor's representation, determine cells.
+        // while unrelated input prevents render feedback. Navigation intent
+        // and the layout fence, not the anchor's representation, determine cells.
         self.fence == GeometryFence::capture(state)
     }
 

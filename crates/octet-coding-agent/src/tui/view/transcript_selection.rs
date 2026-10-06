@@ -169,8 +169,14 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
             text.len()
         };
         let geometry = cache.block_geometries[index];
-        let rows = CopyRows::build(&cache.lines[block_start..block_end], &text, geometry);
-        let first = block_start + geometry.transition_rows + geometry.leading_rows;
+        let rows = CopyRows::build_visible(
+            &cache.lines[block_start..block_end],
+            &text,
+            geometry,
+            start_row.saturating_sub(block_start)
+                ..(start_row + lines.len()).saturating_sub(block_start),
+        );
+        let first = block_start + geometry.transition_rows + geometry.leading_rows + rows.first_row;
         for (row_index, row) in rows.rows.iter().enumerate() {
             let Some(line) = (first + row_index)
                 .checked_sub(start_row)
@@ -178,29 +184,35 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
             else {
                 continue;
             };
-            let left = from.saturating_sub(row.offset).min(row.text.len());
-            let right = to.saturating_sub(row.offset).min(row.text.len());
-            if left >= right {
-                continue;
-            }
-            let left = clamp_copy_offset(&row.text, left);
-            let right = clamp_copy_offset(&row.text, right);
-            let column = usize::from(row.painted_cells) + visible_width(&row.text[..left]);
-            let cells = visible_width(&row.text[left..right]);
-            let selected = strip_terminal_sequences(&slice_by_column(line, column, cells, true));
-            *line = format!(
-                "{}\x1b[0;7m{selected}\x1b[0m{}",
-                slice_by_column(line, 0, column, true),
-                slice_by_column(
-                    line,
-                    column + cells,
-                    visible_width(line).saturating_sub(column + cells),
-                    true
-                )
-            );
-            if line.contains("\x1b]8;") {
-                line.push_str("\x1b]8;;\x1b\\");
-            }
+            row.decorate(line, from, to);
+        }
+    }
+}
+
+impl CopyRow {
+    fn decorate(&self, line: &mut String, from: usize, to: usize) {
+        let left = from.saturating_sub(self.offset).min(self.text.len());
+        let right = to.saturating_sub(self.offset).min(self.text.len());
+        if left >= right {
+            return;
+        }
+        let left = clamp_copy_offset(&self.text, left);
+        let right = clamp_copy_offset(&self.text, right);
+        let column = usize::from(self.painted_cells) + visible_width(&self.text[..left]);
+        let cells = visible_width(&self.text[left..right]);
+        let selected = strip_terminal_sequences(&slice_by_column(line, column, cells, true));
+        *line = format!(
+            "{}\x1b[0;7m{selected}\x1b[0m{}",
+            slice_by_column(line, 0, column, true),
+            slice_by_column(
+                line,
+                column + cells,
+                visible_width(line).saturating_sub(column + cells),
+                true
+            )
+        );
+        if line.contains("\x1b]8;") {
+            line.push_str("\x1b]8;;\x1b\\");
         }
     }
 }
@@ -298,6 +310,15 @@ pub(super) struct CopyRows {
 
 impl CopyRows {
     fn build(painted: &[String], copy_text: &str, geometry: SurfaceGeometry) -> Self {
+        Self::build_visible(painted, copy_text, geometry, 0..painted.len())
+    }
+
+    fn build_visible(
+        painted: &[String],
+        copy_text: &str,
+        geometry: SurfaceGeometry,
+        visible: std::ops::Range<usize>,
+    ) -> Self {
         let first = geometry
             .transition_rows
             .saturating_add(geometry.leading_rows);
@@ -308,9 +329,11 @@ impl CopyRows {
         let content = painted
             .get(first..first.saturating_add(content_rows))
             .unwrap_or_default();
-        let mut rows = Vec::with_capacity(content.len());
+        let from = visible.start.saturating_sub(first).min(content.len());
+        let to = visible.end.saturating_sub(first).min(content.len());
+        let mut rows = Vec::with_capacity(to - from);
         let mut cursor = 0usize;
-        for line in content {
+        for (index, line) in content.iter().take(to).enumerate() {
             let plain = strip_terminal_sequences(line);
             let mut row = CopyRow {
                 text: String::new(),
@@ -351,10 +374,12 @@ impl CopyRows {
                 };
                 break;
             }
-            rows.push(row);
+            if index >= from {
+                rows.push(row);
+            }
         }
         Self {
-            first_row: 0,
+            first_row: from,
             content_left: geometry.content_left,
             rows,
         }
@@ -380,9 +405,9 @@ impl CopyRows {
         }
         let boundary = self.rows.partition_point(|row| row.offset < offset);
         if boundary < self.rows.len() && self.rows[boundary].offset == offset && !trailing {
-            return Some(boundary);
+            return Some(self.first_row + boundary);
         }
-        Some(boundary.saturating_sub(1).min(self.rows.len() - 1))
+        Some(self.first_row + boundary.saturating_sub(1).min(self.rows.len() - 1))
     }
 }
 
@@ -536,12 +561,7 @@ pub(super) fn visible_copy_rows(
     geometry: SurfaceGeometry,
     visible: std::ops::Range<usize>,
 ) -> Option<CopyRows> {
-    let mut rows = CopyRows::build(painted, text, geometry);
-    let first = geometry.transition_rows + geometry.leading_rows;
-    let from = visible.start.saturating_sub(first).min(rows.rows.len());
-    let to = visible.end.saturating_sub(first).min(rows.rows.len());
-    rows.rows = rows.rows[from..to].to_vec();
-    rows.first_row = from;
+    let rows = CopyRows::build_visible(painted, text, geometry, visible);
     (!rows.is_empty()).then_some(rows)
 }
 
@@ -799,3 +819,7 @@ fn newline_offset(text: &str, line_index: usize) -> usize {
         .sum::<usize>()
         .min(text.len())
 }
+
+#[cfg(test)]
+#[path = "transcript_selection_tests.rs"]
+mod tests;
