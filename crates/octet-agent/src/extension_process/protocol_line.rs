@@ -158,6 +158,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        if session_leaf::transport::dispatch(state, object, method, params.clone())? { return Ok(()); }
         if matches!(
             method,
             methods::UI_OPEN | methods::UI_CLOSE | methods::UI_FRAME
@@ -2093,7 +2094,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
         // Tear down the whole generation, rather than unlock one execution.
         return Err("response requires exactly one of result or error".into());
     }
-    let reply = if let Some(error) = object.get("error") {
+    let mut reply = if let Some(error) = object.get("error") {
         if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_3 {
             let error: api_v03::ErrorObject = serde_json::from_value(error.clone())
                 .map_err(|decode| format!("invalid API 0.3 JSON-RPC error: {decode}"))?;
@@ -2116,6 +2117,14 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     };
     let request = {
         let mut pending = lock_std_mutex(&state.pending);
+        if pending.get(&id).is_some_and(|p| p.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE) {
+            if let Ok(value) = &mut reply {
+                if let Err(error) = lock_std_mutex(&state.session_leaf.transport).resolve_projection(id, value) {
+                    reply = Err(PendingError::Protocol(error.to_string()));
+                }
+            }
+        }
+        lock_std_mutex(&state.session_leaf.transport).settle(id);
         // This recognized terminal settles execution-held request capacity too,
         // even when cancellation already removed the ordinary pending waiter.
         state.session_leaf.settle_execution(id);

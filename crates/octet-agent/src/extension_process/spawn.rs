@@ -1,5 +1,6 @@
 //! Spawning an extension process: entrypoint staging and platform launch.
 
+use super::session_leaf::transport::{self, SessionSnapshotProfile};
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
@@ -369,6 +370,16 @@ pub(super) async fn spawn_connection(
         resource_cleanup_changed,
     ));
     artifact_guard.disarm();
+    // The paired owner-routes/history-transport profile is offered only when
+    // the physical frame can carry its counted maximum-ID envelopes.
+    let session_offer = (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4)
+        .then(|| SessionSnapshotProfile::for_frame(config.max_message_bytes).ok())
+        .flatten();
+    let session_offer_frame = if session_offer.is_some() {
+        config.max_message_bytes
+    } else {
+        0
+    };
     let offered_host_services = OfferedHostServices {
         provider_proxy: config.provider_registry.is_some()
             && descriptor.manifest.contributes.providers
@@ -391,6 +402,7 @@ pub(super) async fn spawn_connection(
         approvals: config.approvals,
         secrets: config.secret_broker.is_some()
             && !descriptor.manifest.capabilities.secrets.is_empty(),
+        max_message_bytes: session_offer_frame,
     };
     let mut required_features = API_0_2_REQUIRED_FEATURES
         .iter()
@@ -525,6 +537,11 @@ pub(super) async fn spawn_connection(
     if descriptor.manifest.capabilities.system_prompt {
         optional_features.push(EXTENSION_FEATURE_SYSTEM_PROMPT_READ.to_owned());
     }
+    if let Some(profile) = &session_offer {
+        optional_features.push(transport::OWNER_ROUTES.to_owned());
+        optional_features.push(transport::SNAPSHOT_TRANSPORT.to_owned());
+        debug_assert_eq!(SessionSnapshotProfile::for_frame(session_offer_frame).ok().as_ref(), Some(profile));
+    }
 
     let api_v03_offer = (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_3)
         .then(|| {
@@ -585,6 +602,7 @@ pub(super) async fn spawn_connection(
             flag_values,
             protocol: (uses_api_0_2_capabilities(&descriptor.manifest.api_version)).then(|| {
                 ExtensionProtocolRequest {
+                    session_snapshot_transport_v1: session_offer.clone(),
                     version: descriptor.manifest.api_version.clone(),
                     required_features,
                     optional_features,
@@ -595,6 +613,7 @@ pub(super) async fn spawn_connection(
                         })
                     } else { None },
                     limits: ExtensionProtocolLimits {
+                        max_message_bytes: (session_offer_frame > 0).then_some(session_offer_frame),
                         max_concurrent_requests: config.max_pending_requests,
                         resource_refs_v1: (descriptor.manifest.api_version
                             == EXTENSION_API_VERSION_0_4)
@@ -676,6 +695,9 @@ pub(super) async fn spawn_connection(
             .install_selected_api_v03(contract.limits.max_frame_bytes);
     }
     *write_std_lock(&connection.slots) = Arc::new(Semaphore::new(protocol.max_concurrent_requests));
+    if session_offer.is_some() && protocol.supports(transport::SNAPSHOT_TRANSPORT) {
+        *write_std_lock(&connection.session_leaf.profile) = session_offer;
+    }
     *write_std_lock(&connection.protocol) = protocol;
     *write_std_lock(&connection.api_v03_contract) = api_v03_contract;
     *write_std_lock(&connection.tool_catalog) = contributions.tools.clone();

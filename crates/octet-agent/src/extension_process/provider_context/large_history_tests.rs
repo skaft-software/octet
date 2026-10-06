@@ -2,7 +2,7 @@
 use super::tests::Capture;
 use super::*;
 use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};
-use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningConfig, ReasoningMode};
+use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningMode};
 
 async fn adapter(temp: &tempfile::TempDir) -> ExtensionProcess {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -58,14 +58,21 @@ async fn complete_history(count: usize, publish: bool) {
         process.set_host_state_with_session(ExtensionHostState::default(), &session)
             .expect("complete history publication must not be a whole-frame mirror");
     }
-    let model = ModelCatalog::builtin().unwrap().resolve(&ModelId("gpt-4o-mini".into())).unwrap();
+    // A 80x8,000-character history is far larger than the legacy 512 KiB
+    // mirror, so the acceptance uses a model whose real context window admits
+    // the complete transferred history rather than a raised transport cap.
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    let reasoning = octet_ai::select_auxiliary_reasoning(&model).unwrap();
     let client = octet_ai::AiClient::new();
     let captures = Arc::new(StdMutex::new(Vec::new()));
     client.register_host_stream_transport(model.endpoint.id.clone(), Arc::new(Capture(captures.clone())));
     let mut agent = Agent::new(AgentConfig {
         client, model, session, extensions: host, system: "canonical system".into(),
         sandbox: SandboxConfig::new(temp.path()), effect_broker: EffectBroker::default(),
-        max_turns: Some(1), reasoning: ReasoningConfig::Off,
+        max_turns: Some(1), reasoning,
         reasoning_mode: ReasoningMode::Standard, cache_retention: CacheRetention::Short,
         session_id: Some("history-acceptance".into()),
     }).unwrap();
