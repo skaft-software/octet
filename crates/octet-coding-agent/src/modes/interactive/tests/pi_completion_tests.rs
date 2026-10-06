@@ -142,6 +142,54 @@ async fn native_pi_slow_completion_does_not_block_typing_or_replace_new_draft() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_registry_completion_in_custom_editor_uses_actual_caret_and_one_host_menu() {
+    let factory = format!("{FACTORY}\n{}", r#"
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+"#);
+    // Keep command and editor registration in the same real factory.
+    let factory = factory.replace("export default pi => pi.registerCommand", "const register = pi => pi.registerCommand") + r#"
+export default pi => {
+  register(pi);
+  pi.on('session_start', (_, ctx) => ctx.ui.setEditorComponent((tui, theme, keys) => {
+    const editor = new CustomEditor(tui, theme, keys);
+    const setText = editor.setText.bind(editor);
+    let seeded = false;
+    editor.setText = text => {
+      setText(text);
+      if (!seeded) {
+        seeded = true;
+        setTimeout(() => { setText('/cmd α尾'); editor.handleInput('\x1b[D'); }, 30);
+      }
+    };
+    const render = editor.render.bind(editor);
+    editor.render = width => [...render(width), 'NATIVE-REGISTRY-COMPOSER'];
+    editor.onChange = () => appendFileSync(TRACE, JSON.stringify({draft:editor.getText(),cursor:editor.getCursor()}) + '\n');
+    return editor;
+  }));
+};
+"#;
+    let (directory, mut app, mut shell) = pi_ui_app(&factory);
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    tokio::time::timeout(Duration::from_secs(8), resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input)).await.unwrap().unwrap();
+    shell.finish_startup();
+    input_for(&mut app,&mut shell,None,Duration::from_millis(800)).await;
+    let snapshot = shell.extension_editor_snapshot();
+    assert_eq!(snapshot.text,"/cmd α尾");
+    assert_eq!(snapshot.cursor,"/cmd α".len(),"registry query must use the native component caret, not the end of its draft");
+    assert!(shell.extension_autocomplete_displayed(),"the one native registry menu, not a component-local command popup, must own selection");
+    let rendered = frame(&mut shell).await;
+    assert_eq!(rendered.matches("CHOICE-ALPHA").count(),1,"{rendered}");
+    assert_eq!(rendered.matches("NATIVE-REGISTRY-COMPOSER").count(),1,"{rendered}");
+    assert!(app.executable_extensions.accept_editor_autocomplete(&mut shell));
+    assert_eq!(shell.pending(),"/cmd alpha尾");
+    input_for(&mut app,&mut shell,None,Duration::from_millis(200)).await;
+    let trace = std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap();
+    assert!(trace.contains(r#""prefix":"α""#),"{trace}");
+    assert!(trace.contains(r#""draft":"/cmd alpha尾","cursor":{"line":0,"col":10}"#),"host acceptance must commit the native editor text and caret: {trace}");
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_command_registration_is_not_a_foreground_ui_request() {
     let (_directory, mut app) = pi_app(FACTORY);
     let mut notices = Vec::new();
