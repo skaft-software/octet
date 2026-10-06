@@ -391,7 +391,7 @@ export default pi => {
         let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
         let mut scroll = tokio::time::interval(Duration::from_millis(16));
         let mut extensions = tokio::time::interval(Duration::from_millis(10));
-        let (watcher, mut reload, mut tick) = test_reload();
+        let (watcher, mut reload, mut tick) = super::support::test_reload();
         let idle = tokio::time::timeout(Duration::from_secs(5), wait_for_prompt(
             &mut shell, &mut input, &mut scroll, &mut extensions,
             &mut app.executable_extensions, None, &mut tick, &watcher, &mut reload,
