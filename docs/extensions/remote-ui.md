@@ -262,10 +262,10 @@ input events:
   out of the lane. On Windows, where octet receives console key records instead of
   bytes, the spelling is the host's console encoding.
 - The request is deliberately **not** owner-routed: it carries
-  `resource_owner` as an ordinary parameter instead of the out-of-band owner that
-  attaches a session-history view, because a listener that only decides how one
-  keystroke is dispatched must not drag a history transfer onto the typing path.
-  The frontend still validates the owner (and its liveness) on both sides.
+  `resource_owner` as an ordinary parameter, because a listener that only
+  decides how one keystroke is dispatched must not acquire session-view or
+  history-transport work. The frontend still validates the owner (and its
+  liveness) on both sides.
 
 This is a frontend-owned ordering guarantee, not an extension-scheduled hook: the
 request is answered while the user is typing, and a slow reply delays only input,
