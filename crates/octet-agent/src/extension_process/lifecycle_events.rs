@@ -613,6 +613,21 @@ impl ExtensionSessionLifecycleService {
 }
 
 impl ExtensionSessionLifecycleReceiver {
+    /// Take a model control for queue admission while a run owns the Agent.
+    /// Other lifecycle operations remain with the idle driver, in order.
+    pub fn try_next_model_control(&mut self) -> Option<ExtensionSessionLifecycleRequest> {
+        let request = self.try_next()?;
+        if matches!(
+            request.operation(),
+            ExtensionSessionLifecycleOperation::ModelControl(_)
+        ) {
+            Some(request)
+        } else {
+            self.deferred = Some(request);
+            None
+        }
+    }
+
     /// Take an idle barrier without reordering an earlier session mutation.
     /// The foreground command pump uses this only while its shell reports no run.
     pub fn try_next_idle_wait(&mut self) -> Option<ExtensionSessionLifecycleRequest> {

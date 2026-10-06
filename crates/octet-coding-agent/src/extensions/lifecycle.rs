@@ -881,6 +881,24 @@ impl ExecutableExtensions {
             .and_then(ExtensionSessionLifecycleReceiver::try_next)
     }
 
+    /// Busy controls acknowledge queue admission, never an in-flight mutation.
+    pub fn next_model_control_request(&mut self) -> Option<ExtensionSessionLifecycleRequest> {
+        self.session_lifecycle_receiver
+            .as_mut()
+            .and_then(ExtensionSessionLifecycleReceiver::try_next_model_control)
+    }
+
+    pub(crate) fn model_control_owner_is_current(
+        &self,
+        owner: &octet_agent::extension_process::ExtensionResourceOwner,
+    ) -> bool {
+        self.resource_owner.as_deref() == Some(owner.session_id.as_str())
+            && self
+                .processes
+                .iter()
+                .any(|process| process.resource_owner_is_live(owner))
+    }
+
     pub fn bind_agent_sessions(&self, agent: &Agent) -> anyhow::Result<usize> {
         let mut bound = 0;
         for process in &self.processes {
