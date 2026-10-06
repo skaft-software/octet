@@ -13,7 +13,7 @@ published bundle or API 0.3 process.
 ## Build and enable
 
 The renderer is a separate Rust package because `oxi-snapcompact` 0.64.0
-requires Rust **1.96+** (octet's main workspace declares 1.86). Build it once,
+requires Rust **1.96+** (octet's main workspace declares 1.88). Build it once,
 outside the extension directory:
 
 ```sh

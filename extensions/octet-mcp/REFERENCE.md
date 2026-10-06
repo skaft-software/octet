@@ -184,8 +184,8 @@ in `tests/test_http_hardening.py`:
 Local TLS/HTTP adversarial fixtures do not qualify external-server interoperability,
 Linux/platform cleanup, long-duration resource pressure or host/Serve owner changes.
 A resident binds to only one host owner: remotes initially park with
-`resource_owner_required`; run `/mcp restart <server>` from an owned command to
-connect. A different owner requires restarting the extension process. Automatic
+`resource_owner_required`; choose **Restart** for the server in the octet-mcp
+options menu (or run `/mcp restart <server>` in the web UI) to connect. A different owner requires restarting the extension process. Automatic
 multi-owner partitioning, owner-settlement cleanup and host-qualified owner-specific
 catalog visibility remain unimplemented; foreign tool calls fail closed. These
 limitations must not be mistaken for a fully shared remote service.
@@ -547,7 +547,18 @@ relaunching; restart explicitly replaces a connection; stop removes its current
 tools and closes it. Shutdown closes all roots in bounded parallel workers, and
 octet's extension process-group cleanup is the final descendant fence.
 
-Use the narrow/headless fallback in every frontend:
+In the terminal UI, `/extensions` → octet-mcp is a full server manager: add a
+local (stdio) server through a guided form, or a remote (Streamable HTTP) one
+when octet runs with `--experimental-streamable-http-mcp`; then show, refresh,
+restart, stop, enable, disable, edit, or remove each server. Edits are written
+only after the complete edited file passes the launch-time trust and schema
+checks, through a private temporary file renamed over `~/.octet/mcp.json`, and
+they apply live: added and changed servers start, removed and changed ones stop
+and unpublish their tools, and untouched servers keep their sessions. Guided
+environment values and bearer-token variables are asked as hidden input and
+never appear in summaries or errors.
+
+The web UI and headless frontends use the same actions through the command:
 
 ```text
 /mcp status
@@ -557,6 +568,11 @@ Use the narrow/headless fallback in every frontend:
 /mcp refresh [server]
 /mcp restart <server>
 /mcp stop <server>
+/mcp add stdio|http
+/mcp edit <server>
+/mcp enable <server>
+/mcp disable <server>
+/mcp remove <server>
 ```
 
 `/mcp snapshot` returns the same generic semantic snapshot published through API

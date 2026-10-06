@@ -4,6 +4,14 @@
 
 ### Added
 
+- Keep `/subagents` as the runtime worker surface in the terminal UI. Bare,
+  `list` and `status` open the live roster (Enter shows a transcript, Ctrl+X
+  stops the selected worker), including during a turn. `/subagents stop
+  <name-or-id|all>` uses the bounded owner-bound stop queue during a turn;
+  inspect, wait, reattach and open-all queue until idle. Slash completion
+  follows the first-party extension's live registration. `/extensions` only
+  enables, disables and configures the extension, with no worker operations.
+
 - `/subagents open-all tmux|herdr` remains **Partial**: bounded opaque-handle
   plans and fresh owner-bound host status are retained, but every worker and the
   current parent stay blocked. Even a launchable non-live snapshot cannot
@@ -57,6 +65,12 @@
 - Per-worker policy is no longer described as "inherited model only": the spawn
   schema, tool descriptions, README, and reference document the optional
   provider/model/reasoning selection and its fail-closed validation.
+
+### Fixed
+
+- Multiplexer commands no longer inherit the extension's protocol stdin. On
+  Windows a child that shares that pipe can stall at startup while octet's
+  reader waits on it.
 
 ## [0.2.0]
 

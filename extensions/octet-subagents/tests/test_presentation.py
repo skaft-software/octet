@@ -231,6 +231,27 @@ class PresentationTests(unittest.TestCase):
         self.assertNotIn("parent_id", nodes["worker:agent-1"])
         self.assertEqual(nodes["worker:agent-2"]["parent_id"], "worker:agent-1")
 
+    def test_options_menu_keeps_worker_operations_on_subagents(self):
+        clock = ManualClock()
+        host = FakeHostState(clock)
+        client = host.client()
+        orchestrator = Orchestrator(publish=lambda _snapshot: None, now_ms=clock)
+        context = {"host": {"session_id": "parent-session"}}
+
+        empty = orchestrator.menu(context)
+        self.assertEqual(empty["items"], [])
+        self.assertIn("/subagents", empty["detail"])
+        self.assertNotIn("status", empty)
+
+        current_owner = owner()
+        result = orchestrator.spawn(
+            client, current_owner, {"name": "explore-auth", "task": "Inspect auth."}
+        )
+        host.start(result["worker"]["id"])
+        orchestrator.status(client, current_owner, {})
+        self.assertEqual(orchestrator.menu(context), empty)
+        self.assertEqual(orchestrator.menu({}), empty)
+
     def test_narrow_command_fixture_and_stop_fallback_fail_closed(self):
         clock = ManualClock()
         host = FakeHostState(clock)
