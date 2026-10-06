@@ -62,6 +62,8 @@ export class ExtensionIssues {
   constructor(runtime) {
     this.runtime = runtime; this.started = false;
     this.callbacks = new Set(); this.renderers = new Set();
+    // Last extension-originated notice write, kept as an ordering barrier.
+    this.pending = undefined;
   }
   publish(issues) {
     if (!issues.length) return;
@@ -70,9 +72,18 @@ export class ExtensionIssues {
     const message = issues.map(formatIssue).join('\n');
     console.error(`[Extension issues]\n${message}`);
     const runtime = this.runtime;
-    if (!runtime.stopping && !runtime.transport.closed) runtime.transport.notify('notification', {
+    if (!runtime.stopping && !runtime.transport.closed) this.pending = runtime.transport.notify('notification', {
       level: 'warning', title: '[Extension issues]', message,
     }).catch(error => runtime.transport.fail(error));
+  }
+  // Resolve once every notice published so far has been written to the host.
+  // A later request reply must not overtake a notice the host has not seen.
+  async flush() {
+    while (this.pending) {
+      const pending = this.pending;
+      this.pending = undefined;
+      await pending;
+    }
   }
   inertRenderers() {
     const runtime = this.runtime;

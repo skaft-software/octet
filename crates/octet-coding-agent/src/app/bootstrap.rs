@@ -3817,37 +3817,35 @@ mod stored_api_key_catalog_tests {
     }
 }
 
-/// Declarations whose configuration was consulted while building a catalog.
-///
-/// Test-only observability for the readiness plan: an unrelated provider being
-/// *not consulted at all* is the property under test, and that is a request
-/// count rather than a wall-clock threshold.
+// Declarations whose configuration was consulted while building a catalog.
+//
+// Test-only observability for the readiness plan: an unrelated provider being
+// *not consulted at all* is the property under test, and that is a request
+// count rather than a wall-clock threshold.
+#[cfg(test)]
+thread_local! {
+    /// Test-only request counter for the readiness plan.
+    ///
+    /// The narrowed plan is initialized sequentially on the calling thread, so
+    /// a thread-local records exactly this caller's consultations and cannot be
+    /// polluted by the other lib tests running in parallel.
+    static READINESS_DECLARATIONS_CONSULTED: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[cfg(test)]
 pub(crate) fn readiness_declarations_consulted() -> Vec<&'static str> {
-    READINESS_DECLARATIONS_CONSULTED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+    READINESS_DECLARATIONS_CONSULTED.with(|consulted| consulted.borrow().clone())
 }
 
 #[cfg(test)]
 pub(crate) fn reset_readiness_declarations_consulted() {
-    READINESS_DECLARATIONS_CONSULTED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
+    READINESS_DECLARATIONS_CONSULTED.with(|consulted| consulted.borrow_mut().clear());
 }
 
 #[cfg(test)]
-static READINESS_DECLARATIONS_CONSULTED: std::sync::Mutex<Vec<&'static str>> =
-    std::sync::Mutex::new(Vec::new());
-
-#[cfg(test)]
 fn readiness_note_declaration(provider_id: &'static str) {
-    READINESS_DECLARATIONS_CONSULTED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(provider_id);
+    READINESS_DECLARATIONS_CONSULTED.with(|consulted| consulted.borrow_mut().push(provider_id));
 }
 
 #[cfg(test)]

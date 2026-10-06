@@ -83,7 +83,7 @@ export class Runtime {
     this.scope = new AsyncLocalStorage(); this.tools = new Map(); this.commands = new Map(); this.shortcuts = new Map(); this.flags = new Map(); this.events = new Map();
     this.terminalInput = new TerminalInputListeners(this);
     this.bus = new SharedBus(this); this.ui = new RemoteUI(this); this.transcript = new TranscriptRenderers(this); this.timers = new Timers(this);
-    this.issues = new ExtensionIssues(this);
+    this.issues = new ExtensionIssues(this); this.initializeEpilogue = Promise.resolve();
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map(); this.failedFactories = new Set();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
     this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null; this.autocompleteStarted = false; this.autocompleteSettle = null;
@@ -832,19 +832,52 @@ export class Runtime {
       // completions the moment it reads the line, and nothing here orders that
       // inbound request after the write callback.
       if (message.method === 'initialize') this.armAutocomplete();
+      // No later reply may overtake the initialize epilogue: the host drops
+      // extension-originated notices until it has read the initialize result
+      // and subscribed, so the grouped startup notice is published only after
+      // that write settles. Gating every later reply on the epilogue gives the
+      // notice a total order without moving it ahead of the reply.
+      if (message.method !== 'initialize') await this.initializeEpilogue;
       if (!this.stopping) {
-        await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
+        // A reply is also a barrier for anything already published: the host
+        // may treat this response as evidence that earlier notices were
+        // delivered, so flush pending extension-originated writes first.
+        await this.issues.flush();
+        const reply = this.transport.send({ jsonrpc: '2.0', id: message.id, result });
+        if (message.method === 'initialize') {
+          // Registration stays behind the reply so the query chain waits for
+          // the host to have resolved the negotiated feature; the notice is
+          // published last and the epilogue then resolves.
+          this.initializeEpilogue = (async () => {
+            try {
+              await reply;
+            } catch {
+              return;
+            }
+            try {
+              this.registerAutocomplete();
+              startProviderRegistration(this);
+              this.reportStartupIssues();
+            } catch (error) {
+              this.backgroundError(error);
+            }
+          })();
+        }
+        await reply;
         settlementError = undefined;
-        if (message.method === 'initialize') { this.registerAutocomplete(); startProviderRegistration(this); this.reportStartupIssues(); }
         if (message.method === 'provider/stream') startProviderStream(this, message.params.stream_id);
       }
     } catch (error) {
       settlementError = error;
-      if (!this.stopping) await this.transport.send({ jsonrpc: '2.0', id: message.id, error: {
-        code: store.controller.signal.aborted ? -32800 : (Number.isInteger(error.code) ? error.code : -32603),
-        message: store.controller.signal.aborted ? 'request cancelled' : String(error?.message || error).slice(0, 4096),
-        ...(!store.controller.signal.aborted && fallbackData(error) ? { data: fallbackData(error) } : {}),
-      } });
+      if (!this.stopping) {
+        if (message.method !== 'initialize') await this.initializeEpilogue;
+        await this.issues.flush();
+        await this.transport.send({ jsonrpc: '2.0', id: message.id, error: {
+          code: store.controller.signal.aborted ? -32800 : (Number.isInteger(error.code) ? error.code : -32603),
+          message: store.controller.signal.aborted ? 'request cancelled' : String(error?.message || error).slice(0, 4096),
+          ...(!store.controller.signal.aborted && fallbackData(error) ? { data: fallbackData(error) } : {}),
+        } });
+      }
     } finally {
       this.sessionTransport?.settle(store, settlementError);
       store.live = false; this.active.delete(message.id); this.transport.settleParent(message.id);
