@@ -333,6 +333,7 @@ async fn remote_ui_detached_close_repaints_without_followup_input() {
     assert!(extensions.route_remote_ui_event(
         &mut frontend.shell,
         &key(KeyCode::Char('q'), KeyEventKind::Press, KeyModifiers::NONE),
+        false
     ));
     // Pump requests and await the actual close ACK, but never force a render,
     // insert text, or send another event that could hide a missing render wake.
@@ -385,6 +386,7 @@ async fn remote_ui_close_then_paste_publishes_focus_within_one_request_drain() {
                 KeyEventKind::Press,
                 KeyModifiers::NONE
             ),
+            false
         ));
         // Hold the product consumer until both real child requests are queued.
         tokio::time::timeout(Duration::from_secs(3), async {
@@ -709,7 +711,7 @@ async fn remote_ui_footer_survives_command_then_resize_and_session_fencing() {
         assert!(!extensions.remote_ui.accept_frame(&process, refused));
     }
     assert!(extensions.remote_ui.accept_frame(&process, valid));
-    extensions.route_remote_ui_event(&mut frontend.shell, &Event::Resize(80, 24));
+    extensions.route_remote_ui_event(&mut frontend.shell, &Event::Resize(80, 24), false);
     // An old cache is blanked synchronously, before the remote resize reply.
     assert!(extensions
         .remote_ui
@@ -763,7 +765,8 @@ async fn remote_ui_rescue_and_process_reload_restore_draft() {
             KeyCode::Char('d'),
             KeyEventKind::Press,
             KeyModifiers::CONTROL
-        )
+        ),
+        false
     ));
     assert!(extensions.route_remote_ui_event(
         &mut frontend.shell,
@@ -771,7 +774,8 @@ async fn remote_ui_rescue_and_process_reload_restore_draft() {
             KeyCode::Char('g'),
             KeyEventKind::Press,
             KeyModifiers::CONTROL
-        )
+        ),
+        false
     ));
     assert_eq!(
         extensions.remote_ui.mounts.len(),
@@ -779,14 +783,21 @@ async fn remote_ui_rescue_and_process_reload_restore_draft() {
         "fullscreen rescue preserves the editor underneath"
     );
     assert!(!frontend.shell.has_overlay());
-    assert!(extensions.route_remote_ui_event(
+    extensions.route_remote_ui_event(
         &mut frontend.shell,
         &key(
             KeyCode::Char('g'),
             KeyEventKind::Press,
-            KeyModifiers::CONTROL
-        )
-    ));
+            KeyModifiers::CONTROL,
+        ),
+        false,
+    );
+    assert_eq!(
+        extensions.remote_ui.mounts.len(),
+        1,
+        "Ctrl+G never rescues an editor"
+    );
+    extensions.revoke_terminal_grant_for_shell(&mut frontend.shell, "editor owner retired");
     assert!(extensions.remote_ui.is_empty());
     command(&mut extensions, &mut frontend, &["footer"]).await;
     extensions.processes[0].reload().await.unwrap();

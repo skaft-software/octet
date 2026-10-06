@@ -279,6 +279,7 @@ fn remote(
         components: Arc::new(components),
         chrome: None,
         mounts: vec![MountView {
+            surface_id: "test-surface".into(),
             id: "fixture.remote".into(),
             title: "Fixture remote owner".into(),
             placement,

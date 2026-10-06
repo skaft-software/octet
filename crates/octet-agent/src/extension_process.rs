@@ -75,9 +75,10 @@ use crate::extension_provider::{
 };
 use crate::extension_remote_ui::{
     ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed,
-    ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey,
-    ExtensionRemoteUiMouse, ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation,
-    ExtensionRemoteUiResize, RemoteUiChildRequest, RemoteUiMailbox, EXTENSION_FEATURE_REMOTE_UI,
+    ExtensionRemoteUiEditorText, ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification,
+    ExtensionRemoteUiKey, ExtensionRemoteUiMouse, ExtensionRemoteUiOpenRequest,
+    ExtensionRemoteUiOperation, ExtensionRemoteUiResize, RemoteUiChildRequest, RemoteUiMailbox,
+    EXTENSION_FEATURE_REMOTE_UI,
 };
 use crate::extension_secret::{ExtensionSecretBroker, ExtensionSecretRequest};
 use crate::tool::{
@@ -205,7 +206,6 @@ pub use self::host_requests::AgentSessionWaitRequest;
 pub use self::host_requests::CommandDefinition;
 pub use self::host_requests::ComposerGetRequest;
 pub use self::host_requests::ComposerHistoryRequest;
-pub use self::host_requests::ComposerSubmitRequest;
 pub use self::host_requests::ComposerTextRequest;
 pub use self::host_requests::ComposerTextResult;
 pub use self::host_requests::ContextModelCatalogResult;
@@ -502,6 +502,8 @@ pub mod methods {
     pub const UI_FRAME: &str = "ui/frame";
     /// Host-to-extension focused normalized key notification.
     pub const UI_KEY: &str = "ui/key";
+    /// Host-to-extension composer-slot text replacement for a mounted editor.
+    pub const UI_EDITOR_TEXT: &str = "ui/editor-text";
     /// Host-to-extension normalized fullscreen mouse notification.
     pub const UI_MOUSE: &str = "ui/mouse";
     /// Host-to-extension surface closure notification.
@@ -580,8 +582,6 @@ pub mod methods {
     pub const TOOL_STARTED: &str = "tool/started";
     /// Observational global tool terminal boundary.
     pub const TOOL_SETTLED: &str = "tool/settled";
-    /// Native admission for a currently mounted custom editor.
-    pub const COMPOSER_SUBMIT: &str = "composer/submit";
     /// Extension request for the current host composer snapshot.
     pub const COMPOSER_GET: &str = "composer/get";
     /// Extension request to replace the complete host composer text.
@@ -665,7 +665,6 @@ macro_rules! impl_owner_scoped_host_request {
 impl_owner_scoped_host_request!(ComposerGetRequest);
 impl_owner_scoped_host_request!(ComposerHistoryRequest);
 impl_owner_scoped_host_request!(ComposerTextRequest);
-impl_owner_scoped_host_request!(ComposerSubmitRequest);
 impl_owner_scoped_host_request!(ShortcutRegisterRequest);
 impl_owner_scoped_host_request!(SessionAppendEntryRequest);
 impl_owner_scoped_host_request!(SessionSetNameRequest);

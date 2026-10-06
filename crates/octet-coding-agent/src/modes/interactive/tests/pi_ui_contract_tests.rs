@@ -81,7 +81,7 @@ fn component_key(app: &mut App, shell: &mut InteractiveShell, code: KeyCode) {
     let event = Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE));
     assert!(
         app.executable_extensions
-            .route_remote_ui_event(shell, &event),
+            .route_remote_ui_event(shell, &event, false),
         "native focused surface must own its input"
     );
 }
@@ -183,7 +183,7 @@ export default pi => pi.registerCommand('overlay', {handler: async (_, ctx) => {
     .await;
     let resize = Event::Resize(29, 12);
     app.executable_extensions
-        .route_remote_ui_event(&mut shell, &resize);
+        .route_remote_ui_event(&mut shell, &resize, false);
     pump_until(&mut app, &mut shell, |frame| {
         frame.contains("NATIVE-OVERLAY width=29")
     })
@@ -392,8 +392,10 @@ export default pi => {
         command(&mut app, &mut shell, &format!("seed-{i}"))
             .await
             .unwrap();
-        component_key(&mut app, &mut shell, KeyCode::Enter);
-        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let mut input = futures_util::stream::iter([Ok(Event::Key(
+            crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ))])
+        .chain(futures_util::stream::pending());
         let mut scroll = tokio::time::interval(Duration::from_millis(16));
         let mut extensions = tokio::time::interval(Duration::from_millis(10));
         let (watcher, mut reload, mut tick) = super::support::test_reload();
@@ -416,7 +418,7 @@ export default pi => {
         .expect("custom editor submission did not reach the native composer")
         .unwrap();
         match idle {
-            Idle::Command(command) if text.starts_with('/') => assert_eq!(command, text),
+            Idle::Command(command) if text.starts_with('/') => assert_eq!(command.trim_end(), text),
             Idle::Submit(input) if !text.starts_with('/') => assert_eq!(input.display_text, text),
             _ => panic!("custom editor bypassed native admission for {text}"),
         }
@@ -468,10 +470,8 @@ export default pi => {
                 KeyModifiers::NONE
             },
         ));
-        assert!(app
-            .executable_extensions
-            .route_remote_ui_event(&mut shell, &event));
-        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let mut input =
+            futures_util::stream::iter([Ok(event)]).chain(futures_util::stream::pending());
         let mut ticker = tokio::time::interval(Duration::from_millis(5));
         let mut pending = VecDeque::new();
         let ended = tokio::time::timeout(

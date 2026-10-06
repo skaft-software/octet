@@ -1,9 +1,6 @@
 //! Foreground leases for cached API 0.4 remote components. No render RPCs.
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use octet_agent::extension_process::{
@@ -19,6 +16,7 @@ use octet_agent::extension_remote_ui::{
 
 use crate::tui::extension_components::{ExtensionComponentSurface, MAX_LIVE_COMPONENTS};
 use crate::tui::view::InteractiveShell;
+use octet_agent::extension_remote_ui::ExtensionRemoteUiEditorText;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Projection {
@@ -43,6 +41,8 @@ struct ChromeLease {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MountView {
     pub(crate) id: String,
+    /// Extension-local surface identifier this mount was opened with.
+    pub(crate) surface_id: String,
     pub(crate) title: String,
     pub(crate) placement: ExtensionRemoteUiPlacement,
     pub(crate) columns: u16,
@@ -84,11 +84,12 @@ struct EditorRecovery {
     input_revision: u64,
     acknowledged_input_revision: u64,
     checkpoint_revision: u64,
+    /// Native draft revision the component's next checkpoint answers.
     composer_revision: u64,
-    // A native command may move focus into a panel before its editor receives
-    // admission. Permit only that acknowledged draft's empty clear checkpoint.
-    accepted_submission: Arc<AtomicU64>,
-    last_submission_revision: u64,
+    // The host cleared the slot: an admitted command may move focus into a
+    // panel before its editor answers, so permit only that acknowledged empty
+    // clear checkpoint and nothing else while focus is elsewhere.
+    expected_clear: bool,
 }
 
 impl EditorRecovery {
@@ -316,9 +317,8 @@ impl RemoteUi {
                         input_revision: 0,
                         acknowledged_input_revision: 0,
                         checkpoint_revision: 0,
-                        accepted_submission: Arc::new(AtomicU64::new(0)),
-                        last_submission_revision: 0,
                         composer_revision: shell.extension_editor_snapshot().revision,
+                        expected_clear: false,
                     });
                 let mut result = serde_json::json!({"columns": columns, "rows": rows});
                 if editor.is_some() {
@@ -327,9 +327,10 @@ impl RemoteUi {
                 self.mounts.push(Mount {
                     process,
                     owner,
-                    surface_id,
+                    surface_id: surface_id.clone(),
                     view: MountView {
                         id,
+                        surface_id: surface_id.clone(),
                         title,
                         placement,
                         columns,
@@ -418,50 +419,78 @@ impl RemoteUi {
     }
 
     pub(super) fn editor_owns_composer(&self) -> bool {
-        self.mounts.iter().any(|mount| mount.editor.is_some())
+        self.editor_mount().is_some()
     }
 
-    /// Local half of the synchronous process checkpoint commit. The caller must
-    /// hold `ExtensionProcess::commit_editor_checkpoint`'s disposition through
-    /// this mutation and ACK admission; never reenter process APIs here.
-    pub(super) fn validate_editor_submission(
+    /// Deliver one host decision for the composer slot to the mounted editor.
+    /// The component applies the text and answers with a `composer/set`
+    /// checkpoint, so undo/paste state never leaves its owner on a refusal.
+    /// The mount's expected native revision advances with the host decision, so
+    /// the component's answering checkpoint is not mistaken for a stale draft.
+    pub(super) fn deliver_editor_text(
         &mut self,
-        owner: &ExtensionResourceOwner,
-        checkpoint: &ExtensionEditorCheckpoint,
-        shell: &InteractiveShell,
-    ) -> Result<Arc<AtomicU64>, Refusal> {
-        let invalid = |detail: &str| (ExtensionRequestFailure::InvalidRequest, detail.to_owned());
-        let mount = self
-            .mounts
-            .iter_mut()
-            .find(|mount| {
-                mount.owner == *owner
-                    && mount.surface_id == checkpoint.surface_id
-                    && mount.view.id == checkpoint.mount_id
+        write: &crate::tui::view::ComposerSlotWrite,
+        shell: &mut InteractiveShell,
+    ) {
+        let Some(index) = self.mounts.iter().position(|mount| {
+            mount.editor.is_some()
+                && mount.view.id == write.mount_id
+                && mount.view.surface_id == write.surface_id
+        }) else {
+            return;
+        };
+        let text = write.text.clone().unwrap_or_default();
+        let clears = write.text.is_none();
+        let editor_input = if write.paste {
+            let mount = &mut self.mounts[index];
+            let editor = mount.editor.as_mut().expect("editor mount");
+            if editor.input_revision == MAX_EXTENSION_REMOTE_UI_REVISION {
+                if let Some(notice) = self.remove(index, "editor input revision exhausted", true) {
+                    shell.notice(notice);
+                }
+                return;
+            }
+            editor.input_revision += 1;
+            Some(ExtensionRemoteUiEditorInput {
+                mount_id: mount.view.id.clone(),
+                input_revision: editor.input_revision,
             })
-            .ok_or_else(|| invalid("editor submission belongs to a retired or foreign mount"))?;
-        let editor = mount
-            .editor
-            .as_mut()
-            .ok_or_else(|| invalid("submission requires an editor mount"))?;
-        let snapshot = shell.extension_editor_snapshot();
-        if !mount
-            .process
-            .remote_ui_surface_is_current(owner, &checkpoint.surface_id)
-            || shell.remote_ui_input_blocked()
-            || shell.close_requested()
-            || !snapshot.focused
-            || snapshot.revision != editor.composer_revision
-            || checkpoint.input_revision != editor.acknowledged_input_revision
-            || checkpoint.checkpoint_revision != editor.checkpoint_revision
-            || checkpoint.checkpoint_revision <= editor.last_submission_revision
-        {
-            return Err(invalid(
-                "editor submission no longer owns the acknowledged draft",
-            ));
+        } else {
+            None
+        };
+        let result =
+            self.mounts[index]
+                .process
+                .notify_remote_ui_editor_text(ExtensionRemoteUiEditorText {
+                    surface_id: self.mounts[index].view.surface_id.clone(),
+                    text,
+                    paste: write.paste,
+                    editor_input,
+                });
+        match result {
+            Ok(()) => {
+                if let Some(editor) = self.mounts[index].editor.as_mut() {
+                    editor.composer_revision = shell.extension_editor_snapshot().revision;
+                    editor.expected_clear = clears;
+                }
+            }
+            Err(error) => {
+                if let Some(notice) = self.remove(index, "remote UI editor write failed", true) {
+                    shell.notice(notice);
+                }
+                shell.error(format!(
+                    "remote UI editor closed because the slot write failed: {error}"
+                ));
+            }
         }
-        editor.last_submission_revision = checkpoint.checkpoint_revision;
-        Ok(Arc::clone(&editor.accepted_submission))
+    }
+
+    /// The live composer-slot editor mount, if one owns the slot.
+    pub(super) fn editor_mount(&self) -> Option<&MountView> {
+        self.mounts
+            .iter()
+            .find(|mount| mount.editor.is_some())
+            .map(|mount| &mount.view)
     }
 
     pub(super) fn checkpoint_editor(
@@ -494,10 +523,15 @@ impl RemoteUi {
             ));
         }
         let snapshot = shell.extension_editor_snapshot();
+        // The host cleared the slot and the component answers that exact clear.
+        // A native command can move focus into a panel before the answer
+        // arrives, so only this acknowledged empty replacement is admitted
+        // without focus; an unrelated draft still cannot write while a panel
+        // owns input.
         let admitted_clear = text.is_empty()
+            && editor.expected_clear
             && checkpoint.input_revision == editor.acknowledged_input_revision
-            && editor.accepted_submission.load(Ordering::Acquire) == editor.checkpoint_revision
-            && editor.checkpoint_revision != 0;
+            && checkpoint.checkpoint_revision > editor.checkpoint_revision;
         if (!snapshot.focused && !admitted_clear) || snapshot.revision != editor.composer_revision {
             return Err(invalid(
                 "native composer changed or has another input owner",
@@ -506,15 +540,16 @@ impl RemoteUi {
         // The process guard excludes concurrent cancellation and retirement;
         // the same shell owner serializes rescue, local edits and focus changes.
         let committed = if admitted_clear {
-            shell.clear_editor();
-            shell.extension_editor_snapshot()
+            // This is the receipt for the host's already-applied clear, not
+            // another text decision. Re-clearing here creates an echo loop.
+            snapshot
         } else {
             shell.extension_set_editor(text)
         };
         editor.composer_revision = committed.revision;
         editor.acknowledged_input_revision = checkpoint.input_revision;
         editor.checkpoint_revision = checkpoint.checkpoint_revision;
-        editor.accepted_submission.store(0, Ordering::Release);
+        editor.expected_clear = false;
         Ok(())
     }
 
@@ -612,7 +647,17 @@ impl RemoteUi {
         true
     }
 
-    pub(super) fn route_input(&mut self, shell: &mut InteractiveShell, event: &Event) -> bool {
+    /// Route one terminal event to a remote surface. One terminal owner keeps a
+    /// fixed order: the host's reserved grammar and slash menu run before the
+    /// composer slot's editor, while an explicit full-screen extension view is
+    /// a deliberate takeover. `active` is the run state the native policy is
+    /// classifying against.
+    pub(super) fn route_input(
+        &mut self,
+        shell: &mut InteractiveShell,
+        event: &Event,
+        active: bool,
+    ) -> bool {
         if shell.remote_ui_input_blocked() {
             return false;
         }
@@ -628,13 +673,34 @@ impl RemoteUi {
         else {
             return false;
         };
+        let fullscreen =
+            self.mounts[index].view.placement == ExtensionRemoteUiPlacement::Fullscreen;
+        if !fullscreen && !shell.slot_editor_takes_key(event, active) {
+            // Host-reserved keys, the open slash menu, and every non-key event
+            // keep their native owner. The slot editor sees only the remainder.
+            return false;
+        }
         if matches!(event, Event::Key(key) if matches!(key.code, KeyCode::Char('d' | 'D')) && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             // Only a fresh press requests exit; no kind of Ctrl+D is component data.
             return !matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press);
         }
+        if !fullscreen {
+            if let Event::Paste(text) = event {
+                let mount = &self.mounts[index].view;
+                let write = crate::tui::view::ComposerSlotWrite {
+                    surface_id: mount.surface_id.clone(),
+                    mount_id: mount.id.clone(),
+                    text: Some(text.clone()),
+                    paste: true,
+                };
+                self.deliver_editor_text(&write, shell);
+                return true;
+            }
+        }
         if let Event::Key(key) = event {
-            if matches!(key.code, KeyCode::Char('g' | 'G'))
+            if fullscreen
+                && matches!(key.code, KeyCode::Char('g' | 'G'))
                 && key.modifiers.contains(KeyModifiers::CONTROL)
             {
                 if key.kind == KeyEventKind::Press {
@@ -675,6 +741,9 @@ impl RemoteUi {
             }
             return true;
         }
+        if !fullscreen {
+            return false;
+        }
         if let Event::Mouse(mouse) = event {
             let mount = &self.mounts[index];
             if mount.view.mouse_capture
@@ -699,9 +768,7 @@ impl RemoteUi {
         // Unsupported component gestures never mutate the hidden composer or
         // silently pretend to have reached an editor checkpoint.
         if matches!(event, Event::Paste(_)) {
-            if self.mounts[index].editor.is_some() {
-                shell.notice("Paste was not delivered: this custom editor transport does not support paste. Use Ctrl+G to paste in the native editor.");
-            }
+            shell.notice("Paste is not supported by this custom editor transport. Use the native editor to paste attachments.");
             return true;
         }
         false

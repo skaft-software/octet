@@ -173,7 +173,6 @@ pub(super) fn emulated_shell_with_mode(
     tui.start();
     (
         InteractiveShell {
-            submitted_draft: Default::default(),
             input_dispatch: input_dispatch::InputDispatch::new(
                 crate::tui::keymap::keybindings::KeybindingsManager::current_platform(),
             ),

@@ -1464,6 +1464,24 @@ impl ExtensionProcess {
         Self::queue_remote_ui_notification(&connection, methods::UI_KEY, &key)
     }
 
+    /// Queues a host-issued composer-slot text replacement for one mounted
+    /// editor. The component answers with an ordinary `composer/set`
+    /// checkpoint, so pastes and undo stay with the genuine editor while the
+    /// host owns completion, clear and submit decisions.
+    pub fn notify_remote_ui_editor_text(
+        &self,
+        text: ExtensionRemoteUiEditorText,
+    ) -> Result<(), ExtensionRuntimeError> {
+        text.validate()
+            .map_err(|(_, detail)| ExtensionRuntimeError::Protocol(detail))?;
+        let connection = read_std_lock(&self.inner.connection);
+        if !read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_COMPOSER) {
+            return Ok(());
+        }
+        self.remote_ui_notification_owner(&connection, &text.surface_id)?;
+        Self::queue_remote_ui_notification(&connection, methods::UI_EDITOR_TEXT, &text)
+    }
+
     /// Queues normalized mouse input only for an admitted fullscreen capture
     /// lease, without touching the terminal or waiting for extension rendering.
     pub fn notify_remote_ui_mouse(

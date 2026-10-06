@@ -1051,48 +1051,6 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     }
                 })?;
             }
-            methods::COMPOSER_SUBMIT => {
-                let Some((request, admitted)) = admit_host_request::<ComposerSubmitRequest>(
-                    state,
-                    object,
-                    method,
-                    EXTENSION_FEATURE_COMPOSER,
-                    params,
-                )?
-                else {
-                    return Ok(());
-                };
-                if let Err(failure) = require_remote_ui(state) {
-                    return refuse_admitted_request(
-                        state,
-                        &admitted,
-                        (ExtensionRequestFailure::UnsupportedFeature, failure),
-                    );
-                }
-                if let Err(failure) = request.editor_checkpoint.validate().and_then(|()| {
-                    bounded_plain_text_failure(
-                        "composer text",
-                        &request.text,
-                        MAX_EXTENSION_COMPOSER_TEXT_BYTES,
-                    )
-                }) {
-                    return refuse_admitted_request(state, &admitted, failure);
-                }
-                let operation = ExtensionComposerOperation::Submit {
-                    text: request.text,
-                    follow_up: request.follow_up,
-                    owner: admitted.owner.clone(),
-                    checkpoint: request.editor_checkpoint,
-                };
-                dispatch_host_request_event(state, &admitted, move |admitted| {
-                    ExtensionEvent::ComposerRequested {
-                        request_id: admitted.request_id.clone(),
-                        generation: admitted.generation,
-                        owner: Some(admitted.owner.clone()),
-                        operation,
-                    }
-                })?;
-            }
             methods::COMPOSER_SET | methods::COMPOSER_INSERT => {
                 let Some((request, admitted)) = admit_host_request::<ComposerTextRequest>(
                     state,

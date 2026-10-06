@@ -302,110 +302,14 @@ impl ExecutableExtensions {
         discarded
     }
 
-    pub(crate) fn has_editor_submission(&self) -> bool {
-        self.pending_host_requests.iter().any(|pending| {
-            matches!(
-                pending.operation,
-                HostRequestOperation::Composer(ExtensionComposerOperation::Submit { .. })
-            )
-        })
-    }
-
-    /// Revalidate the exact foreground mount immediately before native input
-    /// dispatch. No background pump can turn a submission into a user message.
-    pub(crate) fn begin_editor_submission(
-        &mut self,
-        shell: &mut InteractiveShell,
-        active: bool,
-    ) -> Option<(
-        crate::tui::view::ComposerAdmission,
-        crate::tui::keymap::InputAction,
-    )> {
-        let index = self.pending_host_requests.iter().position(|pending| {
-            matches!(
-                pending.operation,
-                HostRequestOperation::Composer(ExtensionComposerOperation::Submit { .. })
-            )
-        })?;
-        let pending = self
-            .pending_host_requests
-            .remove(index)
-            .expect("queued submission");
-        let HostRequestOperation::Composer(ExtensionComposerOperation::Submit {
-            text,
-            follow_up,
-            owner,
-            checkpoint,
-        }) = pending.operation
-        else {
-            unreachable!("selected submission")
-        };
-        let validation = if self.resource_owner.as_deref() != Some(owner.session_id.as_str())
-            || pending
-                .process
-                .exec_request_is_cancelled(&pending.request_id, pending.generation)
-        {
-            Err((
-                ExtensionRequestFailure::NotForegroundOwner,
-                "editor submission owner retired".into(),
-            ))
-        } else {
-            self.remote_ui
-                .validate_editor_submission(&owner, &checkpoint, shell)
-        };
-        let accepted_checkpoint = match validation {
-            Ok(accepted) => accepted,
-            Err((failure, detail)) => {
-                self.refuse_host_request(
-                    pending.process,
-                    pending.request_id,
-                    pending.generation,
-                    failure,
-                    detail,
-                );
-                return None;
-            }
-        };
-        let action = crate::tui::keymap::composer_action(&text, active, follow_up);
-        let admission = shell.begin_composer_admission(text, move |accepted| {
-            if accepted {
-                accepted_checkpoint.store(
-                    checkpoint.checkpoint_revision,
-                    std::sync::atomic::Ordering::Release,
-                );
-            }
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(
-                    EXTENSION_UI_EDITOR_RESPONSE_DEADLINE,
-                    pending.process.respond_to_extension_request(
-                        pending.request_id,
-                        pending.generation,
-                        ExtensionRequestOutcome::Ok(serde_json::json!({"accepted": accepted})),
-                    ),
-                )
-                .await;
-            });
-        });
-        Some((admission, action))
-    }
-
     /// Answer the requests the live shell can resolve. Session-entry requests
     /// stay queued for the product loop that owns the session store.
     pub(super) fn drain_host_requests_into_shell(&mut self, shell: &mut InteractiveShell) {
-        // Submission belongs to the native idle/active input owner, not this
-        // background UI pump. Keep it bounded in the same admission queue.
         for _ in 0..self.pending_host_requests.len() {
             let pending = self
                 .pending_host_requests
                 .pop_front()
                 .expect("queued request");
-            if matches!(
-                pending.operation,
-                HostRequestOperation::Composer(ExtensionComposerOperation::Submit { .. })
-            ) {
-                self.pending_host_requests.push_back(pending);
-                continue;
-            }
             if let Some(notice) = pending.discard_notice() {
                 self.diagnostics.push(notice.clone());
                 shell.notice(notice);
@@ -414,9 +318,6 @@ impl ExecutableExtensions {
             let name = pending.process.descriptor().manifest.name.clone();
             let outcome = match pending.operation {
                 HostRequestOperation::Composer(operation) => match operation {
-                    ExtensionComposerOperation::Submit { .. } => {
-                        unreachable!("submission stays with the input owner")
-                    }
                     ExtensionComposerOperation::Get => ExtensionRequestOutcome::Ok(
                         serde_json::json!({ "text": shell.extension_editor_snapshot().text }),
                     ),

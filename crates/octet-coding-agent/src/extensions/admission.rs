@@ -302,9 +302,6 @@ pub(super) fn validate_host_request(
             }
             ExtensionComposerOperation::Checkpoint {
                 text, checkpoint, ..
-            }
-            | ExtensionComposerOperation::Submit {
-                text, checkpoint, ..
             } => {
                 checkpoint.validate()?;
                 bounded_host_request_text("composer text", text, MAX_EXTENSION_COMPOSER_TEXT_BYTES)

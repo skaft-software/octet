@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 
 use crate::extension_process::{
     ExtensionEditorCheckpoint, ExtensionRequestFailure, ExtensionRequestId, ExtensionResourceOwner,
+    MAX_EXTENSION_EDITOR_TEXT_BYTES,
 };
 
 /// Optional feature offered only when a remote UI frontend is bound.
@@ -460,6 +461,49 @@ pub enum ExtensionRemoteUiKeyModifier {
     Control,
     /// Super/Command modifier.
     Super,
+}
+
+/// Host-to-extension `ui/editor-text` notification payload. The one composer
+/// slot owns text: a mounted editor applies this to its genuine component and
+/// answers with an ordinary `composer/set` checkpoint, so the mount's paste
+/// and undo state stays with the component while the host stays authoritative
+/// for completion and clear decisions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionRemoteUiEditorText {
+    /// Editor surface identifier returned by the mount's own open.
+    pub surface_id: String,
+    /// Complete bounded plain-text replacement for the slot draft.
+    pub text: String,
+    /// Paste at the component's caret instead of replacing its draft.
+    #[serde(default)]
+    pub paste: bool,
+    /// Host-issued input clock, required for paste.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_input: Option<ExtensionRemoteUiEditorInput>,
+}
+
+impl ExtensionRemoteUiEditorText {
+    /// Validates the bounded slot write, not its live mount authority.
+    pub fn validate(&self) -> ValidationResult {
+        validate_surface_id(&self.surface_id)?;
+        if self.paste != self.editor_input.is_some() {
+            return Err(invalid("editor paste requires an issued input clock"));
+        }
+        if let Some(input) = &self.editor_input {
+            input.validate()?;
+        }
+        if self.text.len() > MAX_EXTENSION_EDITOR_TEXT_BYTES {
+            return Err(bounds("editor text exceeds its byte limit"));
+        }
+        if self.text.chars().any(|character| {
+            character == '\u{1b}'
+                || (character.is_control() && !matches!(character, '\n' | '\t' | '\r'))
+        }) {
+            return Err(invalid("editor text contains a terminal control character"));
+        }
+        Ok(())
+    }
 }
 
 /// Host-issued input clock for one custom-editor mount. Render clocks are separate.

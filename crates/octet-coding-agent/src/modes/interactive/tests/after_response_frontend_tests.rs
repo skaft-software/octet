@@ -58,7 +58,7 @@ export default pi => pi.registerCommand('native-keys', { handler: async (_, ctx)
     ));
     assert!(app
         .executable_extensions
-        .route_remote_ui_event(&mut shell, &key));
+        .route_remote_ui_event(&mut shell, &key, false));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             apply_extension_background(&mut shell, &mut app.executable_extensions);

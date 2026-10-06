@@ -48,7 +48,6 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
       }
       else if (frame.method === 'ui/autocomplete/register') result = { accepted: options.completionAccepted ?? true };
       else if (frame.method === 'composer/get') result = { text: options.composer ?? 'existing draft' };
-      else if (frame.method === 'composer/submit') result = { accepted: true };
       else if (frame.method === 'session/append_entry') result = { entry_id: 'host-entry' };
       else if (frame.method === 'composer/set' && frame.params.editor_checkpoint) {
         const { input_revision, checkpoint_revision } = frame.params.editor_checkpoint;

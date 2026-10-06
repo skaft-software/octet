@@ -486,11 +486,21 @@ pub(super) fn render_input_suggestions(
         return extension;
     }
     let slash = render_slash_suggestions(state, width, max_rows);
-    if slash.is_empty() {
-        render_path_suggestions(state, width, max_rows)
-    } else {
-        slash
+    if !slash.is_empty() {
+        return slash;
     }
+    // An extension editor owns its own non-command completions (mentions, paths
+    // and extension providers). The host popup is the command registry; it must
+    // not open a second list beside the component's own.
+    if state
+        .extension_ui
+        .remote
+        .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+        .is_some()
+    {
+        return Vec::new();
+    }
+    render_path_suggestions(state, width, max_rows)
 }
 
 fn steering_preview_text(state: &ShellState, message: &str) -> String {

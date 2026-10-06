@@ -1415,6 +1415,10 @@ pub(crate) struct ShellState {
     /// Current host-projected extension UI. It contains only semantic text and
     /// finite roles; rendering remains owned by the shell theme and layout.
     extension_ui: ShellExtensionUi,
+    /// Host decision for the composer slot's editor text, delivered by the
+    /// extension host on its next drain. One slot, one latest write: an
+    /// admission refusal replaces a pending clear instead of racing it.
+    pending_composer_write: Option<composer_slot::ComposerSlotWrite>,
     /// Bounded one-shot intents, drained only by the owning renderer.
     desktop_notifications: Vec<(String, String)>,
     /// One bounded extension autocomplete result awaiting explicit host accept.
@@ -1807,6 +1811,7 @@ impl ShellState {
             slash_scroll: Default::default(),
             slash_popup_dismissed: Default::default(),
             extension_ui: Default::default(),
+            pending_composer_write: Default::default(),
             desktop_notifications: Default::default(),
             extension_autocomplete: Default::default(),
             extension_autocomplete_selection: Default::default(),
@@ -3579,12 +3584,11 @@ fn application_history_budget_scales_with_viewport() {
     assert_eq!(hydration_entry_budget(u16::MAX), 512);
 }
 
-mod composer_admission;
-pub(crate) use composer_admission::ComposerAdmission;
+mod composer_slot;
+pub(crate) use composer_slot::ComposerSlotWrite;
 
 /// Full-screen terminal shell. It owns all terminal I/O and no Agent state.
 pub struct InteractiveShell {
-    submitted_draft: std::rc::Rc<RefCell<Option<composer_admission::SubmittedDraft>>>,
     input_dispatch: input_dispatch::InputDispatch,
     // Production rendering runs on a dedicated OS thread. Tests keep an
     // inline TUI so they can inspect rendering deterministically without a
@@ -3657,7 +3661,6 @@ impl InteractiveShell {
             })?;
 
         Ok(Self {
-            submitted_draft: Default::default(),
             input_dispatch: input_dispatch::InputDispatch::new(
                 crate::tui::keymap::keybindings::KeybindingsManager::for_user(),
             ),
@@ -3730,7 +3733,6 @@ impl InteractiveShell {
         tui.add_child(Box::new(ShellComponent::new(state.clone(), false)));
         tui.start();
         Self {
-            submitted_draft: Default::default(),
             input_dispatch: input_dispatch::InputDispatch::new(
                 crate::tui::keymap::keybindings::KeybindingsManager::current_platform(),
             ),
@@ -5141,9 +5143,6 @@ impl InteractiveShell {
         editor_display: String,
         attachments: Vec<composer::Attachment>,
     ) {
-        if self.reject_submitted_text() {
-            return;
-        }
         let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
         state.ledger.restore(attachments);
@@ -5156,6 +5155,8 @@ impl InteractiveShell {
             format!("{editor_display}\n\n{current}")
         });
         invalidate_editor_autocomplete(&mut state);
+        drop(state);
+        self.sync_composer_slot_draft();
     }
 
     fn push_queued_steering(&mut self, mut queued: QueuedSteering) {
@@ -5193,6 +5194,8 @@ impl InteractiveShell {
             format!("{restored}\n\n{current}")
         });
         invalidate_editor_autocomplete(&mut state);
+        drop(state);
+        self.sync_composer_slot_draft();
     }
 
     pub fn apply_edit(&mut self, action: EditAction) {
@@ -5321,7 +5324,9 @@ impl InteractiveShell {
         invalidate_editor_autocomplete(&mut state);
     }
 
-    /// Complete a unique slash-command prefix at the end of the prompt.
+    /// Complete a unique slash-command prefix at the end of the prompt. A
+    /// mounted slot editor receives the completed draft instead of the hidden
+    /// mirror, so its own pastes and undo stay consistent with what it shows.
     pub fn complete_slash_command(&mut self) {
         let mut state = self.state.borrow_mut();
         if state.editor.cursor() != state.editor.text().len() {
@@ -5334,9 +5339,11 @@ impl InteractiveShell {
                 suggestion.name,
                 if suggestion.accepts_argument { " " } else { "" }
             );
-            state.editor.set_text(completed);
+            state.editor.set_text(completed.clone());
             state.slash_popup_dismissed = true;
             invalidate_editor_autocomplete(&mut state);
+            drop(state);
+            self.set_composer_slot_text(completed);
         }
     }
 
@@ -5393,12 +5400,15 @@ impl InteractiveShell {
             SlashMenuAction::Select => {
                 let command = &suggestions[state.slash_selection];
                 let selected = format!("/{}", command.name);
-                state.editor.set_text(format!(
+                let completed = format!(
                     "{selected}{}",
                     if command.accepts_argument { " " } else { "" }
-                ));
+                );
+                state.editor.set_text(completed.clone());
                 state.slash_popup_dismissed = true;
                 invalidate_editor_autocomplete(&mut state);
+                drop(state);
+                self.set_composer_slot_text(completed);
                 return true;
             }
             SlashMenuAction::Close => {
@@ -6103,8 +6113,7 @@ impl InteractiveShell {
     }
 
     pub fn pending(&self) -> String {
-        self.submitted_text()
-            .unwrap_or_else(|| self.state.borrow().editor.text().to_owned())
+        self.state.borrow().editor.text().to_owned()
     }
 
     pub(crate) fn has_prompt_template(&self, name: &str) -> bool {
@@ -6223,11 +6232,10 @@ impl InteractiveShell {
         }
     }
 
-    /// Drain the editor and resolve chips into ordered parts.
+    /// Drain the editor and resolve chips into ordered parts. A mounted
+    /// composer-slot editor is told to clear on the same decision, so admission
+    /// acceptance is what empties the slot.
     pub fn drain_composed(&mut self) -> ComposedInput {
-        if let Some(text) = self.consume_submitted_text() {
-            return ComposedInput::from_text(text);
-        }
         let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
         let text = state.editor.take_text();
@@ -6236,20 +6244,20 @@ impl InteractiveShell {
         // Ordinary path text is not consent to read or transmit a file. Only
         // attachment chips already shown by explicit paste/@ selection resolve
         // to media here; raw-key drops remain inspectable text.
-        if state.ledger.is_empty() {
+        let composed = if state.ledger.is_empty() {
             ComposedInput::from_text(text)
         } else {
             composer::compose(text, &mut state.ledger)
-        }
+        };
+        drop(state);
+        self.clear_composer_slot();
+        composed
     }
 
     /// Put a failed submission back in the editor without losing attachment
     /// payloads. Composition hooks run before persistence, so their failure
     /// must be observationally equivalent to a validation error.
     pub fn restore_composed(&mut self, composed: ComposedInput) {
-        if self.reject_submitted_text() {
-            return;
-        }
         let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
         let current = state.editor.take_text();
@@ -6260,6 +6268,8 @@ impl InteractiveShell {
         });
         state.ledger.restore(composed.attachments);
         invalidate_editor_autocomplete(&mut state);
+        drop(state);
+        self.sync_composer_slot_draft();
     }
 
     /// Discard the current draft and every attachment it owns.
@@ -6272,12 +6282,11 @@ impl InteractiveShell {
         state.slash_scroll = 0;
         state.slash_popup_dismissed = false;
         invalidate_editor_autocomplete(&mut state);
+        drop(state);
+        self.clear_composer_slot();
     }
 
     pub fn drain_editor(&mut self) -> String {
-        if let Some(text) = self.consume_submitted_text() {
-            return text;
-        }
         let mut state = self.state.borrow_mut();
         let navigating_history = state.prompt_history_navigation.take().is_some();
         state.slash_selection = 0;
@@ -6290,6 +6299,8 @@ impl InteractiveShell {
             state.ledger.clear();
         }
         invalidate_editor_autocomplete(&mut state);
+        drop(state);
+        self.clear_composer_slot();
         text
     }
 

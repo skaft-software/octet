@@ -518,13 +518,47 @@ regressions prove that an invisible approval action cannot be confirmed,
 approval detail remains retained and rendered, and collapsed failures keep a
 bounded actionable reason.
 
+## One terminal owner and composer slot
+
+Octet/sexy-tui-rs alone owns terminal IO, the frame, transcript, chrome, status,
+queue indicators and slash popup. `view/composer_slot.rs` describes the single
+slot occupied by either the native editor or an extension editor projection.
+A Pi component computes lines extension-side; those cached lines replace only
+composer rows, never the whole screen. The surrounding native suggestions and
+footer remain independently laid out. Explicit fullscreen views retain their
+separate fullscreen placement and Ctrl+G rescue; editor mounts never do.
+
+The input policy resolves native reserved actions and user keybinding precedence,
+then the open native slash popup, before the slot editor receives editing input.
+Terminal consumers belong between host policy and the editor, not ahead of
+submit/cancel/close. Command registration combines native commands and executable
+extension contributions (including Pi); native names retain precedence and
+later collisions receive the owner's namespace. Public names are translated back
+to registered names only at the owner-fenced command dispatcher.
+
+The extension editor acknowledges completed keys/pastes using the existing
+`composer/set` mount/input/checkpoint fence. Native admission reads the expanded
+checkpoint draft, so slash commands, busy steering and follow-ups use the ordinary
+idle/active input path. No separate reverse submission RPC remains. Host text
+decisions (completion, accepted clear, restore, clipboard paste) use
+`ui/editor-text`; unchanged refused drafts do not reset paste payloads or undo.
+An empty clear receipt can finish after an admitted command opens a panel, without
+authorizing unrelated panel writes. Closing/crashing/reloading the component
+reveals the last acknowledged native recovery draft without replaying raw keys.
+
+pi-tui remains an extension-side library for Text, Box, Markdown, SelectList,
+width helpers and other components. The next editor phase replaces its host-work
+Editor implementation with a public-shape facade backed by native sexy-tui-rs
+state; that facade is distinct from retaining pi-tui's component-library role.
+See [the wire contract](../extensions/remote-ui.md) for ownership and bounds.
+
 ## Active-run controls
 
-- Enter queues a local, typed follow-up. Normal completion arms exactly one FIFO
+- Ctrl+S queues a local, typed follow-up. Normal completion arms exactly one FIFO
   dispatch through the idle prompt owner after the old Run and children settle.
   Session switches park local follow-ups by session path. Returning restores the
   drafts without carrying over dispatch authorization.
-- Ctrl+S admits live steering to RunControl at the next model boundary. Its
+- Enter admits live steering to RunControl at the next model boundary. Its
   pending display is removed only by the durable delivery acknowledgement;
   undelivered steering is restored on settlement.
 - Option+Up/Alt+Up recalls the newest editable pending message — an

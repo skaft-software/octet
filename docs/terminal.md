@@ -116,7 +116,11 @@ While octet works:
 Pi custom editors use the same native submission rules, including slash and
 extension commands. Their resolved Enter/follow-up keybindings are honored, and
 a rejected submission retains the genuine Pi Editor's draft, pastes and undo.
-This does not add a native slash-completion popup to arbitrary custom editors.
+The custom editor occupies the composer slot, not the screen: Octet keeps the
+transcript, chrome, queue indicators and one native slash popup. Native, executable
+extension and Pi commands share that popup; later name collisions are owner-qualified
+(`/extension:name`). Ctrl+G returns from explicit fullscreen views only, never
+unmounting the editor or footer.
 
 Native clipboard reads during active work don't block input, cancellation or run
 progress. A pending read is dropped when the run settles or is cancelled, or

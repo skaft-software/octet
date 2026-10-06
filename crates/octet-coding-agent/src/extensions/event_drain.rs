@@ -49,6 +49,11 @@ impl ExecutableExtensions {
                 self.remote_ui.accept_frame(process, frame);
             }
         }
+        // One slot, one latest host decision: completion, clear or a restored
+        // draft reaches the mounted component on the same drain as its frames.
+        if let Some(write) = shell.take_composer_slot_write() {
+            self.remote_ui.deliver_editor_text(&write, shell);
+        }
         let changed = shell.set_remote_ui(self.remote_ui.projection());
         if changed {
             shell.render();
@@ -56,18 +61,20 @@ impl ExecutableExtensions {
         changed
     }
 
-    /// Focused keys never reach the composer, keymap shortcuts, or passive
-    /// terminal-input observers. Reconcile before routing after every wake.
+    /// Focused keys reach a remote surface only after the host's reserved
+    /// grammar and open slash menu have had their chance. Reconcile before
+    /// routing after every wake.
     pub(crate) fn route_remote_ui_event(
         &mut self,
         shell: &mut InteractiveShell,
         event: &Event,
+        active: bool,
     ) -> bool {
         if let Event::Resize(columns, rows) = event {
             shell.set_size(*columns, *rows);
         }
         self.sync_remote_ui(shell);
-        let consumed = self.remote_ui.route_input(shell, event);
+        let consumed = self.remote_ui.route_input(shell, event, active);
         if consumed && shell.set_remote_ui(self.remote_ui.projection()) {
             shell.render();
         }

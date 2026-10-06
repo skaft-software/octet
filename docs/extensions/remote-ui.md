@@ -175,38 +175,21 @@ verify the exact returned revision pair, and publish a captured editor frame onl
 render newer text after awaiting an older checkpoint. Frame publication or
 painting alone does not establish a recovery checkpoint.
 
-### `composer/submit` — native composer admission
+### Native composer admission
 
-With API `0.4`, `composer` and `remote_ui`, a mounted editor submits expanded
-plain text through the native composer, **not** `session/send_user_message`:
+An editor occupies only the composer slot. Octet's terminal owner reserves
+submit/follow-up, clear, close, application bindings and its slash popup before
+routing ordinary editing keys to the component. There is no `composer/submit`
+reverse RPC and no custom-editor `session/send_user_message` submission path.
+Native admission reads the last acknowledged, expanded composer draft, parses
+slash commands through the same registry, steers busy Enter, and queues Ctrl+S
+follow-up. Refusal leaves the component's draft/pastes/undo untouched.
 
-```json
-{"jsonrpc":"2.0","id":"submit-1","method":"composer/submit","params":{"parent_request_id":7,"resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"host-issued-instance","process_generation":1},"text":"/model","follow_up":false,"editor_checkpoint":{"surface_id":"demo","mount_id":"host-editor-mount","input_revision":4,"checkpoint_revision":5}}}
-```
-
-The checkpoint must already be acknowledged. The same 256 KiB plain-text bound
-applies, with no implied attachment/file authority. The input owner rechecks the
-foreground owner, live mount, exact checkpoint, native draft revision and focus.
-Normal settlement of the mounting request does not cancel this retained editor
-request; rescue, cancellation and owner replacement still revoke it.
-
-Success returns `{"accepted":true}` after native admission consumes the draft;
-`{"accepted":false}` leaves it unconsumed (for example, a full follow-up queue, a
-host panel, or an empty or whitespace-only draft, which the native composer
-never submits).
-Invalid or retired mounts receive typed errors. Local slash commands, including
-registered extension commands, use native dispatch. Ordinary busy submissions
-steer; `follow_up:true` uses the local after-run queue. Both send normally when
-idle; skill invocations retain native idle-expansion rules.
-
-Keep draft, paste payloads and undo until acceptance. Then clear locally and
-checkpoint the clear with a newer checkpoint revision. If an admitted command
-opened a native panel, the host permits only that unchanged draft's empty clear
-checkpoint despite the focus transition; this grants no general panel write
-access. The Pi adapter defers the genuine Editor's destructive `submitValue`
-until acceptance and buffers bounded subsequent input without replaying it.
-Refusal never silently falls back to message injection. Arbitrary editor objects
-must likewise avoid destroying private state before their submission is admitted.
+An accepted submission clears the native draft and sends a `ui/editor-text`
+replacement to the component. Completion and restored drafts use the same seam.
+The answering checkpoint is an ordinary, exact-pair `composer/set` receipt;
+only the acknowledged empty clear may answer while a command's panel owns focus.
+That receipt does not grant general panel writes.
 
 ### `composer/history` — native prompt-history seed
 
@@ -225,9 +208,9 @@ retains the latest 100 prompts. The current draft, history navigation and native
 attachment payloads are preserved. This seed is UI-only, not session persistence
 or model context.
 
-The Pi adapter applies settings-only standard editors to this native composer
-instead of mounting a remote editor, keeping native slash completion available.
-Editors overriding inherited editor behavior still use the remote mount contract.
+Pi factories are invoked exactly once on the admitted component surface. Both
+settings-only and input/render-overriding editors occupy the composer slot;
+the native slash popup remains available around their projected rows.
 
 ## Host-to-extension notifications
 
@@ -239,6 +222,12 @@ Editors overriding inherited editor behavior still use the remote mount contract
   by open; the host issues a monotonically increasing revision starting at one
   before enqueueing each key. Press, repeat, and release all participate.
   Non-editor keys omit `editor_input`.
+- `ui/editor-text`: `{surface_id, text, paste, editor_input?}`. A bounded native
+  replacement/clear has `paste:false`; a paste has `paste:true` and the same
+  host-issued mount/input fence as a key. Paste enters the component at its
+  actual caret through bracketed-paste handling, preserving undo and payloads.
+  An unchanged replacement is an echo, not a reset. Reply with a newer ordinary
+  checkpoint before publishing the changed draft frame.
 - `ui/mouse`: `{surface_id, kind, button, x, y, modifiers, wheel_delta}`. Kinds:
   `press`, `release`, `drag`, `move`, `wheel`; buttons: `left`, `middle`, `right`,
   `none`. Coordinates are zero-based terminal cells. Positive wheel delta is
@@ -254,12 +243,14 @@ Editors overriding inherited editor behavior still use the remote mount contract
 
 Focused component keys/mouse gestures do not also edit the composer or reach
 ordinary terminal-input observers. Host confirmation/input panels retain
-priority. `Ctrl+G` is host rescue; `Ctrl+D` remains coordinated application close.
-`Escape` belongs to the focused component, so Doom can open its own menu.
+priority. `Ctrl+G` rescues only an explicit fullscreen view; it never unmounts
+an editor or its footer. `Ctrl+D` remains coordinated application close.
+`Escape` belongs to a fullscreen component, so Doom can open its own menu;
+in the composer, native application and popup bindings remain authoritative.
 
 ## Immediate rescue and recovery limits
 
-`Ctrl+G` retires the focused mount immediately, without waiting for a final
+`Ctrl+G` retires the focused **fullscreen** mount immediately, without waiting for a final
 checkpoint, extension response, or grace period. An unresponsive extension cannot
 hold the native composer hostage. Close, crash, reload, session replacement, and
 shutdown also discard stale mounts. Editor recovery reveals the host's last
@@ -273,8 +264,8 @@ If issued input remains unacknowledged, the host reports:
 
 `N` counts events, not lost characters: an unfinished event may be a no-op or a
 release. The host does not pretend those edits were recovered and does not replay
-raw keys. Unsupported terminal paste while an editor is mounted is explicitly
-reported rather than silently applied to the hidden native composer. On voluntary
+raw keys. Terminal/clipboard paste is fenced component input, never a silent
+write into a hidden native draft. On voluntary
 close, an extension may await accepted work before requesting `ui/close`; observed
 host rescue must instead stop queued effects and frame publication immediately.
 

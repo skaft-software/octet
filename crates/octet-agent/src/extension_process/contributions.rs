@@ -393,17 +393,6 @@ pub enum ExtensionComposerOperation {
         /// Plain-text prompts, at most 100 and 256 KiB in aggregate.
         entries: Vec<String>,
     },
-    /// Admit a custom-editor submission using the ordinary native input path.
-    Submit {
-        /// Expanded text to admit.
-        text: String,
-        /// Explicit follow-up rather than ordinary submission.
-        follow_up: bool,
-        /// Authoritative owner resolved by the host.
-        owner: ExtensionResourceOwner,
-        /// Last acknowledged editor checkpoint.
-        checkpoint: ExtensionEditorCheckpoint,
-    },
     /// Commit a recovery checkpoint for a currently owned API 0.4 editor mount.
     Checkpoint {
         /// Complete replacement text.
@@ -448,9 +437,6 @@ impl ExtensionComposerOperation {
         let text = match self {
             Self::Set { text } | Self::Insert { text } => Some(text),
             Self::Checkpoint {
-                text, checkpoint, ..
-            }
-            | Self::Submit {
                 text, checkpoint, ..
             } => {
                 checkpoint.validate().map_err(|(_, detail)| detail)?;

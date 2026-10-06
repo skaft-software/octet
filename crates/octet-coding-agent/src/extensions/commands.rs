@@ -118,22 +118,55 @@ impl ExecutableExtensions {
 
     /// Returns the executable command metadata needed by non-TUI discovery surfaces.
     pub fn command_suggestions_with_usage(&self) -> Vec<(String, String, Option<String>)> {
-        self.processes
-            .iter()
-            .flat_map(|process| {
-                process.contributions().commands.iter().map(|command| {
-                    (
-                        command.name.clone(),
-                        command.description.clone(),
-                        command.usage.clone(),
-                    )
-                })
-            })
+        self.command_registry()
+            .into_iter()
+            .map(|entry| (entry.public_name, entry.description, entry.usage))
             .collect()
+    }
+
+    /// The one slash-command registry. Native and product commands keep their
+    /// own precedence; every executable extension registration lands here, and
+    /// a name claimed twice is namespaced on the later owner rather than
+    /// silently shadowed by registration order.
+    pub(crate) fn command_registry(&self) -> Vec<RegisteredExtensionCommand> {
+        let mut registry: Vec<RegisteredExtensionCommand> = Vec::new();
+        for process in &self.processes {
+            let owner = process.descriptor().manifest.name.clone();
+            for command in &process.contributions().commands {
+                let mut public_name = command.name.clone();
+                if crate::commands::slash_commands()
+                    .iter()
+                    .any(|entry| entry.name == public_name)
+                    || public_name == "debug"
+                    || registry
+                        .iter()
+                        .any(|entry| entry.public_name == public_name)
+                {
+                    public_name = format!("{owner}:{}", command.name);
+                    // A second extension of the same manifest identity cannot
+                    // be told apart by a name; keep the first registration.
+                    if registry
+                        .iter()
+                        .any(|entry| entry.public_name == public_name)
+                    {
+                        continue;
+                    }
+                }
+                registry.push(RegisteredExtensionCommand {
+                    public_name,
+                    owner: owner.clone(),
+                    registered_name: command.name.clone(),
+                    description: command.description.clone(),
+                    usage: command.usage.clone(),
+                });
+            }
+        }
+        registry
     }
 
     /// Worker controls remain a runtime slash surface; extension setup stays
     /// in `/extensions`. Only the live first-party owner can advertise it.
+    #[cfg(test)]
     pub(crate) fn tui_command_suggestions(&self) -> Vec<(String, String)> {
         self.processes
             .iter()
@@ -154,14 +187,20 @@ impl ExecutableExtensions {
 
     /// Returns the manifest identity that owns one registered slash command.
     pub fn command_owner(&self, command: &str) -> Option<String> {
-        self.processes.iter().find_map(|process| {
-            process
-                .contributions()
-                .commands
-                .iter()
-                .any(|definition| definition.name == command)
-                .then(|| process.descriptor().manifest.name.clone())
-        })
+        self.command_registry()
+            .into_iter()
+            .find(|entry| entry.public_name == command)
+            .map(|entry| entry.owner)
+    }
+
+    /// The name the owning extension registered for a public registry entry.
+    /// Only the dispatcher needs it: a namespaced invocation still reaches the
+    /// extension under the name it declared.
+    pub(crate) fn registered_command_name(&self, owner: &str, command: &str) -> Option<String> {
+        self.command_registry()
+            .into_iter()
+            .find(|entry| entry.public_name == command && entry.owner == owner)
+            .map(|entry| entry.registered_name)
     }
 
     pub(crate) fn resolve_presentation_action(
@@ -744,6 +783,19 @@ impl ExecutableExtensions {
     }
 }
 
+/// One public slash-command identity in the single registry. A name claimed by
+/// more than one owner keeps its plain form for the first owner; later owners
+/// are addressed as `<owner>:<name>` so no registration silently shadows
+/// another and the owning extension still receives its declared name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegisteredExtensionCommand {
+    pub(crate) public_name: String,
+    pub(crate) owner: String,
+    pub(crate) registered_name: String,
+    pub(crate) description: String,
+    pub(crate) usage: Option<String>,
+}
+
 /// The transport request owns its process and cancellation/accounting lifetime.
 /// `advance` borrows the fleet only until completion or a lifecycle handoff.
 /// No extension receives a mutable App or a recursive lifecycle dispatcher.
@@ -878,7 +930,7 @@ impl OwnedExtensionCommand {
                             true
                         } else {
                             let consumed = confirmations.command_shell().is_some_and(|shell| {
-                                extensions.route_remote_ui_event(shell, &event)
+                                extensions.route_remote_ui_event(shell, &event, false)
                             });
                             !consumed && confirmations.command_event(event)
                         }

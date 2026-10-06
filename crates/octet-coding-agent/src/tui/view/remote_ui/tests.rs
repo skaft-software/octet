@@ -14,6 +14,7 @@ fn projection(size: (u16, u16), entries: &[(Placement, &str)]) -> Projection {
             .store_render(&id, size.0, vec![(*line).into()])
             .unwrap();
         mounts.push(MountView {
+            surface_id: "test-surface".into(),
             id,
             title: "x".repeat(256),
             placement: *placement,
