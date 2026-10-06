@@ -9,7 +9,7 @@ import { chromeAPI, dialogAPI, editorAPI } from './ui-api.mjs';
 import { currentModel, thinkingLevel, scopedModels, modelRegistry, registerProvider, unregisterProvider } from './providers.mjs';
 import { setModel, setThinkingLevel } from './model-control.mjs';
 import { registerTool, toolSnapshot, getAllTools, setActiveTools } from './tools.mjs';
-import { Editor } from '../node_modules/@earendil-works/pi-tui/dist/components/editor.js';
+import { Editor } from './editor.mjs';
 import { translateSessionEntries } from './session-mirror.mjs';
 import { compactionCallbackStore, requestCompaction } from './compaction.mjs';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';

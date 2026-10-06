@@ -218,6 +218,19 @@ fn editor_takes_key(
     if crate::tui::keymap::is_close_key(key) {
         return false;
     }
+    // Native registry menus own navigation before component hooks/consumers.
+    if key.kind == KeyEventKind::Press
+        && state.extension_autocomplete.as_ref().is_some_and(|menu| {
+            menu.revision == state.editor.revision()
+                && menu.text == state.editor.text()
+                && menu.cursor == state.editor.cursor()
+        })
+        && ["tui.select.up", "tui.select.down", "tui.input.tab"]
+            .iter()
+            .any(|id| bindings.matches(key, id))
+    {
+        return false;
+    }
     let action = crate::tui::keymap::translate_with_bindings(
         Some(event.clone()),
         active,

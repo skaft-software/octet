@@ -49,6 +49,7 @@ pub(crate) struct MountView {
     pub(crate) columns: u16,
     pub(crate) rows: u16,
     pub(crate) mouse_capture: bool,
+    pub(crate) native_editor: bool,
 }
 
 impl Projection {
@@ -77,6 +78,7 @@ struct Mount {
     view: MountView,
     revision: Option<u64>,
     editor: Option<EditorRecovery>,
+    editors: crate::native_editor::EditorService,
 }
 
 /// The hidden native composer is the recovery point, not the last painted frame.
@@ -149,6 +151,26 @@ fn validate_theme_list(themes: &[serde_json::Value]) -> Result<(), Refusal> {
 }
 
 impl RemoteUi {
+    pub(super) fn composer_editor_identity(
+        &self,
+    ) -> Option<(String, crate::native_editor::ComposerEditorIdentity)> {
+        let mount = self.mounts.iter().find(|mount| mount.editor.is_some())?;
+        Some((mount.view.id.clone(), mount.editors.composer_identity()?))
+    }
+
+    pub(super) fn composer_editor_matches(
+        &self,
+        snapshot: &crate::tui::view::ShellEditorSnapshot,
+    ) -> bool {
+        let Some(mount) = self.mounts.iter().find(|mount| mount.editor.is_some()) else {
+            return true;
+        };
+        mount
+            .editors
+            .composer_snapshot()
+            .is_some_and(|native| native.text == snapshot.text && native.cursor == snapshot.cursor)
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.mounts.is_empty() && self.chrome.is_none()
     }
@@ -174,6 +196,47 @@ impl RemoteUi {
             ExtensionRemoteUiOperation::Chrome { chrome } => {
                 use octet_agent::extension_remote_ui::ExtensionRemoteUiChrome as Chrome;
                 match chrome {
+                    Chrome::Editor {
+                        surface_id,
+                        mount_id,
+                        editor_id,
+                        operation,
+                    } => {
+                        if terminal_ceded
+                            || !process.remote_ui_surface_is_current(&owner, &surface_id)
+                        {
+                            return Err((
+                                ExtensionRequestFailure::NotForegroundOwner,
+                                "native editor terminal or surface lease retired".into(),
+                            ));
+                        }
+                        let mount = self
+                            .mounts
+                            .iter_mut()
+                            .find(|mount| mount.owner == owner && mount.surface_id == surface_id)
+                            .ok_or_else(|| {
+                                (
+                                    ExtensionRequestFailure::NotForegroundOwner,
+                                    "native editor surface retired".into(),
+                                )
+                            })?;
+                        if mount.view.placement == ExtensionRemoteUiPlacement::Editor {
+                            if mount_id.as_deref() != Some(mount.view.id.as_str()) {
+                                return Err((
+                                    ExtensionRequestFailure::InvalidRequest,
+                                    "native editor mount fence mismatch".into(),
+                                ));
+                            }
+                        } else if mount_id.is_some() {
+                            return Err((
+                                ExtensionRequestFailure::InvalidRequest,
+                                "composer mount fence on another placement".into(),
+                            ));
+                        }
+                        let reply = mount.editors.request(editor_id.as_deref(), operation)?;
+                        mount.view.native_editor = mount.editors.composer_identity().is_some();
+                        return Ok(reply);
+                    }
                     Chrome::Get => {
                         return Ok(serde_json::json!({
                             "tools_expanded": shell.verbose_tools(),
@@ -249,7 +312,8 @@ impl RemoteUi {
                                 state.working.interval_ms = interval_ms;
                             }
                             Chrome::HiddenThinking { label } => state.hidden_thinking_label = label,
-                            Chrome::Get
+                            Chrome::Editor { .. }
+                            | Chrome::Get
                             | Chrome::ThemeGet { .. }
                             | Chrome::ThemeList {}
                             | Chrome::ThemeSet { .. }
@@ -330,6 +394,7 @@ impl RemoteUi {
                     result["editor_mount_id"] = id.clone().into();
                 }
                 self.mounts.push(Mount {
+                    editors: crate::native_editor::EditorService::for_mount(id.clone()),
                     process,
                     owner,
                     surface_id: surface_id.clone(),
@@ -340,6 +405,7 @@ impl RemoteUi {
                         placement,
                         columns,
                         rows,
+                        native_editor: false,
                         mouse_capture,
                     },
                     revision: None,
@@ -464,6 +530,23 @@ impl RemoteUi {
         } else {
             None
         };
+        let mirror = shell.extension_editor_snapshot();
+        let cursor = if mirror.text == text {
+            mirror.cursor
+        } else {
+            text.len()
+        };
+        let native_changed = if write.paste {
+            None
+        } else {
+            match self.mounts[index].editors.replace_composer(&text, cursor) {
+                Ok(changed) => changed,
+                Err((_, detail)) => {
+                    shell.error(detail);
+                    return;
+                }
+            }
+        };
         let result =
             self.mounts[index]
                 .process
@@ -471,6 +554,7 @@ impl RemoteUi {
                     surface_id: self.mounts[index].view.surface_id.clone(),
                     text,
                     paste: write.paste,
+                    native_changed,
                     editor_input,
                 });
         match result {
@@ -550,7 +634,12 @@ impl RemoteUi {
             // another text decision. Re-clearing here creates an echo loop.
             snapshot
         } else {
-            shell.extension_set_editor(text)
+            let cursor = mount
+                .editors
+                .composer_snapshot()
+                .filter(|snapshot| snapshot.text == text)
+                .map(|snapshot| snapshot.cursor);
+            shell.extension_set_editor_at(text, cursor)
         };
         editor.composer_revision = committed.revision;
         editor.acknowledged_input_revision = checkpoint.input_revision;
