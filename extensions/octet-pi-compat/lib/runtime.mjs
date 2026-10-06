@@ -833,13 +833,9 @@ export class Runtime {
       // inbound request after the write callback.
       if (message.method === 'initialize') this.armAutocomplete();
       if (!this.stopping) {
-        const reply = this.transport.send({ jsonrpc: '2.0', id: message.id, result });
-        // Queue registration after the initialize reply, but install its promise
-        // before yielding: the host can query before the writer receipt arrives.
-        if (message.method === 'initialize') this.registerAutocomplete();
-        await reply;
+        await this.transport.send({ jsonrpc: '2.0', id: message.id, result });
         settlementError = undefined;
-        if (message.method === 'initialize') { startProviderRegistration(this); this.reportStartupIssues(); }
+        if (message.method === 'initialize') { this.registerAutocomplete(); startProviderRegistration(this); this.reportStartupIssues(); }
         if (message.method === 'provider/stream') startProviderStream(this, message.params.stream_id);
       }
     } catch (error) {

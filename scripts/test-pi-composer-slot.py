@@ -81,12 +81,17 @@ def main():
             for name, value in [("draft.txt", draft), ("slash.txt", popup)]:
                 path = args.output / name
                 path.write_text(value + "\n"); path.chmod(0o600)
-            path = args.output / "capture.ansi"
-            path.write_bytes(terminal.capture); path.chmod(0o600)
+        except Exception as error:
+            report.update({"result": "fail", "error": str(error)})
+            raise
         finally:
             terminal.dispose()
-    path = args.output / "result.json"
-    path.write_text(json.dumps(report, indent=2) + "\n"); path.chmod(0o600)
+            # A failed real-binary probe needs the same private candidate and
+            # byte evidence as a pass; do not lose it during fixture cleanup.
+            path = args.output / "capture.ansi"
+            path.write_bytes(terminal.capture); path.chmod(0o600)
+            path = args.output / "result.json"
+            path.write_text(json.dumps(report, indent=2) + "\n"); path.chmod(0o600)
     print(json.dumps(report))
 
 

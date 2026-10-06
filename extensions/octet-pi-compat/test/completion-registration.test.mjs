@@ -35,11 +35,13 @@ test('an immediate post-initialize query waits for registration even before the 
   query = runtime.receive({id: 2, method: 'ui/autocomplete/complete', params: {text: '/complete', cursor: 9, revision: 1}});
   await new Promise(setImmediate);
   assert.equal(replies.some(frame => frame.id === 2), false, 'query must await real host admission, not refuse an unassigned promise');
-  assert.deepEqual(order, ['reply:1', 'register'], 'registration is queued after the initialize reply without awaiting its writer receipt');
+  assert.deepEqual(order, ['reply:1'], 'registration cannot precede the initialize writer receipt');
+  releaseReply(); await initialize;
+  assert.deepEqual(order, ['reply:1', 'register']);
+  assert.equal(replies.some(frame => frame.id === 2), false, 'an armed chain still waits for host admission');
   acknowledge({accepted: true});
   await query;
   assert.deepEqual(replies.find(frame => frame.id === 2).result, {
     prefix: '/complete', items: [{value: '/complete ', label: 'complete', description: 'Complete'}],
   });
-  releaseReply(); await initialize;
 });
