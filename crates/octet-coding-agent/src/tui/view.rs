@@ -6064,6 +6064,52 @@ impl InteractiveShell {
         true
     }
 
+    /// Cheap change counter for the live composer. Callers that only need to
+    /// notice edits avoid cloning the draft on every idle frame.
+    pub(crate) fn extension_editor_revision(&self) -> u64 {
+        self.state.borrow().editor.revision()
+    }
+
+    /// The current menu for the exact live draft, if one is displayed. Selection,
+    /// navigation and Tab acceptance all read this one fenced identity.
+    fn displayed_extension_menu(&self) -> Option<(u64, usize)> {
+        let state = self.state.borrow();
+        let overlay = state.extension_autocomplete.as_ref()?;
+        (normal_editor_focused(&state)
+            && overlay.revision == state.editor.revision()
+            && overlay.text == state.editor.text()
+            && overlay.cursor == state.editor.cursor()
+            && !overlay.items.is_empty())
+        .then_some((overlay.revision, overlay.items.len()))
+    }
+
+    /// Whether Tab belongs to the displayed extension menu instead of a fresh
+    /// query. Only a live, fenced menu can claim the key.
+    pub(crate) fn extension_autocomplete_displayed(&self) -> bool {
+        self.displayed_extension_menu().is_some()
+    }
+
+    /// Move the displayed extension choice without touching the draft. The
+    /// menu keeps its own selection; the composer cursor never becomes a
+    /// second, invisible selector. Returns whether the key belonged to it.
+    pub(crate) fn move_extension_autocomplete_selection(&mut self, forward: bool) -> bool {
+        let Some((revision, items)) = self.displayed_extension_menu() else {
+            return false;
+        };
+        let mut state = self.state.borrow_mut();
+        let current = state
+            .extension_autocomplete_selection
+            .filter(|(selected, _)| *selected == revision)
+            .map_or(0, |(_, index)| index);
+        let moved = if forward {
+            (current + 1).min(items - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        state.extension_autocomplete_selection = Some((revision, moved));
+        true
+    }
+
     /// Accept the current extension choice through a normal host editor mutation.
     /// Without a native selection, retain the first-choice keyboard default.
     pub fn accept_extension_autocomplete(&mut self) -> bool {

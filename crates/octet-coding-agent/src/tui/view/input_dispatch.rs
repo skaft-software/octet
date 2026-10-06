@@ -332,7 +332,28 @@ impl InteractiveShell {
                     InputAction::Ignore
                 };
             }
-            let bindings = &self.input_dispatch.bindings;
+            // A clone of the shared binding table: list navigation below needs
+            // `&mut self`, and the resolver is reference-counted like the
+            // mailbox copy the renderer already holds.
+            let bindings = self.input_dispatch.bindings.clone();
+            // A displayed extension menu owns list navigation while it is open:
+            // Up/Down select a completion instead of moving the draft cursor.
+            if !popup && key.kind == KeyEventKind::Press {
+                let navigation = [("tui.select.up", false), ("tui.select.down", true)]
+                    .into_iter()
+                    .find_map(|(id, forward)| bindings.matches(key, id).then_some(forward));
+                if let Some(forward) = navigation {
+                    if self.move_extension_autocomplete_selection(forward) {
+                        return InputAction::Ignore;
+                    }
+                }
+                // Tab accepts the displayed menu through the same explicit
+                // acceptance path, instead of querying an unchanged draft again.
+                if bindings.matches(key, "tui.input.tab") && self.extension_autocomplete_displayed()
+                {
+                    return InputAction::CompletePath;
+                }
+            }
             if !popup {
                 // Dedicated history actions win over model cycling even in the
                 // middle of a multiline draft. Capture the original cursor.
@@ -380,7 +401,7 @@ impl InteractiveShell {
                 }
                 // Explicit editor bindings have priority over default model and
                 // viewport shortcuts while the composer owns focus.
-                if let Some(action) = keymap::editor_binding(key, bindings, true) {
+                if let Some(action) = keymap::editor_binding(key, &bindings, true) {
                     return InputAction::Edit(action);
                 }
                 if key.kind == KeyEventKind::Press && bindings.matches(key, "app.message.copy") {
