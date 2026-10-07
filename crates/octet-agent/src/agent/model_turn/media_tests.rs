@@ -61,10 +61,12 @@ impl Tool for Frame {
         _: serde_json::Value,
         _: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::new("frame rendered").with_media(Media::image_bytes(
-            bytes::Bytes::from_static(FRAME_BYTES),
-            "image/png".parse().unwrap(),
-        )))
+        Ok(
+            ToolOutput::new("frame rendered").with_media(Media::image_bytes(
+                bytes::Bytes::from_static(FRAME_BYTES),
+                "image/png".parse().unwrap(),
+            )),
+        )
     }
 }
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { launch, owner, root } from './helper.mjs';
+import { host, launch, owner, root } from './helper.mjs';
 
 const factory = join(root, 'test/fixtures/model-turns.ts');
 // The exact durable entry octet commits for an image tool result on a
@@ -88,6 +88,32 @@ test('chat-completions image tool results stay inside one Pi tool result and nev
       { type: 'image', data: 'iVBORw0KGgpwaS1kb29tLWZyYW1l', mimeType: 'image/png' }],
     isError: false, timestamp: 1150 }]);
   assert.equal(peer.seen.some(issueNotice), false);
+  await peer.close();
+});
+
+test('a mounted fullscreen extension surface stays up across image tool-result turns', async t => {
+  const peer = launch(t, [join(root, 'test/fixtures/core.ts'), factory]);
+  await peer.init(); // remote_ui and session_entries are in the offered default set
+  const command = peer.command('surface');
+  const open = await peer.wait(frame => frame.method === 'ui/open');
+  assert.equal(open.params.placement, 'fullscreen');
+  assert.ok((await command.response).result);
+  const entry = structuredClone(assistant);
+  entry.value.Assistant.content.push({ ToolCall: { id: 'frame-call', name: 'frame', arguments_json: '{}' } });
+  const result = { id: 'results', parent: entry.id, timestamp_unix_ms: 1150, value: structuredClone(imageResult) };
+  for (const [index, results, stop] of [[0, [result], 'tool_use'], [1, [], 'end_turn']]) {
+    assert.deepEqual((await peer.request('hook/run', params(peer, start(index))).response).result, expected);
+    const payload = end(entry, results, stop); payload.turn_index = index;
+    assert.deepEqual((await peer.request('hook/run', params(peer, payload)).response).result, expected);
+  }
+  // The surface is not a turn observation: no turn may close it, and its
+  // component must still render afterwards.
+  assert.equal(peer.seen.filter(frame => frame.method === 'ui/close').length, 0);
+  peer.notify('context/updated', { resource_owner: owner, host: { ...host, session_name: 'After Turns' } });
+  await peer.wait(frame => frame.method === 'ui/frame' && frame.params.lines.some(line => line.includes('After Turns')));
+  peer.notify('ui/key', { surface_id: open.params.surface_id, key: 'q', kind: 'press', modifiers: [] });
+  await peer.wait(frame => frame.method === 'ui/close');
+  await peer.wait(frame => frame.method === 'notification' && frame.params.message === 'done:completed');
   await peer.close();
 });
 
