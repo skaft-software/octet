@@ -292,7 +292,8 @@ pub struct Cli {
     /// Additional directory paths to scan for executable extensions.
     #[arg(long = "extension-dir", value_name = "DIR")]
     pub extension_dirs: Vec<PathBuf>,
-    /// Explicitly enable executable extensions by name (comma-separated).
+    /// Enable executable extensions by name (comma-separated), persisted to
+    /// user config like the `/extensions` menu's Enable.
     #[arg(
         long = "enable-extension",
         value_name = "NAMES",
@@ -924,10 +925,13 @@ fn persist_extension_enabled_to_path(
             names.insert(normalize_extension_name(value)?);
         }
     }
-    if enabled {
-        names.insert(name);
+    let changed = if enabled {
+        names.insert(name)
     } else {
-        names.remove(&name);
+        names.remove(&name)
+    };
+    if !changed && document.contains_key("enabled_extensions") {
+        return Ok(names.into_iter().collect());
     }
 
     let mut values = toml_edit::Array::new();
@@ -1406,6 +1410,36 @@ fn build_config_with_global_path_and_diagnostics(
     let reasoning_explicit = cli.reasoning.is_some();
     let reasoning_mode_explicit = cli.reasoning_mode.is_some();
 
+    let project = if cli.workspace_trusted {
+        read_layer(&project_config_path(&workspace), ConfigSourceKind::Project)?
+    } else {
+        LoadedConfigLayer::default()
+    };
+    let environment = environment_layer()?;
+    // `--enable-extension` is the `/extensions` menu's Enable: it persists to
+    // user config, so the menu stays authoritative afterwards. A project or
+    // environment activation list owns activation instead, exactly as it
+    // makes the menu refuse, so the flag then applies to this invocation only.
+    let activation_layered =
+        project.values.enabled_extensions.is_some() || environment.enabled_extensions.is_some();
+    let mut cli_activation_unpersisted = false;
+    if !activation_layered && !cli.enable_extensions.is_empty() {
+        let names = normalize_extension_names(cli.enable_extensions.clone())?;
+        let persisted = match global_path {
+            Some(path) => names
+                .iter()
+                .try_for_each(|name| persist_extension_enabled_to_path(name, true, path).map(drop)),
+            None => Err(anyhow::anyhow!("user home directory is unavailable")),
+        };
+        if let Err(error) = persisted {
+            cli_activation_unpersisted = true;
+            if report_diagnostics {
+                crate::output::stderr_line(format!(
+                    "warning: --enable-extension applies to this invocation only: could not update user configuration: {error}"
+                ));
+            }
+        }
+    }
     // A missing home directory disables global config. Never reinterpret the
     // invocation directory as user scope: that would let an untrusted project
     // smuggle executable trust through `./.octet/config.toml`.
@@ -1413,17 +1447,9 @@ fn build_config_with_global_path_and_diagnostics(
         Some(path) => read_layer(path, ConfigSourceKind::Global)?,
         None => LoadedConfigLayer::default(),
     };
-    let project = if cli.workspace_trusted {
-        read_layer(&project_config_path(&workspace), ConfigSourceKind::Project)?
-    } else {
-        LoadedConfigLayer::default()
-    };
-    let environment = environment_layer()?;
     let theme_explicit = cli.theme.is_some() || environment.theme.is_some();
     let policy_environment = environment.clone();
-    let extension_activation_overridden = project.values.enabled_extensions.is_some()
-        || environment.enabled_extensions.is_some()
-        || !cli.enable_extensions.is_empty();
+    let extension_activation_overridden = activation_layered || cli_activation_unpersisted;
     let mut diagnostics = global.diagnostics;
     diagnostics.extend(project.diagnostics);
     let mut values = global.values;
