@@ -315,32 +315,25 @@ fn partial_text_turn(text: &str) -> String {
 /// text, so a test can emit JSON that conservative repair cannot recover.
 fn openai_raw_tool_turn(id: &str, name: &str, argument_chunks: &[&str]) -> String {
     let mut body = String::new();
-    let first = serde_json::json!({
-        "id": "chat-tools",
-        "choices": [{
-            "index": 0,
-            "delta": {
-                "tool_calls": [{
-                    "index": 0,
-                    "id": id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": argument_chunks[0]},
-                }],
-            },
-        }],
-    });
-    body += &format!("data: {first}\n\n");
-    for chunk in &argument_chunks[1..] {
-        let next = serde_json::json!({
-            "id": "chat-tools",
-            "choices": [{
+    for (index, chunk) in argument_chunks.iter().enumerate() {
+        let call = if index == 0 {
+            serde_json::json!({
                 "index": 0,
-                "delta": {
-                    "tool_calls": [{"index": 0, "function": {"arguments": chunk}}],
-                },
-            }],
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": chunk},
+            })
+        } else {
+            serde_json::json!({
+                "index": 0,
+                "function": {"arguments": chunk},
+            })
+        };
+        let frame = serde_json::json!({
+            "id": "chat-tools",
+            "choices": [{"index": 0, "delta": {"tool_calls": [call]}}],
         });
-        body += &format!("data: {next}\n\n");
+        body += &format!("data: {frame}\n\n");
     }
     body += "data: {\"id\":\"chat-tools\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
     body += "data: [DONE]\n\n";
