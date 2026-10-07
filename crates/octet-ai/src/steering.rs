@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) const MAX_STEERS: usize = 64;
-const MAX_INPUT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
 
 /// Outcome of one locally identified user update.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,7 +26,7 @@ pub enum SteeringState {
         /// Successor response carrying the update.
         response_id: String,
     },
-    /// Provider needs client tool results or approval on the same connection.
+    /// Accepted input remains queued, possibly awaiting client input.
     Pending {
         /// Bounded provider description of required input, not execution authority.
         required_input: serde_json::Value,
@@ -88,6 +88,18 @@ pub(crate) enum Command {
 }
 pub(crate) fn invalid(message: &str) -> AiError {
     ConfigError::Parse(message.to_owned()).into()
+}
+pub(crate) fn validate_request(request: &Request) -> Result<(), AiError> {
+    if request
+        .responses
+        .as_ref()
+        .is_some_and(|options| options.context_management.is_some())
+    {
+        return Err(invalid(
+            "native steering cannot be combined with automatic context management",
+        ));
+    }
+    Ok(())
 }
 pub(crate) fn unresolved(state: &SteeringState) -> bool {
     matches!(
@@ -232,6 +244,7 @@ impl SteeringControl {
     /// own tools, instructions and generation settings. The codec validates the
     /// request; the actor supplies the completed response's `previous_response_id`.
     pub async fn continue_with(&self, mut request: Request) -> Result<(), AiError> {
+        validate_request(&request)?;
         let completed = self
             .completed
             .lock()

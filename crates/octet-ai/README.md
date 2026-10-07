@@ -40,6 +40,28 @@ The coding-agent xAI route follows Responses in Pi reference
 historical, with a named current-reference difference in the contract tests.
 This does not qualify xAI OAuth or a newer static model catalog.
 
+## Prompt-cache metadata
+
+`ModelSpec.cache.prompt_cache` carries explicit, best-effort `short` and `long`
+lifetimes as optional seconds (`PromptCacheLifetimes`). Both default to unknown.
+Catalog registration validates each configured lifetime in `1..=86400`; hints
+never enable a cache-control feature or guarantee a cache hit. For example:
+
+```json
+{"cache":{"prompt_cache":{"short":300,"long":3600}}}
+```
+
+Only the built-in direct Anthropic models and discovery on that verified direct
+route receive the five-minute/one-hour defaults. Gateways, Bedrock and OpenRouter
+do not inherit them from a codec or Claude name. Explicit catalog overrides
+remain authoritative.
+
+A host's cache-warming replay uses the ordinary request snapshot and retention,
+changing only `max_output_tokens` to one. Anthropic preserves the real user,
+system and tool cache markers and adaptive reasoning shape/effort. Budget
+thinking cannot fit a one-token cap and is rejected rather than rewritten.
+These deterministic contracts are not live cache-hit qualification.
+
 ## Proxy environment
 
 The default client snapshots `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
@@ -98,6 +120,18 @@ hooks so extension transports cannot observe or rewrite wire material they do
 not own. Non-empty `metadata` is refused until a codec declares the wire field;
 `RequestOverrides` still owns the data-only sampling/header/env/timeout/retry
 surface, and nonzero retry controls stay refused as host-owned.
+
+The optional async `ProviderRequestHook` chain now mediates actual encoded
+conversation/compact HTTP bodies, mutable headers (including deletions), and real
+response headers before body consumption. It uses bounded cancellable futures,
+not blocking RPC inside the synchronous hooks. An owner-bound client clone or
+`HostRequestOptions.provider_hooks` installs it; absence leaves the native path
+unchanged. Authentication/signing remains authoritative and reserved-header
+protection includes deletion and repeated values. Preferred Responses WebSockets
+use HTTP with this chain; opaque host transports and native steering refuse it,
+never approximating a wire payload or fabricating response metadata. See the
+[wire and integration contract](docs/provider-pipeline.md) for native process
+binding, explicit gaps, and the focused test locations (not a qualification claim).
 
 ## Deferred responses and the faux provider
 
