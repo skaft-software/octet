@@ -1,10 +1,20 @@
 import { RemoteTUI } from '../../lib/remote-ui.mjs';
+import { after, afterEach } from 'node:test';
+import { nativeEditorHost } from '../native-editor-host.mjs';
+
+const peer = nativeEditorHost({after});
+const surfaces = [];
+let sequence = 0;
+afterEach(() => {
+  for (const surface of surfaces.splice(0)) {
+    surface.closed = true;
+    peer.call('ui/close', {surface_id: surface.id});
+  }
+});
 
 // These Editor unit suites never start a terminal, paint a viewport or deliver
-// terminal input. Keep their geometry while exercising the adapter's actual
-// headless TUI facade; importing Pi's terminal renderer is neither needed nor
-// permitted. A native-backed Editor will also need its real sync host binding
-// here: this geometry-only fixture must never implement editing in JavaScript.
+// terminal input. Preserve geometry, binding the actual RemoteTUI and facade
+// to the production Rust service. No editing operation is implemented here.
 export class VirtualTerminal {
   constructor(columns = 80, rows = 24) {
     this.columns = columns;
@@ -14,11 +24,14 @@ export class VirtualTerminal {
 
 export class TuiMainScreen {
   constructor(terminal) {
-    return new RemoteTUI({
-      columns: terminal.columns,
-      rows: terminal.rows,
-      requestRender() {},
-    }).facade;
+    const surface = {id: `fixture-${++sequence}`, placement: 'fullscreen', opened: true, closed: false,
+      columns: terminal.columns, rows: terminal.rows, requestRender() {},
+      store: {id: 1, live: true, state: {owner: {session_id: 'fixture', extension_instance_id: 'fixture', process_generation: 1}}, controller: new AbortController()},
+      runtime: {require() {}, assertOwner() {}, transport: {requestSync: peer.call}},
+    };
+    peer.call('ui/open', {surface_id: surface.id});
+    surfaces.push(surface);
+    return new RemoteTUI(surface).facade;
   }
 }
 

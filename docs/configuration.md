@@ -47,7 +47,7 @@ Defaults are marked. Other values are examples.
 | `show_cache_miss_notices` | default `false` | User-level opt-in notices for material cache misses and successful refreshes. Accounting and `/session` diagnostics are unconditional. |
 | `theme` | `"auto"` | `auto`, `light` or `dark`, or the file stem of a discovered TOML theme (such as `"mine"`). Auto follows the terminal background. Light and dark override detection. [Themes](themes.md). |
 | `color` | `"auto"` | Terminal color, with capability fallbacks. |
-| `mouse` | default `"app"` | `app` runs the fullscreen alternate-screen viewport and captures the mouse. `auto`, `terminal` and `off` stay inline and keep native selection and history. |
+| `mouse` | default `"auto"` | `auto`, `terminal` and `off` keep native scrollback and selection without mouse capture. Explicit `app` opts into the semantic viewport and in-app wheel/drag gestures. CLI `--mouse` overrides this setting. |
 | `plain` | `false` | Chronological frontend. |
 | `show_images` | default `false` | `true` shows tool-result images inline on compatible terminals. Display only: not upload or attachment consent. Same as `--show-images`. [Limits](terminal.md#tool-evidence-and-worker-activity). |
 | `models` | | Optional user-level ordered model scope, written by `/scoped-models` as one comma-separated pattern string (such as `"openai/*:high,custom/alpha-model"`). It only affects Ctrl+P cycling in the interactive UI. Headless modes ignore it, `--models` wins if both are set, and a trusted project layer can't override it. |

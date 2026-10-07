@@ -409,15 +409,16 @@ fn colour_policy_resolves_from_cli() {
 }
 
 #[test]
-fn mouse_policy_defaults_to_the_fullscreen_viewport() {
+fn mouse_policy_owner_decision_defaults_to_auto_preserving_native_gestures() {
     let directory = cwd();
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
     let config = config_with_empty_global(cli, directory.path()).unwrap();
-    assert_eq!(config.mouse, config::MouseMode::App);
-    assert!(config.mouse.application_owned());
+    // Owner decision: omitted mouse policy preserves native scrollback/selection.
+    assert_eq!(config.mouse, config::MouseMode::Auto);
+    assert!(!config.mouse.application_owned());
 
-    // Inline mode with native scrollback stays one setting away.
+    // An explicit inline mode still resolves normally.
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
     cli.mouse = Some("auto".into());
@@ -431,6 +432,33 @@ fn mouse_policy_defaults_to_the_fullscreen_viewport() {
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     assert_eq!(config.mouse, config::MouseMode::App);
     assert!(config.mouse.application_owned());
+}
+
+#[test]
+fn explicit_mouse_settings_and_cli_override_the_owner_default() {
+    let directory = cwd();
+    let global = directory.path().join("global.toml");
+    for saved in ["auto", "app", "terminal", "off"] {
+        std::fs::write(&global, format!("mouse = {saved:?}\n")).unwrap();
+        let config =
+            build_config_with_global_path(base(), directory.path(), Some(&global)).unwrap();
+        assert_eq!(config.mouse, config::MouseMode::parse(saved).unwrap());
+        for explicit in ["auto", "app"] {
+            let mut cli = base();
+            cli.mouse = Some(explicit.into());
+            let config =
+                build_config_with_global_path(cli, directory.path(), Some(&global)).unwrap();
+            assert_eq!(config.mouse, config::MouseMode::parse(explicit).unwrap());
+        }
+    }
+}
+
+#[test]
+fn mouse_help_documents_auto_without_setting_a_cli_override() {
+    use clap::CommandFactory;
+    let help = Cli::command().render_long_help().to_string();
+    assert!(help.contains("Mouse ownership (default: auto)"));
+    assert!(Cli::try_parse_from(["octet"]).unwrap().mouse.is_none());
 }
 
 #[test]

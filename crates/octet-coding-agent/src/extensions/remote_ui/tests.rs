@@ -1027,6 +1027,104 @@ async fn native_theme_selection_cannot_mutate_a_ceded_terminal() {
     extensions.shutdown().await;
 }
 
+#[tokio::test]
+async fn native_editor_service_requires_its_exact_owner_mount_and_live_surface() {
+    use octet_agent::extension_remote_ui::ExtensionRemoteUiChrome as Chrome;
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    command(&mut extensions, &mut frontend, &["editor"]).await;
+    let mount = &extensions.remote_ui.mounts[0];
+    let owner = mount.owner.clone();
+    let process = mount.process.clone();
+    let surface = mount.surface_id.clone();
+    let fence = mount.view.id.clone();
+    let create = |mount_id| ExtensionRemoteUiOperation::Chrome {
+        chrome: Chrome::Editor {
+            surface_id: surface.clone(),
+            mount_id,
+            editor_id: None,
+            operation: serde_json::json!({"op":"create","padding_x":0,"autocomplete_max_visible":5}),
+        },
+    };
+    let call = |ui: &mut RemoteUi, owner, operation, ceded| {
+        ui.apply(
+            process.clone(),
+            owner,
+            operation,
+            &mut frontend.shell,
+            ceded,
+        )
+    };
+    let mut call = call;
+    let result = call(
+        &mut extensions.remote_ui,
+        owner.clone(),
+        create(Some(fence.clone())),
+        false,
+    )
+    .unwrap();
+    assert!(result["editor_id"].as_str().unwrap().starts_with(&fence));
+    for mount_id in [None, Some("retired-mount".into())] {
+        assert_eq!(
+            call(
+                &mut extensions.remote_ui,
+                owner.clone(),
+                create(mount_id),
+                false
+            )
+            .unwrap_err()
+            .0,
+            ExtensionRequestFailure::InvalidRequest
+        );
+    }
+    let mut foreign = owner.clone();
+    foreign.session_id = "foreign".into();
+    assert_eq!(
+        call(
+            &mut extensions.remote_ui,
+            foreign,
+            create(Some(fence.clone())),
+            false
+        )
+        .unwrap_err()
+        .0,
+        ExtensionRequestFailure::NotForegroundOwner
+    );
+    let mut stale = owner.clone();
+    stale.process_generation += 1;
+    assert_eq!(
+        call(
+            &mut extensions.remote_ui,
+            stale,
+            create(Some(fence.clone())),
+            false
+        )
+        .unwrap_err()
+        .0,
+        ExtensionRequestFailure::NotForegroundOwner
+    );
+    assert_eq!(
+        call(
+            &mut extensions.remote_ui,
+            owner.clone(),
+            create(Some(fence.clone())),
+            true
+        )
+        .unwrap_err()
+        .0,
+        ExtensionRequestFailure::NotForegroundOwner
+    );
+    extensions.remote_ui.remove(0, "test retirement", false);
+    assert_eq!(
+        call(&mut extensions.remote_ui, owner, create(Some(fence)), false)
+            .unwrap_err()
+            .0,
+        ExtensionRequestFailure::NotForegroundOwner
+    );
+    extensions.shutdown().await;
+}
+
 #[test]
 fn theme_catalog_bounds_refuse_complete_oversize_catalogs_without_truncation() {
     let metadata = serde_json::json!({"name":"Native","path":"/trusted/native.toml"});

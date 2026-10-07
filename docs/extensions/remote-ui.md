@@ -115,6 +115,30 @@ native admission, not OS delivery. Only the host renderer encodes OSC 777; the
 terminal must support that desktop-notification protocol. Headless/plain output
 does not advertise this frontend service. No escape bytes are accepted in frames.
 
+### `ui/chrome` — native component editor service
+
+The adapter's synchronous `Editor` facade uses `chrome.kind:"editor"` on an
+already admitted surface, under the existing `remote_ui` negotiation and complete
+owner triple. It sends `surface_id`, an optional opaque `editor_id`, and a closed
+`operation` object. Composer placement also requires the exact host-issued
+`mount_id`; another placement must not supply one. A ceded terminal, retired
+surface/process/owner, wrong mount or disposed handle refuses the call.
+
+`create` returns an opaque handle; `bind` selects the primary component editor.
+Reads, input, replacement, history, render projection and disposal all use that
+surface's native sexy-tui-rs model. The native autocomplete service issues query
+IDs and revisions, bounds incoming suggestions, owns selection/navigation and
+checks the originating revision before completion. Completion coordinates are
+UTF-16 line/column observations validated at the native boundary, including
+scalar/grapheme boundaries; stored native carets are UTF-8 byte offsets.
+
+Bounds are 16 editors per surface, 256 KiB raw/expanded draft, 100 history entries
+and 256 KiB aggregate history, and 64 recovery paste entries / 4 MiB. Local
+provider menus have at most 128 suggestions, 4096 bytes per string and 512 KiB
+aggregate; controls are rejected. Registry completions retain their existing,
+narrower wire profile. Retirement drops the service, with no Pi/JS editing-engine
+fallback. This is editing, not a terminal or synchronous native-render RPC.
+
 ### `ui/close` — request
 
 ```json
@@ -227,12 +251,15 @@ the native slash popup remains available around their projected rows.
   by open; the host issues a monotonically increasing revision starting at one
   before enqueueing each key. Press, repeat, and release all participate.
   Non-editor keys omit `editor_input`.
-- `ui/editor-text`: `{surface_id, text, paste, editor_input?}`. A bounded native
+- `ui/editor-text`: `{surface_id, text, paste, editor_input?, native_changed?}`. A bounded native
   replacement/clear has `paste:false`; a paste has `paste:true` and the same
   host-issued mount/input fence as a key. Paste enters the component at its
   actual caret through bracketed-paste handling, preserving undo and payloads.
   An unchanged replacement is an echo, not a reset. Reply with a newer ordinary
-  checkpoint before publishing the changed draft frame.
+  checkpoint before publishing the changed draft frame. For a bound native
+  facade, a non-paste decision is already committed to its native model;
+  `native_changed` signals the callback intent without replaying `setText` and
+  relocating that caret. Unchanged echoes and obsolete observations are not edits.
 - `ui/mouse`: `{surface_id, kind, button, x, y, modifiers, wheel_delta}`. Kinds:
   `press`, `release`, `drag`, `move`, `wheel`; buttons: `left`, `middle`, `right`,
   `none`. Coordinates are zero-based terminal cells. Positive wheel delta is

@@ -432,6 +432,9 @@ pub(super) struct AutocompleteFence {
     pub(super) resource_owner: String,
     pub(super) session_id: Option<String>,
     // One winning provider, or every queried provider for unclaimed fallback.
+    /// A host-owned component handle/revision, in addition to the composer
+    /// mirror and provider/session fences. None means the ordinary host editor.
+    pub(super) composer: Option<(String, crate::native_editor::ComposerEditorIdentity)>,
     pub(super) providers: Vec<AutocompleteProviderFence>,
 }
 

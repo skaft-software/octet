@@ -24,6 +24,7 @@ mod hydrate;
 mod migrate;
 mod models_dev;
 mod modes;
+mod native_editor;
 mod output;
 mod presentation;
 mod prompts;

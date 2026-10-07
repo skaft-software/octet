@@ -15,6 +15,7 @@ pub(super) struct AutocompleteQuery {
 pub(super) struct AutocompleteSync {
     revision: Option<u64>,
     providers: usize,
+    composer: Option<(String, crate::native_editor::ComposerEditorIdentity)>,
 }
 
 impl ExecutableExtensions {
@@ -33,13 +34,16 @@ impl ExecutableExtensions {
         // was admitted/retired (a first attempt can precede registration).
         let revision = shell.extension_editor_revision();
         let providers = self.autocomplete_registrations.len();
+        let composer = self.remote_ui.composer_editor_identity();
         if self.autocomplete_sync.revision == Some(revision)
             && self.autocomplete_sync.providers == providers
+            && self.autocomplete_sync.composer == composer
         {
             return;
         }
         self.autocomplete_sync.revision = Some(revision);
         self.autocomplete_sync.providers = providers;
+        self.autocomplete_sync.composer = composer.clone();
         let snapshot = shell.extension_editor_snapshot();
         if self.autocomplete_query.as_ref().is_some_and(|query| {
             query.snapshot == snapshot && self.autocomplete_fence_is_current(&query.fence)
@@ -47,7 +51,12 @@ impl ExecutableExtensions {
             return;
         }
         self.cancel_editor_autocomplete();
-        if !snapshot.focused || self.remote_ui.editor_owns_composer() {
+        if !snapshot.focused
+            || (self.remote_ui.editor_owns_composer()
+                && composer
+                    .as_ref()
+                    .is_none_or(|(_, identity)| !identity.registry_context))
+        {
             return;
         }
         let line = snapshot.text[..snapshot.cursor]
@@ -66,7 +75,8 @@ impl ExecutableExtensions {
 
     fn autocomplete_fence_is_current(&self, fence: &AutocompleteFence) -> bool {
         self.resource_owner.as_deref() == Some(fence.resource_owner.as_str())
-            && !self.remote_ui.editor_owns_composer()
+            && self.remote_ui.composer_editor_identity() == fence.composer
+            && (!self.remote_ui.editor_owns_composer() || fence.composer.is_some())
             && self.session_id == fence.session_id
             && fence.providers.iter().all(|provider| {
                 self.autocomplete_registrations
@@ -129,10 +139,15 @@ impl ExecutableExtensions {
         }
         let accepted = shell.accept_extension_autocomplete();
         if accepted {
+            if let Some(write) = shell.take_composer_slot_write() {
+                self.remote_ui.deliver_editor_text(&write, shell);
+            }
+            self.autocomplete_sync.composer = self.remote_ui.composer_editor_identity();
             // Accepting is not further typing: do not immediately reopen the menu.
             if let Some(query) = self.autocomplete_query.as_mut() {
                 query.snapshot = shell.extension_editor_snapshot();
             }
+            self.autocomplete_sync.revision = Some(shell.extension_editor_revision());
         }
         accepted
     }
@@ -153,6 +168,16 @@ impl ExecutableExtensions {
         let Some(resource_owner) = self.resource_owner.clone() else {
             return false;
         };
+        if !snapshot.focused
+            || !self.remote_ui.composer_editor_matches(&snapshot)
+            || (self.remote_ui.editor_owns_composer()
+                && self
+                    .remote_ui
+                    .composer_editor_identity()
+                    .is_none_or(|(_, identity)| !identity.registry_context))
+        {
+            return false;
+        }
         let registrations: Vec<_> = self
             .autocomplete_registrations
             .iter()
@@ -179,6 +204,7 @@ impl ExecutableExtensions {
         let mut fence = AutocompleteFence {
             resource_owner,
             session_id: self.session_id.clone(),
+            composer: self.remote_ui.composer_editor_identity(),
             providers: registrations
                 .iter()
                 .map(|(provider, _)| provider.clone())

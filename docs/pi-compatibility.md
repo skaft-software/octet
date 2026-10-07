@@ -173,8 +173,14 @@ whole chain is bounded to 50 ms per event: a listener that stops answering is
 latched off and its input is delivered unchanged, because Pi would block typing
 indefinitely. Input past the 256-byte wire bound bypasses the chain. Editor
 submissions use native idle/busy admission; refusals preserve component paste and
-undo state. Pi's Editor still runs extension-side in this phase; the native-backed
-Editor facade and full upstream Editor parity remain unimplemented.
+undo state. The adapter's `Editor` and `CustomEditor` now share a synchronous
+native-backed facade: sexy-tui-rs owns editing state, caret, undo/history/paste
+recovery and autocomplete state. JS supplies presentation and callback hooks,
+not a second editing engine. Registry argument menus use the bound native caret
+and mount/handle/revision/owner fences; Up/Down and Tab stay host-owned.
+The 193 immutable Pi 1.0.2 Editor/history cases and separate ownership guard pass
+against the compiled production Rust service. Real App/adapter tests separately
+qualify admission and custom-editor registry completion/clear/retirement.
 
 Raw extension terminal writes are not allowed into frames. The adapter recognizes
 allowlisted mouse-mode writes as capture intent and bounded complete OSC 777
@@ -223,8 +229,10 @@ retirement before the composer-slot architecture. They do not qualify the curren
 editor contract: Ctrl+G now retains the slot. Use `scripts/test-pi-composer-slot.py`
 with reviewed unchanged footer/custom-editor factories to check one draft, one
 native slash popup, Ctrl+G retention, native clear, resize and Ctrl+D restoration.
-Arbitrary-editor, upstream Editor parity and the wider extension corpus remain
-unqualified.
+Arbitrary editor overrides and the wider extension corpus remain unqualified.
+The bounded native Editor corpus is independently reproduced using the
+[test-peer instructions](../extensions/octet-pi-compat/test/pi-v1.0.2/README.md);
+its pure `wordWrapLine` cases are library evidence, not native wrapping proof.
 
 The original Anthropic-attribution provider remains blocked: builtin provider
 inheritance is unsupported, and its direct HTTP callback requires a raw OAuth
@@ -233,6 +241,8 @@ needs an explicit credential/transport contract decision, not a dummy token or a
 weakened registration check.
 
 ```bash
+export CARGO_TARGET_DIR=/absolute/existing-target
+CARGO_PROFILE_DEV_DEBUG=0 cargo build -p octet-coding-agent --example native-editor-test-host --locked -j3
 node --test extensions/octet-pi-compat/test/adapter.test.mjs
 # Original-factory tests require explicitly reviewed local paths:
 PI_DOOM_PATH=/absolute/pi-doom/src/index.ts \

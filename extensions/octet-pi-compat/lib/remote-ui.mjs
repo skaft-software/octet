@@ -2,7 +2,8 @@ import { bounded, fields, invalid, rpcError, strict, unsupported } from './error
 import { keyData, mouseData, reservedKey } from './keys.mjs';
 import { mouseModeIntent } from './transport.mjs';
 import { theme, hostKeybindings } from './theme.mjs';
-import { getAutocompleteProvider } from './completions.mjs';
+import { commandArgumentRequest, getAutocompleteProvider } from './completions.mjs';
+import { piPosition } from './autocomplete-edits.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 
 const CURSOR_MARKER = '\x1b_pi:c\x07';
@@ -51,6 +52,40 @@ function size(value, reference, fallback) {
   invalid('overlay size');
 }
 
+const editorSurfaces = new WeakMap();
+const nativeEditors = new WeakMap();
+
+// Internal component binding only; native handles still pass the admitted
+// surface's owner/mount checks on every synchronous call.
+export function registerNativeEditor(component, call, id) {
+  const binding = {call, id, checkpoint: undefined};
+  nativeEditors.set(component, binding);
+  return binding;
+}
+
+
+// The native editor constructor receives only this admitted surface's fence.
+// No terminal, ambient runtime, or extension-created owner can authorize it.
+export function nativeEditorCall(tui) {
+  const surface = editorSurfaces.get(tui);
+  if (!surface) unsupported('native Editor', 'requires the host-supplied TUI');
+  const call = (operation, editorId) => {
+    if (operation.op === 'dispose' && surface.closed) return {};
+    if (surface.closed || !surface.opened || surface.runtime.stopping) throw rpcError(-32002, 'native editor surface retired');
+    const runtime = surface.runtime, store = surface.store;
+    runtime.require('remote_ui'); runtime.assertOwner(store);
+    store.controller.signal.throwIfAborted();
+    return runtime.transport.requestSync('ui/chrome', {
+      parent_request_id: store.id, resource_owner: store.state.owner,
+      chrome: { kind: 'editor', surface_id: surface.id,
+        ...(surface.placement === 'editor' ? {mount_id: surface.mountId} : {}),
+        ...(editorId === undefined ? {} : {editor_id: editorId}), operation },
+    }, {parent: store.live ? store.id : undefined, signal: store.controller.signal});
+  };
+  call.isAlive = () => !surface.closed && surface.opened && !surface.runtime.stopping;
+  return call;
+}
+
 export class RemoteTUI {
   constructor(surface) {
     this.surface = surface; this.children = []; this.focus = null; this.overlays = []; this.listeners = new Set();
@@ -66,6 +101,7 @@ export class RemoteTUI {
       stop() { unsupported('tui.terminal.stop', 'Rust owns terminal lifetime'); },
     }, 'tui.terminal');
     this.facade = strict(this, 'tui');
+    editorSurfaces.set(this.facade, surface);
   }
   requestRender() { this.surface.requestRender(); }
   addChild(value) { this.children.push(component(value)); this.requestRender(); }
@@ -251,6 +287,8 @@ export class RemoteUI {
     const c = surface.component, store = surface.store;
     this.runtime.require('composer');
     if (typeof c.setText !== 'function' || typeof c.getText !== 'function') unsupported('editor component', 'requires getText/setText');
+    const native = nativeEditors.get(c);
+    if (native) native.call({op: 'bind'}, native.id);
     const { text } = await this.runtime.hostCall('composer/get', {}, store);
     if (surface.closed) return;
     store.state.host.composer_text = text; c.setText(text);
@@ -265,6 +303,10 @@ export class RemoteUI {
         getSuggestions(lines, cursorLine, cursorCol, options) {
           const line = String(lines?.[cursorLine] ?? '').slice(0, cursorCol).trimStart();
           if (line.startsWith('/') && !line.includes(' ')) return null;
+          if (native) {
+            const {text, index} = piPosition(lines, cursorLine, cursorCol);
+            if (commandArgumentRequest({text, cursor: Buffer.byteLength(text.slice(0, index)), revision: 0})) return null;
+          }
           return provider.getSuggestions(lines, cursorLine, cursorCol, options);
         },
       });
@@ -300,6 +342,7 @@ export class RemoteUI {
         }
       });
     };
+    if (native) native.checkpoint = () => {if (!surface.closed && !editor.mutating) editor.checkpoint();};
     // The host owns submit, follow-up, clear and close for the composer slot;
     // the component answers host text decisions with checkpoints only.
     c.onChange = value => {
@@ -464,6 +507,8 @@ export class RemoteUI {
             if (issued.mount_id !== surface.mountId || issued.input_revision !== editor.inputRevision + 1) invalid('editor paste mount/revision mismatch');
             surface.component.handleInput('\x1b[200~' + text + '\x1b[201~');
             editor.inputRevision = issued.input_revision;
+          } else if (nativeEditors.has(surface.component) && params.native_changed !== undefined) {
+            if (params.native_changed && (surface.component.getExpandedText?.() ?? surface.component.getText()) === text) surface.component.onChange?.(surface.component.getText());
           } else if ((surface.component.getExpandedText?.() ?? surface.component.getText()) !== text) surface.component.setText(text);
         }); }
         finally { editor.mutating--; }

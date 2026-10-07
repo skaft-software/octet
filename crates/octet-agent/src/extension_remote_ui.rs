@@ -110,6 +110,20 @@ pub struct ExtensionRemoteUiChromeRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionRemoteUiChrome {
+    /// Synchronous native editor operation on an already admitted surface.
+    /// The frontend rechecks owner, surface and optional composer mount fence.
+    Editor {
+        /// Extension-local surface containing the component.
+        surface_id: String,
+        /// Required for composer-slot editors; fullscreen components omit it.
+        #[serde(default)]
+        mount_id: Option<String>,
+        /// Opaque native handle, absent only when creating a component editor.
+        #[serde(default)]
+        editor_id: Option<String>,
+        /// Closed native operation profile, parsed at the frontend mutation.
+        operation: serde_json::Value,
+    },
     /// Read authoritative foreground chrome, including the active palette.
     Get,
     /// Look up a pre-resolved native palette without selecting it.
@@ -236,6 +250,21 @@ fn theme_chrome_names_are_bounded_and_operations_are_closed() {
 impl ExtensionRemoteUiChrome {
     fn validate(&self) -> ValidationResult {
         match self {
+            Self::Editor {
+                surface_id,
+                mount_id,
+                editor_id,
+                operation,
+            } => {
+                validate_surface_id(surface_id)?;
+                for id in [mount_id, editor_id].into_iter().flatten() {
+                    validate_surface_id(id)?;
+                }
+                if !operation.is_object() {
+                    return Err(invalid("editor operation must be an object"));
+                }
+                Ok(())
+            }
             Self::ThemeGet { name: Some(name) } | Self::ThemeSet { name } => {
                 validate_text("theme name", name, 256, false)
             }
@@ -483,6 +512,10 @@ pub struct ExtensionRemoteUiEditorText {
     /// Paste at the component's caret instead of replacing its draft.
     #[serde(default)]
     pub paste: bool,
+    /// Native editor already committed this host decision; notify callbacks
+    /// without replaying a replacement that would lose its native caret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_changed: Option<bool>,
     /// Host-issued input clock, required for paste.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_input: Option<ExtensionRemoteUiEditorInput>,
