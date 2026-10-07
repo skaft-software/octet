@@ -433,11 +433,13 @@ their effort with Pro cleared and a warning. At every idle rebuild boundary, an
 explicit effort selection likewise supersedes and clears any restored legacy
 Pro bit unless the caller explicitly selected a mode.
 
-Routes advertising Responses Lite use the transport contract implemented by
-`octet-ai`, including its ordinary and compact request shapes and advertised
-parallel-tool-call bit. This product layer only discovers and propagates the
-capability; it does not reconstruct the wire format or infer support from the
-endpoint identity.
+Codex inventory retains its Responses Lite preference, but the coding product
+selects ordinary Responses with parallel tool calls enabled, matching Pi's
+Codex request behavior. `codex_inference_capabilities` separates that inference
+policy from the inventory observation while retaining exact reasoning choices,
+V2 delegation and qualified reasoning updates. The `octet-ai` SDK still supports
+explicit Lite selection with its ordinary and compact request shapes; the
+product does not reconstruct those wire formats.
 
 ## OpenRouter Batch API
 
