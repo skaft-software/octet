@@ -128,9 +128,17 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
       record(body, ['content'], 'canonical user');
       let content = [];
       const flush = () => { if (content.length) { output.push({ role: 'user', content }); content = []; } };
-      for (const part of array(body.content, 'user content')) {
-        const [kind, value] = variant(part, 'user part');
-        if (kind === 'Text' || kind === 'Media') content.push(contentToPi(part, 'context user part'));
+      // Pi 1.0.2 keeps the image blocks of a tool result inside its
+      // ToolResultMessage and only its providers split them onto the wire.
+      // Octet's chat-completions lowering commits those blocks as
+      // protocol-adjacent media beside the result, which is the same Pi
+      // message. Provider-context replay keeps the adjacent user message its
+      // codec lowers, because that is the request the provider receives.
+      const inlineToolMedia = !replay;
+      const bodyParts = array(body.content, 'user content');
+      for (let index = 0; index < bodyParts.length; index++) {
+        const [kind, value] = variant(bodyParts[index], 'user part');
+        if (kind === 'Text' || kind === 'Media') content.push(contentToPi(bodyParts[index], 'context user part'));
         else if (kind === 'ToolResult') {
           flush(); record(value, ['tool_call_id', 'content', 'is_error', 'added_tool_names'], 'canonical tool result');
           // Read-only observations report result content, not native registry changes.
@@ -140,6 +148,13 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
           if (!toolName) invalid('canonical tool result has no preceding call');
           if (typeof value.is_error !== 'boolean') invalid('tool result error flag');
           const parts = array(value.content, 'tool result content').map(part => contentToPi(part, 'context tool result part'));
+          if (inlineToolMedia) {
+            let adjacent = index + 1;
+            for (; adjacent < bodyParts.length && variant(bodyParts[adjacent], 'user part')[0] === 'Media'; adjacent++) {
+              parts.push(contentToPi(bodyParts[adjacent], 'context tool result part'));
+            }
+            index = adjacent - 1;
+          }
           output.push({ role: 'toolResult', toolCallId: id, toolName, content: parts, isError: value.is_error });
         } else unsupported(`context user part ${kind}`, 'no lossless Pi content binding');
       }

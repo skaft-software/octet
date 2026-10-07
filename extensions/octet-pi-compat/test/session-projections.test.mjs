@@ -89,6 +89,30 @@ test('session image entries retain original IDs, parent order, actual timestamps
   }
 });
 
+test('chat-completions protocol-adjacent tool media is one Pi message in every read-only view', () => {
+  const call = { ToolResult: { tool_call_id: 'call', content: [{ Text: 'frame follows' }], is_error: false } };
+  const native = [assistant, user([call, image()])];
+  const toolResult = { role: 'toolResult', toolCallId: 'call', toolName: 'read',
+    content: [{ type: 'text', text: 'frame follows' }, piImage()], isError: false };
+  // Pi 1.0.2's ToolResultMessage carries the tool's image blocks; only its
+  // openai-completions provider splits them onto the wire.
+  const messages = canonicalToPi(structuredClone(native));
+  assert.equal(messages.length, 2);
+  assert.deepEqual(messages[1], toolResult);
+  // The Pi session mirror reports the same single durable entry, not two.
+  const mirrored = translateSessionEntries([entry('a', null, assistant), entry('b', 'a', user([call, image()]))], 'actual');
+  assert.deepEqual(mirrored.map(item => item.type), ['message', 'message']);
+  assert.deepEqual(mirrored[1].message, { ...toolResult, timestamp: 1234 });
+  // Provider-context replay keeps the adjacent user message the native codec
+  // lowers onto the chat-completions wire.
+  const replay = canonicalToPi(structuredClone(native), new Map(), { replay: true });
+  assert.deepEqual(replay[1], { ...toolResult, content: [{ type: 'text', text: 'frame follows' }] });
+  assert.deepEqual(replay[2], { role: 'user', content: [piImage()] });
+  // User text beside a result is still a mixed entry, never silently split.
+  assert.throws(() => translateSessionEntries([entry('a', null, assistant), entry('m', 'a', user([call, { Text: 'beside' }]))], 'actual'),
+    /cannot fabricate extra Pi entry identities/);
+});
+
 test('a reused call ID on another branch cannot change the image result tool name', () => {
   const sibling = structuredClone(assistant); sibling.Assistant.content[0].ToolCall.name = 'other-branch';
   const entries = [entry('a', null, assistant), entry('sibling', null, sibling), entry('r', 'a', user([result()]))];
