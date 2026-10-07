@@ -212,8 +212,10 @@ in CLI order; later same-named sources win. Projects require workspace trust.
 Full access implicitly authorizes selected enabled processes but never enables
 them or persists a grant. Controlled/safe mode needs explicit source-bound host
 authority; `--trust-extension NAME` grants that for one invocation and **does
-not enable**. Persistent activation is `enabled_extensions`; persistent grants
-are separate `trusted_extensions`. Bare grants apply only under
+not enable**. `--enable-extension NAME` equals the `/extensions` menu's Enable:
+it persists `NAME` in user `enabled_extensions`, so after copying in a new
+extension you can `/reload` and toggle it from the menu. Persistent grants are
+separate `trusted_extensions`. Bare grants apply only under
 `~/.octet/extensions`; project/other grants use
 `NAME@/absolute/path/extension.toml`. Review the selected path, not just its name.
 `--no-process` / `--no-shell` gates can still refuse startup.

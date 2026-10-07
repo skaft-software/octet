@@ -176,8 +176,12 @@ extensions. For example, with a reviewed bundle installed:
 octet --enable-extension octet-web-search
 ```
 
-`--enable-extension NAME` enables a selected extension for that invocation, and
-`enabled_extensions = ["octet-web-search"]` persists activation in user config.
+`--enable-extension NAME` is the same as choosing Enable in `/extensions`: it
+adds `NAME` to `enabled_extensions` in user config, so the extension stays on
+for later launches and the menu (and `/reload`) can still turn it off or turn
+others on. When a trusted project config or `OCTET_EXTENSIONS` sets the
+activation list, or user config can't be written, the flag applies to that
+invocation only and the menu can't change activation.
 `--trust-extension NAME` grants host authority to the selected source for this
 invocation, even in safe mode, and doesn't turn the extension on. An explicit
 `--extension-dir` grants host authority for that invocation without an extra
