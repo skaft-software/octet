@@ -311,6 +311,35 @@ fn partial_text_turn(text: &str) -> String {
         )
 }
 
+/// A streamed OpenAI-completions tool call whose arguments are raw provider
+/// text, so a test can emit JSON that conservative repair cannot recover.
+fn openai_raw_tool_turn(id: &str, name: &str, argument_chunks: &[&str]) -> String {
+    let mut body = String::new();
+    for (index, chunk) in argument_chunks.iter().enumerate() {
+        let call = if index == 0 {
+            serde_json::json!({
+                "index": 0,
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": chunk},
+            })
+        } else {
+            serde_json::json!({
+                "index": 0,
+                "function": {"arguments": chunk},
+            })
+        };
+        let frame = serde_json::json!({
+            "id": "chat-tools",
+            "choices": [{"index": 0, "delta": {"tool_calls": [call]}}],
+        });
+        body += &format!("data: {frame}\n\n");
+    }
+    body += "data: {\"id\":\"chat-tools\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+    body += "data: [DONE]\n\n";
+    body
+}
+
 /// A complete turn that requests the given tool calls.
 fn tool_turn_with_stop(calls: &[(&str, &str, serde_json::Value)], stop_reason: &str) -> String {
     let mut s = msg_start();
@@ -6061,6 +6090,50 @@ impl Tool for SchemaMismatchBashProbe {
     }
 }
 
+struct MalformedArgumentsEditProbe {
+    effect_calls: Arc<AtomicUsize>,
+    executions: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Tool for MalformedArgumentsEditProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            async_execution: false,
+            name: "edit".into(),
+            description: "Records calls whose streamed arguments were unparseable".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_text": {"type": "string"}
+                },
+                "required": ["path", "old_text"],
+                "additionalProperties": false,
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        self.effect_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolEffect::Pure)
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::new("must not execute"))
+    }
+}
+
 struct AdmissionHookProbe {
     before: Arc<AtomicUsize>,
     after: Arc<AtomicUsize>,
@@ -6419,6 +6492,136 @@ async fn schema_rejected_bash_is_never_classified_or_executed() {
         "one rejected-tool turn and one corrective turn"
     );
     assert!(requests[1].to_string().contains(SCHEMA_MISMATCH_ERROR));
+}
+
+const MALFORMED_ARGUMENTS_ERROR: &str =
+    "tool call was not executed because its streamed arguments were not valid JSON and could not be repaired; re-issue the call with one complete JSON object";
+
+/// A model that emits one tool call whose streamed arguments are not valid JSON
+/// (a missing comma no conservative repair may invent) must receive an error
+/// result and get another turn, exactly as Pi continues after a failed tool
+/// validation. The call is never executed and never carries guessed arguments.
+#[tokio::test]
+async fn malformed_streamed_tool_arguments_do_not_abort_the_run() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(Script {
+            bodies: vec![
+                openai_raw_tool_turn(
+                    "call_malformed",
+                    "edit",
+                    &[r#"{"path": "lib/"#, r#"slugify.js" "old_text": 1}"#],
+                ),
+                openai_text_turn("malformed arguments corrected"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let effect_calls = Arc::new(AtomicUsize::new(0));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut extensions = ExtensionHost::new();
+    extensions.tool(MalformedArgumentsEditProbe {
+        effect_calls: Arc::clone(&effect_calls),
+        executions: Arc::clone(&executions),
+    });
+    let mut agent = Agent::new(AgentConfig {
+        client: AiClient::new(),
+        model: openai_multimodal_model(&server.uri()),
+        session: Session::create(session_dir.path().join("session.jsonl")).unwrap(),
+        system: "malformed arguments test".into(),
+        sandbox: SandboxConfig::new(workspace_dir.path()),
+        effect_broker: EffectBroker::new(EffectPolicy::UnsafeHost),
+        extensions,
+        max_turns: Some(4),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: octet_ai::CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+
+    let mut run = agent.prompt("fix the slugify bug").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{:?}",
+        assert_single_run_finished(&events)
+    );
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolFinished {
+                id,
+                result: Err(error),
+                ..
+            } if id.0 == "call_malformed" => Some(error.message.as_str()),
+            _ => None,
+        })
+        .expect("malformed arguments are surfaced as a tool error");
+    assert_eq!(error, MALFORMED_ARGUMENTS_ERROR);
+    assert_eq!(effect_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+    let call = agent
+        .session()
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.value {
+            EntryValue::Message(Message::Assistant(message)) => {
+                message.content.iter().find_map(|part| match part {
+                    AssistantPart::ToolCall(call) if call.id.0 == "call_malformed" => Some(call),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("the malformed call keeps its envelope in the session");
+    assert_eq!(call.name, "edit");
+    assert_eq!(call.arguments_json, "{}");
+    assert_eq!(call.argument_error, Some(ToolCallArgumentError::Malformed));
+    assert!(!call.arguments_json.contains("slugify"));
+
+    let result = agent
+        .session()
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.value {
+            EntryValue::Message(Message::User(message)) => {
+                message.content.iter().find_map(|part| match part {
+                    UserPart::ToolResult(result) if result.tool_call_id.0 == "call_malformed" => {
+                        Some(result)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("paired rejection result is durable");
+    assert!(result.is_error);
+    let text = result
+        .content
+        .iter()
+        .find_map(|part| match part {
+            octet_ai::ToolResultPart::Text(text) => Some(text),
+            _ => None,
+        })
+        .expect("static error text");
+    assert_eq!(text, MALFORMED_ARGUMENTS_ERROR);
+
+    let requests = wire_requests(&server).await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "one rejected-tool turn and one corrective turn"
+    );
+    assert!(requests[1].to_string().contains(MALFORMED_ARGUMENTS_ERROR));
 }
 
 #[tokio::test]

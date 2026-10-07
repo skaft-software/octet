@@ -1189,6 +1189,11 @@ pub enum ToolCallArgumentError {
     /// The normalized argument object does not satisfy the request's exact
     /// tool-parameter schema.
     SchemaMismatch,
+    /// The streamed arguments were not valid JSON and conservative repair could
+    /// not recover an object, so the call keeps only its envelope with empty
+    /// arguments. Pi parses such arguments leniently and lets the call fail its
+    /// own validation; the model receives a paired error result and can retry.
+    Malformed,
 }
 
 /// Result of validating one normalized argument object against a tool snapshot.

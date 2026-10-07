@@ -1,4 +1,4 @@
-: cite: docs/design/octet-ai.md §8/§13 (bad tool-arg JSON at assembly -> Decode)
+: cite: docs/design/octet-ai.md §8/§13 (bad tool-arg JSON at assembly -> call envelope marked ToolCallArgumentError::Malformed, Finished retained)
 event: message_start
 data: {"type":"message_start","message":{"id":"msg_bad","usage":{"input_tokens":25,"output_tokens":0}}}
 

@@ -395,9 +395,27 @@ async fn parallel_tool_calls() {
 }
 
 #[tokio::test]
-async fn malformed_tool_json_is_decode_error() {
-    let err = run(fx!("malformed_tool_json.sse"), 0).await.unwrap_err();
-    assert!(matches!(err, AiError::Decode(_)), "got {err:?}");
+async fn malformed_tool_json_keeps_a_marked_call_envelope() {
+    let events = run(fx!("malformed_tool_json.sse"), 0).await.unwrap();
+    let response = harness::finished(&events);
+    assert_eq!(response.stop_reason, StopReason::ToolUse);
+    assert!(response
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_tool_arguments"));
+    let call = response
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .expect("the malformed call keeps its envelope");
+    assert_eq!(call.id.0, "toolu_bad");
+    assert_eq!(call.name, "foo");
+    assert_eq!(call.arguments_json, "{}");
+    assert_eq!(call.argument_error, Some(ToolCallArgumentError::Malformed));
 }
 
 #[tokio::test]

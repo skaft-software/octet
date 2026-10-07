@@ -176,9 +176,9 @@ pub(crate) struct ToolCallBuilder {
     pub(crate) name: String,
     pub(crate) arguments_json: String,
     pub(crate) argument_error: Option<ToolCallArgumentError>,
-    /// True once arguments were normalized and schema-checked at an explicit
-    /// `ToolCallEnd`; malformed max-token output remains false for final
-    /// truncation handling.
+    /// True once arguments were normalized at an explicit `ToolCallEnd` or by
+    /// the final pass; unrepairable output stays false until the stop reason
+    /// decides between the truncation and malformed envelopes.
     pub(crate) arguments_normalized: bool,
 }
 
@@ -589,8 +589,9 @@ impl ResponseBuilder {
                 // A completed, parseable call is schema-checked before this
                 // terminal event reaches consumers. This prevents downstream
                 // speculative execution from observing unchecked arguments.
-                // Unparseable output is deferred to `finish`: a MaxTokens
-                // terminal can safely retain its envelope with discarded args.
+                // Unparseable output is deferred to `finish`, where the stop
+                // reason decides whether it is a max-token truncation or a
+                // malformed call that keeps its envelope for the model.
                 self.normalize_completed_tool_arguments(*index)?;
                 self.ended_indices.insert(*index);
             }
@@ -723,8 +724,9 @@ impl ResponseBuilder {
     /// Normalizes a parseable call at its explicit terminal event.
     ///
     /// A malformed value is deliberately deferred to [`Self::normalize_tool_arguments`]:
-    /// the eventual stop reason determines whether a max-token response may retain
-    /// the call envelope with discarded arguments. A parseable call, including a
+    /// the eventual stop reason decides whether a max-token response discards
+    /// truncated arguments or a malformed call keeps its envelope marked
+    /// [`ToolCallArgumentError::Malformed`]. A parseable call, including a
     /// schema mismatch, is marked before consumers can speculate on it.
     fn normalize_completed_tool_arguments(&mut self, index: usize) -> Result<(), AiError> {
         let tool_definitions = self.tool_definitions.as_deref();
@@ -753,9 +755,9 @@ impl ResponseBuilder {
         )
     }
 
-    /// Returns the schema-mismatch marker computed for an explicitly completed
-    /// streamed call. `None` also covers a call whose malformed arguments must
-    /// wait for final truncation handling.
+    /// Returns the recoverable argument marker computed for an explicitly
+    /// completed streamed call. `None` also covers a call whose unparseable
+    /// arguments must wait for final stop-reason handling.
     pub(crate) fn tool_call_argument_error(&self, index: usize) -> Option<ToolCallArgumentError> {
         self.tool_call_builders
             .get(&index)
@@ -797,13 +799,17 @@ impl ResponseBuilder {
     ///
     /// A max-token terminal may cut a tool argument string in the middle. Keep
     /// the call envelope so the agent can pair it with a synthetic error result,
-    /// but never expose guessed partial arguments for execution. Other malformed
-    /// completions remain decode failures. Performing this pass before
-    /// [`Self::finish_mut`] replaces the builder also preserves stream-progress
-    /// counters when strict normalization fails.
+    /// but never expose guessed partial arguments for execution. Any other
+    /// unrepairable completion keeps its envelope too, marked
+    /// [`ToolCallArgumentError::Malformed`]: Pi parses such arguments leniently
+    /// and lets the call fail its own validation, so one malformed call must not
+    /// end the run. Performing this pass before [`Self::finish_mut`] replaces the
+    /// builder also preserves stream-progress counters when strict normalization
+    /// of a repairable call fails.
     fn normalize_tool_arguments(&mut self) -> Result<(), AiError> {
         let output_truncated = matches!(self.stop_reason, Some(StopReason::MaxTokens));
         let mut discarded_truncated_arguments = false;
+        let mut malformed_arguments = false;
         {
             let tool_definitions = self.tool_definitions.as_deref();
             for builder in self.tool_call_builders.values_mut() {
@@ -815,18 +821,25 @@ impl ResponseBuilder {
                 } else {
                     builder.arguments_json.as_str()
                 };
-                let arguments_json = match crate::json_repair::normalize_json_object(raw_arguments)
-                {
-                    Ok(arguments_json) => arguments_json,
-                    Err(_) if output_truncated => {
-                        builder.arguments_json = "{}".to_owned();
-                        builder.argument_error = None;
-                        builder.arguments_normalized = true;
+                let (arguments_json, argument_error) =
+                    crate::json_repair::normalize_completed_tool_arguments(raw_arguments);
+                if let Some(argument_error) = argument_error {
+                    // An authoritative max-token terminal makes truncation the
+                    // expected explanation, so the call is discarded without a
+                    // marker and the agent's truncation path names it. Any other
+                    // unrepairable text is malformed provider output the model
+                    // must see and correct.
+                    builder.arguments_json =
+                        crate::json_repair::UNREPAIRABLE_TOOL_ARGUMENTS.to_owned();
+                    builder.argument_error = (!output_truncated).then_some(argument_error);
+                    builder.arguments_normalized = true;
+                    if output_truncated {
                         discarded_truncated_arguments = true;
-                        continue;
+                    } else {
+                        malformed_arguments = true;
                     }
-                    Err(error) => return Err(AiError::Decode(error)),
-                };
+                    continue;
+                }
                 Self::apply_normalized_tool_arguments(
                     builder,
                     arguments_json,
@@ -840,6 +853,9 @@ impl ResponseBuilder {
                 code: "discarded_truncated_tool_arguments".to_owned(),
                 message: "Tool arguments truncated at the provider output limit were replaced with an empty object and must not be executed".to_owned(),
             });
+        }
+        if malformed_arguments {
+            self.add_diagnostic(crate::json_repair::malformed_tool_arguments_diagnostic());
         }
         Ok(())
     }
