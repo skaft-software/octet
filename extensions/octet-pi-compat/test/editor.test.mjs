@@ -123,6 +123,7 @@ for (const result of [{}, { input_revision: 0, checkpoint_revision: 1 }, { input
     peer.send({ jsonrpc: '2.0', id: write.id, result });
     await peer.wait(f => f.method === 'ui/close');
     assert.equal(peer.seen.some(frame('seedu')), false);
+    await peer.waitStderr(/editor checkpoint acknowledgement mismatch/);
     assert.match(peer.stderr(), /editor checkpoint acknowledgement mismatch/);
     await peer.close();
   });

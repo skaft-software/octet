@@ -19,8 +19,12 @@ function fixture() {
   };
   return { runtime, frames, pending, store };
 }
+// Fixture hang guard for cross-process effects (a child file write, a reverse
+// registration). The window matches this harness's own 7 s round-trip timeout:
+// half a second is below one loaded Node round trip, which made the guard fire
+// on work that was still in progress.
 async function until(predicate) {
-  for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+  for (let i = 0; i < 1400; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
   assert.fail('bounded fixture timeout');
 }
 async function registered(stream) {
