@@ -159,7 +159,7 @@ reference](cli.md#packages).
 | --- | --- |
 | `octet-web-search` | Public web search and fetch, via [Brave Search (recommended) or SearXNG](../extensions/octet-web-search/README.md). Not a browser. |
 | `octet-computer-use` | [Native desktop control](../extensions/octet-computer-use/README.md) (macOS, Windows, Linux) through a locally installed, MIT-licensed Cua Driver. Provisioning is explicit, and the OS permissions are yours to grant. |
-| `octet-codemode` | [Pi's offline JavaScript tool composition](../extensions/octet-codemode/README.md), with QuickJS/WASM and Node 22.19+. Explicitly enabled tools retain normal host policy and budgets. |
+| `octet-codemode` | [Pi's offline JavaScript tool composition](../extensions/octet-codemode/README.md), one Rust executable with the embedded QuickJS/WASM engine; no Node.js or Python is required. Explicitly enabled tools retain normal host policy and budgets. |
 | `octet-mcp` | An [MCP bridge](../extensions/octet-mcp/README.md). Local stdio works. Remote Streamable HTTP is blocked by default. |
 | `octet-pi-compat` | [Bring your Pi 1.0.2 extensions](pi-compatibility.md#bring-your-pi-extensions), with automatic per-extension loading routes and explicit setup. Requires Node 22.19+ or Bun. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |

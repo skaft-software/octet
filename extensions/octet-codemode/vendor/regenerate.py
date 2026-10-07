@@ -31,8 +31,18 @@ PACKAGES = (
 )
 LICENSE_SHA256 = "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48"
 LICENSE_URL = "https://raw.githubusercontent.com/earendil-works/pi/a13d35a742c6ef8462812a28fbe1d8c8b7431c32/LICENSE"
-IMPORT_OLD = b'from "quickjs-wasi";'
-IMPORT_NEW = b'from "../../../quickjs-wasi/dist/index.js";'
+# Exactly the published files the Rust extension embeds or ships: the two
+# vendored Pi sources used by the linker, the prelude it evaluates, the grammar
+# source its unit test pins, and the core WASM. Node-only loaders, declaration
+# files and source maps are not retained: the Rust executable never reads them.
+PI_KEEP = {
+    "LICENSE",
+    "dist/identifier.js",
+    "dist/declarations.js",
+    "dist/source.js",
+    "dist/runtime/prelude-source.js",
+}
+QUICKJS_KEEP = {"LICENSE", "quickjs.wasm"}
 # Supplemental engine/runtime notices omitted from npm, plus notices for optional
 # modules retained only inside the unmodified source archive. Published source
 # pins: quickjs-wasi@3.6.2 / QuickJS-NG submodule and its wasi-sdk-32 toolchain.
@@ -90,22 +100,20 @@ def generated():
                     raise ValueError(f"unsafe or duplicate archive member: {member.name}")
                 seen.add(member.name)
                 relative = path.relative_to("package").as_posix()
-                # Only published JS and its declarations/maps, metadata, license/docs,
-                # and the core WASM. No optional .so modules are extracted or loaded.
-                keep = relative in {"package.json", "README.md", "LICENSE", "quickjs.wasm"} or relative.startswith("dist/")
-                if not keep:
-                    continue
                 if member.size > 8 * 1024 * 1024:
                     raise ValueError(f"oversized source member: {member.name}")
                 data = tar.extractfile(member).read()
-                if package["directory"] == "pi-codemode" and relative == "dist/runtime/worker.js":
-                    if data.count(IMPORT_OLD) != 1:
-                        raise ValueError("published worker import changed")
-                    data = data.replace(IMPORT_OLD, IMPORT_NEW)
+                # The published metadata is unpacked for verification, never retained.
+                if relative == "package.json":
+                    metadata = json.loads(data)
+                    if (metadata["name"], metadata["version"], metadata["license"]) != (
+                        package["name"], package["version"], "MIT"):
+                        raise ValueError("published package metadata mismatch")
+                    continue
+                keep = PI_KEEP if package["directory"] == "pi-codemode" else QUICKJS_KEEP
+                if relative not in keep:
+                    continue
                 files[f"{package['directory']}/{relative}"] = data
-        metadata = json.loads(files[f"{package['directory']}/package.json"])
-        if (metadata["name"], metadata["version"], metadata["license"]) != (package["name"], package["version"], "MIT"):
-            raise ValueError("published package metadata mismatch")
     license = (ROOT / "sources/pi-LICENSE").read_bytes()
     if hashlib.sha256(license).hexdigest() != LICENSE_SHA256:
         raise ValueError("pinned Pi MIT license mismatch")
@@ -126,9 +134,11 @@ def generated():
         "pi_license": {"url": LICENSE_URL, "sha256": LICENSE_SHA256,
                        "note": "Pi's npm tarball omits LICENSE; supplied from its exact published gitHead."},
         "supplemental_licenses": supplemental,
-        "patches": [{"path": "pi-codemode/dist/runtime/worker.js", "old": IMPORT_OLD.decode(), "new": IMPORT_NEW.decode(),
-                     "reason": "Offline relative import relocation only; engine/prelude otherwise unchanged."}],
-        "omitted": ["quickjs-wasi optional native WASM .so extensions (not used by Pi codemode)"],
+        "patches": [],
+        "omitted": [
+            "quickjs-wasi optional native WASM .so extensions (not used by Pi codemode)",
+            "Node-only pi-codemode loaders/declarations/maps and the quickjs-wasi JavaScript loader; the Rust extension embeds the retained sources at compile time",
+        ],
     }
     files["PROVENANCE.json"] = (json.dumps(provenance, indent=2) + "\n").encode()
     files["SHA256SUMS"] = "".join(f"{hashlib.sha256(data).hexdigest()}  {path}\n" for path, data in sorted(files.items())).encode()

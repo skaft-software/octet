@@ -797,18 +797,62 @@ async fn composition_value_over_file_limit_is_an_actionable_error_not_transport_
     );
 }
 
+/// Acceptance test for the shipped no-Node Codemode extension through the real
+/// host transport. The bundle in this test is binary-only: the host stages and
+/// launches the Rust entrypoint with an empty PATH, so a Node, Python or any
+/// other runtime on PATH cannot be what serves the script.
+///
+/// Run it after building the extension crate:
+///   cargo build --manifest-path extensions/octet-codemode/Cargo.toml
+///   cargo test -p octet-agent codemode_bundle_runs_ -- --ignored
+///
+/// CODEMODE_BINARY may point at a release build of the extension instead.
 #[cfg(unix)]
 #[tokio::test]
-#[ignore = "optional codemode bundle requires Node >=22.19 on PATH"]
+#[ignore = "requires the built extensions/octet-codemode binary; set CODEMODE_BINARY to override"]
 async fn codemode_bundle_runs_vendored_vm_through_host_transport() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let bundle = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../extensions/octet-codemode")
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let binary = std::env::var("CODEMODE_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            repository.join("extensions/octet-codemode/target/debug/octet-codemode")
+        })
         .canonicalize()
-        .unwrap();
-    let manifest_path = bundle.join(EXTENSION_MANIFEST_FILENAME);
+        .expect("build the codemode extension crate first or set CODEMODE_BINARY");
+    let temp = tempfile::TempDir::new().unwrap();
+    // A standalone binary-only bundle: no Python launcher, JavaScript module,
+    // package manifest or vendored runtime file is copied.
+    let standalone = temp.path().join("octet-codemode");
+    std::fs::create_dir(&standalone).unwrap();
+    std::fs::write(
+        standalone.join(EXTENSION_MANIFEST_FILENAME),
+        r#"name = "octet-codemode"
+version = "0.9.0"
+api_version = "0.4"
+requires_octet = "=0.9.0"
+[entrypoint]
+command = "octet-codemode"
+args = ["serve", "--engine", "wasi"]
+[capabilities]
+filesystem = "unrestricted"
+process = false
+network = false
+[contributes]
+tools = ["codemode"]
+commands = ["codemode"]
+"#,
+    )
+    .unwrap();
+    let bundle_binary = standalone.join("octet-codemode");
+    std::fs::copy(&binary, &bundle_binary).unwrap();
+    assert_eq!(std::fs::read_dir(&standalone).unwrap().count(), 2);
+    let manifest_path = standalone.join(EXTENSION_MANIFEST_FILENAME);
+    let mut manifest = ExtensionManifest::load(&manifest_path).unwrap();
+    // The entrypoint runs with no inherited PATH at all: only the staged
+    // binary may serve the guest.
+    manifest.entrypoint.env.insert("PATH".into(), String::new());
     let descriptor = DiscoveredExtension {
-        manifest: ExtensionManifest::load(&manifest_path).unwrap(),
+        manifest,
         manifest_path,
         source: ExtensionSource::Explicit,
         activation: ExtensionActivation {
@@ -816,11 +860,13 @@ async fn codemode_bundle_runs_vendored_vm_through_host_transport() {
             trust: ExtensionTrust::Trusted,
         },
     };
-    let mut config = ExtensionRuntimeConfig::new(temp.path().canonicalize().unwrap());
+    let mut config = ExtensionRuntimeConfig::new(standalone.canonicalize().unwrap());
     config.tool_composition = true;
     config.supervise = false;
     let process = ExtensionProcess::start(descriptor, config).await.unwrap();
-    let connection = read_std_lock(&process.inner.connection).clone();
+    // Host entrypoint staging ends after initialization. The extension must use
+    // its own retained image, not reopen a mutable bundle path later.
+    std::fs::write(&bundle_binary, b"not an executable anymore\n").unwrap();
     let definition = process.tool_definitions().remove(0);
     assert_eq!(
         definition.composition.as_ref().unwrap().mode,
@@ -829,28 +875,80 @@ async fn codemode_bundle_runs_vendored_vm_through_host_transport() {
     assert!(definition.constrained_sampling.is_some());
     let service = Arc::new(FakeCompositionService::default());
     *lock_std_mutex(&service.result) = Some(json!({"ok":true,"text":"🌱".repeat(300_000)}));
-    let (started, _operation) = oneshot::channel();
-    let result = process
-        .call_tool_controlled(
-            connection,
-            definition,
-            0,
-            json!({"code":"const row=await tools.echo({message:'from VM'});store('answer',row.text.length);return row.ok ? 'vm-ok' : 'vm-failed';"}),
-            process.current_context_for_resource_owner("real-vm-owner"),
-            CancellationToken::default(),
-            ToolProgressSink::null().with_composition(service.clone()),
-            started,
-        )
-        .await
-        .unwrap();
-    assert!(!result.is_error, "{}", result.content);
-    assert!(result.content.contains("vm-ok"));
-    assert_eq!(
-        *lock_std_mutex(&service.calls),
-        vec![("echo".into(), json!({"message":"from VM"}))]
-    );
+    for (code, fails, expected) in [
+        (
+            "const row=await tools.echo({message:'no Node'});store('answer',row.text.length);return row.ok ? 'vm-ok' : 'vm-failed';",
+            false,
+            &["vm-ok"][..],
+        ),
+        (
+            "store('not-committed',true);await tools.echo({message:'effect-before-error'});throw Error('expected failure');",
+            true,
+            &["expected failure"][..],
+        ),
+        // A second warm script proves the runner is reused after success and
+        // failure with no global or prototype leakage from the first script.
+        (
+            "return [typeof globalThis.__leaked, Object.prototype.polluted === undefined];",
+            false,
+            &[r#"["undefined",true]"#][..],
+        ),
+    ] {
+        let connection = read_std_lock(&process.inner.connection).clone();
+        let (started, _operation) = oneshot::channel();
+        let result = process
+            .call_tool_controlled(
+                connection,
+                definition.clone(),
+                0,
+                json!({"code": code}),
+                process.current_context_for_resource_owner("acceptance-owner"),
+                CancellationToken::default(),
+                ToolProgressSink::null().with_composition(service.clone()),
+                started,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, fails, "{}", result.content);
+        for needle in expected {
+            assert!(result.content.contains(needle), "{}", result.content);
+        }
+    }
+    assert_eq!(lock_std_mutex(&service.calls).len(), 2);
+    assert_eq!(lock_std_mutex(&service.writes).len(), 1);
     assert_eq!(lock_std_mutex(&service.writes)[0].0["answer"], 600_000);
+    // Parent cancellation reaches the real composition reverse worker, and the
+    // cancelled script cannot commit a store write.
+    let waiting = Arc::new(FakeCompositionService::default());
+    waiting.wait.store(true, Ordering::Release);
+    let cancel = CancellationToken::default();
+    let connection = read_std_lock(&process.inner.connection).clone();
+    let (started, _operation) = oneshot::channel();
+    let run = process.call_tool_controlled(
+        connection,
+        definition,
+        0,
+        json!({"code":"store('never',1);await tools.echo({});"}),
+        process.current_context_for_resource_owner("acceptance-cancel"),
+        cancel.clone(),
+        ToolProgressSink::null().with_composition(waiting.clone()),
+        started,
+    );
+    tokio::pin!(run);
+    tokio::select! {
+        _ = waiting.entered.notified() => {},
+        result = &mut run => panic!("completed before waiting: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("runner did not call host"),
+    }
+    cancel.cancel();
+    assert!(run.await.is_err());
+    assert!(lock_std_mutex(&waiting.writes).is_empty());
     assert!(process.shutdown().await);
+    assert!(lock_std_mutex(&waiting.token)
+        .as_ref()
+        .unwrap()
+        .is_cancelled());
+    assert!(waiting.dropped.load(Ordering::Acquire));
 }
 
 #[cfg(unix)]

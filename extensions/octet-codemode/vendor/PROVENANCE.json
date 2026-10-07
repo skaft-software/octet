@@ -109,15 +109,9 @@
       "sha256": "9b405ef4c89342f5eae1dd828882f931747f71001cfba7d114801039b52ad09b"
     }
   ],
-  "patches": [
-    {
-      "path": "pi-codemode/dist/runtime/worker.js",
-      "old": "from \"quickjs-wasi\";",
-      "new": "from \"../../../quickjs-wasi/dist/index.js\";",
-      "reason": "Offline relative import relocation only; engine/prelude otherwise unchanged."
-    }
-  ],
+  "patches": [],
   "omitted": [
-    "quickjs-wasi optional native WASM .so extensions (not used by Pi codemode)"
+    "quickjs-wasi optional native WASM .so extensions (not used by Pi codemode)",
+    "Node-only pi-codemode loaders/declarations/maps and the quickjs-wasi JavaScript loader; the Rust extension embeds the retained sources at compile time"
   ]
 }

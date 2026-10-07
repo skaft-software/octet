@@ -87,11 +87,14 @@ other API version negotiates this replacement hook.
 ## Tool composition
 
 The optional first-party [octet-codemode](../extensions/octet-codemode/README.md)
-bundle runs Pi's pinned offline QuickJS/WASM runtime (Node 22.19+). It adds
-single-shot JavaScript batching/chaining/filtering of the host's existing tools,
-not a new model, shell, filesystem or network authority. The guest cannot access
-Node APIs; the trusted launcher remains an ordinary OS process subject to the
-extension trust rules below.
+bundle is one Rust executable embedding Pi's pinned offline QuickJS/WASM runtime,
+so it needs **no Node.js and no Python**. It adds single-shot JavaScript
+batching/chaining/filtering of the host's existing tools, not a new model, shell,
+filesystem or network authority. Scripts run in a fresh isolated Wasmi store per
+script inside a warm runner, so nothing survives between scripts; the trusted
+launcher remains an ordinary OS process subject to the extension trust rules
+below. An installed bundle starts directly; a source checkout either has a build
+or builds the crate once with `cargo --locked --release`.
 
 Enable explicitly with `--enable-extension octet-codemode`. Startup flags
 `--codemode-mode on|only` and `--codemode-inline-budget 0..16000` control

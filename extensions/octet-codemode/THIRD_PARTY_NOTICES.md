@@ -10,10 +10,13 @@ The octet adapter is MIT licensed: [LICENSE](LICENSE).
 - Copyright (c) 2025 Mario Zechner
 - License: MIT; complete text: [vendor/pi-codemode/LICENSE](vendor/pi-codemode/LICENSE)
 
-The published JavaScript, declarations and maps are retained. The worker's sole
-patch replaces the npm QuickJS import with the bundled relative path. The npm
-archive omits its license; the exact published revision's MIT license is retained
-both alongside the code and in `vendor/sources/pi-LICENSE`.
+The Rust executable embeds the published prelude, identifier normalization and
+declaration-renderer sources at compile time: `dist/runtime/prelude-source.js`,
+`dist/identifier.js`, `dist/declarations.js` and the `dist/source.js` grammar
+source that the unit test pins. No retained runtime source is patched. The
+Node-only loaders, declarations and source maps of the same release are not
+shipped. The npm archive omits its license; the exact published revision's MIT
+license is retained both alongside the code and in `vendor/sources/pi-LICENSE`.
 
 ## QuickJS WASI 3.6.2
 
@@ -22,11 +25,12 @@ both alongside the code and in `vendor/sources/pi-LICENSE`.
 - Copyright (c) 2026 Vercel, Inc.
 - License: MIT; complete text: [vendor/quickjs-wasi/LICENSE](vendor/quickjs-wasi/LICENSE)
 
-The published core WASM and JavaScript are retained without runtime changes.
-Optional native `.so` modules are not extracted or used. Source archives,
-registry URLs, SHA512 integrity and SHA256 digests are retained in
-`vendor/sources/`, `vendor/PROVENANCE.json`, and `vendor/SHA256SUMS`.
-`vendor/regenerate.py --check` verifies the complete retained tree offline.
+The published core WASM is embedded in the Rust executable and the published
+JavaScript loader is not shipped or used (the Rust embedding links the reactor's
+exports directly). Optional native `.so` modules are not extracted or used.
+Source archives, registry URLs, SHA512 integrity and SHA256 digests are retained
+in `vendor/sources/`, `vendor/PROVENANCE.json`, and `vendor/SHA256SUMS`.
+`vendor/regenerate.py --check` verifies every retained file offline.
 
 ## Embedded engine and runtime components
 

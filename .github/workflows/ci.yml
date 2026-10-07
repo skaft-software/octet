@@ -110,9 +110,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version-file: extensions/octet-codemode/.node-version
+          # The Pi adapter still runs on Node; codemode needs no Node at all.
+          node-version: "22.19.0"
+      - name: Build the no-Node codemode extension
+        run: cargo build --locked --release --manifest-path extensions/octet-codemode/Cargo.toml
       - name: Test the shared Python SDK and every official extension adapter
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -194,7 +198,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version-file: extensions/octet-codemode/.node-version
+          node-version: "22.19.0"
       - name: Install reviewed Pi adapter test dependencies
         run: npm ci --prefix extensions/octet-pi-compat --ignore-scripts --no-audit --no-fund
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
