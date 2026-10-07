@@ -483,8 +483,10 @@ evaluation/harbor/README.md
 evaluation/harbor/config.py
 evaluation/harbor/requirements.txt
 extensions/octet-codemode/README.md
+extensions/octet-codemode/bench/results.json
 extensions/octet-pi-compat/README.md
 extensions/octet-pi-compat/LICENSE.pi
+extensions/octet-pi-compat/test/pi-v1.0.2/README.md
 scripts/bench-startup-resume.py
 extensions/octet-codemode/THIRD_PARTY_NOTICES.md
 extensions/octet-codemode/LICENSE
