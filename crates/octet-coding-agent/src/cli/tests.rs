@@ -1300,17 +1300,70 @@ fn relative_home_is_not_a_global_config_root() {
 }
 
 #[test]
-fn cli_activation_marks_the_interactive_user_config_menu_non_authoritative() {
+fn cli_activation_persists_like_the_menu_and_keeps_the_menu_authoritative() {
     let directory = cwd();
     let global = directory.path().join("global.toml");
     std::fs::write(&global, "enabled_extensions = ['global-tool']\n").unwrap();
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
-    cli.enable_extensions.push("cli-tool".into());
+    cli.enable_extensions.push("CLI-Tool".into());
 
     let config = build_config_with_global_path(cli, directory.path(), Some(&global)).unwrap();
 
     assert_eq!(config.enabled_extensions, ["cli-tool", "global-tool"]);
+    assert!(!config.extension_activation_overridden);
+    assert!(extension_activation_menu_authoritative(&config).unwrap());
+    let persisted = std::fs::read_to_string(&global).unwrap();
+    assert!(persisted.contains("\"cli-tool\""), "{persisted}");
+
+    // Re-enabling an already persisted name leaves the user's file untouched.
+    std::fs::write(&global, "enabled_extensions = ['cli-tool'] # mine\n").unwrap();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.enable_extensions.push("cli-tool".into());
+    build_config_with_global_path(cli, directory.path(), Some(&global)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&global).unwrap(),
+        "enabled_extensions = ['cli-tool'] # mine\n"
+    );
+}
+
+#[test]
+fn cli_activation_under_a_project_activation_list_stays_invocation_only() {
+    let directory = cwd();
+    let global = directory.path().join("global.toml");
+    std::fs::write(&global, "enabled_extensions = ['global-tool']\n").unwrap();
+    std::fs::create_dir_all(directory.path().join(".octet")).unwrap();
+    std::fs::write(
+        directory.path().join(".octet/config.toml"),
+        "enabled_extensions = ['project-tool']\n",
+    )
+    .unwrap();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.workspace_trusted = true;
+    cli.enable_extensions.push("cli-tool".into());
+
+    let config = build_config_with_global_path(cli, directory.path(), Some(&global)).unwrap();
+
+    assert_eq!(config.enabled_extensions, ["cli-tool", "project-tool"]);
+    assert!(config.extension_activation_overridden);
+    assert_eq!(
+        std::fs::read_to_string(&global).unwrap(),
+        "enabled_extensions = ['global-tool']\n"
+    );
+}
+
+#[test]
+fn cli_activation_without_a_user_config_stays_invocation_only() {
+    let directory = cwd();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.enable_extensions.push("cli-tool".into());
+
+    let config = build_config_with_global_path(cli, directory.path(), None).unwrap();
+
+    assert_eq!(config.enabled_extensions, ["cli-tool"]);
     assert!(config.extension_activation_overridden);
 }
 
