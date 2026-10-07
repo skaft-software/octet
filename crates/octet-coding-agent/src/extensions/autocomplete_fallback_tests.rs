@@ -7,7 +7,9 @@ async fn admit(state: &mut ProbeState, shell: &mut InteractiveShell) {
             if !state.extensions.autocomplete_registrations.is_empty() {
                 break;
             }
-            tokio::task::yield_now().await;
+            // A cooperative wait lets the process reader and the child run; a
+            // yield-only spin starves both when the host is loaded.
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
@@ -21,7 +23,9 @@ async fn update(state: &mut ProbeState) -> ExtensionAutocompleteUpdate {
             if let Some(update) = updates.autocomplete.into_iter().next() {
                 return update;
             }
-            tokio::task::yield_now().await;
+            // A cooperative wait lets the process reader and the child run; a
+            // yield-only spin starves both when the host is loaded.
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await

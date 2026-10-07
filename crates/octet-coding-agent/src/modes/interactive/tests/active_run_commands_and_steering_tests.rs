@@ -872,12 +872,117 @@ export default pi => pi.registerCommand('doom', {description: 'Fixture Doom', ha
     let IdleCommandOutcome::Continue(mut app) = outcome else {
         panic!("extension command changed application");
     };
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap(),
-        "fixture arguments"
-    );
+    let trace =
+        std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap_or_else(|error| {
+            panic!(
+                "the extension command handler did not run: {error}; debug={:?}; {}",
+                shell.debug_error(),
+                app.executable_extensions.inspect_text()
+            )
+        });
+    assert_eq!(trace, "fixture arguments");
     assert_eq!(shell.debug_error(), None);
     app.executable_extensions.shutdown().await;
+}
+
+/// A typed Pi command whose handler outlives one command-loop poll, so a
+/// terminal-input failure is observed while the extension request is pending.
+#[cfg(unix)]
+const SLOW_DOOM_COMMAND_FIXTURE: &str = r#"
+import { writeFileSync } from 'node:fs';
+export default pi => pi.registerCommand('doom', {description: 'Fixture Doom', handler: async args => {
+  await new Promise(resolve => setTimeout(resolve, 300));
+  writeFileSync(TRACE, args);
+}});
+"#;
+
+/// Deterministic terminal-input outcomes carrying exactly the production
+/// `Result<TerminalEvent>` shapes: the source ends, or the read fails.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum FailedTerminalInput {
+    Ended,
+    Error,
+}
+
+#[cfg(unix)]
+impl futures_util::Stream for FailedTerminalInput {
+    type Item = std::io::Result<Event>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(match *self.get_mut() {
+            Self::Ended => None,
+            Self::Error => Some(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "terminal input failed",
+            ))),
+        })
+    }
+}
+
+/// A typed, published Pi command must still run when the terminal input source
+/// ends or fails while the extension request is pending: the command's own
+/// bounded request settles it, and only a real shutdown may cancel it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_pi_command_completes_when_terminal_input_ends_or_fails() {
+    for (label, failure) in [
+        ("ended", FailedTerminalInput::Ended),
+        ("error", FailedTerminalInput::Error),
+    ] {
+        let (directory, mut app, mut shell) =
+            super::pi_contract_support::pi_ui_app(SLOW_DOOM_COMMAND_FIXTURE);
+        let mut startup_input = EventStream::from_stream(futures_util::stream::pending());
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut startup_input),
+        )
+        .await
+        .expect("startup deadline")
+        .unwrap();
+        shell.finish_startup();
+        request_extension_ui(&mut shell, &mut app);
+        shell.apply_edit(crate::tui::keymap::EditAction::Paste("/doo".into()));
+        shell.render();
+        let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+        assert!(
+            frame.contains("/doom"),
+            "{label}: registered command not painted: {frame}"
+        );
+        let owner = app
+            .executable_extensions
+            .command_owner("doom")
+            .expect("published command owner");
+        let mut failure = failure;
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            run_typed_extension_command(
+                &mut app,
+                &mut shell,
+                &mut failure,
+                owner,
+                "doom".into(),
+                vec!["fixture arguments".into()],
+            ),
+        )
+        .await
+        .expect("command deadline")
+        .unwrap();
+        let trace =
+            std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap_or_else(|error| {
+                panic!(
+                    "{label}: the extension command handler did not run: {error}; debug={:?}; {}",
+                    shell.debug_error(),
+                    app.executable_extensions.inspect_text()
+                )
+            });
+        assert_eq!(trace, "fixture arguments", "{label}");
+        assert_eq!(shell.debug_error(), None, "{label}");
+        app.executable_extensions.shutdown().await;
+    }
 }
 
 #[tokio::test]

@@ -85,6 +85,7 @@ async fn probe_with_arguments(
         shell,
         input: &mut input,
         dialogs: &dialogs,
+        input_retired: false,
     };
     tokio::time::timeout(
         Duration::from_secs(20),
@@ -676,6 +677,7 @@ async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup()
             shell: &mut shell,
             input: &mut input,
             dialogs: &dialogs,
+            input_retired: false,
         };
         let requested = async {
             loop {
@@ -730,6 +732,7 @@ async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup()
             shell: &mut shell,
             input: &mut input,
             dialogs: &dialogs,
+            input_retired: false,
         };
         let failure = loop {
             match command

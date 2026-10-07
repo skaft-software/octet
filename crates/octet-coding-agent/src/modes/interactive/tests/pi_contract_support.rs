@@ -263,6 +263,7 @@ pub(super) async fn command(
             shell,
             input: &mut input,
             dialogs: &dialogs,
+            input_retired: false,
         };
         run_interactive_extension_command(
             app,

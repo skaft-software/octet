@@ -45,7 +45,7 @@ test('startup groups skipped factories and inert renderers into one actionable E
   await peer.init(['remote_ui']);
   assert.ok((await peer.command('again').response).result); // Ordered barrier after initialize and late registration.
   const notices = peer.seen.filter(issueNotice);
-  assert.equal(notices.length, 1, JSON.stringify(peer.seen));
+  assert.equal(notices.length, 1, JSON.stringify(peer.seen) + '\n' + peer.stderr());
   assert.equal(notices[0].params.level, 'warning');
   for (const entry of entries) assert.ok(notices[0].params.message.includes(entry), entry);
   assert.match(notices[0].params.message, /failed while loading/i);

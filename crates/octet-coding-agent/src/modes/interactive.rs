@@ -131,6 +131,9 @@ struct InteractiveExtensionConfirmations<'a, S> {
     /// Process handles captured before the extension runtime took its mutable
     /// borrow, so a presented dialog can still announce its boundary.
     dialogs: &'a crate::extensions::ExtensionLifecycleSnapshot,
+    /// Set once the terminal input source ends or fails. From then on the
+    /// command loop waits only on the command itself and a real shutdown.
+    input_retired: bool,
 }
 
 impl<S> crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionConfirmations<'_, S>
@@ -145,13 +148,39 @@ where
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Event>>> + 'a>> {
         Box::pin(async move {
+            if self.input_retired {
+                crate::tui::terminal::wait_for_shutdown_signal().await;
+                return Ok(None);
+            }
             tokio::select! {
                 biased;
                 _ = crate::tui::terminal::wait_for_shutdown_signal() => Ok(None),
                 event = self.input.next() => match event {
                     Some(Ok(event)) => Ok(Some(event)),
-                    Some(Err(error)) => Err(error.into()),
-                    None => Ok(None),
+                    Some(Err(error)) => {
+                        // A read failure retires the source instead of failing the
+                        // command the user already started: the command still ends
+                        // on its own bounded request, and only a real shutdown may
+                        // cancel it. The user keeps seeing the command's progress.
+                        self.input_retired = true;
+                        self.shell.notice(format!(
+                            "terminal input unavailable; waiting for the command to finish: {error}"
+                        ));
+                        self.shell.render();
+                        crate::tui::terminal::wait_for_shutdown_signal().await;
+                        Ok(None)
+                    }
+                    None => {
+                        // The source ended: no further input is available, which is
+                        // not a cancellation of the command in flight.
+                        self.input_retired = true;
+                        self.shell.notice(
+                            "terminal input ended; waiting for the command to finish",
+                        );
+                        self.shell.render();
+                        crate::tui::terminal::wait_for_shutdown_signal().await;
+                        Ok(None)
+                    }
                 },
             }
         })
@@ -6508,6 +6537,7 @@ where
                 shell,
                 input,
                 dialogs: &dialogs,
+                input_retired: false,
             };
             run_interactive_extension_command(
                 app,
@@ -6566,6 +6596,7 @@ where
                 shell,
                 input,
                 dialogs: &dialogs,
+                input_retired: false,
             };
             run_interactive_extension_command(
                 app,
@@ -9514,6 +9545,7 @@ async fn run_idle_command_inner(
                     shell,
                     input,
                     dialogs: &dialogs,
+                    input_retired: false,
                 };
                 run_interactive_presentation_action(
                     &mut app,

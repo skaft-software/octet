@@ -202,7 +202,7 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn spawn(api_url: &str, theme: &str, color: &str) -> Self {
+    fn spawn(api_url: &str, theme: &str, color: &str, mouse: &str) -> Self {
         let root = tempfile::tempdir().expect("PTY fixture tempdir");
         let canonical = root.path().canonicalize().expect("canonical fixture root");
         let home = canonical.join("home");
@@ -239,6 +239,8 @@ impl Candidate {
                 color,
                 "--theme",
                 theme,
+                "--mouse",
+                mouse,
                 "--workspace",
             ])
             .arg(&workspace)
@@ -727,10 +729,10 @@ fn visible_bytes(bytes: &[u8]) -> String {
     sexy_tui_rs::strip_terminal_sequences(&String::from_utf8_lossy(bytes))
 }
 
-fn run_activity_case(theme: &str, compact: bool, color: &str) {
+fn run_activity_case(theme: &str, compact: bool, color: &str, mouse: &str) {
     const SAMPLE: Duration = Duration::from_millis(640);
     let api = HeldApi::start();
-    let mut candidate = Candidate::spawn(&api.url, theme, color);
+    let mut candidate = Candidate::spawn(&api.url, theme, color, mouse);
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
     await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
@@ -803,17 +805,40 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
     let resize_end =
         resize_start + resize_frame_end(&candidate.pty.output[resize_start..]).unwrap();
     let repair = &candidate.pty.output[resize_start..resize_end];
-    for clear in [b"\x1b[2J", b"\x1b[3J"] {
-        assert!(
-            repair.windows(clear.len()).any(|window| window == clear),
-            "activity resize must clear and rebuild canonical history"
-        );
+    // Coordinator decision (2026-10-06): the resize contract is per mouse mode.
+    // `--mouse auto` leaves scrollback to the terminal, so a destructive resize
+    // must clear and rebuild the complete canonical history, committed prompt
+    // included. `--mouse app` gives the viewport to octet, which owns scrollback
+    // and repaints only the composed window; history stays reachable through
+    // in-app scrolling, so a terminal-history rebuild is neither expected nor
+    // required, and the window must repaint without losing or duplicating rows.
+    match mouse {
+        "auto" => {
+            for clear in [b"\x1b[2J", b"\x1b[3J"] {
+                assert!(
+                    repair.windows(clear.len()).any(|window| window == clear),
+                    "activity resize must clear and rebuild canonical history"
+                );
+            }
+            assert!(
+                visible_bytes(repair).contains("fixture initial prompt"),
+                "resize replay lost the committed prompt: {}",
+                visible_bytes(repair)
+            );
+        }
+        "app" => {
+            let window = visible_bytes(repair);
+            assert!(
+                window.contains("draft remains local"),
+                "application viewport resize must repaint the drafted window: {window}"
+            );
+            assert!(
+                window.contains(label),
+                "application viewport resize must repaint the active window: {window}"
+            );
+        }
+        other => panic!("unsupported mouse mode {other}"),
     }
-    assert!(
-        visible_bytes(repair).contains("fixture initial prompt"),
-        "resize replay lost the committed prompt: {}",
-        visible_bytes(repair)
-    );
     parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
     parser.process(&candidate.pty.output[consumed..resize_end]);
     consumed = resize_end;
@@ -827,6 +852,19 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
         "resize lost active status: {}",
         parser.screen().contents()
     );
+    if mouse == "app" {
+        let window = parser.screen().contents();
+        assert_eq!(
+            window.matches("draft remains local").count(),
+            1,
+            "application viewport resize duplicated or lost a window row: {window}"
+        );
+        assert_eq!(
+            window.matches(label).count(),
+            1,
+            "application viewport resize duplicated or lost the active row: {window}"
+        );
+    }
 
     candidate.pty.write_input(b"\x1b");
     let cancellation = if compact {
@@ -860,7 +898,7 @@ fn failed_pty_fixture_releases_terminal_and_reaps_child() {
     let _guard = pty_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let candidate = Candidate::spawn("http://127.0.0.1:9/v1/", "dark", "never");
+    let candidate = Candidate::spawn("http://127.0.0.1:9/v1/", "dark", "never", "app");
     let pid = candidate.child.id() as libc::pid_t;
     let failed = std::panic::catch_unwind(move || {
         let _candidate = candidate;
@@ -885,10 +923,16 @@ fn real_activity_wait_pty_contract() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Ordinary model waits are qualified on both appearance profiles; the
     // compaction path is independent, and no-color confirms static fallback.
-    run_activity_case("dark", false, "always");
-    run_activity_case("light", false, "always");
-    run_activity_case("dark", true, "always");
-    run_activity_case("dark", false, "never");
+    // Terminal-owned scrollback: the strict clear-and-rebuild contract, across
+    // both appearance profiles and the static no-color fallback.
+    run_activity_case("dark", false, "always", "auto");
+    run_activity_case("light", false, "always", "auto");
+    run_activity_case("dark", true, "always", "auto");
+    run_activity_case("dark", false, "never", "auto");
+    // Application-owned viewport: window repaint only, for the ordinary and the
+    // compacting activity surfaces.
+    run_activity_case("dark", false, "always", "app");
+    run_activity_case("dark", true, "always", "app");
 }
 
 #[test]
@@ -897,7 +941,7 @@ fn real_queued_steering_interrupt_keeps_entries_recallable_pty_contract() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let api = HeldApi::start();
-    let mut candidate = Candidate::spawn(&api.url, "dark", "never");
+    let mut candidate = Candidate::spawn(&api.url, "dark", "never", "app");
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
     await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
@@ -974,7 +1018,7 @@ fn real_queued_follow_up_option_up_edit_and_settled_dispatch_pty_contract() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let api = HeldApi::start();
-    let mut candidate = Candidate::spawn(&api.url, "dark", "never");
+    let mut candidate = Candidate::spawn(&api.url, "dark", "never", "app");
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
     await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");

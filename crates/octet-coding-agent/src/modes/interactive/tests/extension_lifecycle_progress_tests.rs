@@ -187,6 +187,7 @@ commands = ["idle-proof"]
             shell: &mut shell,
             input: &mut input,
             dialogs: &dialogs,
+            input_retired: false,
         };
         let arguments = if active {
             vec![]
@@ -308,6 +309,7 @@ commands = ["idle-proof"]
                 shell: &mut shell,
                 input: &mut input,
                 dialogs: &dialogs,
+                input_retired: false,
             };
             tokio::time::timeout(
                 Duration::from_secs(5),
