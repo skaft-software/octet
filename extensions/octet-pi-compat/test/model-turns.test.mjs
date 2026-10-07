@@ -1,9 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { launch, owner, root } from './helper.mjs';
+import { host, launch, owner, root } from './helper.mjs';
 
 const factory = join(root, 'test/fixtures/model-turns.ts');
+// The exact durable entry octet commits for an image tool result on a
+// chat-completions model (OpenAiChat lowers the call's media beside its result).
+// crates/octet-agent/src/agent/model_turn/media_tests.rs pins the same fixture
+// against a real agent run.
+const imageResult = JSON.parse(readFileSync(join(root, 'test/fixtures/model-turn-image-entry.json'), 'utf8'));
 const user = { id: 'user', parent: null, timestamp_unix_ms: 1000, value: { type: 'message', User: { content: [{ Text: 'question' }] } } };
 const assistant = { id: 'assistant', parent: 'user', timestamp_unix_ms: 1100, value: { type: 'message', Assistant: { model: 'native-model', protocol: 'open_ai_chat', content: [{ Text: 'answer' }] } } };
 const start = (index = 0) => ({ kind: 'model_turn_start', run_id: 'run:user', turn_index: index, timestamp_ms: 1050 + index });
@@ -62,6 +68,52 @@ test('one durable native tool-result batch supplies every Pi tool result without
   assert.ok(issue.params.message.includes(factory));
   assert.match(issue.params.message, /turn_end: octet could not convert/);
   assert.match(issue.params.message, /Next:/);
+  await peer.close();
+});
+
+test('chat-completions image tool results stay inside one Pi tool result and never skip the observation', async t => {
+  const peer = launch(t, [factory]); await peer.init(['session_entries']); await peer.start();
+  const entry = structuredClone(assistant);
+  entry.value.Assistant.content.push({ ToolCall: { id: 'frame-call', name: 'frame', arguments_json: '{}' } });
+  const result = { id: 'results', parent: entry.id, timestamp_unix_ms: 1150, value: structuredClone(imageResult) };
+  assert.deepEqual((await peer.request('hook/run', params(peer, end(entry, [result], 'tool_use'))).response).result, expected);
+  const outcome = await Promise.race([notification(peer, 'model-end:'), peer.wait(issueNotice)]);
+  assert.equal(outcome.params.title, undefined, `turn_end observation was skipped: ${JSON.stringify(outcome.params)}`);
+  const value = JSON.parse(outcome.params.message.slice('model-end:'.length));
+  assert.equal(value.message.stopReason, 'toolUse');
+  // Pi 1.0.2 keeps tool-result images inside the ToolResultMessage content; its
+  // openai-completions provider is the one that splits them onto the wire.
+  assert.deepEqual(value.tools, [{ role: 'toolResult', toolCallId: 'frame-call', toolName: 'frame',
+    content: [{ type: 'text', text: 'frame rendered' },
+      { type: 'image', data: 'iVBORw0KGgpwaS1kb29tLWZyYW1l', mimeType: 'image/png' }],
+    isError: false, timestamp: 1150 }]);
+  assert.equal(peer.seen.some(issueNotice), false);
+  await peer.close();
+});
+
+test('a mounted fullscreen extension surface stays up across image tool-result turns', async t => {
+  const peer = launch(t, [join(root, 'test/fixtures/core.ts'), factory]);
+  await peer.init(); // remote_ui and session_entries are in the offered default set
+  const command = peer.command('surface');
+  const open = await peer.wait(frame => frame.method === 'ui/open');
+  assert.equal(open.params.placement, 'fullscreen');
+  assert.ok((await command.response).result);
+  const entry = structuredClone(assistant);
+  entry.value.Assistant.content.push({ ToolCall: { id: 'frame-call', name: 'frame', arguments_json: '{}' } });
+  const result = { id: 'results', parent: entry.id, timestamp_unix_ms: 1150, value: structuredClone(imageResult) };
+  for (const [index, results, stop] of [[0, [result], 'tool_use'], [1, [], 'end_turn']]) {
+    assert.deepEqual((await peer.request('hook/run', params(peer, start(index))).response).result, expected);
+    const payload = end(entry, results, stop); payload.turn_index = index;
+    assert.deepEqual((await peer.request('hook/run', params(peer, payload)).response).result, expected);
+  }
+  // The surface is not a turn observation: no turn may close it, and its
+  // component must still render afterwards.
+  assert.equal(peer.seen.filter(frame => frame.method === 'ui/close').length, 0);
+  peer.notify('context/updated', { resource_owner: owner, host: { ...host, session_name: 'After Turns' } });
+  await peer.wait(frame => frame.method === 'ui/frame' && frame.params.lines.some(line => line.includes('After Turns')));
+  peer.notify('ui/key', { surface_id: open.params.surface_id, key: 'q', kind: 'press', modifiers: [] });
+  await peer.wait(frame => frame.method === 'ui/close');
+  await peer.wait(frame => frame.method === 'notification' && frame.params.message === 'done:completed');
   await peer.close();
 });
 

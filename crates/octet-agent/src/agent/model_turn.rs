@@ -233,6 +233,8 @@ impl<'a> ModelTurnHooks<'a> {
 }
 
 #[cfg(test)]
+mod media_tests;
+#[cfg(test)]
 mod metadata_tests;
 #[cfg(test)]
 mod tests;
