@@ -23,8 +23,8 @@ use crate::types::{
     AssistantMessage, AssistantPart, AudioFormat, AudioOutputOptions, AudioVoice, Capabilities,
     Endpoint, EndpointId, ImageDetail, ImageMedia, ImageSource, Media, Message, ModalitySet,
     ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode, OutputModalities, Protocol,
-    ReasoningConfig, ReasoningEffort, ReasoningPart, Request, StopReason, ToolCall, ToolCallId,
-    ToolDef, ToolResultPart, UserMessage, UserPart,
+    ReasoningConfig, ReasoningEffort, ReasoningPart, Request, StopReason, ToolCall,
+    ToolCallArgumentError, ToolCallId, ToolDef, ToolResultPart, UserMessage, UserPart,
 };
 use std::sync::Arc;
 
@@ -919,6 +919,59 @@ fn nonstream_defaulted_stop_diagnostic_preserves_required_usage() {
         decode_response(&model, body.to_string().as_bytes(), None),
         Err(AiError::Decode(DecodeError::Json(_)))
     ));
+}
+
+#[test]
+fn nonstream_malformed_tool_arguments_keep_a_marked_call_envelope() {
+    // The completed transport is as lenient as the streamed one: an
+    // unrepairable call keeps its identity for a paired error result instead of
+    // failing the whole response.
+    let model = make_test_model(false, false, false, true, false, false);
+    let tools = [ToolDef {
+        async_execution: false,
+        constrained_sampling: None,
+        name: "edit".to_owned(),
+        description: String::new(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}},
+            "required": ["path", "old_text"],
+            "additionalProperties": false,
+        }),
+    }];
+    let body = serde_json::json!({
+        "id": "chatcmpl-bad",
+        "choices": [{
+            "message": {"role": "assistant", "tool_calls": [{
+                "id": "call_bad",
+                "type": "function",
+                "function": {"name": "edit", "arguments": r#"{"path": "lib/slugify.js" "old_text": 1}"#}
+            }]},
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 12, "total_tokens": 17}
+    });
+
+    let response = decode_response_with_tools(&model, body.to_string().as_bytes(), None, &tools)
+        .expect("an unrepairable call must not fail the completed response");
+    assert_eq!(response.stop_reason, StopReason::ToolUse);
+    assert!(response
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_tool_arguments"));
+    let call = response
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .expect("the malformed call keeps its envelope");
+    assert_eq!(call.id.0, "call_bad");
+    assert_eq!(call.name, "edit");
+    assert_eq!(call.arguments_json, "{}");
+    assert_eq!(call.argument_error, Some(ToolCallArgumentError::Malformed));
 }
 
 #[test]

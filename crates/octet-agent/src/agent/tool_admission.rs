@@ -24,9 +24,16 @@ pub(super) struct CompletedToolExecution {
 pub(super) const SCHEMA_MISMATCH_TOOL_ERROR: &str =
     "tool call was not executed because its arguments do not satisfy the advertised schema; correct the arguments and try again";
 
+/// Synthetic, secret-safe result for a call whose streamed arguments were not
+/// valid JSON that conservative repair could recover. Keep this static:
+/// unparseable provider arguments may contain secrets.
+pub(super) const MALFORMED_ARGUMENTS_TOOL_ERROR: &str =
+    "tool call was not executed because its streamed arguments were not valid JSON and could not be repaired; re-issue the call with one complete JSON object";
+
 pub(super) fn rejected_argument_tool_error(error: ToolCallArgumentError) -> ToolError {
     let message = match error {
         ToolCallArgumentError::SchemaMismatch => SCHEMA_MISMATCH_TOOL_ERROR,
+        ToolCallArgumentError::Malformed => MALFORMED_ARGUMENTS_TOOL_ERROR,
     };
     ToolError::new(message)
 }
