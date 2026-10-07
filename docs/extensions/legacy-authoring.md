@@ -845,7 +845,7 @@ Installation/discovery never enables or starts an extension, records a host
 authority grant, or grants capabilities. `/extensions` may persist activation
 and can separately Grant/Revoke host authority for a selected source. Full access
 implicitly authorizes selected extensions without persisting grants;
-`--enable-extension` is invocation-only activation; `--trust-extension` is an
+`--enable-extension` persists activation like the menu's Enable; `--trust-extension` is an
 invocation-only host authority grant and does not enable anything. `--safe-mode`
 starts enabled, granted sources, which run with OS permissions outside the
 broker; `--no-process`/`--no-shell` still denies process startup.

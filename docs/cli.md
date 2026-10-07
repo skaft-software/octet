@@ -248,7 +248,7 @@ harness exit.
 | `--theme-dir FILE-OR-DIR` | Extra theme directory or TOML file. Repeated paths use normal resource precedence. [Themes](themes.md). |
 | `--skill-dir PATH` | Explicit skill root. |
 | `--extension-dir PATH` | Explicit extension source. |
-| `--enable-extension NAME` | Enable for one run. Not trust. |
+| `--enable-extension NAME` | Enable and save to user config, like Enable in `/extensions`. Not trust. |
 | `--trust-extension NAME` | Trust the exact selected source for one run. Not activation. |
 
 [Instructions](instructions.md) and [resource discovery](resources.md) cover
