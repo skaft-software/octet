@@ -141,6 +141,7 @@ async fn native_original_clm_restores_branch_settings_before_first_command() {
             shell: &mut shell,
             input: &mut input,
             dialogs: &dialogs,
+            input_retired: false,
         };
         tokio::time::timeout(
             Duration::from_secs(10),
