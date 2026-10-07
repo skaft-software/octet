@@ -2,14 +2,16 @@ name = "octet-codemode"
 version = "0.9.0"
 api_version = "0.4"
 requires_octet = "=0.9.0"
-description = "Pi's offline QuickJS/WASM JavaScript sandbox for bounded host-brokered tool composition"
+description = "No-Node QuickJS/WASM JavaScript sandbox for bounded host-brokered tool composition"
 
 [entrypoint]
-command = "extension.py"
+command = "bin/codemode"
+args = ["serve"]
 
 [capabilities]
-# Trusted launcher reads this bundle and writes only host-owned private scratch.
-# Guest JavaScript has no filesystem/process/network authority.
+# The Rust extension is a trusted launcher: it reads its own bundle and writes
+# only host-owned private scratch. Guest JavaScript has no filesystem,
+# process or network authority and never sees a runtime interpreter.
 filesystem = "unrestricted"
 process = false
 network = false

@@ -1,11 +1,11 @@
 # octet-codemode
 
-Compose host tools with JavaScript in Pi's **actual QuickJS/WASM runtime**:
-`@earendil-works/pi-codemode` 1.0.0 and `quickjs-wasi` 3.6.2, vendored offline
-under their MIT licenses, with runtime-component notices retained. This API `0.4`
-bundle pins octet `0.9.0` and requires
-**Python 3.11+ and Node.js 22.19+** on PATH. No npm install, download, credentials,
-or setup command is needed to execute a script.
+Compose host tools with JavaScript in a **sandboxed QuickJS/WASM runtime**:
+one Rust executable with the vendored `quickjs-wasi` 3.6.2 engine, Pi's
+`@earendil-works/pi-codemode` 1.0.0 prelude (MIT) and Octet's discovery
+implementation embedded at compile time. **No Node.js and no Python are
+required at runtime**, and no runtime JavaScript is read from the checkout.
+This API `0.4` bundle pins octet `0.9.0`.
 
 ## Install and enable
 
@@ -20,9 +20,20 @@ octet --enable-extension octet-codemode --codemode-mode on
 For an unpublished source checkout, copy this complete directory to
 `~/.octet/extensions/octet-codemode/` and explicitly enable it. Installation
 alone does not enable execution. Follow the host's extension trust/grant policy;
-the trusted Node launcher is an ordinary OS process, **not an OS sandbox**.
-Only guest JavaScript is isolated. `--no-process`/`--no-shell` also prevent the
-launcher from starting.
+the trusted Rust launcher is an ordinary OS process, **not an OS sandbox**.
+Only guest JavaScript is isolated. `--no-process`/`--no-shell` do not apply to
+this bundle (`process = false` in `extension.toml`).
+
+The entrypoint is `bin/codemode`. It resolves, in order, an explicit
+`OCTET_CODEMODE_BINARY`, a prebuilt `bin/octet-codemode` shipped beside it, an
+in-tree `target/{release,debug}/octet-codemode`, an installed `octet-codemode`
+on `PATH`, and finally builds the crate once with `cargo --locked --release`
+into a private cache. Only that last step needs Rust, and it needs neither
+Node nor Python:
+
+```sh
+cargo build --locked --release --manifest-path extensions/octet-codemode/Cargo.toml
+```
 
 `--codemode-mode on` keeps direct tools and adds `codemode`. `only` advertises
 composition tools alone, without widening the nested tool allowlist.
@@ -30,6 +41,24 @@ composition tools alone, without widening the nested tool allowlist.
 (default 3000); omitted/deferred tools remain discoverable. Flags are resolved
 at startup. `/codemode [status|help]` and the extension menu show limits and help;
 neither grants execution authority or starts a VM.
+
+## Engine and isolation
+
+- **Default engine: Wasmi 0.46 + the vendored QuickJS-WASI 3.6.2 reactor**
+  (pure Rust, no C toolchain at runtime, no WASI filesystem/network/preopens).
+- **Optional native lane: rquickjs 0.14 with QuickJS-NG 0.16.2**, selected
+  explicitly with `serve --engine native`. It is not the default and shares the
+  same adapter, limits and prelude.
+- One **warm disposable runner** per extension generation. The WASM module is
+  compiled and validated once, the invariant guest program is compiled to
+  QuickJS bytecode once, and every script then gets a **fresh isolated Wasmi
+  store** (or realm) that is discarded afterwards: no global, heap object,
+  pending promise or store snapshot survives into the next script. That is
+  asserted by `tests/test_runner.py` and `tests/test_adapter.py`.
+- Scripts are bounded by the engine interrupt at the script deadline. A wedged
+  VM that never reaches an interrupt check is killed by the runner watchdog as
+  the fallback; cancellation kills and reaps the runner, and the next script
+  gets a new one.
 
 ## JavaScript contract
 
@@ -85,6 +114,35 @@ reveals the retained output. Preview elision does not discard captured data or
 change the model-visible result, tool approvals or execution. Native output has
 its own code surface rather than a raw generic tool-card dump.
 
+## Performance
+
+`bench/benchmark.py` drives the same fixture host and the same scripts through
+this extension and through the previous Node/Pi bundle (`@earendil-works/pi-codemode`
+1.0.0 + `quickjs-wasi` 3.6.2, the shipped launcher at revision `901e12eb`),
+30 samples per case, extension process tree peak RSS (`VmHWM`) and CPU from
+`/proc`. Raw samples: [`bench/results.json`](bench/results.json).
+
+| Case (30 samples) | Rust (Wasmi, release) | Node/Pi 1.0.0 | Result |
+|---|---:|---:|---|
+| First script in a fresh process (cold) | 53.9 ms | 47.4 ms | 1.14x slower |
+| Subsequent script in a warm process | **19.0 ms** | 28.1 ms | **1.5x faster** |
+| One script making 50 brokered tool calls | 44.1 ms | 32.0 ms | 1.4x slower |
+| Peak RSS, extension process tree | **15.8 MiB** | 99.0 MiB | **6.3x lower** |
+| CPU, whole measured run | 2.04 s | 2.28 s | ~equal |
+
+Read honestly: the warm path, which is what a session pays repeatedly, is
+faster than Pi's runtime, and memory is a fraction. The cold path pays a
+one-time WASM + guest-bytecode compile; the 50-call script is slower because each
+round trip crosses the runner pipe plus this adapter's per-call bookkeeping
+(task, limiter, cancel scope) on top of Wasmi interpreting the guest. The native
+lane removes the interpreter cost for callers who opt into it
+(`serve --engine native`: ~2.5 ms warm setup).
+
+Note on the reference: the shipped Node/Pi bundle rejects the 0.9.0 feature
+offer (it requires the older key set), so it is measured on the offer it
+accepts, while this extension runs the real 0.9.0 offer. The bundled Pi runtime
+is the behaviour reference, not a claim of bit-identical ECMAScript output.
+
 ## Persistence, output and limits
 
 - Code: at most 65,536 Unicode characters. VM heap: 256 MiB.
@@ -120,26 +178,31 @@ wire frame: flat random basenames, regular no-follow files, exact size at most
 8 MiB, SHA256 verification and cleanup. See the generic
 [`tool_composition_v1` contract](../../docs/extensions/PROTOCOL-REFERENCE.md#225-compositioncontext-compositioncall-compositionstore-api-04-feature-tool_composition_v1).
 
-## Offline verification and provenance
+## Verification and provenance
 
 ```sh
-python3 vendor/regenerate.py --check
-python3 -m unittest discover -s tests
-# Optional Rust-to-Node/WASM integration (from the repository root):
-# cargo test -p octet-agent codemode_bundle_runs_vendored_vm_through_host_transport -- --ignored
+cargo test --locked                      # 16 Rust unit tests
+python3 -m unittest discover -s tests    # 59 real-process tests, both engines
+python3 vendor/regenerate.py --check     # offline vendored-bytes check
+python3 bench/benchmark.py --samples 30  # the table above
+# Native host transport (from the repository root):
+# cargo test -p octet-agent codemode_bundle_runs_ -- --ignored
 ```
 
-The Python catalog adapter runs real Pi/WASM, cancellation, stdio, sidecar,
-artifact, output and deterministic packaging tests; it fails rather than silently
-skipping if Node is absent. `vendor/PROVENANCE.json` pins npm SHA512 integrity,
-SHA256, package versions, Pi's published Git head and the missing npm license
-supplied from that exact revision. `vendor/SHA256SUMS` covers every retained file.
-`python3 vendor/regenerate.py` reproduces the vendor tree **offline** from the
-checked-in archives. The sole runtime patch relocates Pi's QuickJS import to a
-relative bundled path; the VM and guest prelude are upstream. Optional native
-QuickJS `.so` extensions are not loaded or extracted. Supplemental QuickJS-NG,
-WASI/LLVM, and archived-module license notices are pinned and reproduced too.
+`tests/test_runner.py` drives the warm runner protocol directly (prelude
+parity, async settlement, discovery/BM25, heap/stack limits, timeouts, warm
+reuse and per-script isolation). `tests/test_adapter.py` speaks the real API
+`0.4` stdio wire with `PATH` empty (tool composition, sidecars, artifacts,
+store commits, cancellation, output limits, warm-runner lifecycle).
+`tests/test_bundle.py` packages the release archive twice and verifies the
+extracted bundle starts with no Node or Python.
 
-See [third-party notices](THIRD_PARTY_NOTICES.md),
+`vendor/regenerate.py` reproduces the retained vendored bytes offline from the
+checked-in npm archives (SHA512 integrity, SHA256 per file) and fails on drift.
+Only the files this extension embeds are retained: the Pi prelude, identifier
+and declaration sources, the grammar source its unit test pins, `quickjs.wasm`
+and the complete license set. Node-only loaders, declarations and source maps
+are not shipped and no runtime code is patched. See
+[third-party notices](THIRD_PARTY_NOTICES.md),
 [Pi's MIT license](vendor/pi-codemode/LICENSE), and
 [QuickJS WASI's MIT license](vendor/quickjs-wasi/LICENSE).

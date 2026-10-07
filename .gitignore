@@ -67,3 +67,6 @@ DerivedData/
 
 # Stale pre-rename ygg layout left by an old stash; not a workspace member
 crates/ygg-coding-agent/
+
+# The no-Node codemode extension crate builds in place and in its own cache
+/extensions/octet-codemode/target/
