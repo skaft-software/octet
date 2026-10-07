@@ -264,6 +264,10 @@ Message observations now carry `message`, accumulated text updates carry
 messages. Message and `agent_end` observers request native `before_prompt` and
 `model_turn_end` hooks even without a Pi `turn_end` subscriber. These supply user
 text and committed assistant messages with paired tool results before `turn_end`.
+Tool-result media stays inside its Pi tool result message, which is what Pi 1.0.2
+itself holds, even though chat-completions lowering commits it as
+protocol-adjacent media beside the result: only the provider wire splits it into
+a follow-up user message. Context replay keeps that wire split.
 The assistant's exact persisted usage record, linked by entry ID, supplies final
 usage, available cost and supported stop reasons to `message_end`, `turn_end` and
 `agent_end`. Current model selection and aggregate session usage are never used
