@@ -6557,10 +6557,7 @@ async fn malformed_streamed_tool_arguments_do_not_abort_the_run() {
     drop(run);
 
     assert!(
-        matches!(
-            assert_single_run_finished(&events),
-            FinishReason::Completed
-        ),
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
         "{:?}",
         assert_single_run_finished(&events)
     );
@@ -6595,10 +6592,7 @@ async fn malformed_streamed_tool_arguments_do_not_abort_the_run() {
         .expect("the malformed call keeps its envelope in the session");
     assert_eq!(call.name, "edit");
     assert_eq!(call.arguments_json, "{}");
-    assert_eq!(
-        call.argument_error,
-        Some(ToolCallArgumentError::Malformed)
-    );
+    assert_eq!(call.argument_error, Some(ToolCallArgumentError::Malformed));
     assert!(!call.arguments_json.contains("slugify"));
 
     let result = agent

@@ -286,8 +286,8 @@ fn opaque_reasoning_temp_buffer_transfer_is_counted_once() {
     }
 }
 
-#[tokio::test]
-async fn test_response_builder_tool_call_invalid_json() {
+#[test]
+fn unrepairable_tool_arguments_keep_a_marked_envelope() {
     let mut builder = ResponseBuilder::new(
         ModelId("test-model".to_string()),
         Protocol::OpenAiChat,
@@ -315,7 +315,26 @@ async fn test_response_builder_tool_call_invalid_json() {
         })
         .unwrap();
 
-    assert!(builder.finish().is_err());
+    // The stop reason only decides whether unrepairable arguments are a
+    // max-token truncation; without one the malformed call keeps its envelope
+    // so the model can be handed a paired error result.
+    builder.set_stop_reason(StopReason::ToolUse);
+    let response = builder.finish().unwrap();
+    let AssistantPart::ToolCall(call) = &response.message.content[0] else {
+        panic!("expected the marked tool call");
+    };
+    assert_eq!(call.id.0, "call_1");
+    assert_eq!(call.name, "grep");
+    assert_eq!(call.arguments_json, "{}");
+    assert_eq!(call.argument_error, Some(ToolCallArgumentError::Malformed));
+    assert!(response
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_tool_arguments"));
+    assert!(!response
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code.eq("discarded_truncated_tool_arguments")));
 }
 
 #[test]
@@ -529,13 +548,30 @@ fn max_token_response_retains_call_envelope_without_guessing_truncated_arguments
 }
 
 #[test]
-fn finish_mut_keeps_progress_when_strict_tool_argument_decode_fails() {
+fn finish_mut_keeps_progress_when_strict_tool_argument_validation_fails() {
+    // Untrusted argument values have their own validation budget: a provider
+    // array beyond it is a fatal decode failure, and `finish_mut` must return it
+    // without consuming the builder that still holds the stream-progress
+    // counters the transport annotates onto the failure.
+    let definitions = [ToolDef {
+        async_execution: false,
+        constrained_sampling: None,
+        name: "write".to_owned(),
+        description: String::new(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"lines": {"type": "array", "items": {"type": "integer"}}},
+            "required": ["lines"],
+            "additionalProperties": false,
+        }),
+    }];
     let mut builder = ResponseBuilder::new(
         ModelId("test-model".to_string()),
         Protocol::OpenAiChat,
         None,
     );
     builder.observe_provider_stream_event().unwrap();
+    builder.set_tool_definitions(&definitions).unwrap();
     builder
         .on_event(&StreamEvent::ToolCallStart {
             async_execution: false,
@@ -547,9 +583,10 @@ fn finish_mut_keeps_progress_when_strict_tool_argument_decode_fails() {
     builder
         .on_event(&StreamEvent::ToolCallArgsDelta {
             index: 0,
-            delta: r#"{"content":"unterminated"#.to_string(),
+            delta: serde_json::json!({"lines": vec![1; 5_000]}).to_string(),
         })
         .unwrap();
+    builder.set_stop_reason(StopReason::ToolUse);
 
     assert!(builder.finish_mut().is_err());
     assert_eq!(builder.provider_event_count, 1);

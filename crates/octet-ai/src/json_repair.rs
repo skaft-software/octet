@@ -6,6 +6,7 @@
 //! completed speculatively.
 
 use crate::error::DecodeError;
+use crate::types::ToolCallArgumentError;
 use std::collections::HashSet;
 
 const VALID_ESCAPES: &[u8] = b"\"\\/bfnrtu";
@@ -36,6 +37,42 @@ pub(crate) fn normalize_json_object_value(input: &str) -> Result<serde_json::Val
 pub(crate) fn normalize_json_object(input: &str) -> Result<String, DecodeError> {
     let value = normalize_json_object_value(input)?;
     serde_json::to_string(&value).map_err(|error| DecodeError::Json(error.to_string()))
+}
+
+/// Arguments retained for a call whose provider text could not be repaired into
+/// a JSON object. Never a guess at the provider's intent: an unexecutable call
+/// stays visibly empty instead of being completed speculatively.
+pub(crate) const UNREPAIRABLE_TOOL_ARGUMENTS: &str = "{}";
+
+/// Normalize completed provider tool arguments without inventing values.
+///
+/// The returned marker tells a consumer to pair a bounded error result with the
+/// call and never execute it. Conservative repair that cannot recover a JSON
+/// object yields [`UNREPAIRABLE_TOOL_ARGUMENTS`] plus
+/// [`ToolCallArgumentError::Malformed`], so the call keeps its identity and the
+/// model can correct itself. Pi parses such arguments leniently and lets the
+/// call fail its own validation for exactly this reason: one malformed call
+/// must not end the run.
+pub(crate) fn normalize_completed_tool_arguments(
+    raw_arguments: &str,
+) -> (String, Option<ToolCallArgumentError>) {
+    match normalize_json_object(raw_arguments) {
+        Ok(arguments_json) => (arguments_json, None),
+        Err(_) => (
+            UNREPAIRABLE_TOOL_ARGUMENTS.to_owned(),
+            Some(ToolCallArgumentError::Malformed),
+        ),
+    }
+}
+
+/// Diagnostic attached to a response that kept a call whose provider arguments
+/// could not be repaired. Shared by every transport so the streamed and
+/// completed shapes stay observably identical.
+pub(crate) fn malformed_tool_arguments_diagnostic() -> crate::Diagnostic {
+    crate::Diagnostic {
+        code: "malformed_tool_arguments".to_owned(),
+        message: "Tool arguments that were not valid JSON and could not be repaired were replaced with an empty object and must not be executed".to_owned(),
+    }
 }
 
 // Tool schemas arrive as untrusted request data and provider arguments are

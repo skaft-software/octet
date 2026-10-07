@@ -390,14 +390,11 @@ fn decode_response_inner(
     }
 
     // 3. Map tool calls
+    let mut malformed_tool_arguments = false;
     if let Some(ref tcs) = choice.message.tool_calls {
         for tc in tcs {
-            let (name, mut arguments_json) = match (&tc.function, &tc.custom) {
-                (Some(function), None) => (
-                    &function.name,
-                    crate::json_repair::normalize_json_object(&function.arguments)
-                        .map_err(AiError::Decode)?,
-                ),
+            let (name, raw_arguments) = match (&tc.function, &tc.custom) {
+                (Some(function), None) => (&function.name, function.arguments.clone()),
                 (None, Some(custom)) => {
                     let property = crate::protocol::grammar::input_property(
                         tool_definitions.unwrap_or_default(),
@@ -417,7 +414,12 @@ fn decode_response_inner(
                     .into())
                 }
             };
-            let argument_error = if let Some(tools) = tool_definitions {
+            // Pi parses tool arguments leniently on both transports: an
+            // unrepairable call keeps its envelope marked for a paired error
+            // result instead of failing the whole response.
+            let (mut arguments_json, mut argument_error) =
+                crate::json_repair::normalize_completed_tool_arguments(&raw_arguments);
+            if let (Some(tools), None) = (tool_definitions, argument_error) {
                 let mut arguments = serde_json::from_str(&arguments_json)
                     .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
                 crate::constrained_sampling::normalize_tool_arguments(
@@ -427,17 +429,19 @@ fn decode_response_inner(
                     crate::protocol::strict_mode_for(model),
                 )?;
                 arguments_json = arguments.to_string();
-                match crate::json_repair::validate_tool_arguments(name, &arguments, tools)
-                    .map_err(AiError::Decode)?
-                {
-                    ToolArgumentValidation::SchemaMismatch => {
-                        Some(ToolCallArgumentError::SchemaMismatch)
-                    }
-                    ToolArgumentValidation::Valid | ToolArgumentValidation::UnknownTool => None,
-                }
-            } else {
-                None
-            };
+                argument_error =
+                    match crate::json_repair::validate_tool_arguments(name, &arguments, tools)
+                        .map_err(AiError::Decode)?
+                    {
+                        ToolArgumentValidation::SchemaMismatch => {
+                            Some(ToolCallArgumentError::SchemaMismatch)
+                        }
+                        ToolArgumentValidation::Valid | ToolArgumentValidation::UnknownTool => None,
+                    };
+            }
+            if argument_error == Some(ToolCallArgumentError::Malformed) {
+                malformed_tool_arguments = true;
+            }
 
             content.push(AssistantPart::ToolCall(ToolCall {
                 async_execution: false,
@@ -508,11 +512,14 @@ fn decode_response_inner(
                 StopReason::EndTurn
             }
         });
-    let diagnostics = if choice.finish_reason.is_none() {
+    let mut diagnostics = if choice.finish_reason.is_none() {
         vec![defaulted_stop_reason_diagnostic()]
     } else {
         Vec::new()
     };
+    if malformed_tool_arguments {
+        diagnostics.push(crate::json_repair::malformed_tool_arguments_diagnostic());
+    }
     let usage = map_usage(&resp.usage)?;
 
     let cost = model
