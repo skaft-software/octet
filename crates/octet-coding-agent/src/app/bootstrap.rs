@@ -6618,6 +6618,40 @@ fn record_codex_context_uncertainty(session: &mut Session, model: &Model) -> any
     Ok(())
 }
 
+/// Select the coding product's inference contract independently of inventory
+/// transport preferences. Like Pi, use ordinary Responses with parallel calls;
+/// explicitly selected Lite remains supported by `octet-ai` for SDK callers.
+fn codex_inference_capabilities(model: &DiscoveredCodexModel) -> Capabilities {
+    Capabilities {
+        input_modalities: if codex_supports_image_input(&model.id) {
+            ModalitySet::none().with(octet_ai::Modality::Image)
+        } else {
+            ModalitySet::none()
+        },
+        output_modalities: ModalitySet::none(),
+        tools: true,
+        parallel_tool_calls: true,
+        reasoning: Some(ReasoningCapability {
+            options: Some(model.reasoning_options.clone()),
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: None,
+            openai_chat_mode: OpenAiChatReasoningMode::Standard,
+            min_effort: model.min_effort,
+            max_effort: model.max_effort,
+        }),
+        responses_lite: false,
+        agent_delegation: model.agent_delegation,
+        structured_output: false,
+        deferred_tool_loading: false,
+        responses_features: octet_ai::ResponsesFeatures {
+            reasoning_effort_updates: model.reasoning_effort_updates,
+            ..Default::default()
+        },
+    }
+}
+
 /// Register the OpenAI Codex (Sign in with ChatGPT) endpoint and discover the
 /// account's current model inventory, but only for a validated subscription
 /// credential. Codex-specific headers are composed from static endpoint
@@ -6716,7 +6750,7 @@ fn register_openai_codex_with_notes(
             }
         };
         let pricing = crate::providers::pricing_for(declaration, &model.id);
-        let supports_image_input = codex_supports_image_input(&model.id);
+        let capabilities = codex_inference_capabilities(&model);
         // The declaration keeps application session identity separate from the
         // resolver's credential/account routing.
         let cache = crate::providers::cache_compatibility(
@@ -6731,36 +6765,7 @@ fn register_openai_codex_with_notes(
             api_name: model.id,
             display_name: model.display_name,
             protocol: route.protocol,
-            capabilities: Capabilities {
-                input_modalities: if supports_image_input {
-                    ModalitySet::none().with(octet_ai::Modality::Image)
-                } else {
-                    ModalitySet::none()
-                },
-                output_modalities: ModalitySet::none(),
-                tools: true,
-                parallel_tool_calls: true,
-                reasoning: Some(ReasoningCapability {
-                    options: Some(model.reasoning_options),
-                    control: ReasoningControl::Effort,
-                    exposes_text: true,
-                    preserves_state: true,
-                    effort_budgets: None,
-                    openai_chat_mode: OpenAiChatReasoningMode::Standard,
-                    min_effort: model.min_effort,
-                    max_effort: model.max_effort,
-                }),
-                responses_lite: model.responses_lite,
-                agent_delegation: model.agent_delegation,
-                structured_output: false,
-
-                deferred_tool_loading: false,
-
-                responses_features: octet_ai::ResponsesFeatures {
-                    reasoning_effort_updates: model.reasoning_effort_updates,
-                    ..Default::default()
-                },
-            },
+            capabilities,
             limits,
             pricing,
             cache,
