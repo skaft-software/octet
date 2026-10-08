@@ -74,8 +74,12 @@ test('close is bounded when a worker cannot be terminated (Bun pending fd read)'
   // cannot resolve while that read is outstanding. Shutdown must not wait.
   const transport = new Transport({ write() {}, output: {} }, { onMessage() {}, onLost() {} });
   transport.worker = { terminate: () => new Promise(() => {}) };
+  // The deadline timer is unref'd so it never keeps a host alive by itself. A
+  // real host always has live handles; hold one here, or the test's event loop
+  // drains before the deadline can fire and the runner cancels the test.
+  const host = setInterval(() => {}, 1000);
   const started = Date.now();
-  await transport.close();
+  try { await transport.close(); } finally { clearInterval(host); }
   assert.equal(transport.closed, true);
   assert.ok(Date.now() - started < 2000, 'close waited on an unstoppable worker');
 });
