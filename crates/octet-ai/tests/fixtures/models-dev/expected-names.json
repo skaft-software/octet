@@ -1,0 +1,7 @@
+{
+  "anthropic/claude-next": "Claude Next",
+  "deepseek/example": "Example Flash",
+  "openai/example": "Example Flash",
+  "openai/gpt-9-preview": "GPT-9 Preview",
+  "openai/mixed-case": "Mixed Case"
+}
