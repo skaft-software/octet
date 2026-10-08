@@ -377,6 +377,7 @@ text docs/migrations/README.md
 text docs/migrations/external-products.json
 
 # Combined RC public documentation from the stacked follow-ups.
+text docs/benchmarks/startup-fx-2026-10-08.md
 text docs/benchmarks/startup-resume-2026-10-02/README.md
 text docs/benchmarks/startup-resume-2026-10-02/SHA256SUMS
 text docs/benchmarks/startup-resume-2026-10-02/after-build.log
