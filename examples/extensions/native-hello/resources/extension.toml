@@ -1,0 +1,15 @@
+name = "native-resource-hello"
+version = "0.1.0"
+api_version = "0.4"
+requires_octet = "=0.9.0"
+
+[entrypoint]
+command = "build/resource-hello"
+
+[capabilities]
+filesystem = "none"
+process = false
+network = false
+
+[contributes]
+tools = ["counter_create", "counter_add", "counter_release_last"]
