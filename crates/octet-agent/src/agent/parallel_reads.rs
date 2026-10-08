@@ -93,6 +93,57 @@ pub(super) fn parallel_read_candidate(
         })
 }
 
+/// How a call may join an overlapping wave of the current response (see
+/// [`call_overlap`]), if at all. Results are still committed in emitted order.
+/// Background (async) dispatch keeps the stricter [`parallel_read_candidate`].
+pub(super) fn parallel_wave_member(
+    call: &ToolCall,
+    call_index: usize,
+    answer_only: bool,
+    output_truncated: bool,
+    tool_map: &HashMap<String, Arc<dyn Tool>>,
+    context: &ToolContext<'_>,
+    broker: &EffectBroker,
+) -> Option<CallOverlap> {
+    if call_index >= MAX_TOOL_CALLS_PER_TURN
+        || answer_only
+        || output_truncated
+        || call.argument_error.is_some()
+    {
+        return None;
+    }
+    let arguments = call.arguments_value().ok()?;
+    call_overlap(
+        tool_map.get(&call.name)?.as_ref(),
+        &arguments,
+        context,
+        broker,
+    )
+}
+
+/// Exclusive end of the overlapping wave that starts at `start`: its members
+/// are the contiguous run of overlappable calls. Observations share the read
+/// width; processes wait on their own children, so like Pi only the per-turn
+/// limit bounds them, unless a width of one asks for every call in turn.
+pub(super) fn parallel_wave_end(
+    start: usize,
+    read_width: usize,
+    member: impl Fn(usize) -> Option<CallOverlap>,
+    calls: usize,
+) -> usize {
+    let mut end = start;
+    let mut observations = 0;
+    while end < calls {
+        match member(end) {
+            Some(CallOverlap::Observation) if observations < read_width => observations += 1,
+            Some(CallOverlap::Process) if read_width > 1 || end == start => {}
+            _ => break,
+        }
+        end += 1;
+    }
+    end
+}
+
 pub(super) fn completed_parallel_read_execution(
     result: Result<ToolOutput, ToolError>,
     policy_decision: Option<ToolPolicyDecision>,
@@ -318,9 +369,13 @@ pub(super) async fn prepare_parallel_read_call(
     }))
 }
 
+/// Live progress of a wave call, tagged with its position in the wave.
+pub(super) type WaveProgress = (usize, ToolProgress);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_admitted_parallel_read(
     admitted: AdmittedParallelReadCall,
+    live: Option<(usize, mpsc::Sender<WaveProgress>)>,
     sandbox: &SandboxConfig,
     tool_scope: &str,
     resource_owner: &str,
@@ -333,7 +388,7 @@ pub(super) async fn execute_admitted_parallel_read(
         name,
         arguments,
         execute_arguments,
-        progress_rx,
+        mut progress_rx,
         progress_sink,
         policy_decision,
         start,
@@ -352,13 +407,27 @@ pub(super) async fn execute_admitted_parallel_read(
     let execute = tool.execute(execute_arguments, &tool_ctx);
     tokio::pin!(execute);
     let mut cancellation_won = false;
-    let execution_result = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => {
-            cancellation_won = true;
-            Err(cancelled_tool_error())
+    // A live wave hands each accepted progress item to the run loop while the
+    // call runs, so overlapped shell output streams like a sequential call's.
+    // Whatever is still queued when the call ends is drained at its commit.
+    let mut forwarding = live.is_some();
+    let execution_result = loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                cancellation_won = true;
+                break Err(cancelled_tool_error());
+            }
+            result = &mut execute => break result,
+            progress = progress_rx.recv(), if forwarding => match (progress, live.as_ref()) {
+                (Some(progress), Some((index, sender))) => {
+                    if sender.send((*index, progress)).await.is_err() {
+                        forwarding = false;
+                    }
+                }
+                _ => forwarding = false,
+            },
         }
-        result = &mut execute => result,
     };
     let result = if cancellation_won || cancellation.is_cancelled() {
         cancellation_won = true;
@@ -401,6 +470,7 @@ pub(super) async fn execute_parallel_read_wave(
     active_skills: &[crate::session::SkillActivatedSnapshot],
     registered_tools: &[String],
     cancellation: CancellationToken,
+    live: mpsc::Sender<WaveProgress>,
 ) -> Vec<ParallelReadWaveExecution> {
     let mut results: Vec<Option<ParallelReadWaveExecution>> =
         (0..calls.len()).map(|_| None).collect();
@@ -436,11 +506,13 @@ pub(super) async fn execute_parallel_read_wave(
             ParallelReadPreparation::Completed(execution) => results[index] = Some(*execution),
             ParallelReadPreparation::Admitted(admitted) => {
                 let execution_cancellation = cancellation.clone();
+                let live = Some((index, live.clone()));
                 executions.push(async move {
                     (
                         index,
                         execute_admitted_parallel_read(
                             *admitted,
+                            live,
                             sandbox,
                             tool_scope,
                             resource_owner,

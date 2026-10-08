@@ -2268,9 +2268,10 @@ impl Agent {
                     break 'run FinishReason::Completed;
                 }
 
-                // A model can emit several independent observations in one
-                // turn. Scan only the next contiguous run of exact,
-                // host-classified read observations; every mutation, process,
+                // A model can emit several independent calls in one turn. Scan
+                // only the next contiguous run of exact, host-classified read
+                // observations and, while host processes need no approval,
+                // self-contained shell/search processes; every mutation,
                 // delegation, extension, network, unknown, schema-invalid, or
                 // sequential tool is a barrier. The live read predicate is
                 // intentionally broader than the crash-replay predicate:
@@ -2341,31 +2342,28 @@ impl Agent {
                 // ── Commit tool results in emitted order ───────────────────
                 let mut call_index = 0usize;
                 while call_index < calls.len() {
+                    // Only two or more remaining calls can overlap; each is
+                    // classified once while the wave is scanned.
                     if parallel_results.is_empty()
                         && !abort.is_set()
-                        && parallel_read_candidate(
-                            &calls[call_index],
-                            call_index,
-                            answer_only,
-                            output_truncated,
-                            &tool_map,
-                            &classification_context,
-                        )
+                        && calls.len() - call_index > 1
                     {
-                        let mut wave_end = call_index;
-                        while wave_end < calls.len()
-                            && wave_end - call_index < parallel_read_wave_width
-                            && parallel_read_candidate(
-                                &calls[wave_end],
-                                wave_end,
-                                answer_only,
-                                output_truncated,
-                                &tool_map,
-                                &classification_context,
-                            )
-                        {
-                            wave_end += 1;
-                        }
+                        let wave_end = parallel_wave_end(
+                            call_index,
+                            parallel_read_wave_width,
+                            |index| {
+                                parallel_wave_member(
+                                    &calls[index],
+                                    index,
+                                    answer_only,
+                                    output_truncated,
+                                    &tool_map,
+                                    &classification_context,
+                                    &effect_broker,
+                                )
+                            },
+                            calls.len(),
+                        );
                         // A single eligible call gains no overlap and keeps the
                         // ordinary sequential path's hook/control behavior.
                         if wave_end - call_index > 1 {
@@ -2400,6 +2398,31 @@ impl Agent {
                                 yield ev;
                             }
 
+                            // Live progress of the wave's calls, tagged by
+                            // position: settled, checkpointed, paced and
+                            // streamed while the calls run, as a sequential
+                            // call's is, so overlapped shell output stays live.
+                            let (wave_progress_tx, mut wave_progress_rx) =
+                                mpsc::channel::<WaveProgress>(PROGRESS_CHANNEL_CAPACITY);
+                            let mut wave_previews: Vec<LivePreviewPacer> = (call_index..wave_end)
+                                .map(|_| LivePreviewPacer::new())
+                                .collect();
+                            #[cfg(any(unix, windows))]
+                            let mut wave_partial_output: Vec<Option<LivePartialOutput>> = calls
+                                [call_index..wave_end]
+                                .iter()
+                                .zip(&invocation_handles)
+                                .map(|(call, handle)| {
+                                    partial_output_checkpoints.as_ref().and_then(|config| {
+                                        let mut resolved = config.clone();
+                                        if resolved.sink.is_none() {
+                                            resolved.sink = Some(Arc::new(handle.clone())
+                                                as Arc<dyn crate::tool::PartialOutputCheckpointSink>);
+                                        }
+                                        LivePartialOutput::for_call(&resolved, &call.name)
+                                    })
+                                })
+                                .collect();
                             let operation = execute_parallel_read_wave(
                                 &calls[call_index..wave_end],
                                 &invocation_handles,
@@ -2414,10 +2437,17 @@ impl Agent {
                                 &parallel_active_skills,
                                 &registered_tools,
                                 abort.cancellation.clone(),
+                                wave_progress_tx,
                             );
                             tokio::pin!(operation);
                             let mut abort_observed = abort.is_set();
                             let completed = loop {
+                                let now = std::time::Instant::now();
+                                let wave_flush_at = wave_previews
+                                    .iter()
+                                    .filter_map(|preview| preview.flush_deadline(now))
+                                    .min()
+                                    .map(tokio::time::Instant::from_std);
                                 tokio::select! {
                                     biased;
                                     _ = abort.wait(), if !abort_observed => {
@@ -2443,6 +2473,51 @@ impl Agent {
                                         None => control_open = false,
                                     },
                                     results = &mut operation => break results,
+                                    progress = wave_progress_rx.recv() => {
+                                        if let Some((offset, progress)) = progress {
+                                            if let ProgressSettlement::Emit(progress) =
+                                                settle_tool_progress(progress, abort.is_set(), session)
+                                            {
+                                                // Row 4.7: durability before the panel.
+                                                #[cfg(any(unix, windows))]
+                                                if let Some(checkpoints) =
+                                                    wave_partial_output[offset].as_mut()
+                                                {
+                                                    checkpoints.observe_progress(
+                                                        &progress,
+                                                        std::time::Instant::now(),
+                                                    );
+                                                }
+                                                if let Some(progress) = forward_tool_progress(
+                                                    progress,
+                                                    &mut wave_previews[offset],
+                                                    std::time::Instant::now(),
+                                                ) {
+                                                    let ev = AgentEvent::ToolProgress {
+                                                        id: calls[call_index + offset].id.clone(),
+                                                        progress,
+                                                    };
+                                                    notify_observers(&observers, &ev);
+                                                    yield ev;
+                                                }
+                                            }
+                                        }
+                                    },
+                                    _ = tokio::time::sleep_until(
+                                        wave_flush_at.unwrap_or_else(tokio::time::Instant::now)
+                                    ), if wave_flush_at.is_some() => {
+                                        let now = std::time::Instant::now();
+                                        for (offset, preview) in wave_previews.iter_mut().enumerate() {
+                                            if let Some(decoration) = preview.take_due(now) {
+                                                let ev = AgentEvent::ToolProgress {
+                                                    id: calls[call_index + offset].id.clone(),
+                                                    progress: ToolProgress::Decoration(decoration),
+                                                };
+                                                notify_observers(&observers, &ev);
+                                                yield ev;
+                                            }
+                                        }
+                                    },
                                     step = cache_warmer.next_step(), if !abort_observed => {
                                         if abort.is_set() {
                                             abort_observed = true;
@@ -2470,6 +2545,38 @@ impl Agent {
                                     },
                                 }
                             };
+                            // The calls are over: progress still in flight,
+                            // then each call's held decoration, reaches the
+                            // panel before any result of the wave is committed.
+                            while let Ok((offset, progress)) = wave_progress_rx.try_recv() {
+                                let cancelled = completed[offset].execution.cancellation_won;
+                                if let ProgressSettlement::Emit(progress) =
+                                    settle_tool_progress(progress, cancelled, session)
+                                {
+                                    if let Some(progress) = forward_tool_progress(
+                                        progress,
+                                        &mut wave_previews[offset],
+                                        std::time::Instant::now(),
+                                    ) {
+                                        let ev = AgentEvent::ToolProgress {
+                                            id: calls[call_index + offset].id.clone(),
+                                            progress,
+                                        };
+                                        notify_observers(&observers, &ev);
+                                        yield ev;
+                                    }
+                                }
+                            }
+                            for (offset, preview) in wave_previews.iter_mut().enumerate() {
+                                if let Some(decoration) = preview.settle(std::time::Instant::now()) {
+                                    let ev = AgentEvent::ToolProgress {
+                                        id: calls[call_index + offset].id.clone(),
+                                        progress: ToolProgress::Decoration(decoration),
+                                    };
+                                    notify_observers(&observers, &ev);
+                                    yield ev;
+                                }
+                            }
                             for (guard, entry) in
                                 wave_tool_guards.into_iter().zip(completed.iter())
                             {
