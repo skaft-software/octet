@@ -794,8 +794,7 @@ support](media.md#formats-and-limits).
 Codex inference uses ordinary Responses with `parallel_tool_calls: true`, like
 Pi. Explicit Responses Lite selection by an `octet-ai` SDK caller still sends
 `parallel_tool_calls: false`. Host execution is independent of the wire flag:
-only parallel-safe reads overlap; shell and file changes stay one at a time
-whatever the model batches.
+[built-in tools](tools.md) says which batched calls octet runs together.
 
 <details>
 <summary>OpenAI, Codex and Responses details</summary>
