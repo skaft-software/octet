@@ -16,6 +16,8 @@ enum Class {
     Space,
     /// A word-like grapheme: a Unicode alphanumeric or `_`.
     Word,
+    /// An ideographic run, kept separate from adjacent alphabetic words.
+    Ideograph,
     /// Any other grapheme (punctuation, symbols, emoji).
     Punct,
 }
@@ -23,6 +25,11 @@ enum Class {
 fn classify(grapheme: &str) -> Class {
     if grapheme.chars().all(char::is_whitespace) {
         Class::Space
+    } else if grapheme
+        .chars()
+        .any(|c| matches!(c as u32,0x3400..=0x4dbf | 0x4e00..=0x9fff | 0x20000..=0x323af))
+    {
+        Class::Ideograph
     } else if grapheme.chars().any(|c| c.is_alphanumeric() || c == '_') {
         Class::Word
     } else {
@@ -98,45 +105,4 @@ pub fn find_word_forward(text: &str, cursor: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backward_skips_whitespace_then_stops_at_word_start() {
-        let text = "alpha beta gamma";
-        assert_eq!(find_word_backward(text, text.len()), "alpha beta ".len());
-        assert_eq!(find_word_backward(text, "alpha beta".len()), "alpha ".len());
-        assert_eq!(find_word_backward(text, "alpha".len()), 0);
-        // Trailing whitespace is skipped before the word run.
-        assert_eq!(find_word_backward("alpha   ", 8), 0);
-    }
-
-    #[test]
-    fn forward_skips_whitespace_then_stops_at_word_end() {
-        let text = "alpha beta gamma";
-        assert_eq!(find_word_forward(text, 0), "alpha".len());
-        assert_eq!(find_word_forward(text, "alpha ".len()), "alpha beta".len());
-        assert_eq!(find_word_forward(text, text.len()), text.len());
-        // Leading whitespace is skipped before the word run.
-        assert_eq!(find_word_forward("   alpha", 0), "   alpha".len());
-    }
-
-    #[test]
-    fn punctuation_and_unicode_form_runs() {
-        assert_eq!(find_word_backward("foo->bar", 8), "foo->".len());
-        assert_eq!(find_word_forward("foo->bar", 0), "foo".len());
-        assert_eq!(find_word_forward("foo->bar", 3), "foo->".len());
-        // Multi-byte word-like run stays a single unit.
-        assert_eq!(find_word_forward("界界界 a", 0), "界界界".len());
-        assert_eq!(find_word_backward("a 界界界", "a 界界界".len()), "a ".len());
-    }
-
-    #[test]
-    fn boundaries_are_clamped_and_never_panic() {
-        assert_eq!(find_word_backward("abc", 0), 0);
-        assert_eq!(find_word_backward("", 0), 0);
-        assert_eq!(find_word_forward("", 0), 0);
-        assert_eq!(find_word_forward("abc", 999), 3);
-        assert_eq!(find_word_backward("abc", 999), 0);
-    }
-}
+mod tests;

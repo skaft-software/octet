@@ -15,14 +15,20 @@ syntax-highlighting = ["dep:syntect"]
 benchmarks = []
 
 [dependencies]
-crossterm = "0.28"
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+crossterm = "0.29"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde = { version = "1", features = ["derive"] }
 syntect = { version = "5", optional = true, default-features = false, features = ["default-syntaxes", "regex-fancy"] }
-toml = "0.8"
+toml = "1.1"
 # Retain the reviewed grapheme behavior used by the vendored integration.
-unicode-segmentation = "=1.12.0"
+unicode-segmentation = "=1.13.3"
 unicode-width = "0.2"
+
+[lints.clippy]
+# Clippy 1.88 (the MSRV since octet 0.8.2) warns on positional format
+# arguments by default; the code base uses them consistently, so inlining
+# them is left to a separate style change.
+uninlined_format_args = "allow"
 
 [dev-dependencies]
 tempfile = "3"
