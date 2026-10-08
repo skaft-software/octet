@@ -384,13 +384,12 @@ impl CompositionDispatcher {
         let arguments =
             transform_tool_arguments(&self.hooks, tool.as_ref(), &name, arguments, &context)
                 .await?;
-        // Fair reader/writer admission: at most four declared safe reads;
-        // every mutation/extension/unknown effect excludes all other calls.
-        // Reclassification and broker reservation still happen at dispatch.
-        let parallel = tool.concurrency() == ToolConcurrency::Parallel
-            && tool
-                .effect(&arguments, &context)
-                .is_ok_and(effect_is_parallel_observation);
+        // Fair reader/writer admission: overlappable calls (declared safe
+        // reads, and self-contained processes while they need no approval)
+        // share the lock; every mutation/extension/unknown effect excludes all
+        // other calls. Reclassification and broker reservation still happen at
+        // dispatch.
+        let parallel = call_overlap(tool.as_ref(), &arguments, &context, &self.broker).is_some();
         let read_guard;
         let write_guard;
         if parallel {
