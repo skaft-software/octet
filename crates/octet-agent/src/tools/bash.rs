@@ -223,6 +223,12 @@ impl Tool for BashTool {
         Ok(ToolEffect::HostProcess)
     }
 
+    fn concurrency(&self) -> crate::tool::ToolConcurrency {
+        // Every call is its own `-c` child with no shared shell state, so the
+        // independent commands of one response can overlap, as in Pi.
+        crate::tool::ToolConcurrency::ParallelProcess
+    }
+
     fn prompt_snippet(&self) -> Option<&str> {
         Some("Execute bash commands (prefer rg/ripgrep for file and content search)")
     }
