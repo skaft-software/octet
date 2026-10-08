@@ -1,11 +1,11 @@
-#![cfg(unix)]
-
 //! Deterministic PTY/frame regression coverage for primary-screen startup.
 //!
 //! The real binary is run against a disposable HOME, workspace, session store,
 //! and a local custom-provider record. Startup tests submit no prompt. API-wait
 //! and plain-prompt tests use only a gated loopback fixture, never credentials
 //! or a live model.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 use sexy_tui_rs::{ColorDepth, Component, Terminal, TerminalCapabilities, TerminalInput, TUI};
 use tempfile::TempDir;
 
+#[path = "startup_frame_pty/mouse.rs"]
+mod mouse;
+
 const INITIAL_COLUMNS: u16 = 96;
 const INITIAL_ROWS: u16 = 18;
 const RESIZED_COLUMNS: u16 = 64;
@@ -30,6 +33,20 @@ const RESIZED_ROWS: u16 = 12;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DRAIN_TIME: Duration = Duration::from_millis(35);
+/// Budget for observing one automatic live-reload pass.
+///
+/// The reload supervisor samples the filesystem on `DEFAULT_POLL_INTERVAL`
+/// (1s) and debounces for a further 200ms before it applies a pass at an idle
+/// boundary, so a freshly written prompt cannot appear on the first look. This
+/// deliberately does not reuse `STARTUP_TIMEOUT`: that is a single-frame
+/// budget, and spending it here would leave the retry loop below with less time
+/// than one of its own iterations can take, so the loop could never retry.
+const RELOAD_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-attempt slice of `RELOAD_TIMEOUT`.
+///
+/// Kept well below the outer budget so several `/prompt` round trips fit
+/// inside it, which is the whole point of the retry loop.
+const RELOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const FRAME_BEGIN: &[u8] = b"\x1b[?2026h";
 const FRAME_END: &[u8] = b"\x1b[?2026l";
 const STALE_MARKER: &str = "OCTET_PTY_STALE_STARTUP";
@@ -46,15 +63,17 @@ fn pty_test_lock() -> &'static Mutex<()> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MouseMode {
+    Default,
     Auto,
     App,
 }
 
 impl MouseMode {
-    const fn as_arg(self) -> &'static str {
+    const fn as_arg(self) -> Option<&'static str> {
         match self {
-            Self::Auto => "auto",
-            Self::App => "app",
+            Self::Default => None,
+            Self::Auto => Some("auto"),
+            Self::App => Some("app"),
         }
     }
 }
@@ -197,6 +216,8 @@ enum StartupFixture<'a> {
     DiscoveringModel(&'a str, bool),
     /// Fresh/resumed/forked startup against one synthetic saved conversation.
     Session(&'a [&'a str]),
+    /// Long Markdown history for raw mouse/clipboard acceptance.
+    MouseHistory,
     /// A persisted selection, resolved through the real registry with no auth.
     ConfiguredGemma,
     /// Empty inventory and no appearance preference: both onboarding owners run.
@@ -239,6 +260,27 @@ impl PtyOctet {
         start: (u16, bool, bool),
         fixture: StartupFixture<'_>,
     ) -> Self {
+        Self::spawn_at_with_appearance(
+            binary,
+            mode,
+            api,
+            (color, false),
+            dimensions,
+            start,
+            fixture,
+        )
+    }
+
+    fn spawn_at_with_appearance(
+        binary: &Path,
+        mode: MouseMode,
+        api: Option<&str>,
+        appearance: (bool, bool),
+        dimensions: (u16, u16),
+        start: (u16, bool, bool),
+        fixture: StartupFixture<'_>,
+    ) -> Self {
+        let (color, auto_appearance) = appearance;
         let root = tempfile::tempdir().expect("PTY test tempdir");
         // The CLI resolves the workspace physically. Give HOME the same path
         // identity, including macOS's /var -> /private/var temporary-directory
@@ -311,7 +353,7 @@ impl PtyOctet {
                 )
                 .unwrap();
             }
-            StartupFixture::Session(_) => {
+            StartupFixture::Session(_) | StartupFixture::MouseHistory => {
                 // The on-disk session store uses the workspace's stable FNV-1a key.
                 let mut key = 0xcbf2_9ce4_8422_2325u64;
                 for byte in workspace.to_string_lossy().as_bytes() {
@@ -328,6 +370,26 @@ impl PtyOctet {
                         },
                     )))
                     .unwrap();
+                if matches!(fixture, StartupFixture::MouseHistory) {
+                    let mut text = String::from("MOUSE-BEGIN\n");
+                    for index in 1..=400 {
+                        text.push_str(&format!(
+                            "{index}. MOUSE-ROW-{index:03} clipboard line with unique words\n"
+                        ));
+                    }
+                    text.push_str("\nMOUSE-WRAPPED ");
+                    text.push_str(&"wrapped Unicode 界é text ".repeat(12));
+                    text.push_str("\n\nMOUSE-END\n");
+                    session
+                        .append(octet_agent::EntryValue::Message(
+                            octet_ai::Message::Assistant(octet_ai::AssistantMessage {
+                                content: vec![octet_ai::AssistantPart::Text(text)],
+                                model: octet_ai::ModelId("custom/probe".into()),
+                                protocol: octet_ai::Protocol::OpenAiChat,
+                            }),
+                        ))
+                        .unwrap();
+                }
             }
             StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_, _) => {}
         }
@@ -366,8 +428,6 @@ impl PtyOctet {
                 } else {
                     "always"
                 },
-                "--mouse",
-                mode.as_arg(),
                 "--workspace",
             ])
             .arg(&workspace)
@@ -386,6 +446,9 @@ impl PtyOctet {
             .stdout(stdout)
             .stderr(stderr);
 
+        if let Some(mode) = mode.as_arg() {
+            command.args(["--mouse", mode]);
+        }
         match fixture {
             StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model, _) => {
                 command.args(["--model", &format!("custom/{model}")]);
@@ -397,6 +460,10 @@ impl PtyOctet {
                 command
                     .args(["--model", "custom/probe", "--theme", "dark"])
                     .args(args);
+            }
+            StartupFixture::MouseHistory => {
+                command.args(["--model", "custom/probe", "--theme", "dark", "--continue"]);
+                command.env("SSH_CONNECTION", "192.0.2.1 12345 192.0.2.2 22");
             }
             StartupFixture::Changelog { model, initial } => {
                 command.args(["--theme", "dark"]);
@@ -420,6 +487,13 @@ impl PtyOctet {
                         .env("COLORFGBG", "15;0");
                 }
             }
+        }
+
+        if auto_appearance {
+            // No reliable environment hint: exercise the real OSC 11 owner.
+            command
+                .env_remove("OCTET_COLOR_SCHEME")
+                .args(["--theme", "auto"]);
         }
 
         // `openpty` alone does not make the slave a controlling terminal. A
@@ -618,7 +692,7 @@ impl PrimaryTrace {
     fn normalized(&self) -> String {
         format!(
             "mode={}\nstartup.clear_screen={}\nstartup.first_full_frame.synchronized={}\nstartup.first_full_frame.stale_rows={}\nstartup.ready_frame.stale_rows={}\nresize.redraw.synchronized={}\nresize.clear_screen={}\nresize.clear_saved_lines={}\nresize.stale_rows={}\nshutdown.cursor_visible={}\nshutdown.bracketed_paste_disabled={}\nshutdown.termios_restored={}\nshutdown.cursor_position_valid={}\nshutdown.mouse_restored={}\nalternate_screen.used={}\nframes.balanced={}\nmouse.capture={}\n",
-            self.mode.as_arg(),
+            self.mode.as_arg().unwrap_or("default"),
             self.startup_clear_screen,
             self.first_frame_synchronized,
             self.first_frame_stale_rows,
@@ -651,6 +725,10 @@ impl PrimaryTrace {
     }
 }
 
+fn resize_frame_end(output: &[u8]) -> Option<usize> {
+    synchronized_frame_end_containing(output, b"\x1b[2J")
+}
+
 fn run_primary(binary: &Path, mode: MouseMode) -> PrimaryTrace {
     let mut octet = PtyOctet::spawn(binary, mode);
     octet.wait_until(STARTUP_TIMEOUT, |output| nth_frame_end(output, 1).is_some());
@@ -679,12 +757,11 @@ fn run_primary(binary: &Path, mode: MouseMode) -> PrimaryTrace {
     octet.wait_until(STARTUP_TIMEOUT, |output| {
         output
             .get(resize_start..)
-            .and_then(|bytes| synchronized_frame_end_containing(bytes, b"\x1b[2J"))
+            .and_then(resize_frame_end)
             .is_some()
     });
     let resize_end = resize_start
-        + synchronized_frame_end_containing(&octet.pty.output[resize_start..], b"\x1b[2J")
-            .expect("resize redraw frame");
+        + resize_frame_end(&octet.pty.output[resize_start..]).expect("resize redraw frame");
     let (resize_redraw_synchronized, resize_clear_screen, resize_clear_saved_lines) = {
         let resize_frame = &octet.pty.output[resize_start..resize_end];
         parser.process(&octet.pty.output[ready_end..resize_start]);
@@ -1021,12 +1098,12 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
     // was printed. /prompt only inspects the loaded catalog; it never reloads
     // resources or submits a provider request. Close it between observations so
     // the watcher can apply its pass at the idle prompt.
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let deadline = Instant::now() + RELOAD_TIMEOUT;
     loop {
         octet.pty.drain_for(Duration::from_millis(350));
         let before = octet.pty.output.len();
         octet.pty.write_input(b"/prompt\r");
-        octet.wait_until(STARTUP_TIMEOUT, |output| {
+        octet.wait_until(RELOAD_ATTEMPT_TIMEOUT, |output| {
             contains_bytes(&output[before..], b"Prompt templates:")
         });
         octet.pty.drain_for(DRAIN_TIME);
@@ -1426,11 +1503,9 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             octet.resize(columns, rows);
             parser.set_size(rows, columns);
             octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-                synchronized_frame_end_containing(&bytes[start..], b"\x1b[2J").is_some()
+                resize_frame_end(&bytes[start..]).is_some()
             });
-            let end = start
-                + synchronized_frame_end_containing(&octet.pty.output[start..], b"\x1b[2J")
-                    .unwrap();
+            let end = start + resize_frame_end(&octet.pty.output[start..]).unwrap();
             parser.process(&octet.pty.output[start..end]);
             consumed = end;
             assert_unbranded_startup(&parser, columns);
@@ -1623,9 +1698,11 @@ fn real_octet_model_discovery_keeps_startup_editable() {
             Duration::from_millis(500),
         );
         assert_unbranded_startup(&parser, INITIAL_COLUMNS);
-        assert!(
-            synchronized_frame_end_containing(&octet.pty.output, b"startup draft pasted").is_some()
-        );
+        // The screen can show the edit before the frame's closing CSI 2026
+        // has been read: a frame may reach the PTY in more than one write.
+        octet.wait_until(Duration::from_millis(500), |bytes| {
+            synchronized_frame_end_containing(bytes, b"startup draft pasted").is_some()
+        });
 
         let resized_start = octet.pty.output.len();
         octet.resize(RESIZED_COLUMNS, RESIZED_ROWS);
@@ -1654,10 +1731,168 @@ fn real_octet_model_discovery_keeps_startup_editable() {
         );
         assert!(parser.screen().contents().contains("startup draft pasted"));
         assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A branded frame is not admission evidence: actually submit the held
+        // draft after resolution and inspect the single loopback request.
+        octet.pty.write_input(b"\r");
+        api.wait_for_request(&mut octet, 2);
+        assert_plain_user_messages(&api, 0, &["startup draft pasted"]);
+        assert_eq!(api.requests.lock().unwrap()[0]["model"], "probe");
+        api.release.send(()).unwrap();
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "fixture response done",
+            STARTUP_TIMEOUT,
+        );
+        octet.pty.drain_for(DRAIN_TIME);
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(api.requests.lock().unwrap().len(), 1);
         let capture = octet.shutdown();
         assert!(capture.status.success());
         assert!(capture.termios_restored);
         assert!(!uses_alternate_screen(&capture.output));
+    }
+}
+
+/// Auto appearance should overlap a slow inventory rather than repaint the
+/// ready frame. The same input owner must retain typing around the OSC reply.
+#[test]
+fn real_octet_auto_background_probe_overlaps_model_discovery() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let api = HeldChatApi::start_for_models(true);
+    let mut octet = PtyOctet::spawn_at_with_appearance(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Auto,
+        Some(&api.url),
+        (true, true),
+        (INITIAL_COLUMNS, INITIAL_ROWS),
+        (2, false, false),
+        StartupFixture::DiscoveringModel("probe", false),
+    );
+    api.wait_for_request(&mut octet, 1);
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        count_bytes(bytes, b"\x1b]11;?\x1b\\") == 1 && nth_frame_end(bytes, 1).is_some()
+    });
+    assert_eq!(
+        terminal_attributes(octet.pty.slave.as_raw_fd()).c_lflag & (libc::ICANON | libc::ECHO),
+        0,
+    );
+    // A complete light-background reply immediately followed by actual input.
+    octet
+        .pty
+        .write_input(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\auto draftX\x7f");
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+    let mut consumed = 0;
+    await_screen(
+        &mut octet,
+        &mut parser,
+        &mut consumed,
+        "auto draft",
+        STARTUP_TIMEOUT,
+    );
+    assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+    api.release.send(()).unwrap();
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        synchronized_frame_end_containing(bytes, b"custom/probe").is_some()
+    });
+    let ready_end = synchronized_frame_end_containing(&octet.pty.output, b"custom/probe").unwrap();
+    let ready_begin = octet.pty.output[..ready_end]
+        .windows(FRAME_BEGIN.len())
+        .rposition(|bytes| bytes == FRAME_BEGIN)
+        .unwrap();
+    let ready_frame = &octet.pty.output[ready_begin..ready_end];
+    assert!(
+        count_bytes(ready_frame, b"auto draft") > 0,
+        "bootstrap lost the draft"
+    );
+    // The compiled Auto light palette's balanced muted gray (#5d5d5d),
+    // before the ready fence; the unknown-background fallback is different.
+    assert!(
+        count_bytes(ready_frame, b"38;2;93;93;93") > 0,
+        "ready frame used the fallback palette: {}",
+        visible_bytes(ready_frame)
+    );
+    assert_eq!(count_bytes(&octet.pty.output, b"\x1b]11;?\x1b\\"), 1);
+    let capture = octet.shutdown_with_input(&[3, 4]);
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    assert!(!uses_alternate_screen(&capture.output));
+}
+
+#[test]
+fn real_octet_short_pane_startup_is_static_and_keeps_the_draft_cursor() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        for columns in [48, 80] {
+            let mut octet = PtyOctet::spawn_at(
+                Path::new(env!("CARGO_BIN_EXE_octet")),
+                mode,
+                None,
+                true,
+                (columns, 8),
+                (2, false, false),
+                StartupFixture::Model("probe"),
+            );
+            octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                synchronized_frame_end_containing(bytes, b"custom/probe").is_some()
+            });
+            let ready_end =
+                synchronized_frame_end_containing(&octet.pty.output, b"custom/probe").unwrap();
+            let mut parser = vt100::Parser::new(8, columns, 512);
+            parser.process(&octet.pty.output[..ready_end]);
+            let cursor_row = parser.screen().cursor_position().0;
+            assert!(parser.screen().contents().contains("full access"));
+            let mut consumed = ready_end;
+            octet.pty.write_input(b"earlyX\x7f\x1b[200~ draft\x1b[201~");
+            await_screen(
+                &mut octet,
+                &mut parser,
+                &mut consumed,
+                "early draft",
+                STARTUP_TIMEOUT,
+            );
+            octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                synchronized_frame_end_containing(bytes, b"early draft").is_some()
+            });
+            parser.process(&octet.pty.output[consumed..]);
+            let edited_end =
+                synchronized_frame_end_containing(&octet.pty.output, b"early draft").unwrap();
+            assert_eq!(
+                parser.screen().cursor_position().0,
+                cursor_row,
+                "typing moved composer"
+            );
+            octet.pty.drain_for(Duration::from_millis(2350));
+            let settled = &octet.pty.output[edited_end..];
+            assert_eq!(
+                count_bytes(settled, FRAME_BEGIN),
+                0,
+                "decorative repaint in {mode:?}/{columns}x8"
+            );
+            assert_eq!(
+                count_bytes(&octet.pty.output[ready_end..], b"\x1b[3J"),
+                0,
+                "startup cleared saved history"
+            );
+            assert_eq!(
+                count_bytes(&octet.pty.output[ready_end..], b"\x1b[2J"),
+                0,
+                "startup replayed screen"
+            );
+            let capture = octet.shutdown();
+            assert!(capture.status.success());
+            assert!(capture.termios_restored);
+            assert_eq!(
+                count_bytes(&capture.output, FRAME_BEGIN),
+                count_bytes(&capture.output, FRAME_END)
+            );
+            assert!(!uses_alternate_screen(&capture.output));
+        }
     }
 }
 
@@ -1755,13 +1990,13 @@ impl HeldChatApi {
                     }
                 };
                 let headers = String::from_utf8_lossy(&request[..header_end]);
-                assert!(headers.starts_with(if models {
-                    "GET /v1/models HTTP/1.1"
-                } else {
-                    "POST /v1/chat/completions HTTP/1.1"
-                }));
+                let inventory = headers.starts_with("GET /v1/models HTTP/1.1");
+                assert!(
+                    (models && inventory)
+                        || headers.starts_with("POST /v1/chat/completions HTTP/1.1")
+                );
                 assert!(!headers.to_ascii_lowercase().contains("authorization:"));
-                let length: usize = if models {
+                let length: usize = if inventory {
                     0
                 } else {
                     headers
@@ -1780,12 +2015,12 @@ impl HeldChatApi {
                     assert!(n > 0);
                     request.extend_from_slice(&bytes[..n]);
                 }
-                if !models {
+                if !inventory {
                     recorded.lock().unwrap().push(
                         serde_json::from_slice(&request[header_end..header_end + length]).unwrap(),
                     );
                 }
-                let (content_type, body) = if models {
+                let (content_type, body) = if inventory {
                     ("application/json", r#"{"data":[{"id":"probe"}]}"#)
                 } else {
                     ("text/event-stream", concat!(
@@ -2013,19 +2248,26 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
     parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
     octet.resize(RESIZED_COLUMNS, RESIZED_ROWS);
     octet.wait_until(INPUT_BUDGET, |bytes| {
-        synchronized_frame_end_containing(&bytes[resize_start..], b"\x1b[2J").is_some()
+        resize_frame_end(&bytes[resize_start..]).is_some()
     });
     parser.process(&octet.pty.output[consumed..]);
     consumed = octet.pty.output.len();
     assert!(parser.screen().contents().contains("draft remains local"));
-    let replay = sexy_tui_rs::strip_terminal_sequences(&String::from_utf8_lossy(
-        &octet.pty.output[resize_start..],
-    ));
+    let repair_bytes = &octet.pty.output[resize_start..];
+    assert_eq!(count_bytes(repair_bytes, b"\x1b[2J"), 1);
+    assert_eq!(count_bytes(repair_bytes, b"\x1b[3J"), 1);
+    assert!(parser.screen().contents().contains(label));
     assert_eq!(
-        replay.matches("permissions:").count(),
+        parser
+            .screen()
+            .contents()
+            .matches("draft remains local")
+            .count(),
         1,
-        "resize replays exactly one welcome card"
+        "resize must retain one composer and the held activity"
     );
+    // Canonical replay retains the complete transcript, including rows above
+    // the old viewport, rather than silently dropping them during repair.
     octet.pty.write_input(b"\x1b");
     await_screen(
         &mut octet,
@@ -2139,16 +2381,6 @@ fn assert_baseline_structural_compatibility(
             "resize synchronized redraw",
             current.resize_redraw_synchronized,
             baseline.resize_redraw_synchronized,
-        ),
-        (
-            "resize screen clear",
-            current.resize_clear_screen,
-            baseline.resize_clear_screen,
-        ),
-        (
-            "resize saved-line clear",
-            current.resize_clear_saved_lines,
-            baseline.resize_clear_saved_lines,
         ),
         (
             "shutdown cursor restoration",
@@ -2535,19 +2767,14 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                 parser.set_size(24, 80);
                 if (columns, rows) != (80, 24) {
                     octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-                        synchronized_frame_end_containing(&bytes[resize_start..], b"\x1b[2J")
-                            .is_some()
+                        resize_frame_end(&bytes[resize_start..]).is_some()
                     });
                     // Old-width frames may already be queued when the PTY
                     // resizes. Replay them, but apply the new geometry contract
-                    // from the first complete clearing redraw, not to those
+                    // from the first complete canonical replay, not to those
                     // in-flight frames. Every subsequent frame is still checked.
-                    let resize_end = resize_start
-                        + synchronized_frame_end_containing(
-                            &octet.pty.output[resize_start..],
-                            b"\x1b[2J",
-                        )
-                        .unwrap();
+                    let resize_end =
+                        resize_start + resize_frame_end(&octet.pty.output[resize_start..]).unwrap();
                     parser.process(&octet.pty.output[consumed..resize_end]);
                     consumed = resize_end;
                     assert_single_welcome(&parser, 80, &format!("{label}-resize-first"));

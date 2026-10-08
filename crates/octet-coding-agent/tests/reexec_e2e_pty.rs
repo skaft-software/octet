@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 //! Real-binary PTY qualification for `/reload`'s hot re-exec path.
 //!
 //! Every pane runs a scratch *copy* of the built binary under a scratch
@@ -8,6 +6,8 @@
 //! records its pid, its parent pid, and its argv before `exec`ing a second
 //! scratch copy. The assertions therefore show *same process, same session,
 //! new image* without touching `target/` or the real `~/.octet`.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -1143,17 +1143,4 @@ fn real_octet_reload_of_one_pane_leaves_the_other_pane_and_session_healthy() {
     assert_eq!(pane_b.session_files(), vec![session_b.clone()]);
     pane_a.shutdown();
     pane_b.shutdown();
-}
-
-/// (5) `octet serve` cannot be started hermetically from a default test build:
-/// `serve` is an opt-in crate feature, and without it the binary requires an
-/// installed `octet-serve` application package under `$HOME/.octet/extensions`.
-#[test]
-#[ignore = "octet serve needs the embedded 'serve' feature or an installed octet-serve package under a scratch HOME/.octet/extensions; a default build has neither"]
-fn real_octet_reload_leaves_a_coexisting_serve_process_untouched() {
-    panic!(
-        "not implemented: see the #[ignore] reason. A hermetic version needs either \
-         `--features serve` (embedded runtime) or a staged octet-serve app package; \
-         neither exists for the default test build, so serve coexistence stays unproven."
-    );
 }

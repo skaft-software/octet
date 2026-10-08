@@ -362,7 +362,7 @@ pub fn model_display_name_variants(name: &str) -> Vec<String> {
 /// Configured names and unfamiliar aliases remain verbatim, even if they
 /// contain a colon or happen to begin with a known provider's name.
 pub fn footer_model_name<'a>(name: &'a str, canonical_id: &str) -> &'a str {
-    if octet_ai::model_metadata::model_display_name(canonical_id) != Some(name) {
+    if octet_ai::model_metadata::model_display_name(canonical_id).as_deref() != Some(name) {
         return name;
     }
     let derived = derive_model_display_name(canonical_id);

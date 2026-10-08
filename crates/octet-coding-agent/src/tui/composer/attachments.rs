@@ -245,6 +245,18 @@ impl AttachmentLedger {
         self.entries.clear();
     }
 
+    /// Whether a native text mutation would touch an admitted chip mask.
+    /// Caret-only gestures are not mutations. The native path has no
+    /// ledger-aware undo transaction yet; keep masks and payloads intact.
+    pub(crate) fn edit_touches_chip(&self, text: &str, from: usize, to: usize) -> bool {
+        self.entries.iter().any(|entry| {
+            text.match_indices(&entry.chip).any(|(start, _)| {
+                let end = start + entry.chip.len();
+                from < end && to > start
+            })
+        })
+    }
+
     /// Handle Backspace on a registered chip, removing its mask and payload.
     /// Returns false without mutation when ordinary editor Backspace should run.
     ///

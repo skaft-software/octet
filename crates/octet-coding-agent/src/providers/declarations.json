@@ -170,7 +170,11 @@
           "route": 0
         }
       ],
-      "extra_headers": [],
+      "extra_headers": [
+        ["HTTP-Referer", "https://octet.skaft.org"],
+        ["X-OpenRouter-Title", "octet coding agent"],
+        ["X-OpenRouter-Categories", "cli-agent"]
+      ],
       "compatibility": "openrouter",
       "pricing": "openrouter",
       "discovery_capabilities": "default"
@@ -801,6 +805,170 @@
       ],
       "compatibility": "codex",
       "pricing": "subscription",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "XAI_SUBSCRIPTION",
+      "id": "xai-subscription",
+      "name": "Grok (xAI subscription)",
+      "base_url": "https://api.x.ai/v1/",
+      "authentication": {
+        "kind": "subscription",
+        "login": "grok"
+      },
+      "model_discovery": {
+        "kind": "subscription_inventory",
+        "protocol": "openai_models",
+        "filter": {
+          "kind": "all"
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "supplemental",
+      "routes": [
+        {
+          "endpoint_id": "xai-subscription",
+          "protocol": "openai_responses",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "dynamic",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "default",
+      "pricing": "subscription",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "KIMI_CODING_SUBSCRIPTION",
+      "id": "kimi-coding-subscription",
+      "name": "Kimi Code (subscription)",
+      "base_url": "https://api.kimi.com/coding/v1/",
+      "authentication": {
+        "kind": "subscription",
+        "login": "kimi"
+      },
+      "model_discovery": {
+        "kind": "subscription_inventory",
+        "protocol": "anthropic_models",
+        "filter": {
+          "kind": "prefix",
+          "values": [
+            "kimi"
+          ]
+        }
+      },
+      "static_models": "kimi_coding",
+      "inventory_cache": "supplemental",
+      "routes": [
+        {
+          "endpoint_id": "kimi-coding-subscription",
+          "protocol": "anthropic_messages",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "dynamic",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [
+        [
+          "User-Agent",
+          "KimiCLI/1.5"
+        ]
+      ],
+      "compatibility": "default",
+      "pricing": "subscription",
+      "discovery_capabilities": "assume_image_input"
+    },
+    {
+      "const_name": "META_SUBSCRIPTION",
+      "id": "meta-subscription",
+      "name": "Meta Muse (subscription)",
+      "base_url": "https://api.meta.ai/v1/",
+      "authentication": {
+        "kind": "subscription",
+        "login": "meta"
+      },
+      "model_discovery": {
+        "kind": "subscription_inventory",
+        "protocol": "openai_models",
+        "filter": {
+          "kind": "prefix",
+          "values": [
+            "muse-spark-"
+          ]
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "supplemental",
+      "routes": [
+        {
+          "endpoint_id": "meta-subscription",
+          "protocol": "openai_responses",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "dynamic",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "default",
+      "pricing": "subscription",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "OPENROUTER_OAUTH",
+      "id": "openrouter-oauth",
+      "name": "OpenRouter (OAuth)",
+      "base_url": "https://openrouter.ai/api/v1/",
+      "authentication": {
+        "kind": "subscription",
+        "login": "openrouter"
+      },
+      "model_discovery": {
+        "kind": "subscription_inventory",
+        "protocol": "openrouter_models"
+      },
+      "static_models": "none",
+      "inventory_cache": "supplemental",
+      "routes": [
+        {
+          "endpoint_id": "openrouter-oauth",
+          "protocol": "openai_chat",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "dynamic",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "openrouter",
+      "pricing": "openrouter",
       "discovery_capabilities": "default"
     },
     {

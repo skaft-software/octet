@@ -91,6 +91,62 @@ pub(crate) fn render_logo(
         .collect()
 }
 
+/// Retained native mark at the canonical 256×128 master size. Tern 0.4.0
+/// flattens the SVG silhouette; a transparent PNG preserves all eight bars.
+/// Encode only this fixed RGBA8 raster, using the existing zlib dependency.
+/// Logical display dimensions remain independent of this bounded pixel buffer.
+pub(crate) fn native_png(
+    model_accent: Option<(u8, u8, u8)>,
+    solid: Option<(u8, u8, u8)>,
+) -> std::io::Result<Vec<u8>> {
+    use flate2::{write::ZlibEncoder, Compression, Crc};
+    use std::io::Write;
+
+    const WIDTH: usize = 256;
+    const HEIGHT: usize = 128;
+    const COLUMN_WIDTH: usize = WIDTH / BYTE.len();
+    let colors = std::array::from_fn::<_, 8, _>(|column| {
+        solid.map_or_else(
+            || model_accent.map_or(COLORS[column], |accent| mix(COLORS[column], accent, 0.58)),
+            |solid| gradient_stop(solid, column),
+        )
+    });
+    let mut pixels = Vec::with_capacity(HEIGHT * (1 + WIDTH * 4));
+    for y in 0..HEIGHT {
+        pixels.push(0); // PNG's unfiltered scanline selector.
+        for x in 0..WIDTH {
+            let column = x / COLUMN_WIDTH;
+            if BYTE[column] == b'0' && y < HEIGHT / 2 {
+                pixels.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                let (r, g, b) = colors[column];
+                pixels.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+    }
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&pixels)?;
+    let compressed = encoder.finish()?;
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        let mut crc = Crc::new();
+        crc.update(kind);
+        crc.update(data);
+        png.extend_from_slice(&crc.sum().to_be_bytes());
+    };
+    let mut header = Vec::with_capacity(13);
+    header.extend_from_slice(&(WIDTH as u32).to_be_bytes());
+    header.extend_from_slice(&(HEIGHT as u32).to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]); // RGBA8, deflate, no interlace.
+    chunk(b"IHDR", &header);
+    chunk(b"IDAT", &compressed);
+    chunk(b"IEND", &[]);
+    Ok(png)
+}
+
 fn mix(a: (u8, u8, u8), b: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
     let channel = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * amount) as u8;
     (channel(a.0, b.0), channel(a.1, b.1), channel(a.2, b.2))
@@ -113,6 +169,120 @@ mod tests {
     use super::*;
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use sexy_tui_rs::{strip_terminal_sequences, visible_width};
+
+    fn decode_native_png(png: &[u8]) -> Vec<u8> {
+        use flate2::{read::ZlibDecoder, Crc};
+        use std::io::Read;
+
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        let mut offset = 8;
+        let mut kinds = Vec::new();
+        let mut pixels = Vec::new();
+        while offset < png.len() {
+            let len = u32::from_be_bytes(png[offset..offset + 4].try_into().unwrap()) as usize;
+            let kind = &png[offset + 4..offset + 8];
+            let data = &png[offset + 8..offset + 8 + len];
+            let crc =
+                u32::from_be_bytes(png[offset + 8 + len..offset + 12 + len].try_into().unwrap());
+            let mut expected_crc = Crc::new();
+            expected_crc.update(kind);
+            expected_crc.update(data);
+            assert_eq!(crc, expected_crc.sum());
+            kinds.push(kind);
+            match kind {
+                b"IHDR" => assert_eq!(data, &[0, 0, 1, 0, 0, 0, 0, 128, 8, 6, 0, 0, 0]),
+                b"IDAT" => {
+                    ZlibDecoder::new(data).read_to_end(&mut pixels).unwrap();
+                }
+                b"IEND" => assert!(data.is_empty()),
+                _ => panic!("unexpected native PNG chunk"),
+            }
+            offset += len + 12;
+        }
+        assert_eq!(kinds, [b"IHDR", b"IDAT", b"IEND"]);
+        assert_eq!(pixels.len(), 128 * (1 + 256 * 4));
+        pixels
+    }
+
+    #[test]
+    fn native_png_is_valid_bounded_and_has_the_exact_canonical_raster_silhouette() {
+        use octet_ai::{
+            media::{prepare_user_image, ImageInputLimits},
+            types::{ImageMedia, ImageSource},
+        };
+
+        let png = native_png(None, None).unwrap();
+        assert_eq!(png, native_png(None, None).unwrap(), "immutable bytes");
+        assert!(
+            png.len() < 4096,
+            "a small native blob, not an arbitrary image"
+        );
+        // Also use the independent image decoder already behind octet's media
+        // boundary, rather than validating only against our chunk parser.
+        let image = ImageMedia {
+            source: ImageSource::Inline(bytes::Bytes::from(png.clone())),
+            media_type: Some(mime::IMAGE_PNG),
+            detail: None,
+        };
+        prepare_user_image(
+            &image,
+            ImageInputLimits {
+                max_width: 256,
+                max_height: 128,
+                max_bytes: 4096,
+            },
+        )
+        .unwrap();
+        let pixels = decode_native_png(&png);
+        for y in 0..128 {
+            assert_eq!(pixels[y * (1 + 256 * 4)], 0);
+            for x in 0..256 {
+                let offset = y * (1 + 256 * 4) + 1 + x * 4;
+                let column = x / 32;
+                let expected = if (column == 0 || column == 3) && y < 64 {
+                    [0, 0, 0, 0]
+                } else {
+                    let (r, g, b) = COLORS[column];
+                    [r, g, b, 255]
+                };
+                assert_eq!(&pixels[offset..offset + 4], &expected, "pixel {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_png_preserves_settled_model_blend_and_explicit_theme_gradient() {
+        let base = native_png(None, None).unwrap();
+        let model = native_png(Some((255, 0, 0)), None).unwrap();
+        assert_ne!(base, model);
+        let pixels = decode_native_png(&model);
+        let bottom_left = 127 * (1 + 256 * 4) + 1;
+        assert_eq!(&pixels[bottom_left..bottom_left + 4], &[179, 59, 107, 255]);
+        let theme = native_png(Some((255, 0, 0)), Some((217, 119, 87))).unwrap();
+        assert_eq!(
+            theme,
+            native_png(None, Some((217, 119, 87))).unwrap(),
+            "theme overrides model"
+        );
+        let pixels = decode_native_png(&theme);
+        assert_eq!(&pixels[bottom_left..bottom_left + 4], &[119, 65, 47, 255]);
+        let bottom_right = bottom_left + 255 * 4;
+        assert_eq!(
+            &pixels[bottom_right..bottom_right + 4],
+            &[228, 159, 137, 255]
+        );
+        for (plain, adaptive) in decode_native_png(&base)
+            .chunks_exact(1025)
+            .zip(decode_native_png(&model).chunks_exact(1025))
+        {
+            for (plain, adaptive) in plain[1..]
+                .chunks_exact(4)
+                .zip(adaptive[1..].chunks_exact(4))
+            {
+                assert_eq!(plain[3], adaptive[3], "colors never change silhouette");
+            }
+        }
+    }
 
     #[test]
     fn canonical_byte_has_eight_contiguous_columns_and_one_baseline() {

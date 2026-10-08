@@ -165,6 +165,7 @@ pub(super) fn synchronize_shell_frame(state: &ShellState, width: u16, frame: &mu
     frame.initialized = true;
     frame.width = width;
     frame.height = state.size.1;
+    frame.resize_epoch = state.resize_epoch;
     frame.theme_epoch = state.theme_epoch;
     frame.transcript_epoch = state.transcript_epoch;
     frame.transcript_generation = cache.generation;
@@ -218,7 +219,10 @@ fn render_shell_update_inner(
     include_commit_metadata: bool,
 ) -> FrameUpdate {
     let repaint_theme = frame.initialized && frame.theme_epoch != state.theme_epoch;
-    let resized = frame.initialized && (frame.width != width || frame.height != state.size.1);
+    let resized = frame.initialized
+        && (frame.width != width
+            || frame.height != state.size.1
+            || frame.resize_epoch != state.resize_epoch);
     let presentation_changed = frame.initialized && frame.verbose_tools != state.verbose_tools;
     let entering_overlay = frame.initialized && !frame.overlay_active && state.overlay.is_some();
     let leaving_overlay = frame.initialized && frame.overlay_active && state.overlay.is_none();
@@ -270,7 +274,7 @@ fn render_shell_update_inner(
     }
 
     if state.overlay.is_some() {
-        let resize_replay = resized.then(|| {
+        let resize_replay = (resized && include_commit_metadata).then(|| {
             let mut replay = cache.lines.clone();
             append_chrome(&mut replay, chrome.clone(), 0);
             replay
@@ -290,6 +294,7 @@ fn render_shell_update_inner(
         frame.initialized = true;
         frame.width = width;
         frame.height = state.size.1;
+        frame.resize_epoch = state.resize_epoch;
         frame.theme_epoch = state.theme_epoch;
         frame.transcript_epoch = state.transcript_epoch;
         frame.transcript_generation = generation;
@@ -322,7 +327,13 @@ fn render_shell_update_inner(
     let projected_transcript_len = stable_prefix + replacement.len();
     drop(cache);
     append_chrome(&mut replacement, chrome, stable_prefix);
-    if !include_commit_metadata {
+    // Row coordinates from the old width/session cannot fence a reflowed
+    // status. The physical viewport is re-anchored below, so establish its new
+    // seam instead of retaining a larger historical top and freezing Working.
+    if resized || transcript_replaced {
+        state.native_animation_viewport_top.set(None);
+    }
+    if !include_commit_metadata || resized || transcript_replaced {
         record_native_animation_viewport(state, stable_prefix + replacement.len());
     }
     let pinned = include_commit_metadata.then(|| {
@@ -337,6 +348,7 @@ fn render_shell_update_inner(
     frame.initialized = true;
     frame.width = width;
     frame.height = state.size.1;
+    frame.resize_epoch = state.resize_epoch;
     frame.theme_epoch = state.theme_epoch;
     frame.transcript_epoch = state.transcript_epoch;
     frame.transcript_generation = generation;

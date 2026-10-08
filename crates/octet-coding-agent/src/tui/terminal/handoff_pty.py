@@ -18,7 +18,7 @@ import termios
 import time
 
 binary = sys.argv[1]
-entry = "tui::view::tests::terminal_handoff_pty_fixture"
+entry = "tui::view::tests::terminal_handoff_pty_tests::terminal_handoff_pty_fixture"
 
 
 def drain(master, data):

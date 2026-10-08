@@ -1,8 +1,8 @@
-#![cfg(unix)]
-
 //! OSC 11 input regressions against the actual crossterm parser and octet binary.
 //! Isolated HOME/workspace, --offline, no tools/context files, no submitted
 //! prompt, and only an inert loopback provider record; no live credentials.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -356,30 +356,34 @@ fn late_terminal_reply_immediate_response_and_explicit_appearance_preserve_input
 #[test]
 fn late_terminal_reply_cannot_type_into_or_close_appearance_and_provider_panels() {
     for model in [true, false] {
-        // No explicit theme opens the appearance panel before readiness. With
-        // no model, dismiss it and exercise the initial provider setup panel.
+        // No explicit theme opens the appearance panel before readiness. The
+        // OSC 11 probe is deferred until Auto is chosen, so no reply can be
+        // pending while this panel is open.
         let mut pty = PtyOctet::spawn(None, model);
-        pty.wait_for_query();
         pty.wait_for_screen("Choose terminal appearance");
-        if !model {
-            pty.send(b"\r");
-            pty.wait_for_screen("Set up a provider");
+        pty.drain_for(Duration::from_millis(400));
+        assert!(
+            !pty.output.windows(QUERY.len()).any(|bytes| bytes == QUERY),
+            "the OSC 11 probe must not run while the appearance panel is open"
+        );
+        if model {
+            pty.close();
+            continue;
         }
+        // Choosing Auto probes now. With no model, the reply arrives after the
+        // probe timed out, while the initial provider setup panel is open.
+        pty.send(b"\r");
+        pty.wait_for_query();
+        pty.wait_for_screen("Set up a provider");
         pty.drain_for(Duration::from_millis(400));
         send_reply(&mut pty, b"\x1b\\", true);
         pty.drain_for(Duration::from_millis(300));
         pty.assert_no_reply_in_frames();
-        assert!(pty.parser.screen().contents().contains(if model {
-            "Choose terminal appearance"
-        } else {
-            "Set up a provider"
-        }));
-        if !model {
-            // The initial model-less provider panel remains operable before
-            // finish_startup: End + Enter selects Continue without a provider.
-            pty.send(b"\x1b[F\r");
-            pty.wait_for_screen("No configured model");
-        }
+        assert!(pty.parser.screen().contents().contains("Set up a provider"));
+        // The initial model-less provider panel remains operable before
+        // finish_startup: End + Enter selects Continue without a provider.
+        pty.send(b"\x1b[F\r");
+        pty.wait_for_screen("No configured model");
         pty.close();
     }
 }

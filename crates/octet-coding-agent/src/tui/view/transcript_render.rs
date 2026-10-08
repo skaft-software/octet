@@ -257,7 +257,6 @@ pub(super) fn render_block_planned_with_rainbow(
                 .then(|| {
                     [
                         format!("{full} · stop: /subagents stop all"),
-                        format!("{full} stop all"),
                         "Subagents /subagents stop all".to_owned(),
                         "/subagents stop all".to_owned(),
                     ]
@@ -337,7 +336,15 @@ pub(super) fn render_block_planned_with_rainbow(
                 && !verbose_tools;
             let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")
                 && panel.display.shell_command.is_some();
-            let mut lines = if let Some(command) = panel.display.shell_command.as_deref() {
+            let mut lines = if let Some(source) = super::codemode_render::source(panel) {
+                super::codemode_render::render_source(
+                    &source,
+                    rich_renderer,
+                    theme,
+                    width,
+                    verbose_tools,
+                )
+            } else if let Some(command) = panel.display.shell_command.as_deref() {
                 render_bash_row(command, rich_renderer, theme, width, verbose_tools)
             } else {
                 let compact = width < 60 || quiet_summary;
@@ -426,6 +433,12 @@ pub(super) fn render_block_planned_with_rainbow(
 
             if !quiet_summary || panel.is_error {
                 match panel.name.as_str() {
+                    "codemode" => output_lines.extend(super::codemode_render::render_output(
+                        panel,
+                        theme,
+                        nested_width,
+                        verbose_tools,
+                    )),
                     "bash" | "exec" if compact_bash => output_lines.extend(
                         render_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
                     ),
@@ -453,15 +466,7 @@ pub(super) fn render_block_planned_with_rainbow(
             // of `panel.output`, selection, and plain/print projections.
             output_lines.extend(panel.image_rows(nested_width));
             append_nested_tool_output(&mut lines, output_lines, theme, width);
-            let mut lines = finish_transcript_block(lines);
-            // Still's compact in-flight tool header replaces a two-row
-            // Working/Thinking slot. Keep its empty detail row until the
-            // result arrives, so starting a tool cannot pull the tail (and
-            // composer) upward by one cell.
-            if quiet_summary && !panel.finished && lines.len() == 1 {
-                lines.push(String::new());
-            }
-            lines
+            finish_transcript_block(lines)
         }
         TranscriptBlock::Outcome(outcome) => {
             render_outcome(outcome, theme, width, subagents_running)
@@ -566,6 +571,19 @@ pub(super) fn render_block_planned_with_rainbow(
         rainbow_strength,
         collapsed_reasoning,
     );
+    let marker = match block {
+        TranscriptBlock::Reasoning(reasoning)
+            if collapsed_reasoning
+                && !reasoning.finished
+                && reasoning
+                    .extension_working
+                    .as_ref()
+                    .is_some_and(|working| working.frames.is_some()) =>
+        {
+            super::remote_ui::working_frame(reasoning)
+        }
+        _ => marker,
+    };
     let lines = decorate_surface_with_frame(
         lines,
         &plan,

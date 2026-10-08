@@ -74,6 +74,9 @@ pub(super) struct SetupResult {
 enum SetupTarget {
     Endpoint(&'static str),
     ModelPrefix(&'static str),
+    /// An exact `<namespace>/<model>` prefix, so one provider id can never be
+    /// satisfied by a longer id that merely starts with the same text.
+    ModelNamespace(&'static str),
 }
 
 impl SetupTarget {
@@ -81,6 +84,9 @@ impl SetupTarget {
         catalog.models().any(|model| match self {
             Self::Endpoint(endpoint) => model.endpoint.0 == endpoint,
             Self::ModelPrefix(prefix) => model.id.0.starts_with(prefix),
+            Self::ModelNamespace(namespace) => {
+                model.id.0.split_once('/').map(|(prefix, _)| prefix) == Some(namespace)
+            }
         })
     }
 }
@@ -194,7 +200,7 @@ where
             model: None,
             configured_endpoint: match target {
                 SetupTarget::Endpoint(endpoint) => Some(endpoint),
-                SetupTarget::ModelPrefix(_) => None,
+                SetupTarget::ModelPrefix(_) | SetupTarget::ModelNamespace(_) => None,
             },
         })),
         Ok(_) => {
@@ -387,11 +393,38 @@ where
     Ok(false)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Subscription {
     ChatGpt,
     Copilot,
+    /// One of the providers driven by the shared subscription framework.
+    Shared(std::sync::Arc<dyn crate::auth::subscription::flow::SubscriptionFlow>),
 }
+
+/// Menu labels for the subscription logins the shared framework owns.
+///
+/// Derived from the registry rather than written out here, so a provider added
+/// to the framework appears in onboarding without a second edit. The copy is
+/// the one thing that cannot be derived: it says what the user is buying, which
+/// is the question they are actually answering at this menu.
+const SHARED_SUBSCRIPTIONS: &[(&str, &str, &str)] = &[
+    (
+        "grok",
+        "Grok (xAI subscription)",
+        "Sign in with SuperGrok or X Premium",
+    ),
+    ("kimi", "Kimi Code", "Sign in with a Kimi Code plan"),
+    (
+        "meta",
+        "Meta (Muse subscription)",
+        "Sign in with a Meta plan",
+    ),
+    (
+        "openrouter",
+        "OpenRouter",
+        "Sign in to OpenRouter to create a key",
+    ),
+];
 
 async fn sign_in<S>(
     shell: &mut InteractiveShell,
@@ -401,34 +434,55 @@ async fn sign_in<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let mut items = vec![
+        "ChatGPT (OpenAI Codex)".to_owned(),
+        "GitHub Copilot".to_owned(),
+    ];
+    items.extend(
+        SHARED_SUBSCRIPTIONS
+            .iter()
+            .map(|(_, label, _)| (*label).to_owned()),
+    );
+    items.push("Back".to_owned());
+
+    let mut descriptions = vec![
+        Some("OpenAI's hosted device login; available models depend on your account".to_owned()),
+        Some("GitHub.com's device login; only supported Copilot routes are offered".to_owned()),
+    ];
+    descriptions.extend(
+        SHARED_SUBSCRIPTIONS
+            .iter()
+            .map(|(_, _, description)| Some((*description).to_owned())),
+    );
+    descriptions.push(Some("Return without starting sign-in".to_owned()));
+
     let selection = provider_setup_picker(
         shell,
         input,
         "Sign in with a subscription",
-        vec![
-            "ChatGPT (OpenAI Codex)".into(),
-            "GitHub Copilot".into(),
-            "Back".into(),
-        ],
-        vec![
-            Some("OpenAI's hosted device login; available models depend on your account".into()),
-            Some("GitHub.com's device login; only supported Copilot routes are offered".into()),
-            Some("Return without starting sign-in".into()),
-        ],
+        items,
+        descriptions,
         0,
     )
     .await?;
     let subscription = match selection {
         Some(0) => Subscription::ChatGpt,
         Some(1) => Subscription::Copilot,
-        _ => return Ok(None),
+        Some(index) => match SHARED_SUBSCRIPTIONS
+            .get(index - 2)
+            .and_then(|(selector, _, _)| crate::auth::subscription::registry::resolve(selector))
+        {
+            Some(flow) => Subscription::Shared(flow),
+            None => return Ok(None),
+        },
+        None => return Ok(None),
     };
     if offline {
         shell.error("Subscription sign-in requires a connection. Restart without --offline to sign in, or choose an API key/local endpoint.".into());
         shell.render();
         return Ok(None);
     }
-    // Reuse the real host-owned flows, including their browser/device-code
+    // Reuse the real login flows, including their browser/device-code
     // fallback. No credentials are imported from other applications.
     shell.set_run_label("signing in…");
     shell.render();
@@ -440,14 +494,18 @@ where
             Ok(false)
         }
         result = async {
-            match subscription {
+            match &subscription {
                 Subscription::ChatGpt => {
                     let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
-                    crate::auth::codex::login(&store, false).await
+                    crate::auth::codex::login_without_prompt(&store).await
                 }
                 Subscription::Copilot => {
                     let store = crate::auth::copilot::CredentialStore::new(crate::auth::copilot::default_path()?);
                     crate::auth::copilot::login(&store, false).await
+                }
+                Subscription::Shared(flow) => {
+                    let store = crate::auth::subscription::store_for(flow);
+                    crate::auth::subscription::login::login(flow, &store, false).await
                 }
             }
         } => result.map(|()| true),
@@ -459,6 +517,10 @@ where
         Ok(true) => Ok(Some(match subscription {
             Subscription::ChatGpt => SetupTarget::Endpoint(crate::auth::codex::ENDPOINT_ID),
             Subscription::Copilot => SetupTarget::ModelPrefix("github-copilot/"),
+            // Verified by namespace: a subscription login may legitimately
+            // expose no models if the account has none, which must not read as
+            // a failure.
+            Subscription::Shared(flow) => SetupTarget::ModelNamespace(flow.provider_id()),
         })),
         Ok(false) => Ok(None),
         Err(_) => {

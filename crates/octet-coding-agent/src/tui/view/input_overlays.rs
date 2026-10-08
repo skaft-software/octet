@@ -486,11 +486,21 @@ pub(super) fn render_input_suggestions(
         return extension;
     }
     let slash = render_slash_suggestions(state, width, max_rows);
-    if slash.is_empty() {
-        render_path_suggestions(state, width, max_rows)
-    } else {
-        slash
+    if !slash.is_empty() {
+        return slash;
     }
+    // An extension editor owns its own non-command completions (mentions, paths
+    // and extension providers). The host popup is the command registry; it must
+    // not open a second list beside the component's own.
+    if state
+        .extension_ui
+        .remote
+        .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+        .is_some()
+    {
+        return Vec::new();
+    }
+    render_path_suggestions(state, width, max_rows)
 }
 
 fn steering_preview_text(state: &ShellState, message: &str) -> String {
@@ -520,39 +530,27 @@ fn clipped_steering_content(state: &ShellState, content: &str, width: usize) -> 
 /// message (`crates/octet-coding-agent/src/tui/keymap/keybindings.rs`).
 const QUEUED_EDIT_BINDING: &str = "app.message.dequeue";
 
-/// TODO(resolved-binding): the translator still hardcodes
-/// `KeyCode::Up + KeyModifiers::ALT` (`tui/keymap.rs`), so this hint cannot yet
-/// read a user override. The exact accessor needed is
-/// `KeybindingsManager::get_keys("app.message.dequeue")` reached from a
-/// `KeybindingsManager` owned by the shell, with `KeybindingsManager::matches`
-/// replacing that hardcoded arm. Until both exist, the hint reports the chord
-/// the binary provably consumes: the compiled default on every platform whose
-/// default set is not Windows-flavoured, and the translator's chord on Windows
-/// where the Windows-flavoured default set declares `alt+q` instead.
-const QUEUED_EDIT_TRANSLATOR_CHORD: &str = "alt+up";
+/// Shown only if the registry ever declares no key for the binding.
+const QUEUED_EDIT_FALLBACK_CHORD: &str = "alt+up";
 
-/// Resolve the key id for the platform named in `host` (`std::env::consts::OS`
-/// vocabulary).
-pub(super) fn queued_edit_key_id_for(host: &str) -> String {
-    let platform = match host {
-        "macos" => "darwin",
-        "windows" => "win32",
-        other => other,
-    };
-    keybindings::default_definitions(platform, false)
-        .into_iter()
-        .find(|definition| definition.id == QUEUED_EDIT_BINDING)
-        .map(|definition| definition.default_keys)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|key| key.ends_with("up") || key == "up")
-        .unwrap_or_else(|| QUEUED_EDIT_TRANSLATOR_CHORD.to_owned())
+/// The chord a key set restores queued messages with: its first default for
+/// the binding. Windows and WSL use the Windows-flavoured set, which binds
+/// `alt+q` because Windows Terminal claims Alt+arrows for panes, so the hint
+/// must not name `alt+up` there.
+fn queued_edit_key_id_in(bindings: &keybindings::KeybindingsManager) -> String {
+    bindings
+        .get_keys(QUEUED_EDIT_BINDING)
+        .first()
+        .cloned()
+        .unwrap_or_else(|| QUEUED_EDIT_FALLBACK_CHORD.to_owned())
 }
 
-/// The resolved key id for this process, computed once.
+/// The resolved key id for this process, computed once from the same key set
+/// the input translator matches, including WSL detection.
 fn queued_edit_key_id() -> &'static str {
     static RESOLVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    RESOLVED.get_or_init(|| queued_edit_key_id_for(std::env::consts::OS))
+    RESOLVED
+        .get_or_init(|| queued_edit_key_id_in(&keybindings::KeybindingsManager::current_platform()))
 }
 
 /// Human-readable label for one normalized key id.
@@ -599,12 +597,19 @@ pub(super) fn render_pending_steering(
     width: u16,
     max_rows: usize,
 ) -> Vec<String> {
-    if (state.steering_queue.is_empty() && state.follow_up_queue.is_empty()) || max_rows == 0 {
+    if (state.steering_queue.is_empty()
+        && state.follow_up_queue.is_empty()
+        && state.pending_controls.is_empty())
+        || max_rows == 0
+    {
         return Vec::new();
     }
     let max_rows = max_rows.min(crate::tui::layout::MAX_STEERING_PREVIEW_ROWS);
-    let count = state.steering_queue.len() + state.follow_up_queue.len();
-    let label = if state.follow_up_queue.is_empty() {
+    let count =
+        state.steering_queue.len() + state.follow_up_queue.len() + state.pending_controls.len();
+    let label = if !state.pending_controls.is_empty() {
+        "Controls"
+    } else if state.follow_up_queue.is_empty() {
         "Steering"
     } else if state.steering_queue.is_empty() {
         "Follow-up"
@@ -669,11 +674,16 @@ pub(super) fn render_pending_steering(
         .saturating_sub(visible_width(&plain_prefix))
         .max(1);
     let preview_budget = available.saturating_sub(visible_width(&hidden_suffix));
-    let display = state
-        .steering_queue
-        .first()
-        .map(|entry| entry.display.as_str())
-        .unwrap_or_else(|| state.follow_up_queue[0].composed.transcript_text.as_str());
+    let controls = state.pending_controls.join("; ");
+    let display = if !controls.is_empty() {
+        controls.as_str()
+    } else {
+        state
+            .steering_queue
+            .first()
+            .map(|entry| entry.display.as_str())
+            .unwrap_or_else(|| state.follow_up_queue[0].composed.transcript_text.as_str())
+    };
     let preview = steering_preview_text(state, display);
     let preview = if visible_width(&preview) > preview_budget {
         clipped_steering_content(state, &preview, preview_budget)
@@ -741,31 +751,27 @@ mod tests {
 
     #[test]
     fn queued_edit_binding_resolves_from_the_keybinding_registry() {
-        // The compiled default declares this chord on every platform whose
-        // default set is not Windows-flavoured; the hint must read the
-        // registry rather than a literal copy of it.
-        for host in ["macos", "linux", "freebsd"] {
+        // The hint names the chord the translator's key set binds: Alt+Up
+        // generally, Alt+Q in the Windows-flavoured set used on Windows and WSL.
+        for (platform, wsl, expected) in [
+            ("darwin", false, "alt+up"),
+            ("linux", false, "alt+up"),
+            ("freebsd", false, "alt+up"),
+            ("win32", false, "alt+q"),
+            ("linux", true, "alt+q"),
+        ] {
+            let bindings = keybindings::KeybindingsManager::with_platform(
+                platform,
+                wsl,
+                std::collections::BTreeMap::new(),
+            );
             assert_eq!(
-                queued_edit_key_id_for(host),
-                "alt+up",
-                "{host} must declare the registry binding for {QUEUED_EDIT_BINDING}"
+                queued_edit_key_id_in(&bindings),
+                expected,
+                "{platform} (wsl: {wsl})"
             );
         }
-        // Windows-flavoured defaults declare `alt+q` for the same binding while
-        // the translator still consumes `KeyCode::Up + ALT`, so the hint names
-        // the chord the binary accepts. Recorded in the TODO above.
-        assert_eq!(
-            queued_edit_key_id_for("windows"),
-            QUEUED_EDIT_TRANSLATOR_CHORD
-        );
-        assert_eq!(
-            keybindings::default_definitions("win32", false)
-                .into_iter()
-                .find(|definition| definition.id == QUEUED_EDIT_BINDING)
-                .map(|definition| definition.default_keys),
-            Some(vec!["alt+q".to_owned()]),
-            "the recorded Windows divergence must stay real"
-        );
+        assert_eq!(queued_edit_hint("alt+q", false), "(alt+q to edit)");
     }
 
     #[test]

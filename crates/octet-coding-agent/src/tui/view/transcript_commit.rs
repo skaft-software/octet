@@ -1,12 +1,9 @@
 //! Native-scrollback commit boundaries for the rendered transcript.
 
-use std::time::Instant;
-
 use sexy_tui_rs::{CommitCursor, CommitPosition, PinnedFrame};
 
 use super::bash_render::bash_output_changes_when_expanded;
 use super::tool_render::tool_diff;
-use super::welcome_card::welcome_animating;
 use super::{ShellState, ToolPanel, TranscriptBlock, COMPACT_EXEC_OUTPUT_ROWS};
 
 pub(super) const FINAL_COMMIT_SEGMENT: u64 = u64::MAX;
@@ -118,6 +115,8 @@ fn finalized_tool_rows_are_stable(panel: &ToolPanel) -> bool {
     }
 
     let disclosure_sensitive = match panel.name.as_str() {
+        // Both the source preview and the output preview can expand.
+        "codemode" => true,
         "bash" | "exec" => {
             panel.display.shell_command.is_some() && bash_output_changes_when_expanded(panel)
         }
@@ -154,10 +153,6 @@ fn finalized_block_rows_are_stable(block: &TranscriptBlock) -> bool {
 }
 
 fn transcript_stable_rows(state: &ShellState, acknowledged: Option<CommitCursor>) -> usize {
-    if welcome_animating(state, Instant::now()) {
-        return 0;
-    }
-
     // Semantic acknowledgement proves the earlier prefix is already terminal
     // owned. Resume classification at that block instead of rescanning a long
     // settled transcript on every streaming tick.
@@ -227,9 +222,6 @@ fn transcript_commit_target(
     maximum_row: usize,
     acknowledged: Option<CommitCursor>,
 ) -> Option<CommitPosition> {
-    if welcome_animating(state, Instant::now()) {
-        return None;
-    }
     let cache = state.transcript_cache.borrow();
     let mut target = None;
     let start_block = acknowledged
@@ -385,6 +377,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let six_lines = format!("{five_lines}\nline 5");
+
+        let codemode = finalized_tool(
+            "codemode",
+            serde_json::json!({"code":"return 1"}),
+            "short output",
+            false,
+        );
+        assert!(!finalized_block_rows_are_stable(&codemode));
 
         let short_bash = finalized_tool(
             "bash",

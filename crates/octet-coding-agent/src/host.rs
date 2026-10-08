@@ -46,12 +46,28 @@ async fn run_stdio_loop() -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     let mut input = BufReader::new(stdin);
     let mut output = tokio::io::stdout();
+    let mut idle_app: Option<Box<crate::app::App>> = None;
+    let mut cache_warming_failed = false;
 
-    loop {
-        let frame = tokio::select! {
-            biased;
-            _ = crate::tui::terminal::wait_for_shutdown_signal() => break,
-            frame = framing::read_frame(&mut input) => frame?,
+    'requests: loop {
+        // Keep partially consumed NDJSON framing alive when maintenance wins
+        // the select. Recreating read_frame could discard a partial command.
+        let frame = {
+            let read = framing::read_frame(&mut input);
+            tokio::pin!(read);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = crate::tui::terminal::wait_for_shutdown_signal() => break 'requests,
+                    frame = &mut read => break frame?,
+                    warm = run::drive_idle_cache_warming(idle_app.as_deref_mut()), if !cache_warming_failed => {
+                        if warm.is_err() {
+                            cache_warming_failed = true;
+                            crate::output::stderr!("warning: cache warming stopped; session usage may be uncertain.");
+                        }
+                    }
+                }
+            }
         };
         let Some(frame) = frame else {
             break;
@@ -142,8 +158,14 @@ async fn run_stdio_loop() -> anyhow::Result<()> {
                 }
                 let mut emitter =
                     emitter.scoped(run_request.run_id.clone(), run_request.session_id.clone());
+                // Settle/cancel the previous cache generation before opening
+                // any session writer (including a resume of the same file).
+                drop(idle_app.take());
                 match run::run_request(&mut emitter, *run_request).await {
-                    Ok(RunRequestOutcome::Completed) => {}
+                    Ok(RunRequestOutcome::Completed(app)) => {
+                        idle_app = Some(app);
+                        cache_warming_failed = false;
+                    }
                     Ok(RunRequestOutcome::Signaled) => break,
                     Err(_) if crate::tui::terminal::received_shutdown_signal().is_some() => break,
                     Err(error) => {

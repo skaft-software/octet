@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! One-enter coverage against the real interactive binary and a controlling PTY.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::io::{self, Read, Write};

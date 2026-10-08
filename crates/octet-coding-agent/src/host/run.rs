@@ -15,8 +15,20 @@ use super::sessions;
 use super::transport::Emitter;
 
 pub(crate) enum RunRequestOutcome {
-    Completed,
+    /// Keep the settled session owner alive for cancellation-safe idle warming.
+    Completed(Box<crate::app::App>),
     Signaled,
+}
+
+pub(crate) async fn drive_idle_cache_warming(
+    app: Option<&mut crate::app::App>,
+) -> Result<(), octet_agent::AgentError> {
+    let Some(app) = app else {
+        return std::future::pending().await;
+    };
+    let event = app.agent.drive_cache_warming().await?;
+    events::report_idle_cache_warming(event, app.config.show_cache_miss_notices);
+    Ok(())
 }
 
 pub(crate) async fn run_request(
@@ -38,7 +50,9 @@ pub(crate) async fn run_request(
         boot.set_prepared_session(session);
     }
     let session_path = match &selection {
-        SessionSelection::CreateNew(path) | SessionSelection::OpenExisting(path) => path.clone(),
+        SessionSelection::CreateNew(path)
+        | SessionSelection::OpenExisting(path)
+        | SessionSelection::Forked(path) => path.clone(),
     };
     let new_session = matches!(selection, SessionSelection::CreateNew(_));
     let launch = LaunchSelection {
@@ -80,6 +94,10 @@ pub(crate) async fn run_request(
         &app.reasoning,
         &app.sessions,
     );
+    // Non-interactive modes serve the same extension requests: publish the
+    // catalog an approved provider-credential request resolves against.
+    app.executable_extensions
+        .refresh_native_credential_catalog(&app.catalog);
     let composition = app
         .executable_extensions
         .compose_prompt(&app.system, request.prompt.clone())
@@ -101,6 +119,7 @@ pub(crate) async fn run_request(
             .unwrap_or_else(|| request.prompt.clone()),
     ));
     let input = load_user_input(&request, composition.prompt, &app.model.spec)?;
+    let prior_cache_misses = crate::commands::cache_miss_count(&app);
     let mut run = match app.agent.prompt(input).await {
         Ok(run) => run,
         Err(error) => anyhow::bail!(
@@ -151,6 +170,9 @@ pub(crate) async fn run_request(
         }
     };
     drop(run);
+    if let Some(notice) = crate::commands::cache_miss_notice(&app, prior_cache_misses) {
+        crate::output::stderr_line(notice);
+    }
     app.executable_extensions
         .settle_turn(extension_turn, &outcome)
         .await;
@@ -224,5 +246,5 @@ pub(crate) async fn run_request(
             }),
         )
         .await?;
-    Ok(RunRequestOutcome::Completed)
+    Ok(RunRequestOutcome::Completed(Box::new(app)))
 }

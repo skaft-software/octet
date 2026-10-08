@@ -94,6 +94,53 @@ fn plain_terminal_does_not_receive_a_title_sequence() {
 }
 
 #[test]
+fn native_renderer_drains_desktop_notification_intents_exactly_once() {
+    let state = SharedState::new(ShellState {
+        theme: crate::tui::theme::test_theme(),
+        size: (80, 24),
+        desktop_notifications: vec![("Native".into(), "Completed".into())],
+        ..ShellState::default()
+    });
+    let hello = octet_tern::frame::decode_body(
+        "r",
+        &serde_json::json!({"r":"hello", "v":1, "term":"test",
+            "kinds":octet_tern::wire::TSP_KINDS, "credits":4, "dark":true})
+        .to_string(),
+    )
+    .unwrap();
+    state.native().lock().unwrap().messages.push_back(hello);
+    let client =
+        octet_tern::client::TernClient::with_writer("test", None, &["edit"], std::io::sink())
+            .unwrap();
+    let surface = super::super::tern::TernSurface::with_client(client);
+    let writes = Arc::new(Mutex::new(String::new()));
+    let mut terminal = RecordingTerminal {
+        writes: writes.clone(),
+        capabilities: interactive_capabilities(),
+    };
+    let (tx, rx) = mpsc::channel();
+    tx.send(RenderCommand::Stop).unwrap();
+    render_native_loop_with_surface(
+        &mut terminal,
+        &state,
+        &Arc::new(Mutex::new((80, 24))),
+        &rx,
+        &|_, _| false,
+        surface,
+    )
+    .unwrap();
+    assert_eq!(
+        writes
+            .lock()
+            .unwrap()
+            .matches("\x1b]777;notify;Native;Completed\x07")
+            .count(),
+        1
+    );
+    assert!(state.borrow().desktop_notifications.is_empty());
+}
+
+#[test]
 fn production_render_loop_writes_title_after_ready_paint() {
     let state = SharedState::new(ShellState {
         theme: crate::tui::theme::test_theme(),

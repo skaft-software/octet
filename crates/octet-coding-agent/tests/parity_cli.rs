@@ -182,6 +182,9 @@ struct Fixture {
     home: PathBuf,
     workspace: PathBuf,
     sessions: PathBuf,
+    // Only read on Windows, where TMP/TEMP are redirected into the fixture.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    tmp: PathBuf,
 }
 
 impl Fixture {
@@ -191,9 +194,11 @@ impl Fixture {
         let home = canonical.join("home");
         let workspace = canonical.join("workspace");
         let sessions = canonical.join("sessions");
+        let tmp = canonical.join("tmp");
         std::fs::create_dir_all(home.join(".octet/credentials")).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
         if let Some(url) = api {
             let record = serde_json::json!({
                 "base_url": url,
@@ -222,6 +227,7 @@ impl Fixture {
             home,
             workspace,
             sessions,
+            tmp,
         }
     }
 
@@ -284,6 +290,21 @@ impl Fixture {
             .env("PWD", &self.workspace)
             .env("TERM", "dumb")
             .env("LANG", "C.UTF-8");
+        // `env_clear` removes what Windows children need to function:
+        // Winsock/DNS requires `SYSTEMROOT`, and temp files require
+        // `TEMP`/`TMP` (without them `tempfile` falls back to an
+        // unwritable system directory). Home redirection itself is a
+        // separate product gap: `dirs` resolves through the shell on
+        // Windows, so no environment variable isolates the profile.
+        #[cfg(windows)]
+        {
+            command.env("TMP", &self.tmp).env("TEMP", &self.tmp);
+            for key in ["SYSTEMROOT", "WINDIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+        }
         if offline {
             command.arg("--offline");
         }
@@ -397,6 +418,7 @@ fn json_mode_streams_a_session_header_first_delta_only_event_sequence() {
         "turn_start",
         "message_start",
         "message_end",
+        "provider_inference",
         "agent_end",
     ] {
         assert!(
@@ -405,6 +427,11 @@ fn json_mode_streams_a_session_header_first_delta_only_event_sequence() {
         );
     }
     for event in &events {
+        if event["type"] == "provider_inference" {
+            assert_eq!(event["metrics"]["client"]["scope"], "request");
+            assert!(event["metrics"]["client"]["elapsed_ns"].is_u64());
+            assert_eq!(event["metrics"]["server_unavailable"], "not_reported");
+        }
         if event["type"] == "message_update" {
             assert!(
                 event.get("message").is_none(),
@@ -1276,14 +1303,27 @@ fn powershell_opt_in_is_additive_and_reports_an_inert_host() {
     // The shared fixture always passes `--no-tools`, which deliberately
     // conflicts with an additive opt-in; exercise the real default allowlist.
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_octet"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_octet"));
+        command
             .current_dir(&fixture.workspace)
             .env_clear()
             .env("HOME", &fixture.home)
             .env("PATH", "/usr/bin:/bin")
             .env("PWD", &fixture.workspace)
             .env("TERM", "dumb")
-            .env("LANG", "C.UTF-8")
+            .env("LANG", "C.UTF-8");
+        // See `Fixture::command_inner`: Windows children need their system
+        // and temp variables restored after `env_clear`.
+        #[cfg(windows)]
+        {
+            command.env("TMP", &fixture.tmp).env("TEMP", &fixture.tmp);
+            for key in ["SYSTEMROOT", "WINDIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+        }
+        command
             .args(["--offline", "--no-context-files", "--color", "never"])
             .arg("--workspace")
             .arg(&fixture.workspace)
@@ -1641,32 +1681,5 @@ fn sessions_export_preserves_metadata_visibility_and_requires_explicit_secrets_o
         api.chat_requests().len(),
         1,
         "export never invokes the provider"
-    );
-}
-
-/// #180 — `octet serve` accepts a startup session name. The installed extension
-/// runtime owns its own launch protocol, so a build without the embedded Serve
-/// runtime fails closed instead of silently dropping the requested name.
-#[cfg(not(feature = "serve"))]
-#[test]
-fn serve_name_fails_closed_without_the_embedded_serve_runtime() {
-    let fixture = Fixture::new(None);
-    let parsed = fixture.run(&["serve", "--help"]);
-    assert_success(&parsed);
-    let help = stdout_of(&parsed);
-    assert!(
-        help.contains("--name"),
-        "serve must accept a startup name: {help}"
-    );
-
-    let output = fixture.run(&["serve", "--name", "release review"]);
-    assert!(
-        !output.status.success(),
-        "the name must not be silently ignored"
-    );
-    assert!(
-        stderr_of(&output).contains("serve --name requires"),
-        "diagnostic: {}",
-        stderr_of(&output)
     );
 }

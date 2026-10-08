@@ -35,6 +35,10 @@ const SUBAGENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from
 pub(crate) struct SecretInputBuffer(Vec<u8>);
 
 impl SecretInputBuffer {
+    pub(crate) fn byte_len(&self) -> usize {
+        self.0.len()
+    }
+
     pub(crate) fn push(&mut self, character: char) {
         let mut encoded = [0; 4];
         let bytes = character.encode_utf8(&mut encoded).as_bytes();
@@ -46,12 +50,9 @@ impl SecretInputBuffer {
 
     pub(crate) fn extend_paste(&mut self, pasted: &str) {
         let pasted = pasted.trim_end_matches(['\r', '\n']);
-        let remaining = MAX_SECRET_INPUT_BYTES.saturating_sub(self.0.len());
-        let mut end = pasted.len().min(remaining);
-        while end > 0 && !pasted.is_char_boundary(end) {
-            end -= 1;
+        if self.0.len().saturating_add(pasted.len()) <= MAX_SECRET_INPUT_BYTES {
+            self.0.extend_from_slice(pasted.as_bytes());
         }
-        self.0.extend_from_slice(&pasted.as_bytes()[..end]);
     }
 
     pub(crate) fn backspace(&mut self) {
@@ -76,9 +77,25 @@ impl Drop for SecretInputBuffer {
     }
 }
 
-/// Give one extension command exclusive ownership of terminal input. Secret
-/// answers never enter the ordinary editor or rendered frame; non-secret setup
-/// values use the same temporary composer surface and are echoed while typed.
+#[cfg(test)]
+mod temporary_input_tests {
+    use super::{SecretInputBuffer, MAX_SECRET_INPUT_BYTES};
+
+    #[test]
+    fn secret_over_limit_paste_is_rejected_atomically() {
+        let mut value = SecretInputBuffer::default();
+        value.extend_paste("original");
+        value.extend_paste(&"🦀".repeat(MAX_SECRET_INPUT_BYTES));
+        assert_eq!(value.take().as_slice(), b"original");
+        value.extend_paste(&"a".repeat(MAX_SECRET_INPUT_BYTES));
+        value.push('雪');
+        assert_eq!(value.take().len(), MAX_SECRET_INPUT_BYTES);
+    }
+}
+
+/// Give one extension command exclusive ownership of terminal input. Secrets
+/// remain host-private; ordinary values use a separate bounded editor shared
+/// by raw and native input without changing the parent draft or chips.
 pub async fn extension_input_picker<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -87,10 +104,11 @@ pub async fn extension_input_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    shell.set_tool_input_prompt(Some(request.prompt.clone()));
+    use sexy_tui_rs::TextEditAction;
+
+    shell.begin_tool_input(&request.prompt, request.secret);
     shell.render();
     let mut value = SecretInputBuffer::default();
-    let mut overflowed = false;
     loop {
         let next = tokio::select! {
             biased;
@@ -100,18 +118,23 @@ where
         let event = match next {
             Some(Ok(event)) => event,
             Some(Err(error)) => {
-                shell.set_tool_input_prompt(None);
+                shell.end_tool_input();
                 shell.render();
                 return Err(error.into());
             }
             None => {
-                shell.set_tool_input_prompt(None);
+                shell.end_tool_input();
                 shell.render();
                 return Ok(None);
             }
         };
+        let event = if request.secret {
+            event
+        } else {
+            shell.tool_input_event(&event)
+        };
         if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
-            shell.set_tool_input_prompt(None);
+            shell.end_tool_input();
             shell.request_close();
             shell.render();
             return Ok(None);
@@ -119,28 +142,46 @@ where
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match key.code {
-                    KeyCode::Enter if overflowed => {
-                        // Never return a silently truncated credential. Clear the
-                        // rejected input, then let the user paste a fresh value.
+                    KeyCode::Enter if shell.tool_input_overflowed() => {
+                        // Rejected input is never submitted, even after a later edit.
                         value = SecretInputBuffer::default();
-                        overflowed = false;
+                        shell.clear_tool_input_value();
                     }
                     KeyCode::Enter => {
-                        let bytes = value.take();
-                        let answer = String::from_utf8(bytes)
-                            .map_err(|_| anyhow::anyhow!("extension input was not valid UTF-8"))?;
-                        shell.set_tool_input_prompt(None);
+                        let answer = if request.secret {
+                            // All buffer mutations accept valid UTF-8 scalars/paste.
+                            String::from_utf8(value.take()).expect("secret input is valid UTF-8")
+                        } else {
+                            shell
+                                .end_tool_input()
+                                .expect("ordinary request owns an editor")
+                        };
+                        if request.secret {
+                            shell.end_tool_input();
+                        }
                         shell.render();
                         return Ok(Some(answer));
                     }
                     KeyCode::Esc => {
-                        shell.set_tool_input_prompt(None);
+                        shell.end_tool_input();
                         shell.render();
                         return Ok(None);
                     }
-                    KeyCode::Backspace => value.backspace(),
+                    KeyCode::Backspace if request.secret => value.backspace(),
+                    KeyCode::Backspace => shell.edit_tool_input(TextEditAction::Backspace),
+                    KeyCode::Delete if !request.secret => {
+                        shell.edit_tool_input(TextEditAction::Delete)
+                    }
+                    KeyCode::Left if !request.secret => shell.edit_tool_input(TextEditAction::Left),
+                    KeyCode::Right if !request.secret => {
+                        shell.edit_tool_input(TextEditAction::Right)
+                    }
+                    KeyCode::Home if !request.secret => shell.edit_tool_input(TextEditAction::Home),
+                    KeyCode::End if !request.secret => shell.edit_tool_input(TextEditAction::End),
+                    KeyCode::Up if !request.secret => shell.edit_tool_input(TextEditAction::Up),
+                    KeyCode::Down if !request.secret => shell.edit_tool_input(TextEditAction::Down),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        shell.set_tool_input_prompt(None);
+                        shell.end_tool_input();
                         shell.render();
                         return Ok(None);
                     }
@@ -149,36 +190,34 @@ where
                             KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
                         ) =>
                     {
-                        overflowed |= value.0.len().saturating_add(character.len_utf8())
-                            > MAX_SECRET_INPUT_BYTES;
-                        value.push(character)
+                        if request.secret {
+                            if value.0.len().saturating_add(character.len_utf8())
+                                > MAX_SECRET_INPUT_BYTES
+                            {
+                                shell.mark_tool_input_overflow();
+                            }
+                            value.push(character);
+                        } else {
+                            shell.edit_tool_input(TextEditAction::Char(character));
+                        }
                     }
                     _ => {}
                 }
             }
             Event::Paste(pasted) => {
-                overflowed |= value
-                    .0
-                    .len()
-                    .saturating_add(pasted.trim_end_matches(['\r', '\n']).len())
-                    > MAX_SECRET_INPUT_BYTES;
-                value.extend_paste(&pasted);
+                let pasted = pasted.trim_end_matches(['\r', '\n']);
+                if request.secret {
+                    if value.0.len().saturating_add(pasted.len()) > MAX_SECRET_INPUT_BYTES {
+                        shell.mark_tool_input_overflow();
+                    }
+                    value.extend_paste(pasted);
+                } else {
+                    shell.edit_tool_input(TextEditAction::Paste(pasted.to_owned()));
+                }
             }
             Event::Resize(columns, rows) => shell.set_size(columns, rows),
             _ => {}
         }
-        let shown = if overflowed {
-            format!(
-                "{} [input exceeds 4 KiB; Enter to clear, Esc to cancel]",
-                request.prompt
-            )
-        } else if request.secret {
-            request.prompt.clone()
-        } else {
-            let entered = std::str::from_utf8(&value.0).unwrap_or_default();
-            format!("{} {}", request.prompt, entered)
-        };
-        shell.set_tool_input_prompt(Some(shown));
         shell.render();
     }
 }
@@ -626,7 +665,7 @@ pub async fn session_picker(
     let current_session_path = current_session_path.map(Path::to_owned);
     let mut all_rows = None;
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(rows.clone(), current_session_path.clone()),
+        picker: Box::new(PickerState::new(rows.clone(), current_session_path.clone())),
     });
     shell.render();
 
@@ -1314,10 +1353,92 @@ fn model_provider_heading(catalog: &ModelCatalog, model: &octet_ai::ModelSpec) -
     }
 }
 
+/// Public presentation facts only; endpoint headers and model presets never enter TSP.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelPickerDetail {
+    pub(crate) name: String,
+    pub(crate) context: u64,
+    pub(crate) output: u64,
+    pub(crate) price: String,
+    pub(crate) cache_price: Option<String>,
+    pub(crate) input: String,
+    pub(crate) badges: Vec<String>,
+    pub(crate) source: Vec<(String, String)>,
+}
+
+fn native_model_detail(model: &octet_ai::ModelSpec) -> ModelPickerDetail {
+    use octet_ai::Modality;
+    let caps = &model.capabilities;
+    let mut badges = Vec::new();
+    if caps.reasoning.is_some() {
+        badges.push("reasoning".into());
+    }
+    if caps.input_modalities.contains(Modality::Image) {
+        badges.push("vision".into());
+    }
+    if caps.input_modalities.contains(Modality::Audio) {
+        badges.push("audio".into());
+    }
+    if caps.tools {
+        badges.push("tools".into());
+    }
+    if caps.structured_output {
+        badges.push("structured output".into());
+    }
+    let input = [(Modality::Image, "image"), (Modality::Audio, "audio")]
+        .into_iter()
+        .filter(|(modality, _)| caps.input_modalities.contains(*modality))
+        .map(|(_, label)| label)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let input = if input.is_empty() {
+        "text".into()
+    } else {
+        format!("text · {input}")
+    };
+    let metadata =
+        octet_ai::model_metadata::model_capability_metadata(&model.endpoint.0, &model.api_name);
+    let source = ["knowledge", "release_date", "last_updated", "open_weights"]
+        .into_iter()
+        .filter_map(|key| {
+            let value = metadata.as_ref()?.get(key)?;
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                serde_json::Value::Bool(value) => value.to_string(),
+                _ => return None,
+            };
+            Some((key.to_owned(), value))
+        })
+        .collect();
+    ModelPickerDetail {
+        name: model_label(model),
+        context: model.limits.context_window,
+        output: model.limits.max_output_tokens,
+        price: model.pricing.as_ref().map_or_else(
+            || "—".into(),
+            |pricing| {
+                format!(
+                    "{} · {}",
+                    compact_rate_value(pricing.input),
+                    compact_rate_value(pricing.output)
+                )
+            },
+        ),
+        cache_price: model
+            .pricing
+            .as_ref()
+            .map(|pricing| compact_rate_value(pricing.cache_read)),
+        input,
+        badges,
+        source,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelPickerPresentation {
     pub(crate) ids: Vec<ModelId>,
     pub(crate) providers: Vec<String>,
+    pub(crate) details: Vec<ModelPickerDetail>,
     pub(crate) labels: Vec<String>,
     pub(crate) descriptions: Vec<Option<String>>,
 }
@@ -1345,6 +1466,7 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
                 model_label(model),
                 model.id.clone(),
                 model_picker_metadata(model),
+                native_model_detail(model),
             )
         })
         .collect::<Vec<_>>();
@@ -1377,24 +1499,39 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
     let mut presentation = ModelPickerPresentation {
         ids: Vec::with_capacity(rows.len()),
         providers: Vec::with_capacity(rows.len()),
+        details: Vec::with_capacity(rows.len()),
         labels: Vec::with_capacity(rows.len()),
         descriptions: Vec::with_capacity(rows.len()),
     };
-    for (provider, label, id, metadata) in rows {
+    for (provider, label, id, metadata, detail) in rows {
+        presentation.details.push(detail);
         let media = if metadata.media.is_empty() {
             String::new()
         } else {
             format!("  {}", metadata.media)
         };
+        // OAuth / subscription models report no pricing (`—`). Showing
+        // `in — out —` on every such row is visual noise; keep the context
+        // column stable with blank padding so priced rows stay tabular.
+        let unknown_pricing = metadata.input_cost == "—" && metadata.output_cost == "—";
+        let description = if unknown_pricing {
+            format!(
+                "{}{} ctx{media}",
+                " ".repeat(11 + input_width + output_width),
+                pad_visible_left(&metadata.context, context_width),
+            )
+        } else {
+            format!(
+                "in {}  out {}  {} ctx{media}",
+                pad_visible_right(&metadata.input_cost, input_width),
+                pad_visible_right(&metadata.output_cost, output_width),
+                pad_visible_left(&metadata.context, context_width),
+            )
+        };
         presentation.ids.push(id);
         presentation.providers.push(provider);
         presentation.labels.push(label);
-        presentation.descriptions.push(Some(format!(
-            "in {}  out {}  {} ctx{media}",
-            pad_visible_right(&metadata.input_cost, input_width),
-            pad_visible_right(&metadata.output_cost, output_width),
-            pad_visible_left(&metadata.context, context_width),
-        )));
+        presentation.descriptions.push(Some(description));
     }
     presentation
 }
@@ -1454,6 +1591,8 @@ where
         action: PanelAction::SelectGroupedModel {
             models: presentation.ids,
             providers: presentation.providers,
+            details: presentation.details,
+            scope: None,
         },
     });
     shell.render();
@@ -1482,6 +1621,7 @@ where
                                 presentation.descriptions,
                                 presentation.ids,
                                 presentation.providers,
+                                presentation.details,
                             );
                         }
                         Ok(false) => {} // The launch identity is no longer current.
@@ -1600,6 +1740,8 @@ where
         PanelAction::SelectGroupedModel {
             models: presentation.ids.clone(),
             providers: presentation.providers,
+            details: presentation.details,
+            scope: None,
         },
     )
     .await?
@@ -1624,863 +1766,8 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::{KeyEvent, KeyModifiers};
-    use tokio_stream::wrappers::ReceiverStream;
-
-    #[tokio::test]
-    async fn secret_input_paste_never_enters_the_composer_or_transcript() {
-        let mut shell = InteractiveShell::test_shell();
-        shell.extension_set_editor("draft kept intact".into());
-        let request = ExtensionInputRequest {
-            parent_request_id: 0,
-            prompt: "API key (input hidden)".into(),
-            secret: true,
-        };
-        let mut input = futures_util::stream::iter([
-            Ok(Event::Paste("synthetic-private-key\r\n".into())),
-            Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))),
-        ]);
-        let answer = extension_input_picker(&mut shell, &mut input, &request)
-            .await
-            .unwrap();
-        assert_eq!(answer.as_deref(), Some("synthetic-private-key"));
-        assert_eq!(shell.pending(), "draft kept intact");
-        let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
-        assert!(!frame.contains("synthetic-private-key"));
-        assert!(!frame.contains("API key (input hidden)"));
-    }
-
-    #[tokio::test]
-    async fn secret_input_cancel_and_input_error_discard_the_answer_and_restore_editor() {
-        for end in [
-            Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
-            Err(std::io::Error::other("synthetic input failure")),
-        ] {
-            let failed = end.is_err();
-            let mut shell = InteractiveShell::test_shell();
-            shell.extension_set_editor("original draft".into());
-            let request = ExtensionInputRequest {
-                parent_request_id: 0,
-                prompt: "API key (input hidden)".into(),
-                secret: true,
-            };
-            let mut input =
-                futures_util::stream::iter([Ok(Event::Paste("synthetic-private-key".into())), end]);
-            let answer = extension_input_picker(&mut shell, &mut input, &request).await;
-            if failed {
-                assert!(answer.is_err());
-            } else {
-                assert_eq!(answer.unwrap(), None);
-            }
-            assert_eq!(shell.pending(), "original draft");
-            let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
-            assert!(!frame.contains("synthetic-private-key"));
-            assert!(!frame.contains("API key (input hidden)"));
-        }
-    }
-
-    #[tokio::test]
-    async fn oversized_secret_input_cannot_submit_a_truncated_key() {
-        for oversized in [
-            vec![Ok(Event::Paste("x".repeat(MAX_SECRET_INPUT_BYTES + 1)))],
-            vec![
-                Ok(Event::Paste("x".repeat(MAX_SECRET_INPUT_BYTES))),
-                Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Char('y'),
-                    KeyModifiers::NONE,
-                ))),
-            ],
-        ] {
-            let mut shell = InteractiveShell::test_shell();
-            let request = ExtensionInputRequest {
-                parent_request_id: 0,
-                prompt: "API key (input hidden)".into(),
-                secret: true,
-            };
-            let mut events = oversized;
-            events.extend([
-                Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))),
-                Ok(Event::Paste("replacement-key".into())),
-                Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))),
-            ]);
-            let answer = extension_input_picker(
-                &mut shell,
-                &mut futures_util::stream::iter(events),
-                &request,
-            )
-            .await
-            .unwrap();
-            assert_eq!(answer.as_deref(), Some("replacement-key"));
-            assert!(shell.pending_is_empty());
-        }
-    }
-
-    #[test]
-    fn secret_input_is_utf8_bounded_and_backspace_removes_one_character() {
-        let mut value = SecretInputBuffer::default();
-        value.extend_paste(&"x".repeat(MAX_SECRET_INPUT_BYTES - 1));
-        value.push('é');
-        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES - 1);
-        value.push('!');
-        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES);
-        value.backspace();
-        value.backspace();
-        value.extend_paste("é\r\n");
-        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES);
-        assert!(std::str::from_utf8(&value.0).unwrap().ends_with('é'));
-        value.backspace();
-        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES - 2);
-    }
-
-    #[test]
-    fn active_choice_is_focused_and_marked_without_reordering() {
-        let mut labels = vec!["off".into(), "high".into(), "max".into()];
-        assert_eq!(mark_current_choice(&mut labels, Some(2)), 2);
-        assert_eq!(labels, ["off", "high", "max (current)"]);
-        let mut empty = Vec::new();
-        assert_eq!(mark_current_choice(&mut empty, None), 0);
-    }
-
-    #[tokio::test]
-    async fn preview_follows_navigation_and_filtered_original_indices_before_next_input() {
-        use crate::tui::theme::{test_theme_for, TerminalBackground};
-        use std::cell::RefCell;
-        use std::task::Poll;
-
-        let mut shell = InteractiveShell::test_shell();
-        let original = shell.theme();
-        let backgrounds = [
-            TerminalBackground::Unknown,
-            TerminalBackground::Light,
-            TerminalBackground::Dark,
-        ];
-        let themes =
-            backgrounds.map(|background| test_theme_for(background, original.capabilities()));
-        let observed = RefCell::new(Vec::new());
-        // Each expectation is checked when the stream is polled for the NEXT
-        // event: the previous navigation must have already changed the theme.
-        let mut script = [
-            (Some(0), KeyCode::Down),
-            (Some(1), KeyCode::Down),
-            (Some(2), KeyCode::Up),
-            (Some(1), KeyCode::Home),
-            (Some(0), KeyCode::End),
-            (Some(2), KeyCode::Char('t')),
-            (Some(0), KeyCode::Char('e')),
-            (Some(1), KeyCode::Down), // "te" matches Light and Dark terminal.
-            (Some(2), KeyCode::Char('x')),
-            (None, KeyCode::Enter), // Empty results cannot be confirmed.
-            (None, KeyCode::Backspace),
-            (Some(1), KeyCode::Down),
-            (Some(2), KeyCode::Enter),
-        ]
-        .into_iter();
-        let mut input = futures_util::stream::poll_fn(|_| {
-            let Some((expected, code)) = script.next() else {
-                return Poll::Ready(None);
-            };
-            let background = expected.map_or(original.background(), |index| backgrounds[index]);
-            assert_eq!(observed.borrow().last(), Some(&(expected, background)));
-            Poll::Ready(Some(Ok(Event::Key(KeyEvent::new(
-                code,
-                KeyModifiers::NONE,
-            )))))
-        });
-        let items = vec![
-            "Auto (recommended)".into(),
-            "Light terminal".into(),
-            "Dark terminal".into(),
-        ];
-        let action = PanelAction::ProviderSetup(items.clone());
-        let selected = pick_list_with_preview(
-            &mut shell,
-            &mut input,
-            OrdinarySurfaceMetadata::new("Terminal appearance"),
-            items,
-            vec![
-                Some("neutral".into()),
-                Some("daytime".into()),
-                Some("nighttime".into()),
-            ],
-            0,
-            action,
-            |shell, index| {
-                assert_eq!(shell.highlighted_panel_index(), index);
-                shell.set_theme(index.map_or(&original, |index| &themes[index]).clone());
-                observed
-                    .borrow_mut()
-                    .push((index, shell.theme().background()));
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(selected, Some(2));
-        assert_eq!(shell.theme().background(), TerminalBackground::Dark);
-        assert!(!shell.has_panel());
-        assert_eq!(observed.borrow().len(), 12);
-    }
-
-    #[tokio::test]
-    async fn ordinary_provider_picker_navigation_does_not_change_theme() {
-        let mut shell = InteractiveShell::test_shell();
-        let original = shell.theme();
-        let mut input = tokio_stream::iter([
-            Ok(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))),
-            Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))),
-        ]);
-        let selected = provider_setup_picker(
-            &mut shell,
-            &mut input,
-            "Provider setup",
-            vec!["one".into(), "two".into()],
-            vec![None, None],
-            0,
-        )
-        .await
-        .unwrap();
-        assert_eq!(selected, Some(1));
-        assert_eq!(shell.theme().background(), original.background());
-        assert_eq!(shell.theme().capabilities(), original.capabilities());
-    }
-
-    #[tokio::test]
-    async fn model_choice_starts_at_first_result_on_every_open_and_keeps_current_marker() {
-        let catalog = ModelCatalog::builtin().unwrap();
-        let presentation = model_picker_presentation(&catalog);
-        let current = presentation.ids.last().unwrap().clone();
-        assert_ne!(current, presentation.ids[0]);
-        let mut shell = InteractiveShell::test_shell();
-        shell.set_identity("test", &current.0, "high");
-
-        // Exercise the real model driver, without the user-config persistence
-        // boundary. Provider headings never occupy a selectable index.
-        for size in [(46, 8), (80, 24), (120, 40)] {
-            shell.set_size(size.0, size.1);
-            for (keys, expected) in [
-                (vec![KeyCode::Enter], Some(presentation.ids[0].clone())),
-                (
-                    vec![KeyCode::Down, KeyCode::Enter],
-                    Some(presentation.ids[1].clone()),
-                ),
-                (
-                    "(current)"
-                        .chars()
-                        .map(KeyCode::Char)
-                        .chain([KeyCode::Enter])
-                        .collect(),
-                    Some(current.clone()),
-                ),
-                (vec![KeyCode::Esc], None),
-                // Reopening clears the previous filter and navigation state.
-                (vec![KeyCode::Enter], Some(presentation.ids[0].clone())),
-            ] {
-                let mut input = tokio_stream::iter(
-                    keys.into_iter()
-                        .map(|key| Ok(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)))),
-                );
-                assert_eq!(
-                    pick_model_choice(&mut shell, &mut input, &catalog)
-                        .await
-                        .unwrap(),
-                    expected,
-                    "model selection at {size:?}"
-                );
-                assert!(!shell.has_panel());
-                assert_eq!(
-                    shell.selected_identity(),
-                    (current.0.clone(), "high".into())
-                );
-                assert!(shell.debug_snapshot().is_empty());
-                assert_eq!(shell.debug_error(), None);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn empty_model_choice_retains_the_availability_error() {
-        let mut shell = InteractiveShell::test_shell();
-        let mut input = futures_util::stream::pending();
-        assert_eq!(
-            pick_model_choice(&mut shell, &mut input, &ModelCatalog::default())
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            shell.debug_error().as_deref(),
-            Some("nothing is available to select")
-        );
-        assert!(!shell.has_panel());
-    }
-
-    #[tokio::test]
-    async fn live_styled_document_rerenders_at_panel_content_width_after_resize() {
-        let (sender, receiver) = tokio::sync::mpsc::channel(2);
-        sender.send(Ok(Event::Resize(44, 16))).await.unwrap();
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Esc,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        drop(sender);
-        let mut input = ReceiverStream::new(receiver);
-        let mut shell = InteractiveShell::test_shell();
-        shell.set_size(80, 20);
-        let widths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let observed = std::sync::Arc::clone(&widths);
-
-        read_only_document_live_styled(
-            &mut shell,
-            &mut input,
-            "worker transcript",
-            "initial".into(),
-            move |width| {
-                observed.lock().unwrap().push(width);
-                std::future::ready(Ok(Some(format!("rendered at {width}"))))
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(widths.lock().unwrap().contains(&44));
-        assert!(!shell.has_panel());
-    }
-
-    #[tokio::test]
-    async fn ctrl_d_closes_a_picker_and_propagates_the_close_request() {
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('d'),
-                KeyModifiers::CONTROL,
-            ))))
-            .await
-            .unwrap();
-        drop(sender);
-        let mut input = ReceiverStream::new(receiver);
-        let mut shell = InteractiveShell::test_shell();
-
-        let selected = pick_list(
-            &mut shell,
-            &mut input,
-            OrdinarySurfaceMetadata::new("Choose"),
-            vec!["one".into()],
-            vec![None],
-            0,
-            PanelAction::SelectModel(vec![ModelId("one".into())]),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(selected, None);
-        assert!(!shell.has_panel());
-        assert!(shell.close_requested());
-    }
-
-    #[tokio::test]
-    async fn message_picker_driver_returns_the_selected_message() {
-        let (sender, receiver) = tokio::sync::mpsc::channel(2);
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Up,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        drop(sender);
-        let mut input = ReceiverStream::new(receiver);
-        let mut shell = InteractiveShell::test_shell();
-        let selected = message_picker(
-            &mut shell,
-            &mut input,
-            vec![
-                ForkMessage {
-                    entry_id: "entry-a".into(),
-                    text: "first".into(),
-                    whole_conversation: false,
-                },
-                ForkMessage {
-                    entry_id: "entry-b".into(),
-                    text: "second".into(),
-                    whole_conversation: false,
-                },
-            ],
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(selected, Some(("entry-a".into(), "first".into())));
-        assert!(!shell.has_panel());
-    }
-
-    struct LivePickerRefresh {
-        calls: usize,
-        refreshed: Option<tokio::sync::oneshot::Sender<()>>,
-    }
-
-    fn refresh_live_picker(
-        context: &mut LivePickerRefresh,
-    ) -> Pin<Box<dyn Future<Output = SubagentPickerSnapshot> + '_>> {
-        Box::pin(async move {
-            context.calls += 1;
-            if let Some(refreshed) = context.refreshed.take() {
-                let _ = refreshed.send(());
-            }
-            SubagentPickerSnapshot {
-                title: "Subagents · refreshed".into(),
-                items: vec!["beta".into(), "gamma".into()],
-                descriptions: vec![Some("done".into()), Some("running".into())],
-                node_ids: vec!["node-b".into(), "node-c".into()],
-                groups: vec![
-                    SubagentGroup {
-                        label: "Running".into(),
-                        indices: vec![1],
-                        collapsible: false,
-                    },
-                    SubagentGroup {
-                        label: "Done".into(),
-                        indices: vec![0],
-                        collapsible: true,
-                    },
-                ],
-                notices: Vec::new(),
-            }
-        })
-    }
-
-    #[tokio::test]
-    async fn live_subagent_picker_refreshes_and_keeps_the_stable_selection() {
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let (refreshed_tx, refreshed_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            refreshed_rx
-                .await
-                .expect("picker refreshed before confirmation");
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-        });
-        let mut input = ReceiverStream::new(receiver);
-        let mut shell = InteractiveShell::test_shell();
-        let mut refresh = LivePickerRefresh {
-            calls: 0,
-            refreshed: Some(refreshed_tx),
-        };
-        let selected = subagent_picker(
-            &mut shell,
-            &mut input,
-            SubagentPickerSnapshot {
-                title: "Subagents".into(),
-                items: vec!["alpha".into(), "beta".into()],
-                descriptions: vec![Some("running".into()), Some("running".into())],
-                node_ids: vec!["node-a".into(), "node-b".into()],
-                groups: vec![SubagentGroup {
-                    label: "Running".into(),
-                    indices: vec![0, 1],
-                    collapsible: false,
-                }],
-                notices: Vec::new(),
-            },
-            1,
-            &mut refresh,
-            refresh_live_picker,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(selected.as_deref(), Some("node-b"));
-        assert!(refresh.calls >= 1);
-    }
-
-    #[test]
-    fn model_label_uses_friendly_metadata_without_wire_id_noise() {
-        let spec = octet_ai::ModelSpec {
-            preset: Default::default(),
-            id: ModelId("my-custom".into()),
-            endpoint: octet_ai::EndpointId("local".into()),
-            api_name: "llama-3.1-8b-instruct".into(),
-            display_name: Some("Llama 3.1 8B".into()),
-            protocol: octet_ai::Protocol::OpenAiChat,
-            capabilities: octet_ai::Capabilities {
-                responses_features: Default::default(),
-                input_modalities: octet_ai::ModalitySet::none(),
-                output_modalities: octet_ai::ModalitySet::none(),
-                tools: true,
-                parallel_tool_calls: false,
-                reasoning: None,
-                responses_lite: false,
-                agent_delegation: None,
-                structured_output: false,
-                deferred_tool_loading: false,
-            },
-            limits: octet_ai::ModelLimits {
-                context_window: 131072,
-                max_output_tokens: 8192,
-            },
-            pricing: None,
-            cache: octet_ai::CacheCompatibility::default(),
-        };
-        assert_eq!(model_label(&spec), "Llama 3.1 8B");
-        assert_eq!(model_picker_metadata(&spec).input_cost, "—");
-
-        let mut priced = spec.clone();
-        priced.pricing = Some(octet_ai::Pricing {
-            input: octet_ai::TokenRate(1_000_000),
-            output: octet_ai::TokenRate(6_000_000),
-            cache_read: octet_ai::TokenRate(100_000),
-            cache_write_5m: octet_ai::TokenRate(1_250_000),
-            cache_write_1h: None,
-            reasoning: None,
-            tiers: Vec::new(),
-        });
-        assert_eq!(compact_rate_value(octet_ai::TokenRate(0)), "$0");
-        assert_eq!(compact_rate_value(octet_ai::TokenRate(100_000_000)), "$100");
-        assert_eq!(compact_context_limit(1_500_000), "1.5M");
-        let metadata = model_picker_metadata(&priced);
-        assert_eq!(metadata.input_cost, "$1/M");
-        assert_eq!(metadata.output_cost, "$6/M");
-        assert_eq!(metadata.context, "131K");
-        assert_eq!(metadata.media, "");
-    }
-
-    #[test]
-    fn custom_model_label_removes_provider_repository_and_quantization_noise() {
-        let mut spec = octet_ai::ModelSpec {
-            preset: Default::default(),
-            id: ModelId("custom/Intel/Qwen3.6-27B-int4-AutoRound".into()),
-            endpoint: octet_ai::EndpointId("custom-openai".into()),
-            api_name: "Intel/Qwen3.6-27B-int4-AutoRound".into(),
-            display_name: None,
-            protocol: octet_ai::Protocol::OpenAiChat,
-            capabilities: octet_ai::Capabilities {
-                responses_features: Default::default(),
-                input_modalities: octet_ai::ModalitySet::none(),
-                output_modalities: octet_ai::ModalitySet::none(),
-                tools: true,
-                parallel_tool_calls: true,
-                reasoning: None,
-                responses_lite: false,
-                agent_delegation: None,
-                structured_output: true,
-                deferred_tool_loading: false,
-            },
-            limits: octet_ai::ModelLimits {
-                context_window: 128000,
-                max_output_tokens: 16384,
-            },
-            pricing: None,
-            cache: octet_ai::CacheCompatibility::default(),
-        };
-        assert_eq!(model_label(&spec), "Qwen3.6 27B");
-
-        spec.capabilities.input_modalities = octet_ai::ModalitySet::none()
-            .with(octet_ai::Modality::Image)
-            .with(octet_ai::Modality::Audio);
-
-        let metadata = model_picker_metadata(&spec);
-        assert_eq!(metadata.media, "vision + audio");
-    }
-
-    #[test]
-    fn model_picker_groups_and_sorts_models_with_stable_metadata_columns() {
-        let catalog = ModelCatalog::builtin().unwrap();
-        let presentation = model_picker_presentation(&catalog);
-        let groups =
-            presentation
-                .providers
-                .iter()
-                .fold(Vec::<&str>::new(), |mut groups, provider| {
-                    if groups.last().copied() != Some(provider.as_str()) {
-                        groups.push(provider);
-                    }
-                    groups
-                });
-        assert_eq!(groups, vec!["Anthropic", "OpenAI"]);
-
-        for provider in &groups {
-            let labels = presentation
-                .labels
-                .iter()
-                .zip(&presentation.providers)
-                .filter(|(_, row_provider)| row_provider.as_str() == *provider)
-                .map(|(label, _)| label.to_lowercase())
-                .collect::<Vec<_>>();
-            assert!(
-                labels.windows(2).all(|pair| pair[0] <= pair[1]),
-                "{provider} models were not alphabetized: {labels:?}"
-            );
-        }
-
-        let descriptions = presentation
-            .descriptions
-            .iter()
-            .map(|description| description.as_deref().unwrap())
-            .collect::<Vec<_>>();
-        let out_columns = descriptions
-            .iter()
-            .map(|description| {
-                sexy_tui_rs::visible_width(&description[..description.find("out ").unwrap()])
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        let context_columns = descriptions
-            .iter()
-            .map(|description| {
-                sexy_tui_rs::visible_width(&description[..description.find(" ctx").unwrap()])
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(out_columns.len(), 1, "input costs are not one fixed column");
-        assert_eq!(
-            context_columns.len(),
-            1,
-            "context windows are not one fixed column"
-        );
-        assert!(descriptions
-            .iter()
-            .any(|description| description.contains("audio")));
-        assert!(descriptions
-            .iter()
-            .any(|description| description.contains("vision")));
-
-        let astra_index = presentation
-            .ids
-            .iter()
-            .position(|id| id.0 == "gpt-6-astra")
-            .expect("built-in Astra should use the generic model picker path");
-        assert_eq!(presentation.providers[astra_index], "OpenAI");
-        assert_eq!(presentation.labels[astra_index], "GPT-6 Astra");
-        let astra_description = descriptions[astra_index];
-        assert!(astra_description.contains("$10/M"));
-        assert!(astra_description.contains("$50/M"));
-        assert!(astra_description.contains("1.1M ctx"));
-        assert!(astra_description.contains("vision"));
-
-        assert!(descriptions.iter().all(|description| {
-            !description.contains("tools")
-                && !description.contains("reasoning")
-                && !description.contains("Anthropic")
-                && !description.contains("OpenAI")
-        }));
-    }
-}
-
+mod deferred_model_picker_tests;
 #[cfg(test)]
-mod parity_session_search_tests {
-    use super::*;
-    use octet_agent::{EntryValue, Session};
-    use octet_ai::{Message, UserMessage, UserPart};
-
-    #[test]
-    fn resume_transcript_search_dispatch_uses_index_and_returns_original_session() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(root.path(), workspace.path());
-        std::fs::create_dir_all(store.dir()).unwrap();
-        for id in ["one", "two"] {
-            let mut session = Session::create(store.dir().join(format!("{id}.jsonl"))).unwrap();
-            for text in [
-                "ordinary first prompt",
-                if id == "two" {
-                    "deep hidden needle"
-                } else {
-                    "other later text"
-                },
-            ] {
-                session
-                    .append(EntryValue::Message(Message::User(UserMessage {
-                        content: vec![UserPart::Text(text.into())],
-                    })))
-                    .unwrap();
-            }
-        }
-        let rows = store.list();
-        assert_eq!(rows.len(), 2);
-        let expected = store.dir().join("two.jsonl");
-        let mut shell = InteractiveShell::test_shell();
-        shell.open_panel(Panel::SessionPicker {
-            picker: PickerState::new(rows, None),
-        });
-        for character in "needle".chars() {
-            shell.panel_input(&Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char(character),
-                KeyModifiers::NONE,
-            )));
-        }
-        shell.panel_input(&Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
-        )));
-        let mut requests = shell.drain_panel_requests();
-        assert_eq!(requests.len(), 1);
-        let PanelRequest::SearchEntries { query, paths } = requests.remove(0) else {
-            panic!("search request");
-        };
-        let hits = search_picker_entries(&store, &query, &paths).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert!(hits.get(&expected).unwrap().contains("deep hidden needle"));
-        shell.set_picker_entry_search(query.clone(), hits);
-        let repeated = search_picker_entries(&store, &query, &paths).unwrap();
-        assert_eq!(repeated.len(), 1);
-        let selected = shell.panel_input(&Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        )));
-        assert!(matches!(selected, Some((PanelResult::Select(ref id), _)) if id == "two"));
-        assert_eq!(
-            shell.take_picker_selection(),
-            Some(("two".into(), expected))
-        );
-        assert!(search_picker_entries(&store, &"x".repeat(1025), &paths).is_err());
-    }
-}
-
+mod parity_session_search_tests;
 #[cfg(test)]
-mod deferred_model_picker_tests {
-    use super::*;
-    use crossterm::event::{KeyEvent, KeyModifiers};
-    use tokio_stream::wrappers::ReceiverStream;
-
-    #[tokio::test]
-    async fn deferred_model_picker_applies_ready_catalog_before_later_input() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        let active = app.model.spec.id.clone();
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
-        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
-            app.config.offline,
-            &crate::app::bootstrap::CatalogReadiness::Fleet,
-        )
-        .unwrap();
-        let pending = tokio::spawn(async move { Ok((catalog, notes)) });
-        while !pending.is_finished() {
-            tokio::task::yield_now().await;
-        }
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let mut input = ReceiverStream::new(receiver);
-        let mut shell = InteractiveShell::test_shell();
-        {
-            let future =
-                optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending));
-            tokio::pin!(future);
-            assert!(matches!(
-                futures_util::poll!(future.as_mut()),
-                std::task::Poll::Pending
-            ));
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Esc,
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-            assert!(future.await.unwrap().is_none());
-        }
-        assert!(app.readiness.is_fleet());
-        assert_eq!(app.model.spec.id, active);
-        assert!(!shell.has_panel());
-    }
-
-    #[tokio::test]
-    async fn deferred_model_picker_accepts_input_and_escape_before_inventory_finishes() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        let initial = app.catalog.models().count();
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
-        let (release, waiting) = tokio::sync::oneshot::channel::<()>();
-        let pending = tokio::spawn(async move {
-            waiting.await.unwrap();
-            crate::app::bootstrap::model_catalog_for_readiness(
-                true,
-                &crate::app::bootstrap::CatalogReadiness::Fleet,
-            )
-        });
-        let (sender, receiver) = tokio::sync::mpsc::channel(2);
-        let mut input = ReceiverStream::new(receiver);
-        let mut shell = InteractiveShell::test_shell();
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Char('g'),
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Esc,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending)),
-        )
-        .await
-        .expect("picker input must not wait for discovery")
-        .unwrap()
-        .is_none());
-        assert!(!app.readiness.is_fleet());
-        assert_eq!(app.catalog.models().count(), initial);
-        assert!(!shell.has_panel());
-        release.send(()).unwrap();
-    }
-
-    #[tokio::test]
-    async fn deferred_model_picker_failure_keeps_current_routes_and_stays_cancellable() {
-        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
-        let initial = app.catalog.models().count();
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
-        let pending = tokio::spawn(async { anyhow::bail!("inventory unavailable") });
-        while !pending.is_finished() {
-            tokio::task::yield_now().await;
-        }
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let mut input = ReceiverStream::new(receiver);
-        let mut shell = InteractiveShell::test_shell();
-        {
-            let future =
-                optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending));
-            tokio::pin!(future);
-            assert!(matches!(
-                futures_util::poll!(future.as_mut()),
-                std::task::Poll::Pending
-            ));
-            sender
-                .send(Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Esc,
-                    KeyModifiers::NONE,
-                ))))
-                .await
-                .unwrap();
-            assert!(future.await.unwrap().is_none());
-        }
-        assert!(!app.readiness.is_fleet());
-        assert_eq!(app.catalog.models().count(), initial);
-        assert!(!shell.has_panel());
-    }
-}
+mod tests;

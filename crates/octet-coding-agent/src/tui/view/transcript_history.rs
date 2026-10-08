@@ -63,6 +63,9 @@ pub(super) fn materialize_deferred_session_history(state: &SharedState) -> Resul
     let original_activity_groups = std::mem::take(&mut state.activity_groups);
     let original_new_output_count = state.new_output_count;
     let next_commit_id = state.next_transcript_commit_id;
+    let original_extensions = std::mem::take(&mut state.extension_transcript);
+    state.extension_transcript.owners = original_extensions.owners.clone();
+    state.extension_transcript.ever_active = original_extensions.ever_active;
 
     append_hydrated_items(&mut state, items);
     state.seal_activity_group();
@@ -99,6 +102,7 @@ pub(super) fn materialize_deferred_session_history(state: &SharedState) -> Resul
             state.block_revisions = retained_tail_revisions;
             state.tool_panels = original_tool_panels;
             state.activity_groups = original_activity_groups;
+            state.extension_transcript = original_extensions;
             state.next_transcript_commit_id = next_commit_id;
             state.new_output_count = original_new_output_count;
             state.invalidate_transcript_layout();
@@ -106,6 +110,7 @@ pub(super) fn materialize_deferred_session_history(state: &SharedState) -> Resul
         }
     };
 
+    let hydrated_ids = state.transcript_commit_ids.clone();
     for (offset, commit_id) in state
         .transcript_commit_ids
         .iter_mut()
@@ -117,6 +122,27 @@ pub(super) fn materialize_deferred_session_history(state: &SharedState) -> Resul
     state.transcript_commit_ids[prepended_blocks..original_snapshot_len]
         .copy_from_slice(&retained_tail_ids);
     state.next_transcript_commit_id = next_commit_id;
+    let mut sources = std::collections::HashMap::new();
+    let mut revisions = std::collections::HashMap::new();
+    for (old_id, new_id) in hydrated_ids.iter().zip(&state.transcript_commit_ids) {
+        if let Some(source) = state.extension_transcript.sources.get(old_id) {
+            sources.insert(*new_id, source.clone());
+        }
+        if let Some(revision) = state.extension_transcript.source_revisions.get(old_id) {
+            revisions.insert(*new_id, *revision);
+        }
+    }
+    for id in &local_commit_ids {
+        if let Some(source) = original_extensions.sources.get(id) {
+            sources.insert(*id, source.clone());
+        }
+        if let Some(revision) = original_extensions.source_revisions.get(id) {
+            revisions.insert(*id, *revision);
+        }
+    }
+    state.extension_transcript.sources = std::sync::Arc::new(sources);
+    state.extension_transcript.source_revisions = std::sync::Arc::new(revisions);
+    state.extension_transcript.expanded = original_extensions.expanded;
 
     let local_start = state.transcript.len();
     state.transcript.extend(local_blocks);

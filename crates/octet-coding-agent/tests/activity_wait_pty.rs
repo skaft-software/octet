@@ -1,10 +1,10 @@
-#![cfg(unix)]
-
 //! Real-binary PTY qualification for activity rows while an API response is held.
 //!
 //! The loopback server sends HTTP headers and then waits before sending its
 //! finite SSE body. It emits no provider-token events while the row is sampled;
 //! all HOME, workspace, session and provider state is disposable.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -202,7 +202,7 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn spawn(api_url: &str, theme: &str, color: &str) -> Self {
+    fn spawn(api_url: &str, theme: &str, color: &str, mouse: &str) -> Self {
         let root = tempfile::tempdir().expect("PTY fixture tempdir");
         let canonical = root.path().canonicalize().expect("canonical fixture root");
         let home = canonical.join("home");
@@ -239,6 +239,8 @@ impl Candidate {
                 color,
                 "--theme",
                 theme,
+                "--mouse",
+                mouse,
                 "--workspace",
             ])
             .arg(&workspace)
@@ -672,14 +674,15 @@ fn frame_ranges(bytes: &[u8]) -> Vec<Range<usize>> {
 }
 
 fn resize_frame_end(bytes: &[u8]) -> Option<usize> {
-    // A previous frame may finish before the resize repaint has fully arrived.
-    // Require the clear and its following frame end, not independent markers.
+    // A previous animation frame may finish before the canonical replay arrives.
+    // Require its clear/home/saved-line reset and following frame end together.
+    const CANONICAL_REPLAY_ORIGIN: &[u8] = b"\x1b[2J\x1b[H\x1b[3J";
     frame_ranges(bytes)
         .into_iter()
         .find(|range| {
             bytes[range.clone()]
-                .windows(4)
-                .any(|window| window == b"\x1b[2J")
+                .windows(CANONICAL_REPLAY_ORIGIN.len())
+                .any(|window| window == CANONICAL_REPLAY_ORIGIN)
         })
         .map(|range| range.end)
 }
@@ -687,7 +690,7 @@ fn resize_frame_end(bytes: &[u8]) -> Option<usize> {
 #[test]
 fn resize_wait_rejects_a_previous_frame_end() {
     let bytes =
-        b"\x1b[?2026hprevious frame\x1b[?2026l\x1b[?2026h\x1b[2Jdraft remains local\x1b[?2026l";
+        b"\x1b[?2026h\x1b[1;1Hprevious frame\x1b[?2026l\x1b[?2026h\x1b[2J\x1b[H\x1b[3Jdraft remains local\x1b[?2026l";
     for end in 0..bytes.len() {
         assert!(
             resize_frame_end(&bytes[..end]).is_none(),
@@ -696,7 +699,7 @@ fn resize_wait_rejects_a_previous_frame_end() {
     }
     assert_eq!(resize_frame_end(bytes), Some(bytes.len()));
     let mut with_partial_frame = bytes.to_vec();
-    with_partial_frame.extend_from_slice(b"\x1b[?2026h\x1b[2J");
+    with_partial_frame.extend_from_slice(b"\x1b[?2026h\x1b[2J\x1b[H\x1b[3J");
     assert_eq!(resize_frame_end(&with_partial_frame), Some(bytes.len()));
 }
 
@@ -726,10 +729,10 @@ fn visible_bytes(bytes: &[u8]) -> String {
     sexy_tui_rs::strip_terminal_sequences(&String::from_utf8_lossy(bytes))
 }
 
-fn run_activity_case(theme: &str, compact: bool, color: &str) {
+fn run_activity_case(theme: &str, compact: bool, color: &str, mouse: &str) {
     const SAMPLE: Duration = Duration::from_millis(640);
     let api = HeldApi::start();
-    let mut candidate = Candidate::spawn(&api.url, theme, color);
+    let mut candidate = Candidate::spawn(&api.url, theme, color, mouse);
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
     await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
@@ -801,6 +804,41 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
     });
     let resize_end =
         resize_start + resize_frame_end(&candidate.pty.output[resize_start..]).unwrap();
+    let repair = &candidate.pty.output[resize_start..resize_end];
+    // Coordinator decision (2026-10-06): the resize contract is per mouse mode.
+    // `--mouse auto` leaves scrollback to the terminal, so a destructive resize
+    // must clear and rebuild the complete canonical history, committed prompt
+    // included. `--mouse app` gives the viewport to octet, which owns scrollback
+    // and repaints only the composed window; history stays reachable through
+    // in-app scrolling, so a terminal-history rebuild is neither expected nor
+    // required, and the window must repaint without losing or duplicating rows.
+    match mouse {
+        "auto" => {
+            for clear in [b"\x1b[2J", b"\x1b[3J"] {
+                assert!(
+                    repair.windows(clear.len()).any(|window| window == clear),
+                    "activity resize must clear and rebuild canonical history"
+                );
+            }
+            assert!(
+                visible_bytes(repair).contains("fixture initial prompt"),
+                "resize replay lost the committed prompt: {}",
+                visible_bytes(repair)
+            );
+        }
+        "app" => {
+            let window = visible_bytes(repair);
+            assert!(
+                window.contains("draft remains local"),
+                "application viewport resize must repaint the drafted window: {window}"
+            );
+            assert!(
+                window.contains(label),
+                "application viewport resize must repaint the active window: {window}"
+            );
+        }
+        other => panic!("unsupported mouse mode {other}"),
+    }
     parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
     parser.process(&candidate.pty.output[consumed..resize_end]);
     consumed = resize_end;
@@ -809,6 +847,24 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
         "resize lost local input: {}",
         parser.screen().contents()
     );
+    assert!(
+        parser.screen().contents().contains(label),
+        "resize lost active status: {}",
+        parser.screen().contents()
+    );
+    if mouse == "app" {
+        let window = parser.screen().contents();
+        assert_eq!(
+            window.matches("draft remains local").count(),
+            1,
+            "application viewport resize duplicated or lost a window row: {window}"
+        );
+        assert_eq!(
+            window.matches(label).count(),
+            1,
+            "application viewport resize duplicated or lost the active row: {window}"
+        );
+    }
 
     candidate.pty.write_input(b"\x1b");
     let cancellation = if compact {
@@ -842,7 +898,7 @@ fn failed_pty_fixture_releases_terminal_and_reaps_child() {
     let _guard = pty_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let candidate = Candidate::spawn("http://127.0.0.1:9/v1/", "dark", "never");
+    let candidate = Candidate::spawn("http://127.0.0.1:9/v1/", "dark", "never", "app");
     let pid = candidate.child.id() as libc::pid_t;
     let failed = std::panic::catch_unwind(move || {
         let _candidate = candidate;
@@ -867,32 +923,53 @@ fn real_activity_wait_pty_contract() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Ordinary model waits are qualified on both appearance profiles; the
     // compaction path is independent, and no-color confirms static fallback.
-    run_activity_case("dark", false, "always");
-    run_activity_case("light", false, "always");
-    run_activity_case("dark", true, "always");
-    run_activity_case("dark", false, "never");
+    // Terminal-owned scrollback: the strict clear-and-rebuild contract, across
+    // both appearance profiles and the static no-color fallback.
+    run_activity_case("dark", false, "always", "auto");
+    run_activity_case("light", false, "always", "auto");
+    run_activity_case("dark", true, "always", "auto");
+    run_activity_case("dark", false, "never", "auto");
+    // Application-owned viewport: window repaint only, for the ordinary and the
+    // compacting activity surfaces.
+    run_activity_case("dark", false, "always", "app");
+    run_activity_case("dark", true, "always", "app");
 }
 
 #[test]
-fn real_queued_input_escape_dispatch_and_option_up_edit_pty_contract() {
+fn real_queued_steering_interrupt_keeps_entries_recallable_pty_contract() {
     let _guard = pty_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let api = HeldApi::start();
-    let mut candidate = Candidate::spawn(&api.url, "dark", "never");
+    let mut candidate = Candidate::spawn(&api.url, "dark", "never", "app");
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
     await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
     candidate.pty.write_input(b"queue fixture initial\r");
     api.wait_for_request(&mut candidate, 1);
+
+    // Enter steers into the active run. The held response keeps its model
+    // boundary unreachable, so both entries stay queued.
     candidate.pty.write_input(b"QUEUE-FIRST\rQUEUE-ORIGINAL\r");
-    await_screen(&mut candidate, &mut parser, &mut consumed, "2 queued");
+    await_screen(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "Steering · 2 queued",
+    );
     candidate.pty.write_input(b"\x1b[1;3A"); // Option/Alt+Up, not an editor arrow.
-    await_screen(&mut candidate, &mut parser, &mut consumed, "QUEUE-ORIGINAL");
+    await_composer_text(&mut candidate, &mut parser, &mut consumed, "QUEUE-ORIGINAL");
+    // Re-steer an edit and keep a local draft that no path may submit.
     candidate
         .pty
         .write_input(b"\x03QUEUE-EDITED\rDRAFT-NEVER-SUBMIT");
     await_screen(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "Steering · 2 queued",
+    );
+    await_composer_text(
         &mut candidate,
         &mut parser,
         &mut consumed,
@@ -901,64 +978,57 @@ fn real_queued_input_escape_dispatch_and_option_up_edit_pty_contract() {
     assert_eq!(
         api.count.load(Ordering::SeqCst),
         1,
-        "queue editing must not send"
+        "editing queued steering must not send"
     );
+
+    // Escape interrupts. The model never claimed the queued steering, so it
+    // returns to the composer with the untouched draft; nothing is submitted.
     candidate.pty.write_input(b"\x1b");
     await_screen(&mut candidate, &mut parser, &mut consumed, "interrupted");
-    // The serial fixture must release its cancelled socket before accepting
-    // the next one. The real frontend has already settled cancellation.
     api.release_response();
-    api.wait_for_request(&mut candidate, 2);
-    {
-        let bodies = api.bodies.lock().unwrap();
-        let request = String::from_utf8_lossy(&bodies[1]);
-        assert!(request.contains("QUEUE-FIRST"), "{request}");
-        assert!(!request.contains("QUEUE-ORIGINAL"), "{request}");
-        assert!(
-            !request.contains("QUEUE-EDITED"),
-            "FIFO dispatch: {request}"
-        );
-        assert!(!request.contains("DRAFT-NEVER-SUBMIT"), "{request}");
-    }
-    api.release_response();
-    api.wait_for_request(&mut candidate, 3);
-    {
-        let bodies = api.bodies.lock().unwrap();
-        let request = String::from_utf8_lossy(&bodies[2]);
-        assert!(request.contains("QUEUE-EDITED"), "{request}");
-        assert!(!request.contains("QUEUE-ORIGINAL"), "{request}");
-        assert!(!request.contains("DRAFT-NEVER-SUBMIT"), "{request}");
-    }
-    await_screen(
+    candidate.pty.drain_for(Duration::from_millis(400));
+    assert_eq!(
+        api.count.load(Ordering::SeqCst),
+        1,
+        "interrupted steering must not be submitted automatically"
+    );
+    await_composer_text(
         &mut candidate,
         &mut parser,
         &mut consumed,
         "DRAFT-NEVER-SUBMIT",
     );
-    candidate.pty.write_input(b"\x03\x03"); // clear draft, then plain cancellation
-    candidate.pty.drain_for(Duration::from_millis(250));
-    api.release_response();
+    let screen = parser.screen().contents();
+    assert!(
+        screen.contains("QUEUE-FIRST") && screen.contains("QUEUE-EDITED"),
+        "undelivered steering must return to the composer: {screen}"
+    );
+    assert_eq!(
+        api.count.load(Ordering::SeqCst),
+        1,
+        "restored steering must not be submitted with the draft"
+    );
     candidate.shutdown();
-    assert_eq!(api.count.load(Ordering::SeqCst), 3);
+    assert_eq!(api.count.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn real_queued_steering_option_up_edit_pty_contract() {
+fn real_queued_follow_up_option_up_edit_and_settled_dispatch_pty_contract() {
     let _guard = pty_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let api = HeldApi::start();
-    let mut candidate = Candidate::spawn(&api.url, "dark", "never");
+    let mut candidate = Candidate::spawn(&api.url, "dark", "never", "app");
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
     await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
     candidate.pty.write_input(b"steering fixture initial\r");
     api.wait_for_request(&mut candidate, 1);
 
-    // Ctrl+S admits steering to the active run, unlike the Enter follow-ups
-    // covered above. The held response keeps its model boundary unreachable.
+    // Ctrl+S queues an editable follow-up for after the run; the held response
+    // keeps the run active so the entry stays local.
     candidate.pty.write_input(b"STEER-ORIGINAL\x13");
-    await_screen(&mut candidate, &mut parser, &mut consumed, "Steering");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "Follow-up");
     let edit_hint = if cfg!(target_os = "macos") {
         "(option+↑ to edit)"
     } else {
@@ -981,7 +1051,7 @@ fn real_queued_steering_option_up_edit_pty_contract() {
     await_composer_text(&mut candidate, &mut parser, &mut consumed, "STEER-ORIGINAL");
     assert!(
         !parser.screen().contents().contains(edit_hint),
-        "recalled steering must leave the pending queue: {}",
+        "recalled follow-up must leave the pending queue: {}",
         parser.screen().contents()
     );
     candidate
@@ -1037,9 +1107,20 @@ fn real_queued_steering_option_up_edit_pty_contract() {
     }
     let mut sessions = Vec::new();
     collect_sessions(&candidate._root.path().join("sessions"), &mut sessions);
-    assert_eq!(sessions.len(), 1, "steering must stay in the same session");
-    let session = fs::read_to_string(&sessions[0]).expect("persisted steering session");
-    assert_eq!(session.matches("STEER-EDITED").count(), 1, "{session}");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "the follow-up must stay in the same session"
+    );
+    let session = fs::read_to_string(&sessions[0]).expect("persisted follow-up session");
+    // The persisted user row carries both the display label and the model
+    // text, so count the model content and prove the recalled original and
+    // drafts never reached the session.
+    assert_eq!(
+        session.matches("\"Text\":\"STEER-EDITED\"").count(),
+        1,
+        "{session}"
+    );
     assert!(!session.contains("STEER-ORIGINAL"), "{session}");
     assert!(!session.contains("PROTECTED-DRAFT"), "{session}");
     assert!(!session.contains("DRAFT-NEVER-SUBMIT"), "{session}");
