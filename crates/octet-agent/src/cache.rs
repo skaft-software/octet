@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::session::{EntryId, EntryValue, Session, UsageRecord, UsageRecordKind};
+use crate::session::{CacheWarmState, EntryId, EntryValue, Session, UsageRecord, UsageRecordKind};
 use octet_ai::{Cost, EndpointId, ModelId, Usage};
 
 /// Reusable-prefix misses of this size or smaller are intentionally ignored.
@@ -184,21 +184,10 @@ fn analyze_session_cache_impl(
         .enumerate()
         .map(|(index, id)| (id.0.as_str(), index))
         .collect();
-    let turns = session
-        .usage_records()
+    let mut completed_warms = session
+        .cache_warm_records()
         .iter()
-        .filter_map(|record| match &record.kind {
-            UsageRecordKind::AssistantTurn { assistant } => positions
-                .get(assistant.0.as_str())
-                .copied()
-                .map(|index| (index, assistant, record)),
-            UsageRecordKind::DelegatedAgent { .. }
-            | UsageRecordKind::Compaction
-            | UsageRecordKind::CacheWarm
-            | UsageRecordKind::RejectedResponsesTurn
-            | UsageRecordKind::TerminalGate { .. } => None,
-        })
-        .collect::<Vec<_>>();
+        .filter(|record| record.state == CacheWarmState::Completed);
     // Usage records are append-only after their assistant entry. Filtering
     // abandoned branches therefore preserves active-branch chronology even
     // after checkout: a newly created branch suffix is always appended after
@@ -209,7 +198,30 @@ fn analyze_session_cache_impl(
     let mut misses = Vec::new();
     let mut previous: Option<PreviousRequest> = None;
 
-    for (branch_index, assistant, record) in turns {
+    for record in session.usage_records() {
+        if matches!(&record.kind, UsageRecordKind::CacheWarm) {
+            // A successful refresh resets cache age, not the assistant-turn
+            // denominator or reusable prompt size. Ignore abandoned prefixes
+            // and other routes; auxiliary inference is not a cache keepalive.
+            if let (Some(warm), Some(prior)) = (completed_warms.next(), previous.as_mut()) {
+                if warm
+                    .anchor
+                    .as_ref()
+                    .is_some_and(|anchor| positions.contains_key(anchor.0.as_str()))
+                    && prior.endpoint.as_ref() == Some(&warm.endpoint)
+                    && prior.model.as_ref() == Some(&warm.model)
+                {
+                    prior.completed_at_unix_ms = record.completed_at_unix_ms;
+                }
+            }
+            continue;
+        }
+        let UsageRecordKind::AssistantTurn { assistant } = &record.kind else {
+            continue;
+        };
+        let Some(&branch_index) = positions.get(assistant.0.as_str()) else {
+            continue;
+        };
         stats.assistant_turns = stats.assistant_turns.saturating_add(1);
         stats.cache_read_tokens = stats
             .cache_read_tokens
@@ -383,6 +395,72 @@ mod tests {
 
         let (stats, _) = analyze_session_cache(&session);
         assert_eq!(stats.latest_raw_hit_rate_basis_points(), Some(0));
+    }
+
+    #[test]
+    fn successful_warm_resets_idle_age_without_inflating_assistant_metrics() {
+        use crate::session::{CacheWarmRecord, SessionRecord};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("warm-timing.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let first = record_turn(&mut session, "a", 10_000, 0, 10_000);
+        let mut warm = CacheWarmRecord {
+            attempt: 1,
+            endpoint: EndpointId("provider".into()),
+            model: ModelId("a".into()),
+            state: CacheWarmState::Started,
+            at_unix_ms: 400_000,
+            anchor: Some(first.clone()),
+            extension_override: true,
+        };
+        session.record_cache_warm_status(warm.clone()).unwrap();
+        session
+            .record_cache_warm_usage(
+                warm.endpoint.clone(),
+                warm.model.clone(),
+                usage(50_000, 50_000, 0),
+                None,
+            )
+            .unwrap();
+        warm.state = CacheWarmState::Completed;
+        session.record_cache_warm_status(warm).unwrap();
+        record_turn(&mut session, "a", 12_000, 0, 0);
+        drop(session);
+        // Replay fixed timestamps rather than sleeping or depending on wall time.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let records = text
+            .lines()
+            .map(|line| {
+                let mut value: SessionRecord = serde_json::from_str(line).unwrap();
+                if let SessionRecord::Usage { record } = &mut value {
+                    record.completed_at_unix_ms = Some(match &record.kind {
+                        UsageRecordKind::AssistantTurn { assistant } if assistant == &first => 0,
+                        UsageRecordKind::CacheWarm => 400_000,
+                        _ => 500_000,
+                    });
+                }
+                serde_json::to_string(&value).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, records).unwrap();
+        let session = Session::open(&path).unwrap();
+        let (stats, misses) = analyze_session_cache(&session);
+        assert_eq!(stats.assistant_turns, 2);
+        assert_eq!(stats.latest_prompt_tokens, 12_000);
+        assert_eq!(stats.reusable_prefix_tokens, 10_000);
+        assert_eq!(stats.cache_read_tokens, 0);
+        assert_eq!(misses.len(), 1);
+        assert_eq!(misses[0].idle, Some(Duration::from_secs(100)));
+        assert!(!misses[0].idle_past_short_ttl);
+        assert!(
+            session
+                .cache_warm_records()
+                .last()
+                .unwrap()
+                .extension_override
+        );
     }
 
     #[test]
