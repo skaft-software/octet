@@ -89,7 +89,10 @@ endpoint identity or session-affinity format:
   tool outputs while retaining every other opaque field.
 
 Public/non-Lite compact routes retain their narrower schema. Lite is never
-inferred from a model name, endpoint label, or authentication plan.
+inferred from a model name, endpoint label, or authentication plan. The coding
+product's Codex route selects ordinary Responses with parallel calls, like Pi,
+even when account inventory prefers Lite; explicit SDK Lite selection keeps the
+contract above.
 
 ## Native compact opening boundary
 
