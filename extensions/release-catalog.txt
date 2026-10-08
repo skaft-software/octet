@@ -2,15 +2,13 @@
 # Keep one lowercase package ID per line; release packaging and the compiled
 # package manager consume this same catalog.
 #
-# octet-browse is DEPRECATED but still published and installable. It remains the
-# safer surface for authenticated page work because it uses an isolated,
-# Octet-owned Chromium profile with a manual-auth boundary. New automation
-# should prefer the computer-use extension, which drives a locally installed
-# Cua Driver. The package is retained until that path demonstrably covers the
-# isolated-browser case.
-# deprecated: octet-browse -> octet-computer-use
-octet-browse
+# octet-browse was removed as a shipped package. It is retained in git history
+# and in the public snapshot repository. Authenticated page work now goes through
+# the computer-use extension, which drives a locally installed Cua Driver; the
+# catalog no longer carries a browser package.
+octet-codemode
 octet-computer-use
 octet-mcp
+octet-pi-compat
 octet-subagents
 octet-web-search

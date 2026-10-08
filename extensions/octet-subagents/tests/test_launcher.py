@@ -328,6 +328,17 @@ def adapter_plan(octet_binary, workers, multiplexer="tmux", workspace="/workspac
                       inside_multiplexer=False)
 
 
+class ChildIsolationTests(unittest.TestCase):
+    def test_multiplexer_commands_never_inherit_stdin(self):
+        """Inside octet stdin is the protocol pipe; a child must not share it."""
+        from octet_subagents import launcher
+
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(launcher.subprocess, "run", return_value=completed) as run:
+            launcher._run(["tmux", "list-sessions"])
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+
 class LauncherTestCase(unittest.TestCase):
     def setUp(self):
         self.stub = Stub()

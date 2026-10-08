@@ -10,9 +10,13 @@ table, and test commands.
 ## Boundary and authority
 
 - The driver is third-party software installed from the standard package index
-  into `~/.octet/computer-use`. It is not vendored, not forked, and contains no
+  into `~/.octet/computer-use`. Default macOS setup also installs its matching
+  signed app from Cua's tagged release after SHA-256 and Developer ID checks;
+  that app stays in octet-owned state, never replacing a global application.
+  It is not vendored, not forked, and contains no
   part of OpenAI's CUA runtime. This bundle never downloads a driver outside the
-  user-triggered `computer_use_setup` / `/computer-use` provisioning step, and
+  user-triggered `computer_use_setup` tool or **Set up computer use** menu
+  action (under `/extensions`), and
   never runs a piped remote install script.
 - The bundle **never grants an operating-system permission**. macOS
   Accessibility/Screen Recording, a Windows interactive session, and Linux
@@ -26,7 +30,12 @@ table, and test commands.
   session variables. Provider tokens and arbitrary ambient environment are not
   forwarded. The manifest `[capabilities] environment` list is the host-level
   gate; the runtime's `SESSION_ENVIRONMENT` is the bundle-level gate; both must
-  agree before a name reaches the child.
+  agree before a name reaches the child. On Linux only, the child also receives
+  `LINUX_LAUNCH_ENVIRONMENT` (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `TMPDIR`, and locale), the host-sanitized baseline every octet tool
+  subprocess already has, because the Linux driver launches apps with its own
+  environment. In a Wayland session the child also gets
+  `CUA_DRIVER_RS_ENABLE_WAYLAND=1`, the driver's native Wayland opt-in.
 - Credential, payment, and one-time-code entry stays manual. The bundle never
   types secrets and never echoes a typed value.
 
@@ -48,26 +57,42 @@ table, and test commands.
   resulting enabled state before reporting readiness. Failures surface and block
   actions rather than silently proceeding cursorless.
 - Public start/end operations switch or clear that same session; subsequent
-  actions attach to the active session, and extension shutdown ends it.
+  actions attach to the active session, and extension shutdown ends it. A new
+  transport always generates a fresh session identity, even within one PID.
 
 ## Platform notes
 
-- **macOS** — by default, the signed `/Applications/CuaDriver.app` is the
-  desktop host and owns the daemon's permission identity and cursor overlay. If
+- **macOS** — the setup-owned signed `CuaDriver.app`, or a matching existing
+  `/Applications/CuaDriver.app`, owns the daemon's permission identity and cursor
+  overlay. LaunchServices opens that exact selected app path. If
   the host is missing or cannot prove its permissions, runtime status is
   `unavailable`; octet does not silently fall back to a cursorless direct
   runtime. `OCTET_CUA_DESKTOP_HOST=0` explicitly opts into direct mode. An
   alternate app is only selected through the explicit developer override.
 - **Windows** — the driver runs as the interactive user; a locked or
   headless session is not drivable.
-- **Linux** — needs a live display session and AT-SPI 2. X11/XWayland is more
-  widely supported than native Wayland; Wayland input is compositor-dependent.
+- **Linux** — needs a live display session; there is no grant. Readiness is
+  read from the driver's `check_permissions` session report: X11 or a Wayland
+  session with the native backend enabled counts as ready, and only a missing
+  display holds effectful actions. AT-SPI 2 is reported but not required,
+  because the driver can act by pixel. Wayland input is compositor-dependent
+  (wlroots virtual pointer on Hyprland/Sway, portal/libei elsewhere), and
+  Wayland input to a window that is not focused needs `delivery_mode:
+  "foreground"`; neither octet nor the driver escalates automatically. The
+  Linux runtime is always direct and draws the model-colored cursor through
+  Cua's own X11 or layer-shell overlay, best-effort: a cursor failure is
+  reported and never blocks an action. The bundled themes are written into
+  the driver's theme store directly (the wheel has no theme compiler), at setup
+  and on first cursor use. GNOME Wayland uses the bundled, Octet-patched Cua
+  WinRects Shell helper (installed by computer-use setup, loaded at the next
+  login), which draws the cursor itself and is pinned to the model color over
+  D-Bus. KDE Plasma's KWin helper must be built against the local KWin, so it
+  is not bundled; KDE Wayland works through AT-SPI and portal input.
 
 ## Not qualified here
 
-- This bundle does not implement a *browser* surface. For page-level work,
-  including anything authenticated, prefer the still-supported
-  [octet-browse](../octet-browse/README.md) (now deprecated for new automation
-  but retained for its isolated, manual-auth profile).
+- This bundle does not implement a *browser* surface. Page-level work goes
+  through the desktop you already run, including any signed-in browser session,
+  with the observe-act-verify loop below.
 - Physical-teardown detection, hard process-loss cleanup, and cross-platform
   installed-package qualification remain with the driver project.

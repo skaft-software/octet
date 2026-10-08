@@ -25,3 +25,7 @@ python3 extensions/octet-computer-use/themes/build.py /path/to/cua-driver
 The generated `palette.json` and `.cua-theme` files are checked in and shipped
 in the extension. A user-initiated `/computer-use setup` installs only these
 bundled artifacts through Cua's trusted local CLI, never through an agent tool.
+Where the driver ships no theme compiler (the `cua-driver` wheels, used on
+Linux), the extension performs the CLI's own install step instead: an atomic
+write of `<id>.cua-theme` into Cua's theme store, which the driver validates
+again on load. On Linux that also happens the first time the cursor starts.
