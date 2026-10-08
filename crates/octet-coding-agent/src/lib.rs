@@ -73,6 +73,10 @@ pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
+/// With no arguments, exit once startup has dispatched to the interactive
+/// frontend. For startup benchmarks only (`benchmarks/startup.sh`).
+const STARTUP_BENCH_ENV: &str = "OCTET_BENCH";
+
 /// Run the terminal frontend with the same diagnostics and exit status as the `octet` binary.
 pub async fn run_cli() -> std::process::ExitCode {
     match run().await {
@@ -110,6 +114,7 @@ async fn run() -> anyhow::Result<()> {
     // itself inert: the trace stays off unless `OCTET_STARTUP_TRACE` is set.
     octet_agent::extension_process::set_startup_trace_sink(forward_startup_trace);
     app::bootstrap::startup_phase("process.enter");
+    let bench = args.len() <= 1 && std::env::var_os(STARTUP_BENCH_ENV).is_some();
     let (mut cli, extension_flag_values, parsed_cwd) =
         if cli::uses_runtime_extension_flag_parser(&args) {
             let cwd = std::env::current_dir()?;
@@ -151,6 +156,12 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(cli::TopLevelCommand::Update { check }) = top_level_command.clone() {
         return update::run(check).await;
+    }
+    if bench && top_level_command.is_none() {
+        // The boundary fx's `FX_BENCH` measures: arguments are parsed and
+        // dispatched to the interactive frontend. Nothing after it runs: no
+        // working directory, terminal, configuration, session or extension.
+        std::process::exit(0);
     }
     let cwd = match parsed_cwd {
         Some(cwd) => cwd,
