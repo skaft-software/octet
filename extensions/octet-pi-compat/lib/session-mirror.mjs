@@ -3,6 +3,25 @@ import { contextBytes, historyItems } from './context-limits.mjs';
 import { canonicalToPi } from './provider-context.mjs';
 import { bounded, invalid, plainJSON, unsupported } from './errors.mjs';
 
+// Translating walks each message's ancestry, so a host view is translated once
+// per namespace and limits. Views only grow by append, so the length detects
+// a stale translation. Callers get copies and never share mutable entries.
+const translations = new WeakMap();
+function cachedTranslation(entries, namespace) {
+  if (!Array.isArray(entries)) return translateSessionEntries(entries, namespace);
+  const key = `${namespace}\0${historyItems()}\0${contextBytes()}`;
+  let byKey = translations.get(entries);
+  if (!byKey) translations.set(entries, byKey = new Map());
+  let cached = byKey.get(key);
+  if (cached?.length !== entries.length) byKey.set(key, cached = { length: entries.length, result: translateSessionEntries(entries, namespace) });
+  return cached.result;
+}
+export const sessionEntryCopies = (entries, namespace) => structuredClone(cachedTranslation(entries, namespace));
+export function sessionEntryCopy(entries, namespace, id) {
+  const entry = cachedTranslation(entries, namespace).find(candidate => candidate.id === id);
+  return entry === undefined ? undefined : structuredClone(entry);
+}
+
 export function translateSessionEntries(entries, namespace) {
   if (!Array.isArray(entries) || entries.length > historyItems()) invalid('session entries snapshot');
   const byId = new Map(entries.map(entry => [entry.id, entry]));
