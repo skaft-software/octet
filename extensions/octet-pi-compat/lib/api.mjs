@@ -10,7 +10,7 @@ import { currentModel, thinkingLevel, scopedModels, modelRegistry, registerProvi
 import { setModel, setThinkingLevel } from './model-control.mjs';
 import { registerTool, toolSnapshot, getAllTools, setActiveTools } from './tools.mjs';
 import { Editor } from './editor.mjs';
-import { translateSessionEntries } from './session-mirror.mjs';
+import { sessionEntryCopies, sessionEntryCopy } from './session-mirror.mjs';
 import { compactionCallbackStore, requestCompaction } from './compaction.mjs';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 import { contextFacts, getSettings } from './context-api.mjs';
@@ -311,7 +311,8 @@ export function createContext(runtime, store, replaced = false) {
     if (host.session_entries === null || host.session_branch === null) unsupported('ctx.sessionManager', 'native session view unavailable');
     return { ...state, host };
   };
-  const sessionEntries = key => withContextLimits(runtime.sessionTransport?.profile, () => translateSessionEntries(snapshot(sessionState().host, key, `ctx.sessionManager.${key}`), runtime.namespace));
+  const sessionEntries = key => withContextLimits(runtime.sessionTransport?.profile, () => sessionEntryCopies(snapshot(sessionState().host, key, `ctx.sessionManager.${key}`), runtime.namespace));
+  const sessionEntry = id => withContextLimits(runtime.sessionTransport?.profile, () => sessionEntryCopy(snapshot(sessionState().host, 'session_entries', 'ctx.sessionManager.session_entries'), runtime.namespace, id));
   const sessionManager = strict({
     getCwd: () => sessionState().workspace,
     getSessionId: () => sessionState().host.session_id ?? undefined,
@@ -328,7 +329,7 @@ export function createContext(runtime, store, replaced = false) {
       }
       return branch.reverse();
     },
-    getLeafEntry: () => sessionEntries('session_entries').find(entry => entry.id === sessionState().host.session_leaf_id),
+    getLeafEntry: () => sessionEntry(sessionState().host.session_leaf_id),
     getLabel: id => snapshot(sessionState().host, 'session_labels', 'ctx.sessionManager.getLabel')[id],
     buildContextEntries: () => buildContextEntries(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
     buildSessionProjection: () => buildSessionProjection(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
@@ -349,7 +350,7 @@ export function createContext(runtime, store, replaced = false) {
       if (file === null) unsupported('ctx.sessionManager.getSessionDir', 'no persistent session directory supplied by the host');
       return dirname(file);
     },
-    getEntry: id => sessionEntries('session_entries').find(entry => entry.id === id),
+    getEntry: id => sessionEntry(id),
   }, 'ctx.sessionManager');
   return facade({
     get cwd() { return current().workspace; },

@@ -2,7 +2,7 @@
 import { dirname } from 'node:path';
 import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { entryPayload } from './session-leaf.mjs';
-import { translateSessionEntries } from './session-mirror.mjs';
+import { sessionEntryCopies, sessionEntryCopy } from './session-mirror.mjs';
 import { piToCanonical } from './provider-context.mjs';
 import { customMessage } from './custom-messages.mjs';
 
@@ -27,7 +27,8 @@ function setupManager(runtime, store) {
   // Session facts come from whichever transport delivers them; owner, cwd and
   // workspace stays host-owned and reading them grants no authority.
   const facts = () => { live(); return runtime.sessionFacts(store); };
-  const entries = () => translateSessionEntries(facts().session_entries, runtime.namespace);
+  const entries = () => sessionEntryCopies(facts().session_entries, runtime.namespace);
+  const entry = id => sessionEntryCopy(facts().session_entries, runtime.namespace, id);
   const branch = (id = facts().session_leaf_id) => {
     const all = entries(), byId = new Map(all.map(entry => [entry.id, entry])), path = [], seen = new Set();
     while (id !== null) {
@@ -63,9 +64,9 @@ function setupManager(runtime, store) {
     getCwd: () => { live(); return store.state.workspace; },
     isPersisted: () => facts().session_file !== null,
     getEntries: entries, getBranch: branch,
-    getEntry: id => entries().find(entry => entry.id === id),
+    getEntry: id => entry(id),
     getLeafId: () => facts().session_leaf_id,
-    getLeafEntry: () => entries().find(entry => entry.id === facts().session_leaf_id),
+    getLeafEntry: () => entry(facts().session_leaf_id),
     getChildren: id => entries().filter(entry => entry.parentId === id),
     getLabel: id => facts().session_labels?.[id],
     getSessionName: () => {
