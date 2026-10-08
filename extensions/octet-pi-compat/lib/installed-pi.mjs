@@ -248,15 +248,16 @@ function resolveRelative(from, specifier) {
   }
   return null;
 }
+const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Detect direct execution as well as a saved execute callback. These factories
 // can load successfully with child-only shims until a later branch runs. This is
 // a bounded source heuristic, not execution qualification or a sandbox.
 function directlyUsesToolExecution(text, binding) {
-  const escaped = binding.replace(/\$/g, '\\$');
+  const escaped = escapeRegExp(binding);
   if (new RegExp(`\\b${escaped}\\s*\\([^;]*?\\)\\s*\\.\\s*execute\\b`).test(text)) return true;
   const assigned = new RegExp(`\\b(?:const|let|var)\\s+([\\w$]+)(?:\\s*:[^=;\\n]+)?\\s*=\\s*${escaped}\\s*\\(`, 'g');
   for (const [, name] of text.matchAll(assigned)) {
-    if (new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\s*\\.\\s*execute\\b`).test(text)) return true;
+    if (new RegExp(`\\b${escapeRegExp(name)}\\s*\\.\\s*execute\\b`).test(text)) return true;
   }
   return false;
 }
