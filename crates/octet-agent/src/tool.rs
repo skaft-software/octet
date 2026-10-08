@@ -37,6 +37,13 @@ pub enum ToolConcurrency {
     Sequential,
     /// Calls may execute concurrently with other parallel-safe calls.
     Parallel,
+    /// A self-contained native process (one shell command, one search) that
+    /// may overlap the other overlappable calls of the same model response, as
+    /// Pi runs them, but only while the effect policy admits host processes
+    /// without approval. Unlike [`Parallel`](Self::Parallel) it is never
+    /// advertised as an asynchronous tool, and it never overlaps a mutation:
+    /// edits and writes stay ordered barriers.
+    ParallelProcess,
 }
 
 /// A tool the model can call.
