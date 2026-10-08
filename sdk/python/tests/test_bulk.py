@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import PropertyMock, patch
 
 from octet_extension import BlobDigest, BlobRef, CancelledError, CancellationToken, Extension, RpcError
+from octet_extension.bulk import _secure_local_file_available
 from octet_extension.typed import _root_codec
 
 
@@ -16,6 +17,23 @@ LIMITS = {"object_bytes": 1024 * 1024, "owner_bytes": 2 * 1024 * 1024,
           "write_tickets_per_generation": 8, "read_leases_per_generation": 32, "blobs_per_owner": 256}
 
 
+SECURE_TRANSPORT = unittest.skipUnless(
+    _secure_local_file_available(), "local-file.v1 needs dir_fd, O_NOFOLLOW and O_DIRECTORY")
+
+
+class BulkPlatformTests(unittest.TestCase):
+    def test_missing_secure_file_primitives_fail_closed(self):
+        bulk = Extension(api_version="0.4", stderr=io.StringIO()).enable_bulk()
+        with tempfile.TemporaryDirectory() as root, \
+                patch("octet_extension.bulk._secure_local_file_available", return_value=False), \
+                self.assertRaises(RpcError) as raised:
+            bulk._configure({"profile": "local-file.v1", "transfer_directory": root, "limits": LIMITS})
+        self.assertEqual(raised.exception.message, "secure local-file.v1 transport is unavailable")
+        with self.assertRaises(RpcError):
+            bulk.publish_bytes(b"a")
+
+
+@SECURE_TRANSPORT
 class BulkTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -23,12 +23,12 @@ class ProcessHarness:
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.log = self.root / "calls.jsonl"
-        self.stderr = (self.root / "stderr.log").open("w+")
+        self.stderr = (self.root / "stderr.log").open("w+", encoding="utf-8")
         self.addCleanup(self.stderr.close)
         self.process = subprocess.Popen(
             [sys.executable, "-u", str(Path(__file__).with_name(self.fixture_name)), str(self.log)],
             cwd=self.root, env={**os.environ, "HOME": str(self.root), "PYTHONDONTWRITEBYTECODE": "1"},
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr, text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr, text=True, encoding="utf-8",
         )
         self.addCleanup(self.cleanup_process)
         self.messages = queue.Queue()
