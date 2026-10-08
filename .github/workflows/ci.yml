@@ -127,6 +127,12 @@ jobs:
           while IFS= read -r extension; do
             [[ -n "$extension" ]] || continue
             root="extensions/$extension"
+            if [[ -f "$root/package.json" && ! -d "$root/tests" ]]; then
+              # Node adapters run their own suites in the test job, which
+              # builds the native editor peer their editor tests require.
+              echo "$extension: Node suite runs in the test job"
+              continue
+            fi
             test -d "$root/tests"
             if [[ -f "$root/tests/__init__.py" ]]; then
               (cd "$root" && python3 -m unittest discover -s tests -t .)
@@ -201,11 +207,34 @@ jobs:
           node-version: "22.19.0"
       - name: Install reviewed Pi adapter test dependencies
         run: npm ci --prefix extensions/octet-pi-compat --ignore-scripts --no-audit --no-fund
+      - name: Install ripgrep for the search tool
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ripgrep
+          else
+            brew install ripgrep
+          fi
+          rg --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
         timeout-minutes: 15
         env:
           OCTET_PTY_TRACE: "1"
+      # `cargo test --all-targets` builds examples only as test harnesses.
+      - name: Build the native editor peer for the Node adapter suites
+        run: cargo build -p octet-coding-agent --example native-editor-test-host --profile ci-test --locked
+      - name: Test the Node extension adapters in the release catalog
+        env:
+          OCTET_NATIVE_EDITOR_TEST_HOST: ${{ github.workspace }}/target/ci-test/examples/native-editor-test-host
+        run: |
+          set -euo pipefail
+          while IFS= read -r extension; do
+            root="extensions/$extension"
+            [[ -f "$root/package.json" && ! -d "$root/tests" ]] || continue
+            npm ci --prefix "$root" --ignore-scripts --no-audit --no-fund
+            npm test --prefix "$root"
+          done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
       - run: cargo check --workspace --all-targets --no-default-features --locked
 
   windows:
