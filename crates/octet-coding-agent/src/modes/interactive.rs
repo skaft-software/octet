@@ -11535,7 +11535,7 @@ async fn run_interactive_once(
         // Attach every extension handshake that settled while the loop was
         // idle. An attach can add tools, commands, skills, prompts, themes and
         // UI, so the projections below are re-derived once it lands.
-        let startup_progress = app.pump_extension_startup().await;
+        let startup_progress = app.pump_extension_startup().await?;
         if startup_progress.changed {
             refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
             update_status(&mut shell, &app);

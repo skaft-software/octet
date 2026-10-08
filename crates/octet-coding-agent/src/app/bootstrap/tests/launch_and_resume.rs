@@ -424,3 +424,109 @@ fn prepared_configuration_skips_a_second_scan_and_preserves_provenance() {
         Some(ReasoningConfig::Off)
     );
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_subagents_binds_observation_before_ultra_selection() {
+    use octet_ai::{ReasoningEffort, ResponsesFeatures};
+
+    // Both attach paths must wire the host service, with either a normal or
+    // explicit Ultra startup selection. No inference request is needed.
+    for prompt_boundary in [false, true] {
+        for initial in [
+            ReasoningConfig::Effort(ReasoningEffort::Max),
+            ReasoningConfig::Effort(ReasoningEffort::Ultra),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let model_id = "fixture-ultra-deferred";
+            let ultra = ReasoningConfig::Effort(ReasoningEffort::Ultra);
+            let low = ReasoningConfig::Effort(ReasoningEffort::Low);
+            let mut process_config = config(directory.path(), Some(model_id));
+            process_config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+            // Extension roots contain named bundle directories; discovery scans their direct children.
+            let extension_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../extensions")
+                .canonicalize()
+                .unwrap();
+            process_config.extension_paths = vec![extension_root.clone()];
+            process_config.enabled_extensions = vec!["octet-subagents".into()];
+            process_config.invocation_trusted_extensions = vec!["octet-subagents".into()];
+            process_config.reasoning = Some(initial.clone());
+            process_config.reasoning_explicit = true;
+            let mut boot = bootstrap(process_config).unwrap();
+            let mut model = boot
+                .catalog
+                .resolve(&ModelId("gpt-6-astra".into()))
+                .unwrap();
+            let features = ResponsesFeatures {
+                reasoning_effort_updates: true,
+                ..Default::default()
+            };
+            let endpoint = Arc::make_mut(&mut model.endpoint);
+            endpoint.id = octet_ai::EndpointId(model_id.into());
+            endpoint.runtime.responses_features = features;
+            boot.catalog.register_endpoint(endpoint.clone()).unwrap();
+            let spec = Arc::make_mut(&mut model.spec);
+            spec.id = ModelId(model_id.into());
+            spec.endpoint = model.endpoint.id.clone();
+            spec.capabilities.responses_features = features;
+            spec.capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
+            let capability = spec.capabilities.reasoning.as_mut().unwrap();
+            capability.max_effort = ReasoningEffort::Ultra;
+            capability.options = Some(octet_ai::types::ReasoningOptions {
+                values: vec!["none".into(), "low".into(), "max".into(), "ultra".into()],
+                default: Some("low".into()),
+            });
+            boot.catalog.register_model(spec.clone()).unwrap();
+            let launch = resolve_launch_print(&boot, "deferred-ultra").unwrap();
+            let mut app = build_app_first_frame_first(boot, launch, "system".into()).unwrap();
+            assert!(app.executable_extensions.startup_pending());
+            assert!(!app.subagents_available());
+            let session = app.agent.session().path().to_path_buf();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while app.executable_extensions.startup_pending() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{}",
+                    app.executable_extensions.inspect_text()
+                );
+                if prompt_boundary {
+                    app.await_extension_prompt_hooks().await.unwrap();
+                } else {
+                    let progress = app.pump_extension_startup().await.unwrap();
+                    assert!(progress.notices.is_empty(), "{:?}", progress.notices);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                app.subagents_available(),
+                "{}",
+                app.executable_extensions.inspect_text()
+            );
+            let team = app
+                .agent
+                .delegation_team_directory()
+                .expect("deferred observation runtime")
+                .to_path_buf();
+            app.agent.set_reasoning(ultra.clone()).unwrap();
+            app.agent.set_reasoning(low.clone()).unwrap();
+            app.agent.set_reasoning(ultra.clone()).unwrap();
+            assert_eq!(app.agent.session().path(), session);
+            assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
+            let status = app
+                .executable_extensions
+                .execute_command_without_confirmation("subagents", vec!["status".into()])
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                status.starts_with("Subagents: 0 active · 0 terminal · 0 total\n"),
+                "{status}"
+            );
+            // Subsequent idle pumps must not replace the bound runtime.
+            assert!(!app.pump_extension_startup().await.unwrap().changed);
+            assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
+            app.executable_extensions.shutdown_blocking();
+        }
+    }
+}

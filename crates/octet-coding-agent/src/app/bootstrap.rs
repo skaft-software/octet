@@ -8601,12 +8601,19 @@ fn build_app_with_consumer(
         config.compaction.keep_recent_tokens,
     )?;
     agent.set_max_session_cost_microdollars(config.max_cost_microdollars);
-    if service_available {
+    if service_available || service_pending {
         agent.set_delegation_model_resolver(Arc::new(
             super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
         ));
     }
-    configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
+    // An admitted deferred subagents process needs the host runtime before it
+    // attaches. The frontend still gates Ultra on its negotiated live service.
+    configure_v2_delegation(
+        &mut agent,
+        &model,
+        &reasoning,
+        service_available || service_pending,
+    )?;
     executable_extensions.bind_agent_sessions(&agent)?;
     if agent.reasoning() != &reasoning {
         // Construction restores durable effort. Install and bind observation

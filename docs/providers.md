@@ -274,9 +274,13 @@ octet --extension-dir ./extensions \
   --model gpt-5.6-sol --reasoning ultra
 ```
 
-This needs a live, owner-bound child-session service. To rebuild or replace an
-installed bundle, run `./scripts/reinstall-octet-subagents.sh`. `cargo run`
-doesn't update `~/.octet/extensions`. See the [subagents
+This needs a live, owner-bound child-session service. Interactive startup may
+attach subagents after the first frame; Ultra becomes selectable once that
+process has negotiated and bound its service. An explicit Ultra startup choice
+initializes the host runtime before the deferred process attaches.
+
+To rebuild or replace an installed bundle, run
+`./scripts/reinstall-octet-subagents.sh`. `cargo run` doesn't update `~/.octet/extensions`. See the [subagents
 package](../extensions/octet-subagents/README.md) and its API 0.4 exact-version
 boundary. Catalog install works once the matching release is published:
 [Optional packages](installation.md#optional-packages).
