@@ -92,6 +92,7 @@ impl BackgroundTools {
                 ParallelReadPreparation::Admitted(admitted) => Box::new(
                     execute_admitted_parallel_read(
                         *admitted,
+                        None,
                         &sandbox,
                         &tool_scope,
                         &resource_owner,
