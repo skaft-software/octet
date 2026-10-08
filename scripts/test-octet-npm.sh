@@ -16,8 +16,23 @@ fi
 repository_directory=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 version=${1:-$(awk -F '"' '/^version = / { print $2; exit }' "$repository_directory/Cargo.toml")}
 version=${version#v}
+node - "$repository_directory/packages/npm/launcher/lib/launch.js" <<'JS'
+const { selectedPackage } = require(process.argv[2]);
+for (const [platform, architecture, expected] of [
+  ['win32', 'x64', '@skaft/octet-win32-x64'],
+  ['darwin', 'arm64', '@skaft/octet-darwin-arm64'],
+  ['darwin', 'x64', '@skaft/octet-darwin-x64'],
+]) {
+  if (selectedPackage(platform, architecture) !== expected) throw new Error(`wrong platform mapping for ${platform}-${architecture}`);
+}
+for (const [platform, architecture] of [['win32', 'arm64'], ['linux', 'arm64']]) {
+  try { selectedPackage(platform, architecture); throw new Error(`unexpected support for ${platform}-${architecture}`); }
+  catch (error) { if (!error.message.includes('does not support')) throw error; }
+}
+console.log('npm platform map passed (including win32-x64)');
+JS
 script_directory="$repository_directory/scripts"
-for command in bash python3 npm; do
+for command in bash python3 node npm; do
     command -v "$command" >/dev/null 2>&1 || {
         printf 'required npm test command is unavailable: %s\n' "$command" >&2
         exit 1
@@ -44,6 +59,7 @@ import pathlib
 import stat
 import sys
 import tarfile
+import zipfile
 
 native = pathlib.Path(sys.argv[1])
 version = sys.argv[2]
@@ -51,6 +67,7 @@ targets = (
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
 )
 
 
@@ -117,12 +134,28 @@ printf '%s\\n' '{{"protocol_version":1,"request_id":"npm-test","seq":1,"type":"h
                         data = b"# fixture ignore rules\ndata/agent_tasks.jsonl\n"
                     add_file(archive, f"{root}/{name}", data)
 
+windows_tar = native / f"octet-{version}-x86_64-pc-windows-msvc.tar.gz"
+windows_zip = native / f"octet-{version}-x86_64-pc-windows-msvc.zip"
+with tarfile.open(windows_tar, "r:gz") as source, zipfile.ZipFile(windows_zip, "w", compression=zipfile.ZIP_DEFLATED) as output:
+    for member in source.getmembers():
+        if not member.isfile():
+            continue
+        relative = member.name.split("/", 1)[1]
+        data = source.extractfile(member).read()
+        if relative == "octet":
+            relative, data = "octet.exe", b"MZ" + data
+        elif relative == "octet-host":
+            relative, data = "octet-host.exe", b"MZ" + data
+        output.writestr(f"octet-{version}-x86_64-pc-windows-msvc/{relative}", data)
+windows_tar.unlink()
+
 lines = []
 install = native / "install-octet.sh"
 install.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 install.chmod(0o755)
+(native / "install-octet.ps1").write_text("Write-Output 'fixture installer'\\n", encoding="utf-8")
 for path in sorted(native.iterdir()):
-    if path.name == "install-octet.sh" or path.suffix == ".gz":
+    if path.name in {"install-octet.sh", "install-octet.ps1"} or path.suffix in {".gz", ".zip"}:
         lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  ./{path.name}")
 (native / "OCTET_SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="ascii")
 PY
@@ -140,7 +173,8 @@ python3 "$script_directory/generate-octet-release-metadata.py" \
     "skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v$version" \
     "skaft-software/octet" \
     "$native_directory/OCTET_SHA256SUMS" \
-    "$native_directory/OCTET_RELEASE_METADATA.json" >/dev/null
+    "$native_directory/OCTET_RELEASE_METADATA.json" \
+    --include-windows-msvc >/dev/null
 python3 "$script_directory/create-octet-npm-manifest.py" \
     "$version" \
     "v$version" \
@@ -327,6 +361,7 @@ import runpy
 import subprocess
 import sys
 import tarfile
+import zipfile
 
 scripts, native, output, work = map(pathlib.Path, sys.argv[1:5])
 version = sys.argv[5]
@@ -338,16 +373,42 @@ for package in manifest["packages"]:
     assert package["bytes"] == len(data)
     assert package["sha256"] == hashlib.sha256(data).hexdigest()
     assert package["sha512_integrity"] == "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+    with tarfile.open(output / package["artifact"]) as packed:
+        metadata = json.loads(packed.extractfile("package/package.json").read())
+        assert metadata["homepage"] == "https://octet.skaft.org", package["artifact"]
     if package["target"] == "launcher":
         continue
     root = f"octet-{version}-{package['target']}"
-    with tarfile.open(native / (root + ".tar.gz")) as source, tarfile.open(output / package["artifact"]) as packed:
+    native_archive = native / (f"octet-{version}-{package['target']}.zip" if package["target"] == "x86_64-pc-windows-msvc" else root + ".tar.gz")
+    with zipfile.ZipFile(native_archive) if native_archive.suffix == ".zip" else tarfile.open(native_archive, mode="r:gz") as source, tarfile.open(output / package["artifact"]) as packed:
         for name in sorted(files):
-            assert source.extractfile(root + "/" + name).read() == packed.extractfile("package/share/octet/" + name).read(), name
+            source_name = f"{root}/{name}"
+            source_stream = source.open(source_name) if native_archive.suffix == ".zip" else source.extractfile(source_name)
+            assert source_stream.read() == packed.extractfile("package/share/octet/" + name).read(), name
 for line in (output / "OCTET_NPM_SHA256SUMS").read_text().splitlines():
     digest, name = line.split("  ./")
     assert hashlib.sha256((output / name).read_bytes()).hexdigest() == digest
-print(f"native → npm: {len(files)} inventoried files match for all three targets; final artifact digests match")
+print(f"native → npm: {len(files)} inventoried files match for all four targets; final artifact digests match")
+
+# Every launcher/platform manifest must retain the fixed app homepage. Missing,
+# empty, or substituted URLs are release-identity failures, not extra metadata.
+for package in verification["expected_packages"](version):
+    original = verification["inspect_tarball"](output / package.artifact, package)
+    for homepage in (None, "", "https://unrelated.test"):
+        damaged = copy.deepcopy(original)
+        metadata = json.loads(damaged.contents["package.json"])
+        if homepage is None:
+            del metadata["homepage"]
+        else:
+            metadata["homepage"] = homepage
+        damaged.contents["package.json"] = json.dumps(metadata).encode()
+        try:
+            verification["check_manifest"](damaged, version)
+        except verification["VerificationError"] as error:
+            assert "wrong release identity" in str(error)
+        else:
+            raise AssertionError("verifier accepted invalid homepage: " + package.artifact)
+print("launcher/platform homepage and invalid-homepage regressions passed")
 
 expected = verification["expected_packages"](version)[1]
 inspection = verification["inspect_tarball"](output / expected.artifact, expected)
@@ -446,7 +507,7 @@ for mutation, message in [("changed", b"npm changed inventoried documentation by
             archive.addfile(member, io.BytesIO(data) if data is not None else None)
         if mutation in {"link", "traversal", "unexpected", "duplicate"}:
             name = {"link": "package/share/octet/docs/link", "traversal": "package/../escape",
-                    "unexpected": "package/share/octet/extensions/octet-browse/extension.py", "duplicate": ordinary}[mutation]
+                    "unexpected": "package/share/octet/extensions/octet-mcp/extension.py", "duplicate": ordinary}[mutation]
             member = tarfile.TarInfo(name)
             member.mode = 0o644
             if mutation == "link":

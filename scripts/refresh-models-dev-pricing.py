@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import hashlib
+import re
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from urllib.error import HTTPError
@@ -338,6 +339,23 @@ def reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}")
 
 
+def validate_source_receipt(path: Path) -> None:
+    """Validate pinned provenance policy, not equality with today's raw catalog."""
+    try:
+        receipt = json.loads(path.read_text(), parse_constant=reject_json_constant)
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"invalid models.dev source receipt: {path}") from error
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != {"url", "sha256", "unverified_pricing_providers"}
+        or receipt.get("url") != API_URL
+        or receipt.get("unverified_pricing_providers") != sorted(UNVERIFIED_PRICING_PROVIDERS)
+        or not isinstance(receipt.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"]) is None
+    ):
+        raise SystemExit(f"invalid models.dev source receipt: {path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path,
@@ -377,7 +395,13 @@ def main() -> None:
              for path, result in outputs.items()}
     for path, text in texts.items():
         if args.check:
-            if not path.exists() or path.read_text() != text:
+            if path == args.source_output and args.source is None:
+                # Live freshness concerns the three supported projections. The
+                # receipt pins reviewed raw evidence, which can differ solely
+                # because unrelated upstream providers changed. Saved-source
+                # checks still require exact receipt (including digest) equality.
+                validate_source_receipt(path)
+            elif not path.exists() or path.read_text() != text:
                 raise SystemExit(f"stale models.dev snapshot: {path}")
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
