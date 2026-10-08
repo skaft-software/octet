@@ -1552,7 +1552,7 @@ def _handle_jev_choose(values: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _render_status(status: Mapping[str, Any]) -> str:
-    windows = _host_platform() == "windows"
+    windows = status.get("platform", _host_platform()) == "windows"
     if status.get("runtime") == "unavailable":
         if windows:
             grant = ("Pick a non-elevated target on the interactive desktop; "
