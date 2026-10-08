@@ -120,6 +120,11 @@ def _blob_codec():
     return _Codec(schema, convert, features=frozenset({"bulk_objects_v1"}))
 
 
+def _secure_local_file_available():
+    """Whether this platform has the primitives local-file.v1 requires (not Windows)."""
+    return os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+
+
 class Bulk:
     """Bounded bytes publication/read helpers on the existing RPC execution lane."""
     def __init__(self, extension):
@@ -135,7 +140,7 @@ class Bulk:
             raise RpcError(-32000, "invalid bulk transport context")
         if type(limits) is not dict or set(limits) != _LIMIT_KEYS or any(type(v) is not int or not 0 < v <= _PORTABLE for v in limits.values()):
             raise RpcError(-32000, "invalid finite bulk limits")
-        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        if not _secure_local_file_available():
             raise RpcError(-32000, "secure local-file.v1 transport is unavailable")
         self._directory, self._limits = root, dict(limits)
 
