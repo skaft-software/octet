@@ -236,7 +236,7 @@ def post_mutation_rescan(resource_ids: Sequence[str]) -> dict[str, Any]:
 
 
 def text_content(text: Any) -> dict[str, Any]:
-    """Build a text content part for an API 0.2 tool result."""
+    """Build a text content part for a tool result."""
 
     return {"type": "text", "text": str(text)}
 
@@ -2357,27 +2357,31 @@ class Extension:
 
         if not isinstance(value, Mapping):
             value = {"content": [] if value is None else [text_content(value)]}
+        # The 0.4 envelope retains the 0.2 wire's field names, so name the API
+        # the author declared and mention the retained framing only as context.
+        api = f"API {self.api_version}"
+        wire = "" if self.api_version == "0.2" else " (0.2-retained wire)"
         unknown = set(value) - {"content", "is_error", "metadata", "structured_content"}
         if unknown:
             raise RpcError(
                 -32603,
-                f"unknown API 0.2 tool result fields: {sorted(map(str, unknown))}",
+                f"unknown {api} tool result fields{wire}: {sorted(map(str, unknown))}",
             )
         content = value.get("content", [])
         if isinstance(content, str):
             content = [text_content(content)]
         if not isinstance(content, list):
-            raise RpcError(-32603, "API 0.2 tool content must be an array")
+            raise RpcError(-32603, f"{api} tool content must be an array{wire}")
         if not content:
-            raise RpcError(-32603, "API 0.2 tool content must not be empty")
+            raise RpcError(-32603, f"{api} tool content must not be empty{wire}")
         if len(content) > MAX_TOOL_CONTENT_PARTS:
             raise RpcError(
                 -32603,
-                f"API 0.2 tool content exceeds {MAX_TOOL_CONTENT_PARTS} parts",
+                f"{api} tool content exceeds {MAX_TOOL_CONTENT_PARTS} parts{wire}",
             )
         parts = [self._validate_content_part(part) for part in content]
         if not any(part["type"] == "text" for part in parts):
-            raise RpcError(-32603, "API 0.2 tool content requires an explicit text part")
+            raise RpcError(-32603, f"{api} tool content requires an explicit text part{wire}")
         if any(part["type"] in {"image", "audio"} for part in parts):
             if "artifacts" not in self._features:
                 raise RpcError(-32603, "media tool content requires artifacts negotiation")
