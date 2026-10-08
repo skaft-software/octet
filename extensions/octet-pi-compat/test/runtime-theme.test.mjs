@@ -11,13 +11,6 @@ import { backgroundTokens, foregroundTokens } from '../lib/theme-palette.mjs';
 import * as palettes from '../lib/theme.mjs';
 import { launch } from './helper.mjs';
 
-// JSON plus the escapes CodeQL expects before a string is embedded in source.
-const unsafeSourceChars = {
-  '<': '\\u003C', '>': '\\u003E', '/': '\\u002F', '\\': '\\\\', '\b': '\\b', '\f': '\\f',
-  '\n': '\\n', '\r': '\\r', '\t': '\\t', '\0': '\\0', '\u2028': '\\u2028', '\u2029': '\\u2029',
-};
-const escapeUnsafeChars = text => text.replace(/[<>\b\f\n\r\t\0\u2028\u2029]/g, c => unsafeSourceChars[c]);
-
 function fixture(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'octet-pi-runtime-theme-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -146,7 +139,8 @@ test('palette binding is bounded, data-only and keeps retained theme helpers liv
 
 test('an invalid configured palette refuses startup before any factory executes', t => {
   const { root, first } = fixture(t), entry = join(root, 'factory.mjs'), marker = join(root, 'executed');
-  writeFileSync(entry, `import {writeFileSync} from 'node:fs'; export default () => writeFileSync(${escapeUnsafeChars(JSON.stringify(marker))},'executed');`);
+  // The factory writes beside itself, so its source embeds no path.
+  writeFileSync(entry, "import {writeFileSync} from 'node:fs'; export default () => writeFileSync(new URL('./executed', import.meta.url),'executed');");
   const link = join(root, 'link.json'); symlinkSync(first, link);
   const config = join(root, 'bridge.json');
   writeFileSync(config, JSON.stringify({ extensions:[entry], pi_theme:{name:'ghostty-dark',path:link} }));
