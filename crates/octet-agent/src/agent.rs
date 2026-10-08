@@ -449,9 +449,12 @@ const MIN_PARALLEL_READ_WAVE_WIDTH: usize = 4;
 /// use, between [`MIN_PARALLEL_READ_WAVE_WIDTH`] and [`MAX_TOOL_CALLS_PER_TURN`].
 ///
 /// The width bounds resources, not safety. A call joins a wave only when its
-/// exact host classification makes it an independent observation, and every
-/// other call is a barrier, so a wave of any width admits only calls that may
-/// overlap. Results are still committed in emitted order.
+/// exact host classification makes it an independent observation or, while
+/// host processes need no approval, a self-contained process (one shell
+/// command, one search), and every other call is a barrier, so a wave of any
+/// width admits only calls that may overlap. The width bounds a wave's
+/// observations; processes wait on their own children, so only the per-turn
+/// call limit bounds them. Results are still committed in emitted order.
 fn default_parallel_read_wave_width() -> usize {
     std::thread::available_parallelism()
         .map_or(MIN_PARALLEL_READ_WAVE_WIDTH, std::num::NonZeroUsize::get)
@@ -1185,6 +1188,8 @@ impl Agent {
 
     /// Set how many independent observations one ordered read wave may run at
     /// once, clamped to `1..=32`. A width of one runs every call in turn.
+    /// Overlapping process calls (shell, search) are bounded by the per-turn
+    /// call limit instead, except that a width of one still runs them in turn.
     ///
     /// The default follows the CPUs this process may use, never below four.
     /// Classification, not the width, decides which calls may overlap.

@@ -237,4 +237,6 @@ mod media_tests;
 #[cfg(test)]
 mod metadata_tests;
 #[cfg(test)]
+mod process_wave_tests;
+#[cfg(test)]
 mod tests;
