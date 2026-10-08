@@ -217,10 +217,13 @@ callback ports being busy uses the hosted device-code flow, and you can choose
 it explicitly too.
 
 A successful account-scoped live inventory is authoritative. octet asks your
-account which models you can use, and doesn't guess Ultra, collaboration,
-Responses Lite or model availability from a name or plan. If the metadata is
-missing or unusable, octet falls back to the more limited behavior. If the live
-inventory omits a model, no corresponding GPT-6 Codex route is injected. When
+account which models you can use, and doesn't guess Ultra, collaboration
+or model availability from a name or plan. Codex inference follows Pi's ordinary
+Responses contract with parallel tool calls enabled, even when inventory prefers
+Responses Lite; the inventory observation is retained without selecting that
+serial wire contract. If the metadata is missing or unusable, octet falls back to
+the more limited behavior. If the live inventory omits a model, no corresponding
+GPT-6 Codex route is injected. When
 advertised, select `codex/gpt-6.1-sol`, `codex/gpt-6-astra`, `codex/gpt-6-sol`
 or `codex/gpt-6-luna`. These stay namespaced separately from direct OpenAI
 presets. When discovery is unreachable, 6.1 Sol leads the fallback suggestions.
@@ -788,9 +791,10 @@ structured output, output limits and reasoning. Google uses native
 translation. Knowing a protocol doesn't imply [native audio
 support](media.md#formats-and-limits).
 
-Responses Lite sends `parallel_tool_calls: false` even for models that can run
-tools in parallel. Only parallel-safe reads overlap. Shell and file changes stay
-one at a time whatever the model batches.
+Codex inference uses ordinary Responses with `parallel_tool_calls: true`, like
+Pi. Explicit Responses Lite selection by an `octet-ai` SDK caller still sends
+`parallel_tool_calls: false`. Host execution is independent of the wire flag:
+[built-in tools](tools.md) says which batched calls octet runs together.
 
 <details>
 <summary>OpenAI, Codex and Responses details</summary>
@@ -802,10 +806,11 @@ one at a time whatever the model batches.
   sends the valid uncompressed body. These come from the provider
   [declarations](../crates/octet-coding-agent/src/providers/declarations.json),
   not from the Responses codec itself.
-- Responses Lite applies to ordinary and native compact requests. It sends the
-  Lite header, tool schemas and developer instructions as input items, reasoning
-  context across all turns, and no unsupported image-detail hints. Exact shapes:
-  the [Lite notes](design/octet-ai.md#responses-lite) and [wire
+- Explicit Responses Lite selection in `octet-ai` applies to ordinary and native
+  compact requests; the coding product's Codex route does not select it. Lite
+  sends its header, tool schemas and developer instructions as input items,
+  reasoning context across all turns, and no unsupported image-detail hints.
+  Exact shapes: the [Lite notes](design/octet-ai.md#responses-lite) and [wire
   fixtures](../crates/octet-ai/src/protocol/openai_responses.rs).
 - The Responses `service_tier` request field (`auto`, `default`, `flex`,
   `priority`) is a declared endpoint capability, not a provider identity. The

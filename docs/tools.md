@@ -26,10 +26,12 @@ policies that `--safe-mode` selects deny a non-`bash` host process.
 | `search` | Ripgrep search of the workspace. | On |
 
 A tool you turn off is never advertised to the model. Having a tool isn't
-permission to use it. Only parallel-safe reads run together. Shell and file
-changes run one at a time, even if the model batches calls. `search` runs
-ripgrep as a native child, so `--no-process`/`--no-shell` remove it from the
-surface as well, and controlled effect policies deny its process calls.
+permission to use it. When the model batches calls in one response, reads run
+together, and under full access `bash` commands and `search` run together with
+them. File changes, extension tools and anything that could ask for approval
+run one at a time, and results reach the model in the order it asked. `search`
+runs ripgrep as a native child, so `--no-process`/`--no-shell` remove it from
+the surface as well, and controlled effect policies deny its process calls.
 
 | To do this | Use |
 | --- | --- |

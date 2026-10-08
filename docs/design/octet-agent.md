@@ -271,15 +271,23 @@ already-running executable.
 Workspace-mutation approval creates a random, short-lived capability bound to the canonical intent digest. Tokens are atomically single-use, stored by one-way verifier, redacted in debug output, and never supplied to tools. Dispatch reserves admission before `before_tool_call`, then commits and consumes the exact grant only after all hooks pass and immediately before calling `Tool::execute`. Hook denial or cancellation drops and revokes an uncommitted reservation; cancellation after commit cannot restore it. `after_tool_call` runs only for a committed effect.
 
 Sequential, parallel, and crash-recovery dispatch all use this boundary. The
-ordered live read path intersects static `ToolConcurrency::Parallel` with exact
-host classification and explicit policy admission, admitting contiguous,
-model-ordered waves of exact `Pure`, `WorkspaceRead`, or `HostRead` calls.
-`HostRead` is eligible for these live waves but remains non-replayable. A wave
-holds one call per CPU the process may use, at least four and at most the
-32-call turn limit (`Agent::set_parallel_read_wave_width` pins it). The width
-bounds resources, not safety: classification alone admits a call to a wave, and
-every other call is a barrier, so a wider wave admits nothing a narrower one
-would refuse.
+ordered live wave path intersects static `ToolConcurrency` with exact host
+classification and explicit policy admission, admitting contiguous,
+model-ordered waves of exact `Pure`, `WorkspaceRead`, or `HostRead` calls from
+`Parallel` tools and, while the broker is `UnsafeHost` so that no call can
+prompt, exact `HostProcess` calls from `ParallelProcess` tools: one
+self-contained shell command or `search` each, as Pi overlaps them. `HostRead`
+is eligible for these live waves but remains non-replayable. A wave holds up to
+one observation per CPU the process may use, at least four and at most the
+32-call turn limit (`Agent::set_parallel_read_wave_width` pins it); process
+calls wait on their own children, so only the turn limit bounds them, except
+that a width of one runs every call in turn. The width bounds resources, not
+safety: classification alone admits a call to a wave, and every other call
+(edits, writes, extensions, anything that could prompt) is a barrier, so a wider
+wave admits nothing a narrower one would refuse. A wave call's progress streams
+live with the same settlement, pacing and partial-output checkpoints as a
+sequential call's, and results are committed in emitted order. Composition's
+nested calls share the same overlap rule.
 Crash replay separately intersects `ReplaySafety::Safe` with exact host
 classification and permits only exact `Pure` and `WorkspaceRead` calls. A broker or argument denial is returned to the provider as a paired tool error before hooks or executable code; a trusted hook may veto an otherwise admitted call before dispatch.
 

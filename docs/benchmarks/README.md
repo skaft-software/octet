@@ -183,6 +183,35 @@ Those cases require a harness-specific driver and should be supplied with
 same task, endpoint, model weights, context limit, timeout, hardware, and
 concurrency for every harness.
 
+## Mock-provider agent loop
+
+`scripts/bench-agent-loop.py` compares agent overhead with the model taken out:
+every agent under test talks to one loopback OpenAI-compatible Chat Completions
+server that scripts the same turns for all of them, so no paid model is called
+and the work the model asks for is fixed. It ships adapters for octet, Pi and
+opencode:
+
+```console
+python3 scripts/bench-agent-loop.py \
+  --octet ./target/release/octet \
+  --pi /path/to/pi --opencode /path/to/opencode \
+  --repetitions 5 --output ./artifacts/agent-loop.json
+```
+
+The scenarios cover startup plus one answer, three and eight 1-second shell
+calls in one response, three file reads in one response, one ~3.4 MB shell
+output, and a chain of quick shell rounds (`--chain-rounds`). Each run splits wall time into
+startup (spawn to first request), continuations (a response's end to the next
+request: tool execution plus loop overhead) and shutdown, and records model and
+auxiliary requests and the tool calls of each response. `--model-delay` adds a
+fixed latency to every response.
+
+Each agent keeps one isolated `HOME` across repetitions, and one discarded
+warm-up run per scenario fills first-run caches. Workspaces are fresh per run
+and must live outside any Git checkout (`--work-root`). The numbers measure
+runtime overhead only, not model quality or task success, and they depend on
+the host: report them with the JSON, the agent versions and the machine.
+
 ## Credential-free Markdown replay
 
 Build the generic renderer driver once, outside the measured process:
