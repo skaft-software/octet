@@ -12,7 +12,7 @@ and reload contract is documented in [`../resources.md`](../resources.md).
 
 ## Build and dependency boundary
 
-The workspace MSRV is Rust 1.86. `sexy-tui-rs` is vendored as
+The workspace MSRV is Rust 1.88. `sexy-tui-rs` is vendored as
 `crates/sexy-tui-rs`; builds must not depend on a sibling checkout. Its import
 provenance is recorded in `crates/sexy-tui-rs/VENDORED.md`.
 
@@ -45,6 +45,21 @@ catalog build. Once idle, `/model` opens from current routes and enriches the
 fleet in the background; filtering and highlighted model identity survive the
 refresh, while cancellation/failure leaves the active selection untouched.
 
+For OpenAI Responses routes that prefer WebSockets, plain, print (including
+JSON), and RPC prompt runs best-effort prewarm the settled system/tool/context
+prefix with `generate=false`, before the first admitted generation. Idle RPC
+readiness and construction of an undriven run do not open a provider connection.
+The warmup is caller-driven, cancellable by the run's abort control, and bounded
+to 30 seconds or the shorter endpoint timeout. Failure proceeds through ordinary
+inference and its HTTP/SSE fallback. A live pooled connection or latched fallback
+is not warmed again. SDK `Agent::prompt` and no-tools runs remain unchanged;
+headless hosts opt in through `Agent::prompt_with_responses_prewarm`.
+
+Warmup emits no assistant turn, tool call, usage record, or generation attempt.
+Its elapsed time is included in the first turn's timing. This accounting boundary
+does not promise that the provider will not bill warmup input, nor guarantee
+backend prompt-cache hits or a latency improvement.
+
 Startup resolves the persistent session before final model selection:
 
 1. Select a new, latest, named, or interactively picked session, or fork a
@@ -69,9 +84,9 @@ Runtime `/resume` and branch checkout use the same restoration behavior.
 Interactive resume follows renderer ownership. Default terminal-owned mode
 hydrates the complete active branch so the complete logical frame can populate
 native scrollback without an impossible later prepend. Explicit application-owned
-mode hydrates only a bounded active-branch tail for first paint; the complete
-branch is materialized when semantic navigation or selection reaches beyond that
-tail.
+mode hydrates a viewport-scaled active-branch tail for first paint (bounded
+between 32 and 512 entries); the complete branch is materialized when
+semantic navigation or selection reaches beyond that tail.
 
 Session discovery uses a workspace-local disposable SQLite projection of
 bounded active-branch titles and message counts keyed by transcript size and
@@ -120,8 +135,8 @@ The product treats accepted readiness updates as nonpersistent activity. The TUI
 replaces its mutable `Working` row with a bounded provider-status label until
 model output or settlement; plain and print modes write the diagnostic to stderr
 so print stdout stays response-only. RPC and the native host expose a structured
-`provider_lifecycle` event for clients that choose to render it. Session records,
-serve item projections, and durable telemetry deliberately omit this endpoint
+`provider_lifecycle` event for clients that choose to render it. Session records
+and durable telemetry deliberately omit this endpoint
 telemetry. It is observational only and does not change retry or timeout
 semantics.
 
@@ -208,10 +223,12 @@ summaries retain them. Legacy entries deserialize with empty details.
 ## Agent construction and tools
 
 Every build or idle-boundary rebuild creates one `ExtensionHost`. `CoreTools`
-registers the core tools in order: `read`, `edit`, `write`, `bash`, then opt-in
-`search`; the default surface omits `search` because `bash` already provides
-`rg`/`find`/`ls`. Enabled extensions may add their own tools after discovery and
-policy admission. Skill discovery does not add a model-facing tool.
+registers the core tools in order: `read`, `edit`, `write`, `bash`, then `search`.
+The default surface keeps `search`: the product prompt names it for repository
+content search, and `bash` alone forced that discovery through the shell. Host
+tool and sandbox gates still remove it (`--no-process`/`--no-shell`, an explicit
+allowlist or exclusion). Enabled extensions may add their own tools after
+discovery and policy admission. Skill discovery does not add a model-facing tool.
 
 Context budgeting reserves the serialized schemas from that exact host rather
 than reproducing a hard-coded subset. When delegation is installed, bootstrap
@@ -234,11 +251,6 @@ launched under `--safe-mode`. Delegated children inherit the same broker policy
 through the root's delegation template.
 
 For explicit capability/orchestration boundaries (search vs browser vs computer use, hosted vs in-harness delegation, trust/cwd/approval/sandbox inheritance, and scope non-goals), see [`docs/design/extension-capability-and-orchestration-boundaries.md`](extension-capability-and-orchestration-boundaries.md).
-
-Serve currently has no policy-decision item in its graphical protocol, so its
-projection intentionally ignores `ToolPolicyDecision`; the matching
-`ToolFinished` remains visible. Exposing policy evidence there requires an
-explicit Serve protocol addition rather than silently changing the projection.
 
 The coding host creates an extension-only V2 delegation manager whenever the
 trusted, enabled `octet-subagents` extension successfully negotiates its
@@ -269,8 +281,8 @@ During an active interactive run, the product schedules one nonblocking
 owner-scoped subagent status refresh every 250 ms, reduces the resulting fenced
 semantic snapshot, and updates one bounded tool-like **Subagents** transcript
 block in place, including between root turns. Its heading counts worker states
-and up to four active child lines show tasks and input/output tokens; `/subagents`
-retains the complete roster and cost. Ctrl+O retains disclosure. Structured
+and up to four active child lines show tasks and input/output tokens; the worker
+list retains the complete roster and cost. Ctrl+O retains disclosure. Structured
 priced child cost temporarily augments the host-owned footer; after
 `octet-agent` mirrors the settled child usage into root `delegated_agent`
 records, the idle footer reads only the durable session total.
@@ -291,10 +303,6 @@ The frontends have different command and persistence paths:
   the `SKILL.md` body plus arguments into an ordinary user message; it does not
   append `SkillActivated`. TUI `/skills off` can append `SkillDeactivated` only
   for an activation already present on the branch.
-- Serve's slash-command worker appends `SkillActivated` (descriptor, content
-  hash, and instructions) on load and `SkillDeactivated` on off. The activation
-  event is Serve-only; TUI `off` can only deactivate pre-existing state. Plain,
-  print, and RPC do not gain this activation path.
 - Interactive submission and the plain, print, and RPC prompt paths expand
   explicit `/skill:NAME` text as ordinary prompt content. They do not provide a
   second activation API. Prompt-template `{{skill:name}}` expansion likewise
@@ -310,9 +318,7 @@ registered model tool writes that event; it is not a model-facing resource API.
 Compaction keeps the configured recent-message token window (default 20,000) and
 summarizes older ordinary messages. A TUI inline body is therefore ordinary
 history and may be summarized away; it does not become durable active state.
-Serve activation events are separate session state and their active snapshots
-are carried by compaction, so that Serve-only persistence must not be promised
-for TUI activation.
+Inline skill expansion does not promise durable activation.
 
 ## Prompt templates
 
@@ -363,8 +369,8 @@ remain disabled; the appearance selector is not a theme loader. See
 - `/name [name]`, `/export [path]` — name and safely export the current session.
 - `/prompt [name] [arguments]` — inspect or expand prompt templates.
 - `/skills search|load|reload|off ...` — inspect, invoke, reload, or deactivate skills; TUI load-prefill does not establish durable activation.
-- `/extensions [status|reload]` — interactively enable/disable managed executable bundles, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped.
-- `/subagents` — when supplied by the enabled `octet-subagents` package, navigate workers with arrow keys and open owner-authorized read-only transcripts with Enter.
+- `/extensions [status|reload]` — enable, disable, set up, and configure managed executable bundles through each one's options menu, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped. Runtime worker controls do not belong in this menu.
+- `/subagents [list|status|inspect|wait|reattach|stop|open-all]` — runtime inspection and control owned by the ready first-party octet-subagents extension. Bare, list and status open the live worker roster, and stop uses the bounded owner-bound queue during a run; other operations wait for idle. Arrow keys navigate workers and Enter opens owner-authorized read-only transcripts.
 - `/help [command]` — show local command help and octet self-documentation.
 - `/status`, `/exit` — product status and lifecycle controls.
 
@@ -383,8 +389,8 @@ current reload generation. A malformed manifest, rejected link, or ID mismatch
 does not prevent healthy skills from loading and no longer disappears into
 startup-only stderr.
 
-The extension menu enumerates managed executable bundles rather than the
-separate `octet-serve` application. It edits only the selected name in the user
+The extension menu enumerates managed executable bundles. It edits only the
+selected name in the user
 config's `enabled_extensions`, preserves independent trust grants and unrelated
 activation, refuses to redirect a shadowed global bundle to project/explicit
 code, and performs a full idle-boundary rebuild so the new process set is live.
@@ -397,10 +403,10 @@ closed.
 
 ## OpenAI Codex discovery and Ultra
 
-Authenticated Codex discovery sends compatibility client version `0.153.2` and
+Authenticated Codex discovery sends compatibility client version `0.159.2` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 7 invalidates inventories
-queried with older compatibility or context-window policies; entries carry the
+`multi_agent_version: "v2"`. Cache schema version 10 invalidates inventories
+queried with older compatibility, context-window or GPT-6.1 Sol policies; entries carry the
 pre-cap backend default window so the deliberate Codex cap can be reported and an
 explicit operator override resolved exactly (`docs/codex-context.md`). It
 preserves those fields, uses a 372K working window for GPT-5.6 Luna and 272K for
@@ -427,11 +433,13 @@ their effort with Pro cleared and a warning. At every idle rebuild boundary, an
 explicit effort selection likewise supersedes and clears any restored legacy
 Pro bit unless the caller explicitly selected a mode.
 
-Routes advertising Responses Lite use the transport contract implemented by
-`octet-ai`, including its ordinary and compact request shapes and advertised
-parallel-tool-call bit. This product layer only discovers and propagates the
-capability; it does not reconstruct the wire format or infer support from the
-endpoint identity.
+Codex inventory retains its Responses Lite preference, but the coding product
+selects ordinary Responses with parallel tool calls enabled, matching Pi's
+Codex request behavior. `codex_inference_capabilities` separates that inference
+policy from the inventory observation while retaining exact reasoning choices,
+V2 delegation and qualified reasoning updates. The `octet-ai` SDK still supports
+explicit Lite selection with its ordinary and compact request shapes; the
+product does not reconstruct those wire formats.
 
 ## OpenRouter Batch API
 

@@ -3,9 +3,12 @@
 [Documentation](README.md) · [Installation](installation.md) · [Terminal](terminal.md)
 
 octet is released for macOS and Linux. **Termux on Android is not a supported or
-qualified platform.** The repository contains no Termux-specific code path (no
-`termux-*` integration, no Android target, no Android CI job), so anything below
-is "may work, unverified" rather than a compatibility claim.
+qualified platform.** A few Termux-specific paths exist in the tree — clipboard
+read/write through `termux-clipboard-get`/`termux-clipboard-set` when
+`TERMUX_VERSION` is set, Termux cursor handling in the TUI, and Android in the
+process-identity target list — but there is no Android/Termux release artifact
+or CI job and no terminal-emulator qualification, so anything below is "may
+work, unverified" rather than a compatibility claim.
 
 ## Why this is unqualified
 
@@ -13,8 +16,9 @@ is "may work, unverified" rather than a compatibility claim.
   documented build profiles ([installation](installation.md),
   [build profiles](build-profiles.md)); there is no published Android/aarch64
   Termux artifact.
-- Clipboard and image handling use desktop mechanisms. Android clipboard/image
-  integration would require new host code and is not implemented.
+- Clipboard and image handling use desktop mechanisms plus the Termux clipboard
+  helpers. Android image handling, terminal sizing and input quirks are not
+  implemented or exercised.
 - Keyboard/terminal behavior under Termux's emulator has not been exercised in
   the terminal qualification record ([terminal](terminal.md)).
 
@@ -29,8 +33,9 @@ pkg install rust clang git
 cargo build --release -p octet-coding-agent --bin octet
 ```
 
-Then run `./target/release/octet`. Expect rough edges: no clipboard integration,
-uncertain colour/keyboard capability detection, and no release-support channel.
+Then run `./target/release/octet`. Expect rough edges: no image handling,
+unverified clipboard behaviour beyond the Termux text helpers, uncertain
+colour/keyboard capability detection, and no release-support channel.
 
 ## Reporting
 

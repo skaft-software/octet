@@ -7,12 +7,13 @@ defines version policy and the distinct canonical API `0.3` models. Earlier
 example versions remain intentional; these shared operations do not translate
 wires or make every low-level service a supported coding-product feature.
 
-**Identity boundary:** octet 0.8.0 source uses only octet first-party names,
+**Identity boundary:** octet 0.9.0 candidate source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
-The source SDK distributions and four official executable bundles are version
-`0.8.0`; independent examples keep their own versions. Native publication does
-not publish SDK registries; see
+The source SDK distributions and six official executable bundles are version
+`0.9.0`; independent examples keep their own versions. 0.9.0 assets are not
+published; use reviewed source or matching local archives. Native publication
+does not publish SDK registries; see
 [installation and availability](../installation.md).
 
 The [legacy protocol reference](PROTOCOL-REFERENCE.md) retains complete API
@@ -78,19 +79,18 @@ Manifest-selected versions are exact:
 No version adds an OS sandbox or implicit access beyond negotiated host
 capabilities. Pi migration is capability-oriented, not Pi's in-process ABI:
 `octet migrate pi --dry-run` inventories resources without executing them.
-The Pi execution bridge is removed; portable import and native providers are
-separate. See [Pi migration](../pi-migration.md).
+Portable import and native providers are separate from the optional
+[Pi extension adapter](../pi-compatibility.md). See [Pi migration](../pi-migration.md).
 
 Discovery is available under every effect policy; executable extensions remain
 disabled until explicitly enabled. In the coding product, startup requires
-enablement, trust, the `unsafe_host` effect-policy floor, and independent
-process permissions. Default full access (`unsafe_host`) implicitly trusts the
-selected extension without persisting a grant or enabling it. `--safe-mode`
-does not inherit that implicit trust and never starts an executable extension,
-even with explicit trust grants or enabled process/shell flags.
-`/extensions status` reports the blocked startup. Use full-access mode only
-inside separate OS-level isolation. Capability declarations are visible consent
-metadata, not an OS sandbox.
+enablement, host authority, and process permissions. Default full access
+(`unsafe_host`) implicitly authorizes the selected extension without persisting
+a grant or enabling it. `--safe-mode` does not inherit that authority: enabled
+extensions require an explicit source-bound grant or `--extension-dir` selection.
+They then run outside the tool-effect broker with your OS permissions, so use
+OS-level isolation for untrusted code. `/extensions status` reports blocked
+startup. Capability declarations are visible consent metadata, not an OS sandbox.
 
 ## Layout and discovery
 
@@ -143,9 +143,9 @@ written back as a persistent name grant. A trusted project config may suggest
 `enabled_extensions`, but cannot create explicit executable-trust grants.
 Persistent grants come from user config or environment
 (`OCTET_TRUSTED_EXTENSIONS`); one-shot grants come from `--trust-extension`.
-Coding-product full access supplies implicit trust independently of those
-grants; `--safe-mode` does not inherit it and keeps executable extensions
-stopped even with explicit grants.
+Coding-product full access supplies implicit host authority independently of
+those grants; `--safe-mode` starts only enabled, granted sources. An explicit
+`--extension-dir` is itself the invocation-only grant for that source.
 
 The agent crate exposes `discover_extension_manifests` for direct-child layouts
 and `ExtensionCatalog::load_resolved` for already resolved manifest paths in
@@ -187,6 +187,7 @@ tool_renderers = ["git_status"]
 notifications = true
 confirmations = true
 presentation = true # API 0.2 frontend-neutral activity/list/tree/detail snapshots
+menu = true # API 0.2 options menu under /extensions (menu/collect); needs a command
 
 # Optional. Omitting this preserves the legacy isolated resident process.
 [runtime]
@@ -197,8 +198,8 @@ sharing = "workspace"
 ### Runtime lifecycle and sharing
 
 Discovery builds a bounded static catalog without launching entrypoints. The
-runtime manager activates only profiles admitted by enablement, trust,
-effect-policy, and process-policy gates. `[runtime]` defaults to
+runtime manager activates only profiles admitted by enablement, host authority,
+workspace trust, and process permissions. `[runtime]` defaults to
 `lifecycle = "legacy_resident"`, `sharing = "isolated"`. Valid lifecycles are
 `legacy_resident`, `lazy_resident`, `oneshot`, `session`, `workspace_service`,
 `always`, and `pi_aggregate`.
@@ -214,16 +215,20 @@ effect-policy, and process-policy gates. `[runtime]` defaults to
 
 Workspace sharing is never inferred from a name or language. It requires a
 canonical workspace, explicit host trust partition, manifest opt-in, matching
-content digest, and directly verified local entrypoint. Ordinary and Serve hosts
-use disjoint trust partitions; Serve further separates project and authority
-profiles. PATH-only commands are permitted for isolated legacy compatibility,
+content digest, and directly verified local entrypoint. PATH-only commands are
+permitted for isolated legacy compatibility,
 not sharing. API `0.1` lacks resource-owner fences and is always isolated.
 Source/catalog changes retire shared runtimes fail-closed. Runtime status and
 `resource_exhausted` expose extension/digest provenance, not workspace paths,
 trust inputs, child stderr, or secrets.
 
-Bare commands resolve beside the manifest, then through `PATH`. Arguments pass
-directly without a shell; the child's working directory is the active workspace.
+Bare commands resolve beside the manifest, then through absolute `PATH`
+entries. A file shipped inside the extension directory is copied to private
+storage (at most 64 MiB) and run from there. An installed runtime such as
+`node`, `bun` or `python3`, found on `PATH` or named by an absolute path outside
+the extension directory, runs in place and is not copied or hashed. Arguments
+pass directly without a shell; the child's working directory is the active
+workspace.
 The host supplies `OCTET_EXTENSION_API_VERSION`, `OCTET_EXTENSION_NAME`,
 `OCTET_EXTENSION_DIR`, `OCTET_EXTENSION_MANIFEST`, `OCTET_WORKSPACE`, and
 `OCTET_EXTENSION_SCRATCH` for host-verified artifact publication each generation.
@@ -243,6 +248,15 @@ subprocess environment excludes it. It is copied only when explicitly declared
 and present, never persisted or logged by the host. This grants signing authority
 to the trusted process; use the same full-access/OS-isolation boundary. Unknown
 names and API `0.1` declarations are rejected.
+
+`[capabilities].provider_credentials` is a reviewed disclosure grant, not a
+runtime permission an extension can request. It defaults to `false`; only an
+explicit `true` captured while reviewing the factories makes the Pi bridge's
+`provider/credentials` path negotiable. The host then resolves exactly the one
+provider/model the request names against its own native catalog and returns only
+that result, so a declared grant never becomes a full credential catalog. Values
+are not written to initialize, diagnostics, status, or persistence. This is an
+API `0.2` declaration; API `0.1` rejects it.
 
 ### Manifest CLI flags
 
@@ -343,6 +357,38 @@ replacements, not rendering code or model results. The
 retain activity/list/tree/detail, action, metrics, state, reference, ownership,
 rate, and byte/count limits.
 
+### Options menu
+
+An API `0.2` manifest declaring `menu = true` (with at least one command)
+answers [`menu/collect`](PROTOCOL-REFERENCE.md#16b-menucollect-api-02) with the
+complete options menu people see when they select the extension under
+`/extensions`: a title, a compact status, and items that each run one of the
+extension's declared commands with literal arguments, or open a submenu. This
+is how people set up and configure an extension in the terminal UI, which no
+longer accepts extension commands after the slash. With the Python SDK:
+
+```python
+@ext.menu
+def options(request, context):
+    return {
+        "title": "Checkpoints",
+        "status": {"state": "active", "label": "3 saved"},
+        "items": [
+            {"id": "save", "label": "Save a checkpoint", "command": "checkpoint",
+             "arguments": ["save"], "recommended": True},
+            {"id": "clear", "label": "Delete all checkpoints", "command": "checkpoint",
+             "arguments": ["clear"], "destructive": True},
+        ],
+    }
+```
+
+Build the menu from cached state; it is requested again after every action.
+Ask for anything else an action needs with `ext.request_input` (hidden with
+`secret=True`) and `ext.confirm` while the command runs, and report long steps
+with `ext.progress(message=...)`, which appear live in place. An extension
+without a menu still appears there, with one entry per declared command that
+asks for its arguments.
+
 Handler-time updates carry `parent_request_id`; the host derives the resource
 owner. Background publishers echo a complete host-issued owner triple accepted
 only if previously issued to that process generation. These fields are mutually
@@ -379,33 +425,27 @@ first-party observed exception is `octet-subagents`: it updates one bounded,
 tool-like **Subagents** transcript block in place from native
 `AgentEvent::DelegationUpdated` telemetry while workers are active, including
 between root turns. Its heading counts worker states and up to four active child
-lines show tasks and input/output tokens; `/subagents` retains the complete
+lines show tasks and input/output tokens; its worker list retains the complete
 roster. Ctrl+O retains disclosure. The host-owned footer adds live priced child
 spend while active, then durable root-session delegated usage after settlement,
 never an extension footer string.
 
-`/extensions` opens the installed-bundle management menu. Enter toggles ordinary
-bundles or opens the enabled first-party web-search provider picker; activation
-does not persist trust grants. Activation is read-only when
-project/environment/CLI activation makes user config non-authoritative.
+`/extensions` opens the installed-bundle management menu. Enter opens the
+selected extension's options menu, enabling it first when it is disabled;
+activation alone does not persist host authority grants. Activation is read-only
+when project/environment/CLI activation makes user config non-authoritative.
 `/extensions status` is the diagnostic and presentation fallback;
 `/extensions inspect <agent-session:…>` opens a current parent-bound delegated
 transcript; `/extensions action <extension> <action-id>` performs validated
 interactive routing.
 
-The enabled package's no-argument `/subagents` opens a live arrow-key worker list.
+`/subagents`, `/subagents list` and `/subagents status` open the live arrow-key
+worker list, including during a run; `/extensions` stays an enablement and
+configuration surface, not a runtime worker inspector.
 Owner-bound refresh reconciles authoritative `agent_sessions` state and retains
 focus by stable node ID. Enter revalidates and opens the selected bounded read-only
 transcript; Escape/Left returns to the list.
 
-Serve carries the same complete state through authenticated snapshot/event
-reduction. `extension.invokeAction {extension, extensionInstanceId, generation,
-revision, action, confirmed}` binds action identity; reconnect replaces state
-without replay. Destructive actions need a second host-owned confirmation and an
-instance/generation/revision/action-bound authenticated command. The selected
-manifest's process executes its own command even when another extension uses
-the same name. At most one matching extension confirmation is preapproved during
-that command; other command confirmations fail closed without a trusted surface.
 Plain/print/RPC retain bounded text/structured fallbacks and never implicitly
 choose an action or selection.
 
@@ -448,8 +488,7 @@ effective policy, created/started/completed/deadline timestamps, turn/token/cost
 usage, terminal `timed_out`, and owner/principal provenance, including current
 structured phase/tool, host-observed call count, and disjoint token buckets.
 `session` is an opaque `agent-session:*` reference, never the private JSONL path.
-Serve resolves it only through a host-written parent-session/extension-principal/
-resource-owner binding into a locked read-only inspector. `/extensions inspect`
+`/extensions inspect`
 opens only the current parent's delegation team.
 
 Every child has a fresh independent context; child tokens never enter parent
@@ -585,20 +624,21 @@ drops the waiter, tombstones late replies without harming unrelated calls,
 cancels correlated child requests, and terminates non-cooperative generations
 after bounded grace. Cancellation promises neither rollback nor unsafe replay.
 
-`/extensions` manages installed bundles: Up/Down moves, Enter toggles, Escape
-closes. Selecting enabled `octet-web-search` opens a provider picker; Brave
-Search is recommended and requests its key through correlated secret input;
-SearXNG remains available. Only `enabled_extensions` changes, never trust
-grants; provider state remains extension-owned. Activation is read-only if
-project, environment, or CLI layers participate, because user config is not
+`/extensions` manages installed bundles: Up/Down moves, Enter opens options,
+including Grant/Revoke host authority, Escape closes. Selecting enabled
+`octet-web-search` opens a provider picker; Brave Search is recommended and
+requests its key through correlated secret input; SearXNG remains available.
+Activation changes only `enabled_extensions`; Grant/Revoke separately changes
+`trusted_extensions`. Provider state remains extension-owned. Activation is
+read-only if project, environment, or CLI layers participate, because user config is not
 next-launch authority; already running web-search setup remains available.
 Precedence is revalidated immediately before each write. Enabled unavailable
 bundles remain disable-only. Source-changing trust, tool-name collisions, and
 explicit required-tool removal fail closed.
 
 `/extensions status` includes the selected manifest path and a copyable exact
-persistent/one-shot trust grant for enabled-but-untrusted entries. These grants
-do not bypass safe-mode startup denial.
+persistent/one-shot host authority grant for enabled-but-ungranted entries. Those
+grants permit startup in safe mode when On/off is on.
 `/extensions reload` replaces running processes after successful handshakes;
 general `/reload` reruns discovery and rebuilds the product boundary.
 
@@ -655,8 +695,8 @@ and API `0.2` lifecycle APIs at semantic boundaries.
 Legacy lifecycle subscriptions are exact `session/started`, `session/settled`,
 `turn/started`, `turn/settled`, `tool/started`, and `tool/settled` names. Settled
 outcomes cover completion, failure, cancellation, interruption, frontend
-disconnection, shutdown, and limits across interactive/plain/print/RPC/native-host/
-Serve boundaries. Notifications are best effort; host cleanup/persistence remain
+disconnection, shutdown, and limits across interactive/plain/print/RPC/native-host
+boundaries. Notifications are best effort; host cleanup/persistence remain
 authoritative. API `0.1`/`0.2` `after_response` remains success-only; in `0.2`
 it is bounded response-content synchronization, not terminal cleanup.
 
@@ -667,9 +707,9 @@ selection, sanitized binding/end payload, 250 ms dispatch, idempotence,
 non-veto, and reload/crash fencing rules moved to
 [declared API `0.3` session hooks](../extensions.md#declared-api-03-session-hooks).
 
-For admitted running full-access extensions, reload starts and fully initializes
-a candidate while the old process remains ready. Launch, handshake, or
-contribution mismatch leaves the old process active. Negotiated dynamic catalogs
+For admitted running extensions (including granted safe-mode sources), reload
+starts and fully initializes a candidate while the old process remains ready.
+Launch, handshake, or contribution mismatch leaves the old process active. Negotiated dynamic catalogs
 may change; static tools and all command/hook/UI contributions must remain
 compatible or return `re-registration required` for an intentional frontend
 rebuild. On acceptance the old generation stops admission, drains to a bounded
@@ -728,13 +768,13 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 ## Installable extension bundles
 
 Catalog commands select the package matching the running host version. For
-octet 0.8.0 availability, signed assets, and public-install verification, consult
-the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0).
-Use a reviewed source or local archive when matching publication has not been
-verified.
+octet 0.9.0 candidate availability and remaining qualification, consult the
+[candidate record](../releases/v0.9.0.md) and [installation](../installation.md).
+0.9.0 assets are not published. Use reviewed source or a matching local archive
+until publication is approved and version-matched assets are verified.
 
-Executable bundles use runtime `extension.toml`, not Serve's application launcher
-manifest. An archive has exactly one root named for the extension, all regular
+Executable bundles use runtime `extension.toml`. An archive has exactly one root
+named for the extension, all regular
 runtime files, and optional docs, fixtures, and skills:
 
 ```text
@@ -754,17 +794,17 @@ unpackaged for legacy runtime compatibility. The current source bundle declares:
 
 ```toml
 name = "octet-web-search"
-version = "0.8.0"
+version = "0.9.0"
 api_version = "0.4"
-requires_octet = "=0.8.0"
+requires_octet = "=0.9.0"
 ```
 
 `requires_octet` is optional for unpackaged local copies but enforced when
 present. Installed bundles require an exact match to the running octet version.
-The first-party catalog is `octet-browse`, `octet-mcp`, `octet-subagents`, and
-`octet-web-search`. The four working-tree manifests declare API `0.4`; their
-exact host pins still apply. This source metadata is not evidence of a
-published 0.8.0 bundle.
+The first-party catalog is `octet-codemode`,
+`octet-computer-use`, `octet-mcp`, `octet-subagents`, and `octet-web-search`.
+The five working-tree manifests declare API `0.4`; their exact host pins still
+apply. This source metadata is not evidence of a published 0.9.0 bundle.
 
 After matching publication is verified:
 
@@ -801,14 +841,14 @@ version. Removal accepts only managed bundles and deletes only their directory.
 Config, provider state, sessions, artifacts, browser profiles, and other data
 must live outside it and are not removed.
 
-Installation/discovery never enables or starts an extension, records a trust
-grant, or grants capabilities. `/extensions` may persist activation; it never
-records a trust grant. Coding-product full access implicitly trusts the selected
-extension without persisting trust. `--enable-extension` is invocation-only
-activation; `--trust-extension` is an optional invocation-only explicit grant
-that does not enable anything. `--safe-mode` does not inherit implicit trust and
-keeps executable extensions stopped even with explicit grants; the `unsafe_host`
-floor and independent process gates still apply.
+Installation/discovery never enables or starts an extension, records a host
+authority grant, or grants capabilities. `/extensions` may persist activation
+and can separately Grant/Revoke host authority for a selected source. Full access
+implicitly authorizes selected extensions without persisting grants;
+`--enable-extension` persists activation like the menu's Enable; `--trust-extension` is an
+invocation-only host authority grant and does not enable anything. `--safe-mode`
+starts enabled, granted sources, which run with OS permissions outside the
+broker; `--no-process`/`--no-shell` still denies process startup.
 
 Packaged `skills/*/SKILL.md` become user-installed skill candidates but stay
 inactive until explicitly loaded. `~/.octet/skills` and explicit `--skill-dir`
@@ -821,34 +861,3 @@ Local packages have no remembered remote update source; only published-catalog
 updates download. There is no automatic earlier-first-party hotfix migration,
 old-root scan, or retired-package cleanup. Existing Ygg installations/external
 data remain separate and untouched.
-
-## First-party application packages
-
-The complete Serve application package is separate from executable bundles. It
-uses `package.toml`, contains target-specific `bin/octet-serve-runtime`, and is
-never loaded by executable-extension discovery. These catalog commands also
-remain gated on matching publication:
-
-```console
-octet extension install octet-serve
-octet extension update octet-serve
-octet extension remove octet-serve
-octet serve
-```
-
-Installation under `~/.octet/extensions/octet-serve/` has its own manifest,
-executable, and `install.json`. The application manifest declares ID/version,
-exact octet version, target triple, launcher arguments, executable SHA-256, and
-loopback/process/workspace capabilities. Official installation uses a matching
-target archive and shared release `SHA256SUMS`; local archives use:
-
-```console
-octet extension install --path ./octet-serve-0.8.0-TARGET.tar.gz
-```
-
-The application archive retains its strict two-file payload and atomic install.
-`octet serve` revalidates compatibility/checksum before replacing the launcher
-process. As a first-party replacement octet process it inherits launcher config
-and provider environment, not the sanitized child environment used for
-model-controlled tools and executable extensions. Removal deletes only package
-files; sessions, project metadata, and other user data remain outside the directory.
