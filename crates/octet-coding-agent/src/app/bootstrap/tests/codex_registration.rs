@@ -5,6 +5,138 @@
 use super::support::*;
 use super::*;
 
+#[tokio::test]
+async fn codex_inference_uses_pi_parallel_wire_contract_when_inventory_prefers_lite() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let response = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fixture\"}}\n\n",
+        "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"done\"}\n\n",
+        "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(response),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+    let client = AiClient::new();
+    for id in ["gpt-6.1-sol", "gpt-6-luna", "gpt-account-preview"] {
+        let inventory = codex_models_from_response(
+            &serde_json::json!({"models": [{
+                "slug": id, "use_responses_lite": true,
+                "multi_agent_version": "v2", "supports_reasoning_effort_updates": true,
+                "supported_reasoning_levels": ["low", "high", "ultra"]
+            }]}),
+            None,
+        )
+        .unwrap();
+        let discovered = &inventory[0];
+        assert!(
+            discovered.responses_lite,
+            "retain the inventory observation"
+        );
+        let capabilities = codex_inference_capabilities(discovered);
+        assert!(!capabilities.responses_lite);
+        assert!(capabilities.parallel_tool_calls);
+        assert_eq!(capabilities.agent_delegation, discovered.agent_delegation);
+        assert!(capabilities.responses_features.reasoning_effort_updates);
+        assert_eq!(
+            capabilities
+                .reasoning
+                .as_ref()
+                .unwrap()
+                .options
+                .as_ref()
+                .unwrap(),
+            &discovered.reasoning_options
+        );
+        let model = Model {
+            spec: Arc::new(ModelSpec {
+                id: ModelId(format!("codex/{id}")),
+                endpoint: EndpointId(crate::auth::codex::ENDPOINT_ID.into()),
+                api_name: id.into(),
+                display_name: None,
+                protocol: Protocol::OpenAiResponses,
+                capabilities,
+                limits: ModelLimits {
+                    context_window: 272_000,
+                    max_output_tokens: 32_768,
+                },
+                pricing: None,
+                cache: CacheCompatibility::default(),
+                preset: Default::default(),
+            }),
+            endpoint: Arc::new(Endpoint {
+                id: EndpointId(crate::auth::codex::ENDPOINT_ID.into()),
+                base_url: url::Url::parse(&format!("{}/", server.uri())).unwrap(),
+                auth: Auth::none(),
+                default_headers: http::HeaderMap::new(),
+                transport: EndpointTransport::Http,
+                // Keep the Codex profile/features, but inspect uncompressed JSON
+                // on this loopback route; request compression is unchanged.
+                runtime: RequestRuntime {
+                    body_encoding: octet_ai::RequestBodyEncoding::Identity,
+                    ..crate::providers::CODEX.inventory_route().unwrap().runtime
+                },
+                timeout: Duration::from_secs(5),
+            }),
+        };
+        let request = octet_ai::Request {
+            system: Some("fixture instructions".into()),
+            messages: vec![octet_ai::Message::User(octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("fixture prompt".into())],
+            })],
+            tools: vec![ToolDef {
+                name: "read".into(),
+                description: "Read a file".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                async_execution: false,
+                constrained_sampling: None,
+            }],
+            tool_choice: octet_ai::ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low),
+            reasoning_mode: ReasoningMode::Standard,
+            responses: None,
+            output_format: octet_ai::OutputFormat::Text,
+            output_modalities: octet_ai::OutputModalities::Text,
+            compatibility: octet_ai::CompatibilityMode::Strict,
+            cache_retention: octet_ai::CacheRetention::Short,
+            session_id: Some("fixture-session".into()),
+        };
+        client.complete(&model, request).await.unwrap();
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    for request in requests {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert!(body["tools"].is_array());
+        assert!(body["input"].as_array().unwrap().iter().any(|item| {
+            item["role"] == "developer" && item["content"][0]["text"] == "fixture instructions"
+        }));
+        assert!(!request
+            .headers
+            .contains_key("x-openai-internal-codex-responses-lite"));
+        assert!(body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] != "additional_tools"));
+    }
+}
+
 #[test]
 fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
     let directory = tempfile::tempdir().unwrap();

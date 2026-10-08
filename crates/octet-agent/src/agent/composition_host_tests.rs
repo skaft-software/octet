@@ -13,6 +13,7 @@ struct Probe {
     name: String,
     effect: ToolEffect,
     parallel: bool,
+    process: bool,
     composition: Option<ToolCompositionConfig>,
     usage: Option<Usage>,
     executions: Arc<AtomicUsize>,
@@ -27,6 +28,7 @@ impl Probe {
             name: name.into(),
             effect,
             parallel: true,
+            process: false,
             composition: None,
             usage: None,
             executions: Arc::new(AtomicUsize::new(0)),
@@ -59,7 +61,9 @@ impl Tool for Probe {
         Ok(self.effect)
     }
     fn concurrency(&self) -> ToolConcurrency {
-        if self.parallel {
+        if self.process {
+            ToolConcurrency::ParallelProcess
+        } else if self.parallel {
             ToolConcurrency::Parallel
         } else {
             ToolConcurrency::Sequential
@@ -339,6 +343,39 @@ async fn safe_reads_overlap_at_most_four_and_mutations_are_exclusive() {
     assert!(results.iter().all(Result::is_ok));
     assert_eq!(read.peak.load(Ordering::Acquire), 1);
     assert!(session.context().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn independent_processes_overlap_like_reads_under_full_access() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let mut process = Probe::new("process_probe", ToolEffect::HostProcess);
+    process.process = true;
+    process.delay = std::time::Duration::from_millis(20);
+    let process = Arc::new(process);
+    let (scope, mut receiver) = scope(
+        vec![process.clone()],
+        &session,
+        sandbox,
+        model,
+        Vec::new(),
+        EffectBroker::new(EffectPolicy::UnsafeHost),
+    );
+    let calls = (0..8).map(|value| {
+        scope.0.call(
+            "process_probe".into(),
+            json!({"value":value}),
+            CancellationToken::default(),
+        )
+    });
+    let results = journal(
+        futures_util::future::join_all(calls),
+        &mut receiver,
+        &mut session,
+    )
+    .await;
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(process.executions.load(Ordering::Acquire), 8);
+    assert_eq!(process.peak.load(Ordering::Acquire), 4);
 }
 
 #[tokio::test]

@@ -243,6 +243,43 @@ pub(super) fn effect_is_parallel_observation(effect: ToolEffect) -> bool {
     )
 }
 
+/// How one call may overlap other overlappable calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CallOverlap {
+    /// An exact parallel observation; read waves bound how many run at once.
+    Observation,
+    /// A self-contained process (one shell command, one search) admitted
+    /// without approval. It waits on its own child, so, as in Pi, only the
+    /// per-turn call limit bounds how many run at once.
+    Process,
+}
+
+/// Whether one call may overlap other overlappable calls: an exact parallel
+/// observation, or a self-contained process while the broker admits host
+/// processes without approval, as Pi runs them. Mutations, extensions and
+/// anything that could prompt stay exclusive. The call is classified only when
+/// its declared concurrency could allow overlap.
+pub(super) fn call_overlap(
+    tool: &dyn Tool,
+    arguments: &serde_json::Value,
+    context: &ToolContext<'_>,
+    broker: &EffectBroker,
+) -> Option<CallOverlap> {
+    match tool.concurrency() {
+        ToolConcurrency::Sequential => None,
+        ToolConcurrency::Parallel => tool
+            .effect(arguments, context)
+            .is_ok_and(effect_is_parallel_observation)
+            .then_some(CallOverlap::Observation),
+        ToolConcurrency::ParallelProcess => (broker.policy()
+            == crate::effect::EffectPolicy::UnsafeHost
+            && tool
+                .effect(arguments, context)
+                .is_ok_and(|effect| effect == ToolEffect::HostProcess))
+        .then_some(CallOverlap::Process),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn reserve_tool_effect(
     broker: &EffectBroker,

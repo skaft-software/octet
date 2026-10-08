@@ -284,9 +284,9 @@ impl Tool for SearchTool {
     }
 
     fn concurrency(&self) -> ToolConcurrency {
-        // Native process effects remain ordered unless an isolated backend can
-        // prove independence and enforce aggregate resource bounds.
-        ToolConcurrency::Sequential
+        // One fixed, read-only `rg` child per call: independent calls from one
+        // response overlap while host processes need no approval.
+        ToolConcurrency::ParallelProcess
     }
 
     async fn execute(

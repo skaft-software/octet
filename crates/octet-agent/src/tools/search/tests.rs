@@ -210,7 +210,9 @@ fn effect_requires_process_authority_and_metadata_fails_closed() {
         ToolEffect::HostProcess
     );
     assert_eq!(SearchTool.replay_safety(), ReplaySafety::Unsafe);
-    assert_eq!(SearchTool.concurrency(), ToolConcurrency::Sequential);
+    // One self-contained `rg` child per call: overlappable only while host
+    // processes need no approval, never advertised as an async tool.
+    assert_eq!(SearchTool.concurrency(), ToolConcurrency::ParallelProcess);
 
     fixture.sandbox.allow_process = false;
     let error = SearchTool
