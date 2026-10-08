@@ -5,7 +5,8 @@ import os
 import sys
 from typing import Optional
 
-from typed_fixture import ext, record
+from typed_fixture import ext, record  # Puts the SDK on sys.path.
+from octet_extension.extension import _protocol_stream
 
 
 @dataclass
@@ -62,7 +63,9 @@ class FaultWriter:
         self.stream.flush()
 
 
-writer = FaultWriter(sys.stdout)
+# A caller-supplied stream keeps its own encoding, so configure it as the SDK
+# configures the streams it opens: exact UTF-8 frames on every platform.
+writer = FaultWriter(_protocol_stream(sys.stdout))
 
 
 @ext.typed_tool(name="hostile", description="Fault the next SDK terminal frame", summary=lambda value: "Fault armed.")

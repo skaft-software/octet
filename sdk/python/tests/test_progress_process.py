@@ -3,10 +3,11 @@ import hashlib
 import json
 import unittest
 
-from test_bulk import LIMITS
+from test_bulk import LIMITS, SECURE_TRANSPORT
 from test_typed_process import ProcessHarness
 
 
+@SECURE_TRANSPORT
 class ProgressProcessTests(ProcessHarness, unittest.TestCase):
     fixture_name = "progress_fixture.py"
     tools = ["typed_progress_descriptor"]

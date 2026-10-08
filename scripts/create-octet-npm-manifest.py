@@ -19,6 +19,7 @@ from octet_release_identity import CANONICAL_REPOSITORY, release_repository
 REPOSITORY = CANONICAL_REPOSITORY
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+WINDOWS_FIRST_RELEASE = (0, 9, 0)
 PACKAGES = (
     ("octet-{version}.tgz", "@skaft/octet", "launcher"),
     (
@@ -124,9 +125,13 @@ def read_release_metadata(
         checksum_manifest.get("sha256"), str
     ) or re.fullmatch(r"[0-9a-f]{64}", checksum_manifest["sha256"]) is None:
         fail("release metadata checksum manifest identity is malformed")
+    release = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    if release is None:
+        fail("release metadata version is not a stable release")
+    # Windows assets ship from 0.9.0; earlier metadata stays consumable unchanged.
+    windows = tuple(int(part) for part in release.groups()) >= WINDOWS_FIRST_RELEASE
     expected_assets = {
         "install-octet.sh": ("installer", None),
-        "install-octet.ps1": ("installer", None),
         f"octet-{version}-aarch64-apple-darwin.tar.gz": (
             "binary",
             "aarch64-apple-darwin",
@@ -139,11 +144,13 @@ def read_release_metadata(
             "binary",
             "x86_64-unknown-linux-gnu",
         ),
-        f"octet-{version}-x86_64-pc-windows-msvc.zip": (
+    }
+    if windows:
+        expected_assets["install-octet.ps1"] = ("installer", None)
+        expected_assets[f"octet-{version}-x86_64-pc-windows-msvc.zip"] = (
             "binary",
             "x86_64-pc-windows-msvc",
-        ),
-    }
+        )
     assets = value.get("assets")
     if not isinstance(assets, list) or len(assets) != len(expected_assets):
         fail("release metadata has an incomplete asset list")
