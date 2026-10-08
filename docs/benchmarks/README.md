@@ -19,6 +19,7 @@ These are historical Ygg artifacts, not octet 0.7.0 results:
 - [Reconciled failure report](failure-report-v0.6.2-2026-08-28.md)
 - [Complete token-efficiency audit](token-efficiency-v0.6.2-2026-08-28.md)
 - [Scoped runtime-footprint comparison](runtime-footprint-2026-08-29.md)
+- [Startup against fx 0.0.13](startup-fx-2026-10-08.md)
 
 The pinned [Harbor adapter](../../evaluation/harbor/README.md) reproduces historical
 Ygg 0.6.2 only. It is not an octet 0.7.0 evaluation adapter or campaign.
