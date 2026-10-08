@@ -128,6 +128,12 @@ fn effect_validates_capabilities_and_arguments_before_approval() {
             .unwrap(),
         ToolEffect::HostProcess
     );
+    // Each call is its own `-c` child, so one response's commands may overlap
+    // while they need no approval; it is never advertised as an async tool.
+    assert_eq!(
+        BashTool.concurrency(),
+        crate::tool::ToolConcurrency::ParallelProcess
+    );
     for arguments in [
         json!({"command": ""}),
         json!({"command": "echo ok", "cwd": "../outside"}),
