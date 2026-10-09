@@ -25,6 +25,11 @@ pub(crate) struct ResourcePathConsumer {
     theme: Option<String>,
     // Saved route before any session-only contribution is applied.
     model: Option<ModelId>,
+    // The resolved launch selection (including resumed-session reasoning) is
+    // captured at the first idle publication, not guessed from Config defaults.
+    selection: Option<(ModelId, ReasoningConfig)>,
+    model_default_active: bool,
+    thinking_default_active: bool,
     // Kept independently of revoked registry descriptors, which become empty.
     pub(super) catalog_suffix: String,
     baseline_skills: Arc<dyn octet_agent::SkillRegistry>,
@@ -57,6 +62,9 @@ impl ResourcePathConsumer {
             theme_paths: config.theme_paths.clone(),
             theme: config.theme.clone(),
             model: config.model.clone(),
+            selection: None,
+            model_default_active: false,
+            thinking_default_active: false,
             catalog_suffix: dynamic_suffix(&[], skills.as_ref()),
             baseline_skills: skills.clone(),
             baseline_prompts: prompts.clone(),
@@ -73,7 +81,17 @@ impl ResourcePathConsumer {
             config.theme = self.theme.clone();
         }
         if !config.model_explicit {
-            config.model = self.model.clone();
+            config.model = self
+                .selection
+                .as_ref()
+                .map(|(model, _)| model.clone())
+                .or_else(|| self.model.clone());
+        }
+        if !config.reasoning_explicit && (self.model_default_active || self.thinking_default_active)
+        {
+            if let Some((_, reasoning)) = &self.selection {
+                config.reasoning = Some(reasoning.clone());
+            }
         }
     }
 }
@@ -109,6 +127,17 @@ impl App {
     /// exactly as a model-selection surface does; an explicit invocation choice
     /// never reaches this path.
     fn resolve_contributed_model(&mut self, provider: &str, model: &str) -> Option<ModelId> {
+        // Pi may name the native endpoint alias (notably openai-codex).
+        // Normalize only aliases declared by the host, never invent a route.
+        let provider = crate::providers::ALL_PROVIDER_DECLARATIONS
+            .iter()
+            .find(|declaration| {
+                declaration
+                    .routes
+                    .iter()
+                    .any(|route| route.endpoint_id == provider)
+            })
+            .map_or(provider, |declaration| declaration.id);
         let resolve = |catalog: &octet_ai::ModelCatalog| {
             crate::extensions::model_control::resolve_model(catalog, provider, model)
                 .map(|model| model.spec.id.clone())
@@ -119,6 +148,87 @@ impl App {
         self.enrich_catalog().ok()?;
         resolve(&self.catalog)
     }
+    /// Prepare and commit the route/effort as one idle selection. Failure must
+    /// not publish half a preference or erase the saved launch selection.
+    fn apply_resource_defaults(
+        &mut self,
+        requested_model: Option<&octet_agent::extension_process::ExtensionDefaultModel>,
+        requested_thinking: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let baseline = self
+            .resource_paths
+            .selection
+            .get_or_insert_with(|| (self.model.spec.id.clone(), self.reasoning.clone()))
+            .clone();
+        let model_preference = requested_model.filter(|_| !self.config.model_explicit);
+        let thinking_preference = requested_thinking.filter(|_| !self.config.reasoning_explicit);
+        let withdraw_model = !self.config.model_explicit
+            && model_preference.is_none()
+            && self.resource_paths.model_default_active;
+        let withdraw_thinking = !self.config.reasoning_explicit
+            && thinking_preference.is_none()
+            && self.resource_paths.thinking_default_active;
+        let id = if let Some(selection) = model_preference {
+            self.resolve_contributed_model(&selection.provider, &selection.model)
+                .with_context(|| format!(
+                    "requested Pi default model {}/{} is unavailable; configure this provider/model and its credentials, or choose an available --model",
+                    selection.provider, selection.model
+                ))?
+        } else if withdraw_model {
+            baseline.0.clone()
+        } else {
+            self.model.spec.id.clone()
+        };
+        let model = self.catalog.resolve(&id)?;
+        let changed_model = id != self.model.spec.id;
+        let subagents = self.executable_extensions.has_agent_session_service();
+        let reasoning = if self.config.reasoning_explicit && changed_model {
+            let requested = self
+                .config
+                .reasoning
+                .as_ref()
+                .context("explicit invocation reasoning is unset")?;
+            if matches!(requested, ReasoningConfig::Budget(_)) {
+                // Custom explicit budgets have no portable level; core admission
+                // validates the exact budget rather than silently normalizing it.
+                requested.clone()
+            } else {
+                requested_thinking_to_reasoning(
+                    level_from_reasoning(requested, &self.model)?,
+                    &model,
+                    subagents,
+                )?
+            }
+        } else if let Some(level) = thinking_preference {
+            // The protocol has already required exact Pi spellings. Native
+            // admission rejects unsupported levels instead of lowering max.
+            requested_thinking_to_reasoning(ThinkingLevel::parse(level)?, &model, subagents)?
+        } else if !self.config.reasoning_explicit && (withdraw_model || withdraw_thinking) {
+            if id == baseline.0 {
+                baseline.1.clone()
+            } else {
+                default_reasoning_for_model(&model)
+            }
+        } else if changed_model {
+            default_reasoning_for_model(&model)
+        } else {
+            // Theme/path-only reloads must not reset a live reasoning choice.
+            self.reasoning.clone()
+        };
+        if changed_model || reasoning != self.reasoning {
+            self.agent.select_model_at_idle(
+                model.clone(),
+                reasoning.clone(),
+                reasoning_label(&reasoning),
+            )?;
+            self.model = model;
+            self.reasoning = reasoning;
+        }
+        self.resource_paths.model_default_active = model_preference.is_some();
+        self.resource_paths.thinking_default_active = thinking_preference.is_some();
+        Ok(())
+    }
+
     pub(crate) fn mark_resource_paths_reload(&mut self) {
         self.resource_paths.pending = Some(Reason::Reload);
         self.resource_paths.guard.clear();
@@ -180,6 +290,19 @@ impl App {
             .context("resource publication requires the base skill-catalog prompt boundary")?;
         let suffix = dynamic_suffix(&loaded.context, loaded.skills.as_ref());
         let system = format!("{prefix}{suffix}");
+        let mut diagnostics = loaded.diagnostics;
+        if let Err(error) = self.apply_resource_defaults(
+            loaded.default_model.as_ref(),
+            loaded.default_thinking_level.as_deref(),
+        ) {
+            diagnostics.push(
+                format!("warning: session-only Pi defaults were not applied; previous model/thinking retained: {error}")
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .take(4096)
+                    .collect(),
+            );
+        }
         // All fallible work is above. Registry snapshots and provider admission
         // receive the same owner/generation fence in this synchronous boundary.
         self.system = system;
@@ -196,38 +319,6 @@ impl App {
         self.config.theme_paths = loaded.config.theme_paths;
         self.config.theme = loaded.config.theme;
         self.user_keybindings = loaded.keybindings;
-        let mut diagnostics = loaded.diagnostics;
-        // Session-only default route: honored only when the invocation did not
-        // choose one explicitly, and restored to the saved route on withdrawal.
-        if !self.config.model_explicit {
-            let desired = match loaded.default_model.as_ref() {
-                Some(selection) => {
-                    self.resolve_contributed_model(&selection.provider, &selection.model)
-                }
-                None => self.resource_paths.model.clone(),
-            };
-            if let Some(id) = desired {
-                if self.model.spec.id != id {
-                    if let Ok(model) = self.catalog.resolve(&id) {
-                        let reasoning = crate::app::default_reasoning_for_model(&model);
-                        match self.agent.select_model_at_idle(
-                            model.clone(),
-                            reasoning.clone(),
-                            crate::app::reasoning_label(&reasoning),
-                        ) {
-                            Ok(()) => {
-                                self.model = model;
-                                self.reasoning = reasoning;
-                            }
-                            Err(error) => diagnostics.push(format!(
-                                "warning: contributed default model {} was not selected: {error}",
-                                id.0
-                            )),
-                        }
-                    }
-                }
-            }
-        }
         self.resource_paths.catalog_suffix = suffix;
         self.resource_paths.pending = None;
         self.resource_paths.guard.publish(lease);

@@ -62,7 +62,7 @@ function appendPaths(paths, contribution, budget) {
 // 1.0.2 setup. Discovery is read-only and bounded; the native host still owns
 // admission, parsing, precedence and publication.
 function appendMirrorPaths(runtime, paths, budget) {
-  const setup = discoverPiSetup({ agentDir: runtime.config.pi_agent_dir, env: process.env, cwd: budget.cwd });
+  const setup = discoverPiSetup({ agentDir: runtime.config.pi_agent_dir, env: process.env, cwd: budget.cwd, projectTrusted: runtime.host.project_trusted === true });
   for (const diagnostic of setup.diagnostics.slice(0, 32)) runtime.diagnostic(`mirror ${diagnostic}`);
   // Theme roots are flattened to individual palettes: a directory plus the
   // exact selected file would register one name twice, and the exact file must
@@ -96,6 +96,7 @@ function appendMirrorPaths(runtime, paths, budget) {
   if (setup.keybindingsPath) paths.keybindings_paths = [normalizeResourcePath(setup.keybindingsPath, budget.cwd)];
   if (setup.contextPath) paths.context_paths = [normalizeResourcePath(setup.contextPath, budget.cwd)];
   if (setup.defaultModel) paths.default_model = setup.defaultModel;
+  if (setup.defaultThinkingLevel) paths.default_thinking_level = setup.defaultThinkingLevel;
 }
 
 async function cancellable(promise, signal) {

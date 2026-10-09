@@ -2,14 +2,22 @@
 // coding-agent sources at 200387122ca450d6387f033949423114a270b96c.
 // See ../LICENSE.pi. No Pi agent, session store, or CLI runtime is loaded.
 import { realpath } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 // Identifies the pinned Pi compatibility target, not the native Octet binary.
 export const VERSION = '1.0.2';
 export const CONFIG_DIR_NAME = '.pi';
+// Native ESM and jiti helpers share one recorded bridge root. HOME/env changes
+// after relocation must not redirect factories to a different private setup.
+const agentRoot = globalThis[Symbol.for('octet.pi-compat.agent-root')] ??= {};
+export function configureAgentDir(path) {
+  if (path !== undefined && (typeof path !== 'string' || !isAbsolute(path))) throw new Error('pi_agent_dir must be an absolute path');
+  agentRoot.path = path;
+}
 export function getAgentDir() {
+  if (agentRoot.path !== undefined) return agentRoot.path;
   let path = process.env.PI_CODING_AGENT_DIR;
   if (!path) return join(homedir(), CONFIG_DIR_NAME, 'agent');
   if (process.platform === 'win32' && path.startsWith('/') && !path.startsWith('//') && !path.includes('\\')) {
