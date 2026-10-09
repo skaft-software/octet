@@ -223,12 +223,11 @@ summaries retain them. Legacy entries deserialize with empty details.
 ## Agent construction and tools
 
 Every build or idle-boundary rebuild creates one `ExtensionHost`. `CoreTools`
-registers the core tools in order: `read`, `edit`, `write`, `bash`, then `search`.
-The default surface keeps `search`: the product prompt names it for repository
-content search, and `bash` alone forced that discovery through the shell. Host
-tool and sandbox gates still remove it (`--no-process`/`--no-shell`, an explicit
-allowlist or exclusion). Enabled extensions may add their own tools after
-discovery and policy admission. Skill discovery does not add a model-facing tool.
+registers the core tools in order: `read`, `edit`, `write`, `bash`. Repository
+content search and file discovery use shell commands through `bash`, subject to
+its ordinary process and approval gates. There is no separate search tool.
+Enabled extensions may add their own tools after discovery and policy admission.
+Skill discovery does not add a model-facing tool.
 
 Context budgeting reserves the serialized schemas from that exact host rather
 than reproducing a hard-coded subset. When delegation is installed, bootstrap

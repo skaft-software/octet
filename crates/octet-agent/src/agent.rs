@@ -228,7 +228,7 @@ pub struct AgentConfig {
     /// Mandatory deterministic broker for every model-requested tool effect.
     pub effect_broker: EffectBroker,
     /// Registered tools and event observers. Register [`CoreTools`](crate::tools::CoreTools)
-    /// here for the built-in `read`/`edit`/`write`/`bash`/`search` tools.
+    /// here for the built-in `read`/`edit`/`write`/`bash` tools.
     pub extensions: ExtensionHost,
     /// Maximum model turns per run; exceeding it finishes the run with
     /// [`FinishReason::MaxTurns`].  `None` disables the limit.

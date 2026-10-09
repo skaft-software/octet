@@ -13,7 +13,7 @@ isn't an agent team, a swarm or a second model loop.
 ## Try a read-only investigation
 
 After [installing and enabling the bundle](#install-and-enable), a
-`subagent_spawn` call can limit a worker to reading and search:
+`subagent_spawn` call can limit a worker to the hard read-only `read` tool:
 
 ```json
 {
@@ -23,7 +23,7 @@ After [installing and enabling the bundle](#install-and-enable), a
   "provider": "inherit",
   "model": "inherit",
   "reasoning": "inherit",
-  "tools": ["read", "search"],
+  "tools": ["read"],
   "timeout_seconds": 300,
   "max_turns": 8,
   "max_output_bytes": 8192,
@@ -89,7 +89,7 @@ generation and negotiated features. The packaged skill is opt-in too:
 - Profiles are `explore`, `review`, `test-analysis` and `research`. The
   provider, model and reasoning selection defaults to inherited. There's no
   separate `max_tokens` argument.
-- The default tool grant is **read, search, edit, write and bash**, not
+- The default tool grant is **read, edit, write and bash**, not
   read-only. A requested list must be a non-empty, duplicate-free subset. No
   browser, network-specific, collaboration or recursive agent tools are
   admitted.

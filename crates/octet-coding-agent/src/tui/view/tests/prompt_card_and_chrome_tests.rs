@@ -1052,10 +1052,6 @@ fn tool_summaries_do_not_repeat_the_action_label() {
         "/tmp/src/lib.rs"
     );
     assert_eq!(
-        without_redundant_tool_lead("search", "searched src for pattern"),
-        "src for pattern"
-    );
-    assert_eq!(
         without_redundant_tool_lead("bash", "running cargo test --workspace"),
         "cargo test --workspace"
     );

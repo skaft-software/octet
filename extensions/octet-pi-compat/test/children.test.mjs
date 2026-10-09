@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createAgentSession, SessionManager, readTool, writeTool, createReadTool, withChildHost, CHILD_FEATURES, DEFAULT_CHILD_LIMITS, retireChildSessions } from '../lib/children.mjs';
+import * as childTools from '../lib/children.mjs';
 import { ChildEventProjection, childUsage } from '../lib/child-events.mjs';
 import { parseChildArgv, runChildCli } from '../lib/child-cli.mjs';
 
@@ -39,6 +40,12 @@ function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
 
 // All provider/host responses below are deterministic local protocol fixtures.
 // They qualify projection/control semantics, not the native integration binding.
+test('child tool exports contain only the four core tools, without a Search alias', () => {
+  assert.deepEqual(childTools.codingTools.map(tool => tool.name), ['read', 'bash', 'edit', 'write']);
+  assert.equal('searchTool' in childTools, false);
+  assert.equal('createSearchTool' in childTools, false);
+});
+
 test('SDK runs and continues one host-owned session with finite limits and real observations', async () => {
   const h = host();
   await h.run(async () => {
@@ -188,12 +195,12 @@ test('unsupported Pi authority/file/callback paths are explicit before any spawn
 
 test('CLI accepted argv drives the same host service and real JSON events', async () => {
   const h = host(), events = [];
-  assert.equal(await runChildCli(['--mode', 'json', '-p', '--no-session', '--tools', 'read,search', 'inspect'], { binding: h.binding, emit: e => events.push(e) }), 0);
+  assert.equal(await runChildCli(['--mode', 'json', '-p', '--no-session', '--tools', 'read', 'inspect'], { binding: h.binding, emit: e => events.push(e) }), 0);
   assert.equal(events.at(-1).type, 'agent_end');
-  assert.deepEqual(h.requests[0].params.policy.tools, ['read', 'search']);
+  assert.deepEqual(h.requests[0].params.policy.tools, ['read']);
   assert.equal(h.requests.at(-1).method, 'agent/stop');
   assert.deepEqual(parseChildArgv(['--mode', 'json', '-p', '--model', 'provider/model', '--thinking', 'high', 'x']).options.model, { provider: 'provider', id: 'model' });
-  for (const argv of [['--mode', 'rpc', '-p', 'x'], ['--mode', 'json', '-p', '--session', '/fake', 'x'], ['--mode', 'json', '-p', '--append-system-prompt', 'secret', 'x'], ['--mode', 'json', '-p', '@task.txt']]) assert.throws(() => parseChildArgv(argv), /unsupported_feature/);
+  for (const argv of [['--mode', 'json', '-p', '--tools', 'search', 'x'], ['--mode', 'rpc', '-p', 'x'], ['--mode', 'json', '-p', '--session', '/fake', 'x'], ['--mode', 'json', '-p', '--append-system-prompt', 'secret', 'x'], ['--mode', 'json', '-p', '@task.txt']]) assert.throws(() => parseChildArgv(argv), /unsupported_feature/);
 });
 
 test('package-root CLI never starts a hidden upstream agent without authenticated launch', () => {

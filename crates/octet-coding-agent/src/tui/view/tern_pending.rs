@@ -2,7 +2,6 @@
 
 use octet_tern::wire::{Kind, Node, Props, Span};
 
-use super::terminal_text::sanitize_for_terminal;
 use super::{tern_controls, ShellState};
 
 pub(super) fn node(shell: &ShellState) -> Option<Node> {
@@ -63,24 +62,7 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
             ));
         }
     }
-    let controls = shell.pending_controls.join("; ");
-    let display = if !controls.is_empty() {
-        controls.as_str()
-    } else {
-        shell
-            .steering_queue
-            .first()
-            .map(|entry| entry.display.as_str())
-            .unwrap_or_else(|| shell.follow_up_queue[0].composed.transcript_text.as_str())
-    };
-    let display = sanitize_for_terminal(display).replace('\n', " ↵ ");
-    let mut preview = display.chars().take(240).collect::<String>();
-    if preview.len() < display.len() {
-        preview.push('…');
-    }
-    if count > 1 {
-        preview.push_str(&format!(" · +{} more", count - 1));
-    }
+    let preview = super::input_overlays::pending_message_texts(shell).join("\n");
     Some(Node::with_children(
         "pending",
         Kind::Card,
@@ -98,9 +80,7 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
             Node::new(
                 "pending.preview",
                 Kind::Text,
-                Props::new()
-                    .text("spans", vec![Span::styled(preview, "muted")])
-                    .set("truncate", "end"),
+                Props::new().text("spans", vec![Span::styled(preview, "muted")]),
             ),
         ],
     ))

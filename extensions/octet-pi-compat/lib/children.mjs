@@ -18,7 +18,7 @@ const sessions = new WeakMap();
 const TOOL = Symbol('octet host standard tool');
 const MANAGER = Symbol('octet child session selector');
 const SECRET = Symbol('host child constructor');
-const STANDARD = ['read', 'search', 'edit', 'write', 'bash'];
+const STANDARD = ['read', 'edit', 'write', 'bash'];
 export const CHILD_FEATURES = Object.freeze(['agent_sessions', 'agent_session_events_v1', 'agent_session_lifetime_v1']);
 export const CHILD_METHODS = Object.freeze(['agent/spawn', 'agent/events', 'agent/message', 'agent/follow_up', 'agent/interrupt', 'agent/stop']);
 export const DEFAULT_CHILD_LIMITS = Object.freeze({ max_depth: 1, max_concurrent_children: 8, max_turns: 32, max_tokens: 64000, max_output_bytes: 16384, timeout_ms: 600000 });
@@ -55,7 +55,7 @@ function live(binding) {
   for (const feature of CHILD_FEATURES) if (!binding.features?.has(feature)) unsupported(feature, 'host child contract was not negotiated');
 }
 function tool(name) { return Object.freeze({ name, [TOOL]: true, execute() { unsupported(`direct ${name}.execute`, 'only the native child agent may execute host tools'); } }); }
-export const readTool = tool('read'), bashTool = tool('bash'), editTool = tool('edit'), writeTool = tool('write'), searchTool = tool('search');
+export const readTool = tool('read'), bashTool = tool('bash'), editTool = tool('edit'), writeTool = tool('write');
 export const codingTools = Object.freeze([readTool, bashTool, editTool, writeTool]);
 function toolsAt(cwd, tools) {
   if (cwd !== undefined && cwd !== captureChildHost().cwd) unsupported('child tools cwd', 'child cwd must inherit the authenticated host workspace');
@@ -66,7 +66,6 @@ export const createReadTool = cwd => toolsAt(cwd, readTool);
 export const createBashTool = cwd => toolsAt(cwd, bashTool);
 export const createEditTool = cwd => toolsAt(cwd, editTool);
 export const createWriteTool = cwd => toolsAt(cwd, writeTool);
-export const createSearchTool = cwd => toolsAt(cwd, searchTool);
 
 // This selector is a Pi-facing view, not a second session store. Native durable
 // persistence is mandatory even for an in-memory Pi view; no Pi JSONL is written.

@@ -1762,7 +1762,7 @@ mod tests {
             "run-1",
             1,
             "call-1",
-            "search",
+            "native_process_probe",
             ToolEffect::HostProcess,
             serde_json::json!({}),
         )

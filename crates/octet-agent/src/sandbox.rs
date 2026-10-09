@@ -323,7 +323,7 @@ pub struct SandboxConfig {
     /// Explicit Bash-compatible shell executable. When unset on Unix, octet
     /// follows Pi's order: `/bin/bash`, `bash` on `PATH`, then `sh`.
     pub shell_path: Option<PathBuf>,
-    /// Maximum duration for a `bash` call (also bounds `search`).
+    /// Maximum duration for a `bash` call.
     pub bash_timeout: Duration,
     /// Maximum bytes of tool output before truncation.
     pub max_output_bytes: usize,

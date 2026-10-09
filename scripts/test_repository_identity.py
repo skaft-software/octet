@@ -222,7 +222,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
         self.assertIn(f"distribution target is **{version}**", text)
         self.assertIn("source candidate, not a published release", text)
         self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
-        self.assertIn(f"planned npm channel is `@skaft/octet@{version}` (launcher plus three signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
+        self.assertIn(f"planned npm channel is `@skaft/octet@{version}` (launcher plus four signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
         self.assertIn(f"**{version} is not published to npm.**", text)
 
 

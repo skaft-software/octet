@@ -242,7 +242,8 @@ fn tool_output_tail_expands_with_global_ctrl_o_and_copy_stays_safe() {
     };
     let collapsed = transcript(&shell);
     assert!(collapsed.contains("private result line 8"), "{collapsed}");
-    assert!(!collapsed.contains("private result line 1"), "{collapsed}");
+    assert!(collapsed.contains("private result line 1"), "{collapsed}");
+    assert!(!collapsed.contains("private result line 4"), "{collapsed}");
     assert!(collapsed.contains("4 output rows collapsed"), "{collapsed}");
     assert_eq!(
         shell.debug_tool_output(&id).as_deref(),
@@ -260,7 +261,8 @@ fn tool_output_tail_expands_with_global_ctrl_o_and_copy_stays_safe() {
     assert!(!shell.verbose_tools());
     let collapsed_again = transcript(&shell);
     assert!(
-        !collapsed_again.contains("private result line 1"),
+        collapsed_again.contains("private result line 1")
+            && !collapsed_again.contains("private result line 4"),
         "{collapsed_again}"
     );
     let state = shell.state.borrow();
@@ -269,27 +271,27 @@ fn tool_output_tail_expands_with_global_ctrl_o_and_copy_stays_safe() {
 }
 
 #[test]
-fn search_output_and_edit_write_diffs_expand_with_global_ctrl_o() {
+fn bash_output_and_edit_write_diffs_expand_with_global_ctrl_o() {
     use octet_agent::ToolOutput;
 
     let mut shell = InteractiveShell::test_shell();
     let run_id = shell.begin_run("local");
-    let search_id = ToolCallId("expand-search".into());
+    let bash_id = ToolCallId("expand-bash".into());
     shell.on_run_event(
         run_id,
         &AgentEvent::ToolStarted {
-            id: search_id.clone(),
-            name: "search".into(),
-            args: serde_json::json!({"query": "needle", "path": "src"}),
+            id: bash_id.clone(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "rg needle src"}),
         },
     );
     shell.on_run_event(
         run_id,
         &AgentEvent::ToolFinished {
-            id: search_id,
+            id: bash_id,
             result: Ok(ToolOutput::new(
                 (1..=8)
-                    .map(|line| format!("SEARCH MATCH {line}"))
+                    .map(|line| format!("BASH MATCH {line}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
             )),
@@ -339,8 +341,10 @@ fn search_output_and_edit_write_diffs_expand_with_global_ctrl_o() {
             .join("\n")
     };
     let collapsed = transcript(&shell);
-    assert!(!collapsed.contains("SEARCH MATCH 1"), "{collapsed}");
-    assert!(collapsed.contains("SEARCH MATCH 8"), "{collapsed}");
+    assert!(collapsed.contains("BASH MATCH 1"), "{collapsed}");
+    assert!(!collapsed.contains("BASH MATCH 3"), "{collapsed}");
+    assert!(collapsed.contains("4 output rows collapsed"), "{collapsed}");
+    assert!(collapsed.contains("BASH MATCH 8"), "{collapsed}");
     assert!(
         !collapsed.contains("EDIT DIFF FINAL SENTINEL"),
         "{collapsed}"
@@ -352,8 +356,12 @@ fn search_output_and_edit_write_diffs_expand_with_global_ctrl_o() {
 
     shell.toggle_disclosure();
     let expanded = transcript(&shell);
-    assert!(expanded.contains("SEARCH MATCH 1"), "{expanded}");
-    assert!(expanded.contains("SEARCH MATCH 8"), "{expanded}");
+    for line in 1..=8 {
+        assert!(
+            expanded.contains(&format!("BASH MATCH {line}")),
+            "{expanded}"
+        );
+    }
     assert!(expanded.contains("EDIT DIFF FINAL SENTINEL"), "{expanded}");
     assert!(expanded.contains("WRITE DIFF FINAL SENTINEL"), "{expanded}");
 }
@@ -411,7 +419,9 @@ fn ctrl_o_toggles_all_expandable_transcript_blocks() {
     };
     let collapsed = transcript(&shell);
     assert!(!collapsed.contains("private reasoning body"), "{collapsed}");
-    assert!(!collapsed.contains("tool output 1"), "{collapsed}");
+    assert!(collapsed.contains("tool output 1"), "{collapsed}");
+    assert!(!collapsed.contains("tool output 3"), "{collapsed}");
+    assert!(collapsed.contains("2 output rows collapsed"), "{collapsed}");
     assert!(collapsed.contains("tool output 6"), "{collapsed}");
     assert!(!collapsed.contains("shell output 1"), "{collapsed}");
     assert!(collapsed.contains("shell output 6"), "{collapsed}");
@@ -431,6 +441,7 @@ fn ctrl_o_toggles_all_expandable_transcript_blocks() {
     assert!(expanded.contains("private reasoning body"), "{expanded}");
     assert!(expanded.contains("future reasoning body"), "{expanded}");
     assert!(expanded.contains("tool output 1"), "{expanded}");
+    assert!(expanded.contains("tool output 3"), "{expanded}");
     assert!(expanded.contains("shell output 1"), "{expanded}");
     assert!(expanded.contains("private compaction body"), "{expanded}");
 
@@ -445,7 +456,15 @@ fn ctrl_o_toggles_all_expandable_transcript_blocks() {
         "{collapsed_again}"
     );
     assert!(
-        !collapsed_again.contains("tool output 1"),
+        collapsed_again.contains("tool output 1"),
+        "{collapsed_again}"
+    );
+    assert!(
+        !collapsed_again.contains("tool output 3"),
+        "{collapsed_again}"
+    );
+    assert!(
+        collapsed_again.contains("tool output 6"),
         "{collapsed_again}"
     );
     assert!(

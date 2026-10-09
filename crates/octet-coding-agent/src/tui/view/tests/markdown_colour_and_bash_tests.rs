@@ -9,14 +9,13 @@ use super::*;
 fn wrapped_tool_summaries_keep_their_action_indent() {
     let theme = crate::tui::theme::test_theme();
     let args = serde_json::json!({
-        "path": "crates/octet-coding-agent/src/tui/view.rs",
-        "query": "a-very-long-search-query-that-must-wrap-without-losing-the-tool-label"
+        "path": "crates/octet-coding-agent/src/tui/a-very-long-file-name-that-must-wrap-without-losing-the-tool-label.rs"
     });
     let panel = TranscriptBlock::Tool(Box::new(ToolPanel::new(
         ToolCallId("id".into()),
-        "search".into(),
+        "read".into(),
         args.to_string(),
-        summarize_tool("search", &args),
+        summarize_tool("read", &args),
         String::new(),
         false,
         false,
@@ -30,7 +29,7 @@ fn wrapped_tool_summaries_keep_their_action_indent() {
         .collect::<Vec<_>>();
 
     assert!(lines.len() > 1, "the long summary should wrap: {lines:?}");
-    assert!(lines[0].starts_with("• Explored"), "{lines:?}");
+    assert!(lines[0].starts_with("• Read"), "{lines:?}");
     let value_byte = lines[0]
         .find("crates/octet-coding-agent")
         .expect("tool summary value on first row");
@@ -620,7 +619,7 @@ fn bash_output_and_hidden_metadata_share_a_terminal_content_gutter() {
 
     let details = render_compact_bash_output(&panel, &theme, 80, false, &tool_value_indent("Bash"));
     assert!(
-        details[0].contains("\x1b[38;2;"),
+        details[2].contains("\x1b[38;2;"),
         "hidden-line metadata should use the muted metadata style: {details:?}"
     );
     assert!(
@@ -649,13 +648,13 @@ fn bash_output_and_hidden_metadata_share_a_terminal_content_gutter() {
         .expect("synthetic hidden-line metadata");
     let output = rendered
         .iter()
-        .find(|line| line.contains("result line 5"))
+        .find(|line| line.contains("result line 1"))
         .expect("first retained output row");
-    let elbow_byte = hidden.find('└').expect("nested output elbow");
-    let elbow_column = visible_width(&hidden[..elbow_byte]);
+    let elbow_byte = output.find('└').expect("nested output elbow");
+    let elbow_column = visible_width(&output[..elbow_byte]);
     let hidden_byte = hidden.find('…').expect("hidden metadata marker");
     let hidden_column = visible_width(&hidden[..hidden_byte]);
-    let output_byte = output.find("result line 5").expect("retained output text");
+    let output_byte = output.find("result line 1").expect("retained output text");
     let output_column = visible_width(&output[..output_byte]);
     assert_eq!(elbow_column, label_column, "{rendered:?}");
     assert_eq!(hidden_column, elbow_column + 2, "{rendered:?}");
@@ -889,7 +888,8 @@ fn failed_bash_output_keeps_a_bounded_excerpt_before_expansion() {
     .map(|line| strip_terminal_sequences(&line))
     .collect::<Vec<_>>()
     .join("\n");
-    assert!(!collapsed.contains("failed output line 1"), "{collapsed}");
+    assert!(collapsed.contains("failed output line 1"), "{collapsed}");
+    assert!(!collapsed.contains("failed output line 4"), "{collapsed}");
     assert!(collapsed.contains("failed output line 8"), "{collapsed}");
     assert!(collapsed.contains("output rows collapsed"), "{collapsed}");
 

@@ -342,7 +342,6 @@ mod tests {
         let group = ToolActivityGroup {
             member_ids: vec![read.clone(), bash.clone()],
             read_files: 1,
-            searches: 0,
             commands: 1,
             file_paths: vec!["src/main.rs".into()],
             ..Default::default()
@@ -464,7 +463,6 @@ mod tests {
         let group = crate::hydrate::ToolActivityGroup {
             member_ids: vec![id.clone()],
             read_files: 1,
-            searches: 0,
             commands: 0,
             file_paths: vec!["src/file.rs".into()],
             ..Default::default()

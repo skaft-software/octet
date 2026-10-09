@@ -4,7 +4,7 @@
 
 ```sh
 octet --safe-mode --model claude-sonnet-4-6
-octet -p "Explain the code" --tools read,search
+octet -p "Explain the code" --tools read
 ```
 
 Uppercase words are values you supply, and `[brackets]` are optional. This page
@@ -61,7 +61,7 @@ without assistant-message or turn events. Its usage is session-only.
 
 | Option | What it does |
 | --- | --- |
-| `--tools NAMES`, `--exclude-tools NAMES` | Final comma-separated allowlist or exclusions, such as `read,search`. |
+| `--tools NAMES`, `--exclude-tools NAMES` | Final comma-separated allowlist or exclusions, such as `read,bash`. |
 | `--powershell` | Opt in to the Windows `powershell` tool, in addition to `bash`. It never replaces `bash`, can't be combined with an exclusive `--tools` or `--no-tools` list, and reports itself inert on hosts without PowerShell. |
 | `--models PATTERNS` | Ordered, comma-separated model scope for selection and Ctrl+P cycling: `provider/*`, a literal `provider/model`, or a bare-id glob, each with an optional real `:level` suffix. The first requested match is the default for a new session, and a miss warns without discarding the rest. `/scoped-models` saves the same ordered patterns. |
 | `--no-tools` | Disable all tools. Can't be combined with `--tools`. |

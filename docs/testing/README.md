@@ -122,6 +122,19 @@ publish signed artifacts, and `homebrew-formula.yml` renders the formula. All of
 them key off an **existing canonical `vX.Y.Z` tag** — the tag is both the trigger
 and the pinned source of provenance, so there is no untagged path through them.
 
+Before binary, installer or npm publication, `release-octet.yml` requires the
+latest main-push or manually dispatched CI run for the **exact immutable source
+SHA** to succeed, including every designated CI lane. PR merge-ref results,
+missing or skipped lanes and older green runs after a newer failure cannot
+qualify it. This gate does not replace separately required hosted branch checks.
+
+Windows GNU CI does not qualify the MSVC release executable. The Windows release
+job additionally gates on MSVC terminal, private-file, shell/extension and process
+contracts. It packages twice, compares the ZIP digests, extracts the archive,
+runs version/host smoke with an OS-only PATH and runs ConPTY scenarios against
+the extracted executable before upload or signing. These are workflow requirements,
+not a claim that the unpublished candidate has passed them.
+
 Untagged candidates come from the `release-candidate` job in `ci.yml`, which
 runs only when the workflow is dispatched by hand. It builds release binaries
 for GNU/Linux x86-64 and for macOS on Intel and Apple silicon, packages each

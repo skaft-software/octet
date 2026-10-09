@@ -155,9 +155,8 @@ impl Default for SandboxPolicy {
 }
 
 /// Tool names understood by the v0.1 coding product.
-pub const SUPPORTED_TOOL_NAMES: [&str; 9] = [
+pub const SUPPORTED_TOOL_NAMES: [&str; 8] = [
     "read",
-    "search",
     "edit",
     "write",
     "bash",
@@ -567,10 +566,6 @@ impl Config {
                 "write" => self.sandbox.allow_write,
                 // Process mode deliberately has shell-equivalent authority.
                 "bash" => self.sandbox.process_execution_allowed(),
-                // `search` runs `rg` as a native child and refuses to run
-                // without the same authority, so it is not advertised then
-                // either.
-                "search" => self.sandbox.process_execution_allowed(),
                 "powershell" => cfg!(windows) && self.sandbox.process_execution_allowed(),
                 _ => true,
             }
@@ -763,12 +758,12 @@ mod tests {
 
     #[test]
     fn tool_policy_validates_and_filters_names() {
-        let mut policy = ToolPolicy::only(["read".to_owned(), "search".to_owned()]).unwrap();
-        policy.exclude("search").unwrap();
+        let mut policy = ToolPolicy::only(["read".to_owned(), "bash".to_owned()]).unwrap();
+        policy.exclude("bash").unwrap();
         assert_eq!(policy.names().collect::<Vec<_>>(), vec!["read"]);
         assert_eq!(
             policy.explicit_names().unwrap().collect::<Vec<_>>(),
-            vec!["read", "search"],
+            vec!["bash", "read"],
             "startup diagnostics must retain explicitly requested names removed by later gates"
         );
 
@@ -801,9 +796,9 @@ mod tests {
     }
 
     #[test]
-    fn default_tool_policy_advertises_search_and_keeps_powershell_explicit() {
+    fn default_tool_policy_excludes_search_and_keeps_powershell_explicit() {
         let policy = ToolPolicy::default();
-        for name in ["read", "edit", "write", "bash", "search"] {
+        for name in ["read", "edit", "write", "bash"] {
             assert!(policy.enabled(name), "{name}");
         }
         assert!(policy.explicit_names().is_none());
@@ -811,9 +806,8 @@ mod tests {
         assert!(ToolPolicy::only(["powershell".to_owned()])
             .unwrap()
             .enabled("powershell"));
-        assert!(ToolPolicy::only(["search".to_owned()])
-            .unwrap()
-            .enabled("search"));
+        assert!(!policy.enabled("search"));
+        assert!(!SUPPORTED_TOOL_NAMES.contains(&"search"));
     }
 
     #[test]

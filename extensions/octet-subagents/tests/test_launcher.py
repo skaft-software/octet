@@ -63,7 +63,7 @@ def worker(state: str = "running", *, name: str = "explore-auth", index: int = 1
         profile="explore",
         requested_model="inherit",
         effective_model="claude-sonnet-test",
-        tools=("read", "search"),
+        tools=("read",),
         state=state,
         phase="searching",
         created_at_ms=1_700_000_000_000,

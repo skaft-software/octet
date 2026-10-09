@@ -37,7 +37,7 @@ pub enum ToolConcurrency {
     Sequential,
     /// Calls may execute concurrently with other parallel-safe calls.
     Parallel,
-    /// A self-contained native process (one shell command, one search) that
+    /// A self-contained native process (one shell command) that
     /// may overlap the other overlappable calls of the same model response, as
     /// Pi runs them, but only while the effect policy admits host processes
     /// without approval. Unlike [`Parallel`](Self::Parallel) it is never
@@ -48,7 +48,7 @@ pub enum ToolConcurrency {
 
 /// A tool the model can call.
 ///
-/// Core tools (`read`, `search`, `edit`, `write`, `bash`) and third-party tools
+/// Core tools (`read`, `edit`, `write`, `bash`) and third-party tools
 /// implement the same trait and register through the same
 /// [`ExtensionHost::tool`](crate::ExtensionHost::tool) method — nothing is
 /// hardcoded into the agent loop.

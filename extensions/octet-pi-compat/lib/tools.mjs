@@ -4,7 +4,7 @@ import { lstat, open, unlink } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { bounded, fields, invalid, plainJSON, unsupported } from './errors.mjs';
 
-export const BUILTIN_TOOL_NAMES = Object.freeze(['read', 'search', 'edit', 'write', 'bash', 'powershell']);
+export const BUILTIN_TOOL_NAMES = Object.freeze(['read', 'edit', 'write', 'bash', 'powershell']);
 const builtinToolNames = new Set(BUILTIN_TOOL_NAMES);
 
 // Match octet 0.9.0's bounded schema profile (octet-ai/json_repair.rs).

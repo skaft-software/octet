@@ -11,7 +11,7 @@ pub(crate) struct ExtensionAgentSessionPolicy {
     #[serde(default)]
     pub(crate) resolved_reasoning: Option<octet_ai::ReasoningConfig>,
     /// Child tool scope: a non-empty duplicate-free subset of the standard
-    /// tools `read`, `search`, `edit`, `write`, and `bash`.
+    /// tools `read`, `edit`, `write`, and `bash`.
     pub(crate) tools: Vec<String>,
     /// Child depth relative to the root; extension children are exactly one.
     pub(crate) max_depth: usize,
@@ -101,8 +101,7 @@ impl ExtensionAgentSessionPolicy {
                 .any(|tool| !EXTENSION_CHILD_TOOLS.contains(&tool.as_str()))
         {
             return Err(
-                "child tools must be a duplicate-free subset of read, search, edit, write, and bash"
-                    .into(),
+                "child tools must be a duplicate-free subset of read, edit, write, and bash".into(),
             );
         }
         if self.max_depth != 1 {

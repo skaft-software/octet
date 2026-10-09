@@ -1453,11 +1453,11 @@ fn no_edit_and_explicit_allowlists_match_the_provider_tool_surface() {
 
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
-    cli.tools = Some(vec!["read".into(), "search".into()]);
+    cli.tools = Some(vec!["read".into(), "bash".into()]);
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     assert_eq!(
         config.tools.names().collect::<Vec<_>>(),
-        vec!["read", "search"]
+        vec!["bash", "read"]
     );
 }
 

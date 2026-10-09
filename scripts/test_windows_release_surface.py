@@ -29,6 +29,24 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         self.assertIn(".zip", workflow)
         self.assertIn("octet-host.exe", workflow)
 
+    def test_msvc_artifact_is_qualified_before_upload_and_signing(self):
+        workflow = (ROOT / ".github/workflows/release-octet.yml").read_text()
+        job = workflow.split("\n  build-windows:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        for contract in (
+            "--lib tui::terminal", "-- secure_fs tools::bash::tests",
+            "--test windows_process_current", "Expand-Archive $archive",
+            "$env:PATH = \"$env:SystemRoot\\System32;$env:SystemRoot\"",
+            "$env:OCTET_CONPTY_BINARY = Join-Path $package 'octet.exe'",
+            "--test windows_conpty", "Windows archives differ",
+            "path: ${{ runner.temp }}/octet-release/*.zip",
+            r"-notmatch '^rustc 1\.97\.1(?: |$)'",
+        ):
+            self.assertIn(contract, job)
+        self.assertLess(job.index("Expand-Archive $archive"), job.index("--test windows_conpty"))
+        self.assertLess(job.index("--test windows_conpty"), job.index("uses: actions/upload-artifact"))
+        self.assertIn("needs: [resolve, build, build-windows]", workflow)
+        self.assertNotIn("continue-on-error", job)
+
     def test_npm_launcher_resolves_windows_x64_platform_package(self):
         launcher = json.loads(
             (ROOT / "packages/npm/launcher/package.json.in").read_text()

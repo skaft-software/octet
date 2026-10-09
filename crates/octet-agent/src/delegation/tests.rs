@@ -45,7 +45,7 @@ fn test_extension_policy() -> ExtensionAgentSessionPolicy {
         model_selection: None,
         resolved_model: None,
         resolved_reasoning: None,
-        tools: vec!["read".into(), "search".into()],
+        tools: vec!["read".into()],
         max_depth: 1,
         max_concurrent_children: 2,
         max_turns: Some(4),
@@ -3283,10 +3283,7 @@ fn extension_child_policy_installs_only_detached_read_only_tools_and_lowers_pare
     let child = manager
         .build_child_agent(session, &identity, Some(&policy))
         .unwrap();
-    assert_eq!(
-        child.registered_tool_names(),
-        vec!["read".to_owned(), "search".to_owned()]
-    );
+    assert_eq!(child.registered_tool_names(), vec!["read".to_owned()]);
     assert!(child
         .registered_tool_names()
         .iter()
@@ -3531,7 +3528,7 @@ async fn extension_service_enforces_concurrency_depth_deadline_and_list_provenan
         ));
         record.turn_count = 2;
         record.tool_call_count = 1;
-        record.active_tools.insert("call-3".into(), "search".into());
+        record.active_tools.insert("call-3".into(), "read".into());
         record.usage = Usage {
             input_tokens: 10,
             output_tokens: 5,
@@ -3557,8 +3554,8 @@ async fn extension_service_enforces_concurrency_depth_deadline_and_list_provenan
     manager.update_agent_tool_started(
         first_id,
         "call-10",
-        "search".to_owned(),
-        tool_args_summary(&json!({"pattern": "spawn_agent"})),
+        "read".to_owned(),
+        tool_args_summary(&json!({"path": "src/lib.rs"})),
     );
     let listed = service.list("root-owner").unwrap();
     let record = listed["agents"]
@@ -3568,7 +3565,7 @@ async fn extension_service_enforces_concurrency_depth_deadline_and_list_provenan
         .find(|record| record["agent_id"] == first_id)
         .unwrap();
     assert_eq!(record["task_name"], "first");
-    assert_eq!(record["policy"]["tools"], json!(["read", "search"]));
+    assert_eq!(record["policy"]["tools"], json!(["read"]));
     assert_eq!(
         record["effective_tool_policy"]["effect_policy"]["value"],
         "controlled"
@@ -3588,7 +3585,7 @@ async fn extension_service_enforces_concurrency_depth_deadline_and_list_provenan
     assert_eq!(record["turn_count"], 2);
     assert_eq!(record["tool_call_count"], 3);
     assert_eq!(record["phase"], "using_tool");
-    assert_eq!(record["tool_name"], "search");
+    assert_eq!(record["tool_name"], "read");
     let recent = record["recent_tools"].as_array().unwrap();
     assert_eq!(recent.len(), 2);
     assert_eq!(recent[0]["name"], "read");
@@ -3599,8 +3596,8 @@ async fn extension_service_enforces_concurrency_depth_deadline_and_list_provenan
     assert!(recent[0]["started_at_ms"].as_u64().is_some());
     assert!(recent[0]["finished_at_ms"].as_u64().is_some());
     assert_eq!(recent[0]["error"], false);
-    assert_eq!(recent[1]["name"], "search");
-    assert_eq!(recent[1]["args"], "pattern=spawn_agent");
+    assert_eq!(recent[1]["name"], "read");
+    assert_eq!(recent[1]["args"], "path=src/lib.rs");
     assert!(recent[1]["finished_at_ms"].is_null());
     assert_eq!(record["usage"]["total_tokens"], 15);
     assert_eq!(record["cost_microdollars"], 7);

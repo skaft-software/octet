@@ -866,7 +866,7 @@ class AgentSessionTests(unittest.TestCase):
                 fingerprint="f" * 64,
                 message="Find the answer",
                 idempotency_key="request-42-research",
-                tools=["read", "search"],
+                tools=["read"],
                 max_depth=1,
                 max_concurrent_children=2,
                 max_turns=8,
@@ -916,7 +916,7 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(
             calls[0]["params"]["policy"],
             {
-                "tools": ["read", "search"],
+                "tools": ["read"],
                 "max_depth": 1,
                 "max_concurrent_children": 2,
                 "max_turns": 8,
@@ -967,6 +967,25 @@ class AgentSessionTests(unittest.TestCase):
             extension.list_agent_models(parent_request_id=42)
         with self.assertRaisesRegex(RpcError, "agent_model_selection_v1"):
             extension.spawn_agent(**spawn, model_selection={"model": "haiku"})
+        host.shutdown()
+
+    def test_child_tool_scope_has_four_tools_and_rejects_removed_search(self):
+        from unittest.mock import Mock
+
+        extension = Extension(api_version="0.2", stderr=io.StringIO())
+        host = RunningExtension(extension)
+        host.start(initialize_v02(optional=["agent_sessions"]))
+        extension.request = Mock(return_value={"agent_id": "worker"})
+        arguments = dict(task_name="reader", message="x", idempotency_key="key",
+                         max_depth=1, max_concurrent_children=1, max_output_bytes=512,
+                         parent_request_id=42)
+        extension.spawn_agent(**arguments, tools=["read", "edit", "write", "bash"])
+        self.assertEqual(extension.request.call_args.args[1]["policy"]["tools"],
+                         ["read", "edit", "write", "bash"])
+        extension.request.reset_mock()
+        with self.assertRaisesRegex(ValueError, "subset of read, edit, write, and bash"):
+            extension.spawn_agent(**arguments, tools=["read", "search"])
+        extension.request.assert_not_called()
         host.shutdown()
 
     def test_agent_session_helpers_require_negotiation(self):

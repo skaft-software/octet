@@ -153,7 +153,7 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   leaves the accepted tool unchanged. Late `on` callbacks can use already
   subscribed native hooks. New command/shortcut/flag names remain startup-bound.
 - Reviewed builtin overrides use exact `capabilities.builtin_tool_overrides`
-  grants for captured names among `read`, `search`, `edit`, `write`, `bash` and
+  grants for captured names among `read`, `edit`, `write`, `bash` and
   `powershell`. Startup and late registrations must match the native initialize
   grant and negotiated feature; `bridge.json` cannot grant authority. The
   owner-scoped replacement keeps extension effects, scheduling, metering and

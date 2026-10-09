@@ -1,12 +1,8 @@
 //! The default coding tool surface against the real binary.
 //!
-//! The product prompt advertises a dedicated `search` tool
-//! (`crates/octet-coding-agent/src/resources.rs`, `TOOL_PREFERENCE`), but the
-//! default allowlist used to omit it, so every discovery step had to go through
-//! `bash`. This suite runs the real CLI against a loopback OpenAI-compatible
-//! server and asserts that the tool the prompt advertises is the tool the model
-//! is offered: the request schema must carry `search`, and a `search` call must
-//! execute and return the matching file.
+//! Runs the real CLI against a loopback OpenAI-compatible server. The default
+//! surface is exactly read/edit/write/bash; repository content search executes
+//! through bash, without a separate search schema or prompt instruction.
 
 #![cfg(unix)]
 #![allow(missing_docs)]
@@ -43,16 +39,16 @@ async fn fixture() -> (tempfile::TempDir, MockServer) {
             let (delta, finish) = if last["role"] == "tool" {
                 assert!(
                     last["content"].as_str().unwrap().contains(MARKER),
-                    "read-only search did not return the matching file: {}",
+                    "bash content search did not return the matching file: {}",
                     last["content"]
                 );
                 (json!({"content": MARKER}), "stop")
             } else {
                 let id = sequence.fetch_add(1, Ordering::Relaxed);
                 (
-                    json!({"tool_calls": [{"index": 0, "id": format!("search-{id}"),
-                        "type": "function", "function": {"name": "search",
-                        "arguments": "{\"query\":\"onboarding-tool-ok\"}"}}]}),
+                    json!({"tool_calls": [{"index": 0, "id": format!("bash-{id}"),
+                        "type": "function", "function": {"name": "bash",
+                        "arguments": json!({"command": "rg --fixed-strings --line-number onboarding-tool-ok nested"}).to_string()}}]}),
                     "tool_calls",
                 )
             };
@@ -129,22 +125,61 @@ fn tool_names(request: &Request) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn default_surface_advertises_and_executes_the_search_tool_the_prompt_names() {
+async fn default_surface_has_only_four_core_tools_and_searches_through_bash() {
     let (root, server) = fixture().await;
     run_cli(root.path(), &[]).await;
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2, "one search call and one answer");
+    assert_eq!(requests.len(), 2, "one bash call and one answer");
     let names = tool_names(&requests[0]);
-    assert!(
-        names.iter().any(|name| name == "search"),
-        "the default allowlist omits the tool the prompt advertises: {names:?}"
-    );
+    assert_eq!(names, ["read", "edit", "write", "bash"]);
     let system = requests[0].body_json::<Value>().unwrap()["messages"][0]["content"]
         .as_str()
         .unwrap()
         .to_owned();
     assert!(
-        system.contains("Configured core tools: read, edit, write, bash, search."),
+        system.contains("Configured core tools: read, edit, write, bash."),
         "the prompt must advertise exactly the tools the model is given: {system}"
     );
+    assert!(system.contains("Use `bash` for shell commands and repository content search"));
+    assert_eq!(system.matches("<tools>").count(), 1);
+    assert_eq!(system.matches("</tools>").count(), 1);
+    assert_eq!(system.matches("<rules>").count(), 1);
+    assert_eq!(system.matches("</rules>").count(), 1);
+    assert!(!system.contains("Tool preference:"));
+    assert!(!system.contains("dedicated `search` tool"));
+}
+
+#[tokio::test]
+async fn explicitly_requesting_removed_search_tool_fails_before_inference() {
+    let (root, server) = fixture().await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        Command::new(env!("CARGO_BIN_EXE_octet"))
+            .current_dir(root.path().join("workspace"))
+            .env_clear()
+            .env("HOME", root.path().join("home"))
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("OCTET_SESSION_DIR", root.path().join("sessions"))
+            .env("TERM", "dumb")
+            .args([
+                "--offline",
+                "--no-context-files",
+                "--model",
+                MODEL,
+                "--tools",
+                "search",
+                "--print",
+                "Find the onboarding marker.",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("removed-tool rejection exceeded its deadline")
+    .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("search"), "{error}");
+    assert!(error.contains("unavailable"), "{error}");
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

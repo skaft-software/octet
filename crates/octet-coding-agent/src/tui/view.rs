@@ -425,11 +425,6 @@ fn activity_group_label(
             group.read_files,
             if group.read_files == 1 { "" } else { "s" }
         ),
-        crate::hydrate::ToolActivityKind::Explore if group.searches > 0 => format!(
-            "Searched {} time{}",
-            group.searches,
-            if group.searches == 1 { "" } else { "s" }
-        ),
         crate::hydrate::ToolActivityKind::Explore => format!(
             "Ran {} Command{}",
             group.commands,
@@ -465,14 +460,7 @@ fn activity_group_label(
             }
         ),
     };
-    if group.read_files > 0 && group.searches > 0 {
-        label.push_str(&format!(
-            " · {} search{}",
-            group.searches,
-            if group.searches == 1 { "" } else { "es" }
-        ));
-    }
-    if group.commands > 0 && (group.read_files > 0 || group.searches > 0) {
+    if group.commands > 0 && group.read_files > 0 {
         label.push_str(&format!(
             " · {} command{}",
             group.commands,

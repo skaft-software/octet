@@ -136,7 +136,13 @@ fn queued_follow_up_preview_is_bounded_and_control_safe() {
     shell.queue_follow_up(ComposedInput::from_text("second".into()));
     for width in [20, 40, 80] {
         let rows = input_overlays::render_pending_steering(&shell.state.borrow(), width, 10);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 10);
+        let notice = strip_terminal_sequences(rows.last().unwrap());
+        assert!(notice.starts_with("    … "), "{notice}");
+        assert!(notice.contains("queued"), "{notice}");
+        if width >= 40 {
+            assert!(notice.contains("queued rows hidden"), "{notice}");
+        }
         assert!(rows.iter().all(|row| visible_width(row) <= width as usize));
         assert!(rows.iter().all(|row| !row.contains("\x1b[3J")));
     }

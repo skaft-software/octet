@@ -115,6 +115,41 @@
     "structured_output": true,
     "tool_call": true
   },
+  "anthropic/claude-haiku-5-5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Haiku 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "anthropic/claude-opus-4-5": {
     "limit": {
       "context": 200000,
@@ -348,7 +383,7 @@
   },
   "anthropic/claude-sonnet-4-5": {
     "limit": {
-      "context": 1000000,
+      "context": 200000,
       "output": 64000
     },
     "modalities": {
@@ -374,7 +409,7 @@
   },
   "anthropic/claude-sonnet-4-5-20250929": {
     "limit": {
-      "context": 1000000,
+      "context": 200000,
       "output": 64000
     },
     "modalities": {
@@ -8049,6 +8084,41 @@
     ],
     "tool_call": true
   },
+  "opencode/claude-haiku-5-5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Haiku 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/claude-opus-4-1": {
     "limit": {
       "context": 200000,
@@ -11572,6 +11642,41 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/anthropic/claude-haiku-5.5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Haiku 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/anthropic/claude-opus-4.1": {
     "limit": {
       "context": 200000,
@@ -12468,7 +12573,7 @@
   "openrouter/deepseek/deepseek-v3.2": {
     "limit": {
       "context": 163840,
-      "output": 65536
+      "output": 147456
     },
     "modalities": {
       "input": [
@@ -14521,7 +14626,7 @@
         "text"
       ]
     },
-    "name": "Codestral 2508",
+    "name": "Codestral 25.08",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -15290,7 +15395,7 @@
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -18105,7 +18210,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -18303,7 +18408,7 @@
   "openrouter/qwen/qwen3.5-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 81920
     },
     "modalities": {
       "input": [
@@ -20458,8 +20563,8 @@
   },
   "openrouter/~anthropic/claude-haiku-latest": {
     "limit": {
-      "context": 200000,
-      "output": 64000
+      "context": 1000000,
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -20476,6 +20581,16 @@
     "reasoning_options": [
       {
         "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
       }
     ],
     "structured_output": true,
@@ -20580,7 +20695,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20932,7 +21047,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [

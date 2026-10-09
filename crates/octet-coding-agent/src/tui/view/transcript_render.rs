@@ -12,9 +12,8 @@ use super::surface_frame::{
 use super::surface_layout::{compile_surface_plan, surface_roles};
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{
-    render_compact_tool_output, render_diff_only, render_tool_failure_reason, tool_diff,
-    tool_display_label, tool_grid_label, tool_value_indent, tool_value_indent_width,
-    without_redundant_tool_lead,
+    render_diff_only, render_tool_failure_reason, tool_diff, tool_display_label, tool_grid_label,
+    tool_value_indent, tool_value_indent_width, without_redundant_tool_lead,
 };
 use super::transcript_cache::{RenderedTranscriptBlock, SurfaceGeometry};
 use super::{
@@ -442,13 +441,6 @@ pub(super) fn render_block_planned_with_rainbow(
                     "bash" | "exec" if compact_bash => output_lines.extend(
                         render_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
                     ),
-                    "search" if !panel.is_error => output_lines.extend(render_compact_tool_output(
-                        panel,
-                        theme,
-                        nested_width,
-                        verbose_tools,
-                        "",
-                    )),
                     "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => {
                         output_lines.extend(render_diff_only(
                             panel,

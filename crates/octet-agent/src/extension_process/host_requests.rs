@@ -76,7 +76,7 @@ pub struct AgentSessionPolicy {
     #[serde(default)]
     pub model_selection: Option<crate::delegation::AgentModelSelection>,
     /// Requested upper-bound tool allowlist. Accepted standard tools are
-    /// `read`, `search`, `edit`, `write`, and `bash`.
+    /// `read`, `edit`, `write`, and `bash`.
     pub tools: Vec<String>,
     /// Maximum absolute delegation depth. V1 requires one.
     pub max_depth: usize,

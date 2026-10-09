@@ -1,4 +1,4 @@
-//! The built-in tools (`read`, `edit`, `write`, `bash`, `search`), the [`CoreTools`]
+//! The built-in tools (`read`, `edit`, `write`, `bash`), the [`CoreTools`]
 //! extension that registers them, and the tool-layer durability primitives they
 //! need.
 //!
@@ -6,13 +6,9 @@
 //! tools. [`CoreTools`] additionally marks their native identities so reviewed
 //! builtin overrides cannot replace unrelated tools with familiar names.
 //!
-//! The model-visible core surface is `read`/`write`/`edit`/`bash` plus the
-//! ripgrep-backed `search` tool. The coding product advertises `search` for
-//! repository content search, so it is part of the default allowlist; a host
-//! may still narrow it through its own allowlist or effect policy. There is
-//! deliberately no separate `ls`/`find`/`grep` tool: directory listing and
-//! glob-style discovery stay with `bash`, while content search has one
-//! bounded, non-interpolated schema.
+//! The model-visible core surface is `read`/`write`/`edit`/`bash`. Directory
+//! listing, file discovery, and content search use shell commands through
+//! `bash`; there are no separate `search`/`ls`/`find`/`grep` tools.
 //!
 //! Three modules here are not tools but the harness-side primitives Pi defines
 //! next to them, landed in the tool layer because `session.rs`/`agent.rs` are
@@ -26,7 +22,6 @@ mod bash;
 mod edit;
 mod powershell;
 mod read;
-mod search;
 mod shell_environment;
 mod write;
 
@@ -56,7 +51,6 @@ pub use durability::{
 pub use edit::EditTool;
 pub use powershell::PowerShellTool;
 pub use read::ReadTool;
-pub use search::SearchTool;
 pub use shell_environment::{SessionShellTool, ShellSessionEnvironment};
 pub use summarization::{
     run_summarization_with_retry, CompactionFailure, CompactionFailureKind, CompactionStepOutcome,
@@ -157,8 +151,7 @@ pub(crate) fn validate_expected_hash(value: Option<&serde_json::Value>) -> Resul
 
 /// Builtin identities eligible for an explicitly reviewed API 0.4 override.
 /// Publication still requires the actual CoreTools registration, not just a name.
-pub(crate) const BUILTIN_TOOL_NAMES: &[&str] =
-    &["read", "search", "edit", "write", "bash", "powershell"];
+pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &["read", "edit", "write", "bash", "powershell"];
 
 /// Extension registering the built-in tools through the native registry.
 pub struct CoreTools;
@@ -169,9 +162,6 @@ impl Extension for CoreTools {
         host.builtin_tool(EditTool);
         host.builtin_tool(WriteTool);
         host.builtin_tool(BashTool);
-        // The coding product's prompt names this tool for repository content
-        // search, so the default allowlist and the prompt surface agree.
-        host.builtin_tool(SearchTool);
         // Optional at the product allowlist boundary; never a bash fallback.
         #[cfg(windows)]
         host.builtin_tool(PowerShellTool::default());

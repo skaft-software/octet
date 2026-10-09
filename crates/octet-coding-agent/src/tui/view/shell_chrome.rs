@@ -283,8 +283,9 @@ fn shell_chrome_with_composer_rows(
     }
     remaining = remaining.saturating_sub(suggestions.len());
 
-    // Pending steering is a compact preview, never a second transcript.
-    let pending_limit = remaining.min(crate::tui::layout::MAX_STEERING_PREVIEW_ROWS);
+    // Wrap queued messages in the available chrome, retaining transcript space
+    // and the composer instead of letting a long queue push either off-screen.
+    let pending_limit = remaining.saturating_sub(3);
     let pending = render_pending_steering(state, width, pending_limit);
     remaining = remaining.saturating_sub(pending.len());
 

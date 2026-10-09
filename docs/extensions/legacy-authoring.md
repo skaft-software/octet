@@ -471,7 +471,7 @@ retains every field and bound: `{parent_request_id, task_name, profile?,
 fingerprint?, message, idempotency_key, policy}`. Mandatory `policy` contains
 `tools`, `max_depth`, `max_concurrent_children`, `max_turns`, optional/null
 `max_tokens`, `max_cost_microdollars`, `max_output_bytes`, and `timeout_ms`.
-The tools are a non-empty subset of `read`, `search`, `edit`, `write`, and `bash`,
+The tools are a non-empty subset of `read`, `edit`, `write`, and `bash`,
 the parent's full standard scope by default, narrowable per spawn. Depth is one;
 there are at most eight active children and thirty-two retained records. The
 host freezes detached tool snapshots, applies lower parent turn/cost ceilings,

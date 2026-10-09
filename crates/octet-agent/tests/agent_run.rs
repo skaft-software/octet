@@ -3693,7 +3693,8 @@ async fn multiple_parallel_safe_tool_calls_start_together_and_coalesce_in_order(
         "two independent reads should cost one tool turn, not one model turn each"
     );
     let tool_defs = requests[0]["tools"].as_array().unwrap();
-    for name in ["read", "search"] {
+    {
+        let name = "read";
         let definition = tool_defs
             .iter()
             .find(|definition| definition["name"] == name)
@@ -6817,9 +6818,9 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
             serde_json::json!({"path": "https://example.com/image.png"}),
         ),
         (
-            "call_search",
-            "search",
-            serde_json::json!({"query": "secret"}),
+            "call_native_process",
+            "native_process_probe",
+            serde_json::json!({}),
         ),
         (
             "call_process",
@@ -6850,6 +6851,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     let mut extensions = ExtensionHost::new();
     extensions.load(&CoreTools);
     for (name, effect) in [
+        ("native_process_probe", ToolEffect::HostProcess),
         ("delegation_probe", ToolEffect::Delegation),
         ("extension_probe", ToolEffect::Extension),
         ("unknown_probe", ToolEffect::Unknown),
@@ -6946,7 +6948,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
             ToolPolicyDenialCode::EffectNetworkDenied,
         ),
         (
-            "call_search",
+            "call_native_process",
             ToolEffect::HostProcess,
             ToolPolicyDenialCode::EffectNativeProcessDenied,
         ),
@@ -7027,7 +7029,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     for id in [
         "call_host_read",
         "call_network",
-        "call_search",
+        "call_native_process",
         "call_host_mutation",
         "call_delegation",
         "call_extension",
@@ -7039,7 +7041,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     assert!(succeeded.contains("call_process"));
     assert!(denied["call_host_read"].contains("reading outside the workspace"));
     assert!(denied["call_network"].contains("trusted egress broker"));
-    assert!(denied["call_search"].contains("OS or VM isolation backend"));
+    assert!(denied["call_native_process"].contains("OS or VM isolation backend"));
     assert!(denied["call_host_mutation"].contains("mutating outside the workspace"));
     assert!(denied["call_delegation"].contains("attenuated authority"));
     assert!(denied["call_extension"].contains("executable extensions"));
@@ -11734,27 +11736,21 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         .collect::<Vec<_>>();
     // `PowerShellTool` registers (with a snippet) on Windows only.
     #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut expected = vec!["read", "edit", "write", "bash", "search"];
+    let mut expected = vec!["read", "edit", "write", "bash"];
     #[cfg(windows)]
     expected.push("powershell");
     assert_eq!(
         declared, expected,
         "contributions follow wire order for exactly the tools that declare a snippet"
     );
-    // Search contributes its own snippet and stays callable. Rendering does
-    // not reintroduce any of the withdrawn ls/find/grep aliases.
-    assert!(
-        enabled
+    for name in ["search", "ls", "find", "grep"] {
+        assert!(!enabled
             .agent
             .registered_tool_names()
             .iter()
-            .any(|name| name == "search"),
-        "search stays registered"
-    );
-    assert!(
-        declared.contains(&"search"),
-        "the real search contribution reaches the section"
-    );
+            .any(|registered| registered == name));
+        assert!(!declared.contains(&name));
+    }
     enabled.agent.complete("hello").await.unwrap();
     let requests = wire_requests(enabled.server.as_ref().unwrap()).await;
     assert_eq!(requests.len(), 1);

@@ -1207,7 +1207,7 @@ fn tool_result_facts(
             let status = if output.is_error() { "error" } else { "ok" };
             let state_change = match name {
                 Some("edit" | "write") => Some(!output.is_error()),
-                Some("read" | "search") => Some(false),
+                Some("read") => Some(false),
                 _ => None,
             };
             (status, output.text.len() as u64, state_change)

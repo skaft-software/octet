@@ -98,7 +98,7 @@ impl Tool for ReadTool {
                           hash and continuation metadata. Image/audio returns bounded structured media \
                           for protocol-aware ingestion and a payload-free summary for the TUI; the active \
                           model may reject a recognized audio format it cannot accept. For independent \
-                          file inspections, request all read/search calls together in one turn. Existing \
+                          file inspections, request all read calls together in one turn. Existing \
                           bracketed [Image #N]/[Audio #N] attachments are already included in the prompt \
                           and must not be read again."
                 .to_string(),

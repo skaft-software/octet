@@ -10,10 +10,8 @@ octet --safe-mode --tools read --no-context-files --offline
 
 This allows read only, skips context files and optional discovery, and keeps
 approvals on. It isn't a network sandbox: inference still contacts your
-provider. Use OS isolation for untrusted work. Content search needs the default
-`unsafe_host` effect policy (`octet --tools read,search --no-context-files
---offline`), because `search` runs ripgrep as a native child and the controlled
-policies that `--safe-mode` selects deny a non-`bash` host process.
+provider. Use OS isolation for untrusted work. Content search uses `bash` with
+`rg` (ripgrep), subject to the same process and approval policy as other commands.
 
 ## Built-in tools
 
@@ -23,19 +21,16 @@ policies that `--safe-mode` selects deny a non-`bash` host process.
 | `edit` | Exact replacements that detect stale file content. | On |
 | `write` | Creates or replaces whole files. | On |
 | `bash` | Runs Bash-compatible commands with output limits, a timeout, cancellation and process-group cleanup. | On |
-| `search` | Ripgrep search of the workspace. | On |
 
 A tool you turn off is never advertised to the model. Having a tool isn't
 permission to use it. When the model batches calls in one response, reads run
-together, and under full access `bash` commands and `search` run together with
+together, and under full access independent `bash` commands run together with
 them. File changes, extension tools and anything that could ask for approval
-run one at a time, and results reach the model in the order it asked. `search`
-runs ripgrep as a native child, so `--no-process`/`--no-shell` remove it from
-the surface as well, and controlled effect policies deny its process calls.
+run one at a time, and results reach the model in the order it asked.
 
 | To do this | Use |
 | --- | --- |
-| Allow only some tools, or exclude some | `--tools read,search` or `--exclude-tools bash` |
+| Allow only some tools, or exclude some | `--tools read` or `--exclude-tools bash` |
 | Block file changes | `--no-edit` (turns off `edit` and `write`) |
 | Block whole-file writes | `--no-write` |
 | Block commands | `--no-process` or `--no-shell` |
@@ -51,8 +46,7 @@ effect policy, tool exclusions or approvals. `on` retains direct tools; `only`
 advertises composition tools while ordinary tools stay nested-only.
 
 Nested core `read` returns unnumbered bounded `content` with path/hash/line and
-continuation metadata. `search` returns ordered `matches` with path, line, text,
-context/clipping flags, `total` and `truncated`. `bash` returns independently
+continuation metadata. `bash` returns independently
 bounded raw `stdout`/`stderr` (up to 1 MiB source bytes each, additionally bounded
 by JSON encoding), exit status, byte counts and completeness/truncation flags.
 Direct tool text stays unchanged. Schema-less tools resolve to text, not

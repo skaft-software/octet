@@ -281,6 +281,28 @@ prices, input modalities and limits for actual inventory-returned routes. Seven
 offline metadata-tooling tests and 13 release-gate tests passed for this
 refresh; the live source may change independently before CI runs.
 
+### 2026-10-08 release-preparation refresh
+
+The four outputs were refreshed together from a retained public response with
+SHA-256 `4670fd67eb8581450409388cd4c16f3eeeb20b20b084c5b671fd0fe8d3ac9a7b`
+(5,359,633 bytes). The response remains private local release evidence, not a
+bundled artifact. Reproduce with the existing generator's `--source FILE` and
+validate with `--source FILE --check` using a response matching that digest.
+
+Relative to the preceding Mistral refresh:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 920 | 3 | 0 | 27 |
+| Canonical names | 415 | 1 | 0 | 0 |
+| Capability routes | 943 | 3 | 0 | 10 |
+
+Saved-source reproduction, 11 offline metadata-tooling tests and 13 release-gate
+tests passed. The generator, provider mappings, extraction exclusions and runtime
+precedence rules are unchanged; direct DeepSeek pricing remains unverified and
+excluded. These are catalog projections, not live model or capability acceptance.
+The live freshness gate must still pass on the final release source.
+
 ## GPT-6 contract review (2026-09-23)
 
 The public [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),

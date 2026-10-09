@@ -1598,7 +1598,7 @@ model session:
     "message": "Inspect the current Ableton MCP catalog.",
     "idempotency_key": "catalog-audit-2026-08-16",
     "policy": {
-      "tools": ["read", "search"],
+      "tools": ["read"],
       "max_depth": 1,
       "max_concurrent_children": 8,
       "max_turns": null,
@@ -1614,9 +1614,9 @@ model session:
 The host derives the resource owner from `parent_request_id`; callers cannot
 invent an owner. API `0.4` `agent_session_lifetime_v1` permits returning the
 original host-issued owner as described below. `policy` is mandatory. Its tools are a non-empty,
-duplicate-free subset of `read`, `search`, `edit`, `write`, and `bash`
-(the first-party extension defaults to all five; explicitly select
-`read`/`search` for read-only work); depth is exactly one;
+duplicate-free subset of `read`, `edit`, `write`, and `bash`
+(the first-party extension defaults to all four; explicitly select
+`read` for hard read-only work; content search uses `bash`, which can mutate); depth is exactly one;
 concurrency is 1..=8; returned UTF-8 bytes are 512..=16,384. The turn, cost,
 and wall-time ceilings are optional per child: `max_turns: null`,
 `max_cost_microdollars: null`, and `timeout_ms: null` inherit the parent

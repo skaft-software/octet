@@ -2,8 +2,8 @@
 // dependency on an upstream coding-agent package and no provider fallback.
 export {
   createAgentSession, AgentSession, SessionManager,
-  createCodingTools, codingTools, readTool, bashTool, editTool, writeTool, searchTool,
-  createReadTool, createBashTool, createEditTool, createWriteTool, createSearchTool,
+  createCodingTools, codingTools, readTool, bashTool, editTool, writeTool,
+  createReadTool, createBashTool, createEditTool, createWriteTool,
 } from '../lib/children.mjs';
 import { unsupported } from '../lib/errors.mjs';
 export class DefaultResourceLoader { constructor() { unsupported('DefaultResourceLoader', 'child resource discovery, callbacks and system-prompt replacement are not yet bound'); } }
@@ -12,6 +12,6 @@ export class SettingsManager {
   static create() { unsupported('SettingsManager.create', 'Pi settings files cannot replace host policy'); }
   static inMemory() { unsupported('SettingsManager.inMemory', 'native child settings inherit from the owning host'); }
 }
-export const createGrepTool = () => unsupported('createGrepTool', 'native search is not a transparent Pi grep implementation');
-export const createFindTool = () => unsupported('createFindTool', 'native search is not a transparent Pi find implementation');
-export const createLsTool = () => unsupported('createLsTool', 'native search is not a transparent Pi ls implementation');
+export const createGrepTool = () => unsupported('createGrepTool', 'Pi grep has no native tool implementation');
+export const createFindTool = () => unsupported('createFindTool', 'Pi find has no native tool implementation');
+export const createLsTool = () => unsupported('createLsTool', 'Pi ls has no native tool implementation');

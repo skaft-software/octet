@@ -151,8 +151,8 @@ are the behavioral evidence.
 - Native-backed Pi built-in tool factories on path A: `createBashTool` and
   friends returning Pi-shaped tools that call Octet's native tools through
   `ctx.executeTool`, so they need no fallback. Pi's `read`/`edit`/`write` match
-  native arguments; `bash` maps `timeout` seconds to `timeout_ms`; `grep` maps to
-  `search`; `find`/`ls` have no native equivalent. Custom `operations` (as in
+  native arguments; `bash` maps `timeout` seconds to `timeout_ms`;
+  `grep`/`find`/`ls` have no native equivalent. Custom `operations` (as in
   `ssh`) still need the fallback.
 - Host permission prompt that offers the fallback. A proposal (uncompiled) is
   summarized below; `configure.mjs` must also learn to capture with installed Pi.

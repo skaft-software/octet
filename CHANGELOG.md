@@ -63,10 +63,11 @@ and known limitations.
 
 ### Changed
 
-- The default coding surface now includes the ripgrep-backed `search` tool the
-  product prompt already names for repository content search, so discovery no
-  longer goes through `bash`. `--no-process`/`--no-shell`, explicit allowlists
-  and exclusions still remove it, and PowerShell stays explicit-only.
+- Permanently removed the native Search tool, its schemas, registration and SDK
+  exports. The core coding surface is `read`, `edit`, `write` and `bash`;
+  repository content search uses `rg` through `bash`. Independent shell calls
+  can still overlap reads under full access. Still retains its quiet **Explored**
+  activity grouping and Ctrl+O disclosure; PowerShell stays explicit-only.
 - The default coding prompt asks for the requested change plus one relevant
   check, then stops: no extra harnesses, no `git diff`, and no further
   verification unless the user asks. The diff-review and honest-reporting
