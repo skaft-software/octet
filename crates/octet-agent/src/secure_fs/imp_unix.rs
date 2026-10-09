@@ -292,39 +292,43 @@ fn open_root_component(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, Errno>
 #[cfg(target_os = "macos")]
 fn open_root_component(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, Errno> {
     // Root components are no different from caller-controlled descendants,
-    // except for macOS's system-owned `/var -> private/var` compatibility
-    // alias. Never follow arbitrary first-component links.
+    // except for macOS's system-owned `/var -> private/var` and
+    // `/tmp -> private/tmp` aliases. Never follow arbitrary root links.
     match open_directory(parent, name) {
         Ok(directory) => Ok(directory),
-        Err(error) if name == OsStr::new("var") => open_macos_var_alias(parent).or(Err(error)),
+        Err(error) if name == OsStr::new("var") || name == OsStr::new("tmp") => {
+            open_macos_system_alias(parent, name).or(Err(error))
+        }
         Err(error) => Err(error),
     }
 }
 
 #[cfg(target_os = "macos")]
-fn open_macos_var_alias(root: &OwnedFd) -> Result<OwnedFd, Errno> {
-    let before = rustix::fs::statat(root, "var", AtFlags::SYMLINK_NOFOLLOW)?;
+fn open_macos_system_alias(root: &OwnedFd, name: &OsStr) -> Result<OwnedFd, Errno> {
+    let before = rustix::fs::statat(root, name, AtFlags::SYMLINK_NOFOLLOW)?;
     if rustix::fs::FileType::from_raw_mode(before.st_mode) != rustix::fs::FileType::Symlink
         || before.st_uid != 0
     {
         return Err(Errno::LOOP);
     }
-    let target = rustix::fs::readlinkat(root, "var", Vec::new())?;
-    if !matches!(target.as_bytes(), b"private/var" | b"/private/var") {
-        return Err(Errno::LOOP);
+    let target = rustix::fs::readlinkat(root, name, Vec::new())?;
+    match (name.to_str(), target.as_bytes()) {
+        (Some("var"), b"private/var" | b"/private/var")
+        | (Some("tmp"), b"private/tmp" | b"/private/tmp") => {}
+        _ => return Err(Errno::LOOP),
     }
 
     let followed = rustix::fs::openat(
         root,
-        "var",
+        name,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
     let private = open_directory(root, OsStr::new("private"))?;
-    let expected = open_directory(&private, OsStr::new("var"))?;
+    let expected = open_directory(&private, name)?;
     let followed_stat = rustix::fs::fstat(&followed)?;
     let expected_stat = rustix::fs::fstat(&expected)?;
-    let after = rustix::fs::statat(root, "var", AtFlags::SYMLINK_NOFOLLOW)?;
+    let after = rustix::fs::statat(root, name, AtFlags::SYMLINK_NOFOLLOW)?;
     if rustix::fs::FileType::from_raw_mode(followed_stat.st_mode) != rustix::fs::FileType::Directory
         || followed_stat.st_uid != 0
         || (followed_stat.st_dev, followed_stat.st_ino)
