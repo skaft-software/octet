@@ -23,6 +23,7 @@ pub(super) fn previous_message_is_user(session: &Session, entry: &crate::session
         match &previous.value {
             EntryValue::Message(Message::User(user)) => return !user.content.is_empty(),
             EntryValue::Message(Message::Assistant(_)) => return false,
+            EntryValue::BranchSummary { .. } => return true,
             EntryValue::Compaction { .. }
             | EntryValue::ResponsesTurn { .. }
             | EntryValue::ResponsesCompaction { .. }
@@ -584,7 +585,9 @@ pub(super) fn provider_context_estimate(session: &Session, model: &Model) -> Opt
         PROVIDER_CONTEXT_ENTRY_VISITS.with(|visits| visits.set(visits.get() + 1));
         let entry = session.entry(id)?;
         match &entry.value {
-            EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. } => break,
+            EntryValue::Compaction { .. }
+            | EntryValue::ResponsesCompaction { .. }
+            | EntryValue::BranchSummary { .. } => break,
             EntryValue::Message(message) => {
                 if matches!(message, Message::Assistant(_)) {
                     let measured = usage_by_assistant.get(&entry.id).copied().or_else(|| {

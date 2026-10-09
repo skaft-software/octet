@@ -776,6 +776,7 @@ fn active_branch_tail_from<'a>(
             &entry.value,
             EntryValue::Message(_)
                 | EntryValue::Compaction { .. }
+                | EntryValue::BranchSummary { .. }
                 | EntryValue::ResponsesCompaction { .. }
         ) {
             displayable_entries = displayable_entries.saturating_add(1);
@@ -809,6 +810,7 @@ fn active_branch_tail_from<'a>(
                 &entry.value,
                 EntryValue::Message(_)
                     | EntryValue::Compaction { .. }
+                    | EntryValue::BranchSummary { .. }
                     | EntryValue::ResponsesCompaction { .. }
             ) {
                 break;
@@ -989,6 +991,23 @@ fn hydrate_entries_with_image_budget(
                     active_lab = lab;
                     active_model = Some(model_name.clone());
                 }
+            }
+            EntryValue::BranchSummary {
+                summary,
+                from_entry,
+                details,
+            } => {
+                // A branch handoff is not compaction or a user-authored prompt.
+                // Reuse the ordinary custom-message surface without inventing
+                // extension ownership or reviving abandoned conversation.
+                items.push(TranscriptItem::CustomMessage {
+                    id: entry.id.clone(),
+                    timestamp_unix_ms: entry.timestamp_unix_ms,
+                    content: octet_agent::session::CustomMessageContent::Text(summary.clone()),
+                    custom_type: "octet:branch-summary".into(),
+                    text: summary.clone(),
+                    details: Some(serde_json::json!({"fromId": from_entry.0, "details": details})),
+                });
             }
             EntryValue::Compaction { summary, .. } => {
                 items.push(TranscriptItem::CompactionMarker {
@@ -1382,6 +1401,32 @@ mod tests {
         let (items, truncated) = hydrate_transcript_tail(&session, 100).unwrap();
         assert!(!truncated);
         assert_eq!(items.len(), 100);
+    }
+
+    #[test]
+    fn resumed_branch_summary_is_visible_and_counts_toward_the_transcript_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let kept = session.append(user("kept prompt")).unwrap();
+        let abandoned = session.append(user("abandoned work")).unwrap();
+        let summary = "# Branch handoff\n\nKeep the exact sentinel.";
+        let head = session
+            .branch_with_summary(Some(kept), summary.into(), Default::default())
+            .unwrap();
+        drop(session);
+
+        let resumed = Session::open(path).unwrap();
+        let (items, truncated) = hydrate_transcript_tail(&resumed, 1).unwrap();
+        assert!(truncated);
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            TranscriptItem::CustomMessage { id, custom_type, text, .. }
+                if id == &head && custom_type == "octet:branch-summary" && text == summary
+        ));
+        assert!(!format!("{:?}", hydrate_transcript(&resumed).unwrap()).contains("abandoned work"));
+        assert!(resumed.entry(&abandoned).is_some());
     }
 
     #[test]

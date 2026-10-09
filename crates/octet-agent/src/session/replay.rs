@@ -265,6 +265,13 @@ impl Session {
                         ));
                     }
                 }
+                EntryValue::BranchSummary { summary, .. } => {
+                    let Message::User(user) = super::context::branch_summary_message(summary)
+                    else {
+                        unreachable!("branch summary projects as a user message")
+                    };
+                    replay.push(octet_ai::responses::ResponsesReplayItem::User(user));
+                }
                 EntryValue::Message(Message::User(user)) => {
                     replay.push(octet_ai::responses::ResponsesReplayItem::User(user.clone()));
                 }

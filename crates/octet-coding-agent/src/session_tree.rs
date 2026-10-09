@@ -137,6 +137,7 @@ fn entry_kind(entry: &Entry) -> &'static str {
         EntryValue::Message(octet_ai::Message::User(_)) => "user",
         EntryValue::Message(octet_ai::Message::Assistant(_)) => "assistant",
         EntryValue::Compaction { .. } => "compaction",
+        EntryValue::BranchSummary { .. } => "branch-summary",
         EntryValue::ResponsesTurn { .. } => "responses-turn",
         EntryValue::ResponsesCompaction { .. } => "responses-compaction",
         EntryValue::ResponsesReasoning { .. } => "responses-reasoning",

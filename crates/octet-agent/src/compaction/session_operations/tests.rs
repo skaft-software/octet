@@ -166,6 +166,7 @@ async fn cancellation_wins_callback_same_poll_completion() {
         &SessionOperation::BeforeTree {
             target_id: None,
             old_head: None,
+            preparation: None,
         },
         &cancellation,
         Duration::from_secs(1),
@@ -201,7 +202,8 @@ async fn pending_hook_times_out_without_native_fallback_or_write() {
             &[Arc::new(Pending)],
             &SessionOperation::BeforeTree {
                 target_id: None,
-                old_head: None
+                old_head: None,
+                preparation: None,
             },
             &CancellationToken::default(),
             Duration::from_secs(3)
@@ -231,6 +233,39 @@ fn source_revision_rejects_head_aba_and_reopened_writer() {
     let reopened = Session::open(&path).unwrap();
     assert!(matches!(
         revision.validate(&reopened),
+        Err(SessionOperationError::StaleSource)
+    ));
+}
+
+#[test]
+fn source_revision_permits_summary_accounting_but_not_tree_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create(dir.path().join("session.jsonl")).unwrap();
+    let root = user(&mut session, "root");
+    let revision = SessionSourceRevision::capture(&session).unwrap();
+    session
+        .record_compaction_usage(
+            octet_ai::EndpointId("local".into()),
+            octet_ai::ModelId("model".into()),
+            octet_ai::Usage::default(),
+            None,
+        )
+        .unwrap();
+    revision.validate_tree(&session).unwrap();
+    assert!(matches!(
+        revision.validate(&session),
+        Err(SessionOperationError::StaleSource)
+    ));
+    session.checkout_root().unwrap();
+    session.checkout(root).unwrap();
+    // A→root→A also invalidates the exact revision even if the tree itself is identical.
+    assert!(matches!(
+        revision.validate(&session),
+        Err(SessionOperationError::StaleSource)
+    ));
+    user(&mut session, "changed source");
+    assert!(matches!(
+        revision.validate_tree(&session),
         Err(SessionOperationError::StaleSource)
     ));
 }
@@ -299,10 +334,37 @@ fn model_turn_observations_serialize_real_entries_and_only_accept_continue() {
 }
 
 #[test]
+fn raw_tree_operations_keep_existing_wire_fields() {
+    let before = SessionOperation::BeforeTree {
+        target_id: Some(EntryId("target".into())),
+        old_head: Some(EntryId("source".into())),
+        preparation: None,
+    };
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::json!({
+            "kind":"before_tree", "target_id":"target", "old_head":"source"
+        })
+    );
+    let after = SessionOperation::Tree {
+        old_head: Some(EntryId("source".into())),
+        new_head: None,
+        summary_entry: None,
+    };
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::json!({
+            "kind":"tree", "old_head":"source", "new_head":null
+        })
+    );
+}
+
+#[test]
 fn observations_cannot_veto_or_replace_already_committed_work() {
     let event = SessionOperation::Tree {
         old_head: None,
         new_head: None,
+        summary_entry: None,
     };
     assert!(matches!(
         validate_decision(&event, &SessionOperationDecision::Cancel),
@@ -389,6 +451,7 @@ async fn callback_can_wait_for_durable_private_append_on_same_session_owner() {
         &SessionOperation::Tree {
             old_head: None,
             new_head: None,
+            summary_entry: None,
         },
         &CancellationToken::default(),
         Duration::from_secs(1),

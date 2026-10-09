@@ -892,6 +892,17 @@ pub enum EntryValue {
         #[serde(default)]
         details: crate::compaction::CompactionDetails,
     },
+    /// Model-visible handoff from a conversation branch left during navigation.
+    /// This adds context at its parent; it never replaces the selected ancestry.
+    BranchSummary {
+        /// Complete summary, including the branch preamble and file lists.
+        summary: String,
+        /// Source head at navigation time. Provenance only: a fork may omit it.
+        from_entry: EntryId,
+        /// Cumulative deterministic read/modified file lists.
+        #[serde(default)]
+        details: crate::compaction::CompactionDetails,
+    },
     /// Opaque complete Responses output attached beside its canonical assistant
     /// message. It is not model-visible canonical context.
     ResponsesTurn {
@@ -1332,6 +1343,24 @@ fn entry_ancestry_intervals(
     (entered, exited)
 }
 
+fn validate_branch_summary(
+    summary: &str,
+    details: &crate::compaction::CompactionDetails,
+) -> Result<(), SessionError> {
+    if summary.trim().is_empty()
+        || summary.len() > crate::compaction::MAX_COMPACTION_HANDOFF_BYTES
+        || summary
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        || serde_json::to_vec(details).map_or(true, |bytes| {
+            bytes.len() > crate::compaction::MAX_COMPACTION_HANDOFF_BYTES
+        })
+    {
+        return Err(SessionError::Limit("invalid branch summary".into()));
+    }
+    Ok(())
+}
+
 pub(crate) fn now_unix_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1480,6 +1509,7 @@ impl std::fmt::Debug for Session {
     }
 }
 
+pub(crate) use context::branch_summary_message;
 pub use context::ActiveSkillState;
 // Only Windows session creation maps secure-file errors in `store`.
 #[cfg(windows)]

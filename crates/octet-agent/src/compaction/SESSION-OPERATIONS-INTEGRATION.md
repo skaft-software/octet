@@ -96,3 +96,30 @@ old-branch model. Existing guarded rebuild/rollback paths remain.
 Targeted frontend tests are authored but **not compiled or run**. The performance
 agent now owns the heavy-build slot; only source review, rustfmt and whitespace
 checks ran for this follow-up. Earlier driver tests do not qualify these callers.
+
+## Branch-summary integration — 2026-10-09
+
+The dated notes above describe earlier integration states. Native tree navigation
+now also supports `Agent::navigate_session_tree_with_summary(target, summarize,
+custom_instructions, cancellation, on_event)`. It returns `TreeNavigationResult`
+with optional `editor_text` and `summary_entry`. Selecting a user/custom entry
+restores its text for editing and navigates to its parent; it never resubmits it.
+
+Summary preparation includes only the abandoned span to the common ancestor.
+`before_tree` can include `preparation` with `common_ancestor_id`, native
+`entries_to_summarize`, `user_wants_summary`, and `custom_instructions`. The
+committed `tree` event can include the real native `summary_entry`. Absent optional
+fields retain the ordinary checkout wire contract. Existing metadata namespace
+filtering applies to both preparation and committed observations.
+
+The summary entry and selected head persist together after validation. Provider
+failure or cancellation before commit does not move the branch; post-commit hook
+failure discloses the durable outcome and forbids retry. Branch summaries retain
+IDs, parent links, timestamps, `from_entry` provenance and file details across
+replay/fork. They contribute custom context, not resurrected user prompts or
+extension authority. Arbitrary extension branch-summary replacement remains
+unsupported; compaction replacements keep their separate typed contract.
+
+Parent verification covers the agent library and native frontend tests. These
+synthetic checks do not qualify existing Pi packages, attended terminals, real
+providers, installers or release artifacts.

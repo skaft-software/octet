@@ -77,6 +77,36 @@ fn rpc_loopback_app_with_session(uri: &str, ephemeral: bool) -> (tempfile::TempD
 }
 
 #[test]
+fn rpc_branch_summary_projection_retains_real_identity_and_provenance() {
+    let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+    let from = app
+        .agent
+        .session_mut()
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("source branch".into())],
+        })))
+        .unwrap();
+    let id = app
+        .agent
+        .session_mut()
+        .branch_with_summary(None, "actual handoff".into(), Default::default())
+        .unwrap();
+    let entry = app.agent.session().entry(&id).unwrap();
+    let value = RpcSessionProjection::new(&app).entry(entry);
+    assert_eq!(value["id"], id.0);
+    assert_eq!(value["parentId"], Value::Null);
+    assert_eq!(value["type"], "branch_summary");
+    assert_eq!(value["summary"], "actual handoff");
+    assert_eq!(value["fromId"], from.0);
+    assert_eq!(
+        value["details"],
+        json!({"readFiles": [], "modifiedFiles": []})
+    );
+    assert!(value.get("message").is_none());
+    assert!(value.get("firstKeptEntryId").is_none());
+}
+
+#[test]
 fn rpc_cache_warming_events_are_session_only_and_preserve_exact_cost() {
     let (_directory, app) = crate::compaction::tests::app_for_estimate();
     let capture = RpcCapture::default();

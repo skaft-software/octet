@@ -45,6 +45,19 @@ pub struct ModelTurnAssistantMetadata {
     pub stop_reason: Option<octet_ai::StopReason>,
 }
 
+/// Actual source span prepared for summary-capable tree navigation.
+#[derive(Clone, Debug, Serialize)]
+pub struct TreeNavigationPreparation {
+    /// Deepest shared ancestor of the source head and requested target.
+    pub common_ancestor_id: Option<EntryId>,
+    /// Only the abandoned source span, in chronological order.
+    pub entries_to_summarize: Vec<Entry>,
+    /// Whether the initiating command requested a summary.
+    pub user_wants_summary: bool,
+    /// Additional instructions forwarded to the native summarizer.
+    pub custom_instructions: Option<String>,
+}
+
 /// Actual prepared or committed session state, never a synthesized notification.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -77,6 +90,9 @@ pub enum SessionOperation {
         target_id: Option<EntryId>,
         /// Source head, before the operation.
         old_head: Option<EntryId>,
+        /// Abandoned-branch preparation; absent for legacy raw checkouts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preparation: Option<TreeNavigationPreparation>,
     },
     /// Observes the preparation boundary of one logical model iteration.
     /// Retries and auxiliary model requests do not begin another iteration.
@@ -110,6 +126,9 @@ pub enum SessionOperation {
         old_head: Option<EntryId>,
         /// Durably selected head.
         new_head: Option<EntryId>,
+        /// Actual committed branch summary, if navigation produced one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary_entry: Option<Entry>,
     },
 }
 
@@ -226,14 +245,24 @@ impl SessionSourceRevision {
         })
     }
 
-    /// Revalidate immediately before a mutation/decision is adopted.
-    pub fn validate(&self, session: &Session) -> Result<(), SessionOperationError> {
+    /// Revalidate the writer and tree while permitting the owner's summary
+    /// accounting writes. The writer's append fence still rejects external writes.
+    pub(crate) fn validate_tree(&self, session: &Session) -> Result<(), SessionOperationError> {
         let current = Self::capture(session)?;
         if !self.incarnation.ptr_eq(&current.incarnation)
             || self.head != current.head
             || self.entries != current.entries
-            || self.bytes != current.bytes
         {
+            return Err(SessionOperationError::StaleSource);
+        }
+        Ok(())
+    }
+
+    /// Revalidate immediately before a mutation/decision is adopted.
+    pub fn validate(&self, session: &Session) -> Result<(), SessionOperationError> {
+        self.validate_tree(session)?;
+        let current = Self::capture(session)?;
+        if self.bytes != current.bytes {
             return Err(SessionOperationError::StaleSource);
         }
         Ok(())
