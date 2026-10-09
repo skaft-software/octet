@@ -390,7 +390,7 @@ pub(super) fn invocation_has_top_level_subcommand(
             index += 1;
             continue;
         }
-        if value == "-p" {
+        if matches!(value, "-p" | "-c" | "-r") {
             index += 1;
             continue;
         }
@@ -551,7 +551,7 @@ pub(crate) fn uses_runtime_extension_flag_parser(args: &[OsString]) -> bool {
             }
             continue;
         }
-        if value == "-p" {
+        if matches!(value, "-p" | "-c" | "-r") {
             index += 1;
             continue;
         }
@@ -583,6 +583,9 @@ mod fast_path_tests {
             vec!["octet", "--offline", "--model", "custom/bench/model-00000"],
             vec!["octet", "--workspace", "/tmp", "--", "--literal-prompt"],
             vec!["octet", "-p", "hello"],
+            vec!["octet", "-r", "initial prompt"],
+            vec!["octet", "-c", "initial prompt"],
+            vec!["octet", "--thinking", "max", "initial prompt"],
             vec!["octet", "doctor"],
         ] {
             let args: Vec<OsString> = invocation
@@ -595,6 +598,47 @@ mod fast_path_tests {
             assert!(values.is_empty());
             assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
             EXTENSION_COMMAND_BUILDS.with(|count| assert_eq!(count.get(), 0));
+        }
+    }
+
+    #[test]
+    fn declared_flags_preserve_session_short_forms_and_thinking() {
+        for selector in ["-r", "-c"] {
+            let declarations = vec![(
+                "fixture".to_owned(),
+                ExtensionFlag {
+                    name: "fixture-label".to_owned(),
+                    kind: ExtensionFlagType::String,
+                    default: serde_json::json!("default"),
+                    description: None,
+                },
+            )];
+            for level in ["off", "max"] {
+                let args = [
+                    "octet",
+                    "--fixture-label",
+                    "doctor",
+                    selector,
+                    "--thinking",
+                    level,
+                    "initial prompt",
+                ]
+                .into_iter()
+                .map(OsString::from)
+                .collect();
+                let (cli, values) =
+                    parse_declared_extension_flags(args, declarations.clone()).unwrap();
+                assert!(cli.command.is_none());
+                assert_eq!(cli.resume_picker, selector == "-r");
+                assert_eq!(cli.continue_, selector == "-c");
+                assert!(cli.resume.is_none());
+                assert_eq!(cli.reasoning.as_deref(), Some(level));
+                assert_eq!(cli.message.as_deref(), Some("initial prompt"));
+                assert_eq!(
+                    values["fixture"]["fixture-label"],
+                    serde_json::json!("doctor")
+                );
+            }
         }
     }
 

@@ -29,7 +29,7 @@ defaults that aren't listed here aren't guessed.
 | `--show-images` | Show tool-result images inline on compatible terminals. Off by default. It isn't upload permission or attachment consent. [Behavior](terminal.md#tool-evidence-and-worker-activity). |
 | `--theme NAME` | Pick the built-in `auto`, `light` or `dark`, or a discovered TOML theme by file stem. [Theme discovery](themes.md). |
 | `--model ID` | Choose the model. Overrides a resumed session's model. |
-| `--reasoning LEVEL`, `--reasoning budget=N` | Reasoning effort, or a token budget where supported. [Levels](providers.md#reasoning). |
+| `--reasoning LEVEL`, `--thinking LEVEL`, `--reasoning budget=N` | Reasoning effort, or a token budget where supported. [Levels](providers.md#reasoning). |
 | `--cache-retention VALUE` | Provider cache retention, such as `short`. |
 | `--cache-warming off\|streaming\|idle` | Billable prompt-cache refresh policy; default `streaming`. Overrides `OCTET_CACHE_WARMING` and user configuration. [Details](cache-warming.md). |
 | `--max-turns N` | Limit model turns. |
@@ -156,7 +156,8 @@ endpoints](providers.md#local-and-custom-endpoints).
 ## Sessions and diagnostics
 
 ```text
-octet --continue
+octet --continue  # -c also continues
+octet -r "prompt after choosing a session"  # boolean resume picker
 octet --resume [SESSION_ID]
 octet --fork [ID|PATH]
 octet --session-dir PATH
@@ -165,7 +166,9 @@ octet sessions list [--query TEXT]
 octet sessions inspect ID
 octet sessions rename ID "NAME"
 octet sessions tag ID TAG...
-octet sessions export ID [--format json|html] [--output PATH] [--force] [--include-secrets]
+octet sessions export ID [--format json|jsonl|html] [--output PATH] [--force] [--include-secrets]
+octet sessions import PATH
+octet sessions share ID [--yes]
 octet sessions delete ID
 octet sessions repair ID
 octet doctor
@@ -173,13 +176,22 @@ octet doctor
 
 `--continue` picks the latest session in this workspace. A bare `--resume` or
 `--fork` opens a picker. `--continue`, `--resume` and `--fork` can't be
-combined. Fork creates a new session before startup.
+combined. Fork creates a new session before startup. Pi-style `-r` is a boolean
+picker flag and does not consume the following prompt; native `--resume ID`
+retains explicit-ID selection.
 
 `list` and `inspect` are read-only. `delete` moves to a recoverable trash.
 `repair` backs up first, then removes only a torn final append. `export` redacts
 by default, refuses an existing destination without `--force` and warns on
 `--include-secrets`. Both formats always leave out private extension metadata,
-so opting out of credential scrubbing doesn't widen that boundary. `doctor` runs
+so opting out of credential scrubbing doesn't widen that boundary. JSONL is
+Octet's whole durable graph, **not Pi output**; HTML is view-only. Import creates
+a new private session from supported Octet or Pi v3 data, refusing unsupported
+semantics and never granting imported extension/effect authority. Sharing requires
+review and explicit confirmation of an exact redacted snapshot; `--yes` authorizes
+an **unlisted**, not private, GitHub gist. Anyone with its link can read it.
+No upload is attempted before approval, and cancellation cannot undo an accepted
+publication. `doctor` runs
 read-mostly checks without starting an agent or an extension. See
 [Sessions](sessions.md).
 

@@ -29,7 +29,8 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | --- | --- |
 | `/new` | Start a new conversation. |
 | `/resume [id]` | Pick a session, or resume `id`. |
-| `/fork` | Branch from an earlier message, or the whole conversation. |
+| `/tree` | Select a branch in the same session file, optionally summarizing abandoned work or supplying custom summary instructions. |
+| `/fork` | Create a new session file from an earlier message, or the whole conversation. |
 | `/clone` | Copy the current session at its latest point. |
 | `/model [id]` | Pick a model, or select `id`. |
 | `/fast [on\|off\|status]` | Turn capability-gated Responses priority on or off, or show it. A change made during a run waits for a safe point. |
@@ -53,13 +54,15 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | `/changelog` | Read this version's bundled release notes in a scrollable report. No network or model request. |
 | `/update` | Check for a newer release. Install it with `octet update`, subject to [channel availability](installation.md#binary-availability). |
 | `/name [name]` | Show or rename the session. |
-| `/export [path]` | Export the session with secrets redacted. |
+| `/export [path]` | Export redacted HTML by default; `.json` selects whole-graph data and `.jsonl` native Octet JSONL. |
+| `/import path` | Confirm a new private copy of supported Octet/Pi session data, then switch to it without submitting the draft. |
+| `/share` | Review an immutable redacted all-branches snapshot and explicitly confirm an unlisted GitHub gist. Cancel is the default; unlisted is not private. |
 | `/prompt [name] [arguments]` | List or expand prompt templates. `/<name> ...` also works, as in Pi. |
 | `/skills ...` | List, search, inspect, load, unload or reload [skills](instructions.md#skills). |
 | `/skill:NAME [arguments]` | Expand a skill as a user prompt when sent, not as a local slash command. During a run, Enter or Ctrl+S queues it, so it expands at the next idle prompt. |
 | `/extensions [status\|reload]` | Enable, disable and configure extensions (below), or show or reload extension state. Menu changes wait for idle during a run. |
 | `/subagents [list\|status\|inspect\|wait\|reattach\|stop\|open-all]` | Browse and control this session's workers when octet-subagents is ready. Bare `/subagents`, `list` and `status` open the live roster, including during a run; `/subagents stop <name-or-id\|all>` requests owner-bound interruption immediately. Other operations wait for idle. |
-| `/settings [theme\|images on/off\|default model/reasoning\|transport\|padding]` | Show or change user-level display and default preferences. Defaults, theme and images persist through the shared config writer. Transport and editor padding are reported facts, and project trust is deliberately not a persisted setting. |
+| `/settings [show\|theme\|images on/off\|default model/reasoning\|transport\|padding]` | Open the settings menu, or use an explicit subcommand. `/settings show` reports effective settings. Defaults, theme and images persist through the shared config writer. Transport and editor padding are reported facts, and project trust is deliberately not a persisted setting. |
 | `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model-cycling scope. Changes apply to Ctrl+P at once and persist as an exact ordered pattern list (`models` in the user config). `move <id> <up\|down\|top\|bottom>` reorders it. |
 | `/help [command]` | Help for a command. |
 | `/exit` | Exit octet. |
@@ -117,6 +120,30 @@ characters. Native Responses compaction refuses them outright. Local main and
 split-prefix summaries use host-owned retries, reservations and accounting, and
 the summary is committed once. That doesn't promise retry-progress UI or
 exactly-once inference after a transport interruption.
+
+## Settings menu
+
+Bare `/settings` opens a filterable menu immediately, including during active
+work. Choose **Theme**, **Inline tool-result images (On/Off)**, **Default model
+for new sessions**, **Default reasoning for new sessions**, or **Show effective
+settings**. Up and Down select, typing filters, and Enter opens or applies the
+highlighted choice. Child menus offer **Back**; Escape closes the menu without
+changing a preference.
+
+Theme uses the existing preview picker. Inline images offers explicit On and Off
+choices for tool-result display only, not upload or attachment consent. Default
+model choices come from the available credential-scoped catalog; default
+reasoning choices use available portable levels. Saving either default does not
+switch the active session: use `/model` or `/thinking` for that. The menu does not
+label the current session or launch selection as a saved default. Selected
+changes use the same safe display or deferred settings dispatch as explicit
+commands; opening and browsing the menu does not interrupt active work.
+
+**Show effective settings**, or `/settings show`, opens read-only diagnostics.
+Existing explicit `/settings theme`, `images`, `default model`, `default
+reasoning`, `transport` and `padding` forms keep their behavior. Transport,
+padding, permissions and project trust are not editable menu preferences, and
+the menu adds no cache-policy controls.
 
 ## Extension menu
 
@@ -187,7 +214,7 @@ See [Discovery and trust](resources.md).
 | Ctrl+Up / Ctrl+Down | Jump between prompt boundaries. |
 | Ctrl+O | Show kept reasoning, compaction, subagent activity, tool commands, tool evidence and shell output. It can't recover discarded output. |
 | PageUp / PageDown | Scroll the transcript. PageUp pins the view, PageDown returns toward live output. |
-| Up / Down | Pick a visible path or `@` suggestion, otherwise move through the editor. When idle, Up at position 0 recalls sent prompts and Down past the newest restores your draft. |
+| Up / Down | Pick a visible suggestion first, otherwise move through multiline input. At the first/last editor row, recall sent prompts and return to the exact draft, caret and paste/attachment chips—even during active work. History never submits. |
 | Tab | Complete the selected slash command without running it, or insert the selected path or `@` file suggestion. Directories stay open, and spaces are backslash-escaped. |
 | `@` | Fuzzy-find workspace files, respecting `.gitignore`. With a path prefix, it completes from the filesystem. |
 

@@ -975,6 +975,9 @@ pub(crate) enum PanelAction {
     SelectSession(Vec<std::path::PathBuf>),
     /// Select a thinking level.
     SelectThinking(Vec<crate::config::ThinkingLevel>),
+    /// Select a settings menu destination or an explicit preference value.
+    /// Entries align with raw select-list indices, including the Back row.
+    SelectSettings(Vec<crate::commands::SettingsCommand>),
     /// Select a terminal theme without suspending an active run.
     SelectTheme {
         keys: Vec<String>,
@@ -993,6 +996,8 @@ pub(crate) enum PanelAction {
     ProviderSetup(Vec<String>),
     /// Drive the enhanced session browser without copying its row data.
     SessionPicker,
+    /// Navigate the same session by durable entry ID, including inactive branches.
+    SessionTree(Vec<octet_agent::EntryId>),
     /// Drive the user-message fork browser without copying its row data.
     MessagePicker,
     /// Navigate a read-only transcript document.
@@ -7179,6 +7184,15 @@ impl InteractiveShell {
         self.state.borrow().panel.is_some()
     }
 
+    /// Check ordinary-panel ownership without exposing or retaining a state borrow.
+    pub(crate) fn panel_action_matches(&self, matches: impl FnOnce(&PanelAction) -> bool) -> bool {
+        let state = self.state.borrow();
+        match state.panel.as_ref() {
+            Some(Panel::SelectList { action, .. }) => matches(action),
+            _ => false,
+        }
+    }
+
     /// Original item index of the highlighted select-list row, after filtering.
     pub(crate) fn highlighted_panel_index(&self) -> Option<usize> {
         let state = self.state.borrow();
@@ -7348,6 +7362,18 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         if let Some(Panel::SessionPicker { picker }) = state.panel.as_mut() {
             picker.surface.lifecycle = lifecycle;
+        }
+    }
+
+    /// Pi tree navigation restores a selected prompt only into an empty draft.
+    /// Existing text or attachment chips always remain user-owned.
+    pub(crate) fn prefill_empty_editor(&mut self, text: String) {
+        let empty = {
+            let state = self.state.borrow();
+            state.editor.text().is_empty() && state.ledger.is_empty()
+        };
+        if empty {
+            self.prefill_editor(text);
         }
     }
 
@@ -7777,13 +7803,58 @@ impl InteractiveShell {
                                             | KeyModifiers::SUPER,
                                     ) =>
                             {
+                                let previous = matches!(panel_action, PanelAction::SessionTree(_))
+                                    .then(|| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .get(*selected)
+                                        .copied()
+                                    })
+                                    .flatten();
                                 filter.push(c);
-                                // The match set changed; restart at the top.
-                                *selected = 0;
+                                *selected = previous
+                                    .and_then(|index| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .iter()
+                                        .position(|candidate| *candidate == index)
+                                    })
+                                    .unwrap_or(0);
                             }
                             KeyCode::Backspace if !confirmation && key.modifiers.is_empty() => {
+                                let previous = matches!(panel_action, PanelAction::SessionTree(_))
+                                    .then(|| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .get(*selected)
+                                        .copied()
+                                    })
+                                    .flatten();
                                 filter.pop();
-                                *selected = 0;
+                                *selected = previous
+                                    .and_then(|index| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .iter()
+                                        .position(|candidate| *candidate == index)
+                                    })
+                                    .unwrap_or(0);
                             }
                             _ => {}
                         }

@@ -14,6 +14,16 @@ pub(super) struct InputDispatch {
     models: Vec<String>,
     cycle_target: Option<String>,
     generated_command: bool,
+    thinking_cycle: Option<ThinkingCycle>,
+}
+
+/// Local keyboard selection survives waits that temporarily borrow the App.
+/// It is not an acknowledgement from the provider or a second config store.
+struct ThinkingCycle {
+    owner: String,
+    choices: Vec<octet_ai::ReasoningConfig>,
+    selected: octet_ai::ReasoningConfig,
+    pending: Option<octet_ai::ReasoningConfig>,
 }
 
 impl InputDispatch {
@@ -24,11 +34,85 @@ impl InputDispatch {
             models: Vec::new(),
             cycle_target: None,
             generated_command: false,
+            thinking_cycle: None,
         }
     }
 }
 
 impl InteractiveShell {
+    pub(crate) fn set_thinking_cycle(
+        &mut self,
+        owner: String,
+        choices: Vec<octet_ai::ReasoningConfig>,
+        selected: &octet_ai::ReasoningConfig,
+    ) {
+        match self.input_dispatch.thinking_cycle.as_mut() {
+            Some(cycle) if cycle.owner == owner => {
+                cycle.choices = choices;
+                if cycle.pending.is_none() {
+                    cycle.selected = selected.clone();
+                }
+            }
+            _ => {
+                self.input_dispatch.thinking_cycle = Some(ThinkingCycle {
+                    owner,
+                    choices,
+                    selected: selected.clone(),
+                    pending: None,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn deferred_thinking(&self) -> Option<&octet_ai::ReasoningConfig> {
+        self.input_dispatch
+            .thinking_cycle
+            .as_ref()?
+            .pending
+            .as_ref()
+    }
+
+    pub(crate) fn take_deferred_thinking(&mut self) -> Option<octet_ai::ReasoningConfig> {
+        self.input_dispatch.thinking_cycle.as_mut()?.pending.take()
+    }
+
+    /// Publish the initiating selection before a rebuild yields input ownership.
+    /// It is already being applied, so only subsequent presses become deferred.
+    pub(crate) fn begin_thinking_selection(&mut self, reasoning: &octet_ai::ReasoningConfig) {
+        if let Some(cycle) = self.input_dispatch.thinking_cycle.as_mut() {
+            cycle.selected = reasoning.clone();
+        }
+        let (provider, model) = {
+            let state = self.state.borrow();
+            (state.provider.clone(), state.model.clone())
+        };
+        let label = crate::app::reasoning_label(reasoning);
+        self.set_identity(&provider, &model, &format!("{label} (queued)"));
+    }
+
+    pub(crate) fn cycle_thinking_during_wait(&mut self) {
+        let Some(cycle) = self.input_dispatch.thinking_cycle.as_mut() else {
+            return;
+        };
+        if cycle.choices.is_empty() {
+            self.error("no thinking levels are available".into());
+            return;
+        }
+        let next = cycle
+            .choices
+            .iter()
+            .position(|choice| choice == &cycle.selected)
+            .map_or(0, |index| (index + 1) % cycle.choices.len());
+        cycle.selected = cycle.choices[next].clone();
+        cycle.pending = Some(cycle.selected.clone());
+        let label = crate::app::reasoning_label(&cycle.selected);
+        let (provider, model) = {
+            let state = self.state.borrow();
+            (state.provider.clone(), state.model.clone())
+        };
+        self.set_identity(&provider, &model, &format!("{label} (queued)"));
+    }
+
     pub(super) fn reset_input_interaction(&mut self) {
         self.input_dispatch.jump_forward = None;
     }

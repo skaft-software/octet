@@ -420,7 +420,7 @@ export default pi => pi.on('turn_start', async () => {
         assert!(
             matches!(
                 &pending[1],
-                PendingIdleAction::ChangeThinking(ReasoningConfig::Off)
+                PendingIdleAction::ChangeThinkingLevel(ThinkingLevel::Off)
             ),
             "{pending:?}"
         );

@@ -4,7 +4,912 @@
 //! shows live progress and the extension's confirm and input dialogs.
 
 use super::*;
-use crate::extensions::ExtensionConfirmationHandler;
+use crate::extensions::{ExecutableExtensions, ExtensionConfirmationHandler};
+
+/// An immutable management projection captured before `Run` borrows the Agent.
+/// Inspection failures are surface state, never failures of the active prompt.
+#[derive(Clone, Default)]
+pub(super) struct Snapshot {
+    choices: Vec<ManagementChoice>,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+struct ManagementChoice {
+    choice: InstalledExtensionChoice,
+    fence: Fence,
+    authority: Option<bool>,
+    setup: bool,
+    fallback: crate::extensions::ExtensionOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStamp {
+    path: PathBuf,
+    digest: String,
+}
+
+impl FileStamp {
+    fn capture(path: &std::path::Path) -> anyhow::Result<Option<Self>> {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Read as _;
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        // Both manifest and install record are bounded metadata, not arbitrary
+        // extension payloads. Refuse symlinks and oversized reads at the boundary.
+        let mut bytes = Vec::new();
+        octet_agent::secure_fs::open_regular_file_for_read(path)?
+            .take(256 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= 256 * 1024,
+            "extension menu metadata is too large"
+        );
+        Ok(Some(Self {
+            path: path.canonicalize()?,
+            digest: format!("{:x}", Sha256::digest(bytes)),
+        }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceFence {
+    source: octet_agent::extension_process::ExtensionSource,
+    manifest_path: PathBuf,
+    manifest_digest: String,
+    bundle_digest: Option<String>,
+    manifest: FileStamp,
+    receipt: Option<FileStamp>,
+}
+
+impl SourceFence {
+    fn capture(summary: &crate::extensions::ExtensionSummary) -> anyhow::Result<Self> {
+        let manifest = FileStamp::capture(&summary.manifest_path)?
+            .ok_or_else(|| anyhow::anyhow!("{}: manifest is unavailable", summary.name))?;
+        anyhow::ensure!(
+            manifest.digest == summary.manifest_digest,
+            "{}: manifest changed; reload before managing it",
+            summary.name
+        );
+        let receipt = FileStamp::capture(&summary.manifest_path.with_file_name("install.json"))?;
+        Ok(Self {
+            source: summary.source,
+            manifest_path: summary.manifest_path.clone(),
+            manifest_digest: summary.manifest_digest.clone(),
+            bundle_digest: summary.bundle_digest.clone(),
+            manifest,
+            receipt,
+        })
+    }
+
+    fn matches(&self, summary: &crate::extensions::ExtensionSummary) -> bool {
+        self.source == summary.source
+            && self.manifest_path == summary.manifest_path
+            && self.manifest_digest == summary.manifest_digest
+            && self.bundle_digest == summary.bundle_digest
+    }
+
+    fn validate_files(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            FileStamp::capture(&self.manifest_path)?.as_ref() == Some(&self.manifest)
+                && FileStamp::capture(&self.manifest_path.with_file_name("install.json"))?
+                    == self.receipt,
+            "extension manifest or installed bundle changed; reopen /extensions"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BundleFence {
+    root: PathBuf,
+    installed: crate::extension_bundle::InstalledBundle,
+    manifest: Option<FileStamp>,
+    receipt: FileStamp,
+}
+
+impl BundleFence {
+    fn capture(
+        root: PathBuf,
+        installed: crate::extension_bundle::InstalledBundle,
+    ) -> anyhow::Result<Self> {
+        let directory = root.join(&installed.id);
+        let manifest = FileStamp::capture(&directory.join("extension.toml"))?;
+        let receipt = FileStamp::capture(&directory.join(crate::extension_bundle::INSTALL_RECORD))?
+            .ok_or_else(|| anyhow::anyhow!("installed bundle receipt disappeared"))?;
+        Ok(Self {
+            root,
+            installed,
+            manifest,
+            receipt,
+        })
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            crate::extension_package::extensions_root()? == self.root,
+            "extension package root changed; reopen /extensions"
+        );
+        let current = crate::extension_bundle::list_installed(&self.root)?
+            .into_iter()
+            .find(|bundle| bundle.id == self.installed.id)
+            .ok_or_else(|| anyhow::anyhow!("selected installed bundle was removed"))?;
+        anyhow::ensure!(
+            Self::capture(self.root.clone(), current)? == *self,
+            "selected installed bundle changed; reopen /extensions"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Fence {
+    name: String,
+    session_path: PathBuf,
+    session_owner: String,
+    source: Option<SourceFence>,
+    bundle: Option<BundleFence>,
+    owner: Option<octet_agent::extension_process::ExtensionResourceOwner>,
+}
+
+impl Fence {
+    fn fleet_matches(&self, fleet: &ExecutableExtensions) -> bool {
+        let summaries = fleet.summaries();
+        let current = summaries.iter().find(|summary| summary.name == self.name);
+        let source_matches = match (&self.source, current) {
+            (Some(source), Some(summary)) => source.matches(summary),
+            (None, None) => true,
+            _ => false,
+        };
+        source_matches
+            && fleet.extension_menu_resource_owner(&self.name, &self.session_owner) == self.owner
+    }
+
+    fn validate(&self, app: &App) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            app.agent.session().path() == self.session_path
+                && app.agent.session().resource_owner_key() == self.session_owner,
+            "selected extension menu belongs to a retired session"
+        );
+        anyhow::ensure!(
+            self.fleet_matches(&app.executable_extensions),
+            "selected extension source or process changed; reopen /extensions"
+        );
+        let fresh = app
+            .executable_extensions
+            .extension_menu_selected_source(&app.config, &self.name)?;
+        match (&self.source, fresh) {
+            (Some(source), Some(descriptor)) => {
+                anyhow::ensure!(
+                    source.source == descriptor.source
+                        && source.manifest_path == descriptor.manifest_path,
+                    "selected extension source was replaced or shadowed; reopen /extensions"
+                );
+                source.validate_files()?;
+            }
+            (None, None) => {}
+            _ => anyhow::bail!(
+                "selected extension source was removed or replaced; reopen /extensions"
+            ),
+        }
+        if let Some(bundle) = &self.bundle {
+            bundle.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl Snapshot {
+    pub(super) fn capture(app: &App) -> Self {
+        match Self::try_capture(app) {
+            Ok(choices) => Self {
+                choices,
+                error: None,
+            },
+            Err(error) => Self {
+                choices: Vec::new(),
+                error: Some(format!("failed to inspect extensions: {error:#}")),
+            },
+        }
+    }
+
+    fn try_capture(app: &App) -> anyhow::Result<Vec<ManagementChoice>> {
+        let choices = installed_extension_choices(app)?;
+        let root = crate::extension_package::extensions_root()?;
+        let installed = crate::extension_bundle::list_installed(&root)?;
+        let summaries = app.executable_extensions.summaries();
+        let session_owner = app.agent.session().resource_owner_key();
+        choices
+            .into_iter()
+            .map(|choice| {
+                let summary = summaries.iter().find(|summary| summary.name == choice.name);
+                if let Some(summary) = summary {
+                    anyhow::ensure!(
+                        app.executable_extensions
+                            .extension_menu_source_unchanged(summary),
+                        "{}: source metadata changed; reload before managing it",
+                        choice.name
+                    );
+                }
+                let source = summary.map(SourceFence::capture).transpose()?;
+                let bundle = installed
+                    .iter()
+                    .find(|bundle| bundle.id == choice.name)
+                    .map(|bundle| BundleFence::capture(root.clone(), bundle.clone()))
+                    .transpose()?;
+                let fence = Fence {
+                    name: choice.name.clone(),
+                    session_path: app.agent.session().path().to_owned(),
+                    session_owner: session_owner.clone(),
+                    source,
+                    bundle,
+                    owner: app
+                        .executable_extensions
+                        .extension_menu_resource_owner(&choice.name, &session_owner),
+                };
+                let authority = summary.and_then(|summary| {
+                    authority_action(
+                        &app.config,
+                        summary,
+                        crate::cli::extension_host_authority_menu_authoritative(),
+                    )
+                });
+                let setup = python_runtime_setup_available(app, &choice.name);
+                let fallback = app
+                    .executable_extensions
+                    .generated_options_menu(&choice.name)
+                    .unwrap_or_else(not_running_options);
+                Ok(ManagementChoice {
+                    choice,
+                    fence,
+                    authority,
+                    setup,
+                    fallback,
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Page {
+    Closed,
+    Root,
+    Options { choice: usize, path: Vec<String> },
+}
+
+#[derive(Clone, Debug)]
+enum Row {
+    Extension(usize),
+    Item(octet_agent::ExtensionMenuItem),
+    Enable(bool),
+    Authority(bool),
+    Setup,
+    Back,
+}
+
+/// The sole in-flight collection polled alongside active Run/input events.
+/// Drop it on back/close, cancellation, approval preemption or owner change.
+pub(super) struct OwnedCollection {
+    pub(super) future: Pin<Box<dyn Future<Output = CollectionCompletion> + Send>>,
+}
+
+pub(super) struct CollectionCompletion {
+    token: u64,
+    choice: usize,
+    fence: Fence,
+    result: anyhow::Result<crate::extensions::ExtensionOptions>,
+}
+
+#[derive(Default)]
+pub(super) struct Selection {
+    pub(super) collection: Option<OwnedCollection>,
+    pub(super) effect: Option<Effect>,
+}
+
+/// Typed navigation is frontend-owned; only a leaf returns an idle effect.
+/// The driver must call `cancel` before *any* other panel (especially approval)
+/// replaces this one. Completion cannot grant itself panel ownership.
+pub(super) struct State {
+    snapshot: Option<Snapshot>,
+    page: Page,
+    rows: Vec<Row>,
+    action_keys: Vec<String>,
+    options: Option<crate::extensions::ExtensionOptions>,
+    token: u64,
+    root_selected: usize,
+    remembered: std::collections::HashMap<Vec<String>, String>,
+    loading: bool,
+    error: Option<String>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            snapshot: None,
+            page: Page::Closed,
+            rows: Vec::new(),
+            action_keys: Vec::new(),
+            options: None,
+            token: 0,
+            root_selected: 0,
+            remembered: Default::default(),
+            loading: false,
+            error: None,
+        }
+    }
+}
+
+impl State {
+    pub(super) fn is_open(&self) -> bool {
+        self.page != Page::Closed
+    }
+
+    pub(super) fn owns_action(&self, action: &PanelAction) -> bool {
+        self.is_open()
+            && matches!(action, PanelAction::SelectExtension(keys) if keys == &self.action_keys)
+    }
+
+    /// Synchronous: opening the root performs no collection and queues nothing.
+    pub(super) fn open(&mut self, snapshot: Snapshot, shell: &mut InteractiveShell) {
+        self.cancel();
+        self.error = snapshot.error.clone();
+        self.snapshot = Some(snapshot);
+        self.page = Page::Root;
+        self.root_selected = 0;
+        self.show(shell);
+    }
+
+    /// Invalidate before close/preemption, and drop the driver's owned future.
+    /// This does not close a panel belonging to a different owner.
+    pub(super) fn cancel(&mut self) {
+        self.token = self.token.wrapping_add(1);
+        self.page = Page::Closed;
+        self.snapshot = None;
+        self.error = None;
+        self.rows.clear();
+        self.action_keys.clear();
+        self.options = None;
+        self.loading = false;
+        self.remembered.clear();
+    }
+
+    /// Escape/Back returns one level; root Escape closes without aborting Run.
+    /// Any outstanding collection must be dropped by the driver on this route.
+    pub(super) fn back(&mut self, shell: &mut InteractiveShell) {
+        self.token = self.token.wrapping_add(1);
+        self.loading = false;
+        self.error = None;
+        match &mut self.page {
+            Page::Options { path, .. } if !path.is_empty() => {
+                path.pop();
+            }
+            Page::Options { .. } => {
+                self.page = Page::Root;
+                self.options = None;
+            }
+            Page::Root => {
+                self.cancel();
+                shell.close_panel();
+                return;
+            }
+            Page::Closed => return,
+        }
+        self.show(shell);
+    }
+
+    pub(super) fn select(
+        &mut self,
+        index: usize,
+        fleet: &ExecutableExtensions,
+        shell: &mut InteractiveShell,
+    ) -> Selection {
+        let Some(row) = self.rows.get(index).cloned() else {
+            return Selection::default();
+        };
+        if let Row::Back = row {
+            self.back(shell);
+            return Selection::default();
+        }
+        if let Row::Extension(choice) = row {
+            self.root_selected = index;
+            let selected = &self
+                .snapshot
+                .as_ref()
+                .expect("open state has snapshot")
+                .choices[choice];
+            if !selected.fence.fleet_matches(fleet) {
+                self.error = Some(
+                    "failed: selected source or process changed; close and reopen /extensions"
+                        .into(),
+                );
+                self.show(shell);
+                return Selection::default();
+            }
+            if !selected.choice.enabled {
+                if selected.choice.toggleable {
+                    let effect = Effect {
+                        fence: selected.fence.clone(),
+                        kind: EffectKind::Enabled(true),
+                    };
+                    self.cancel();
+                    shell.close_panel();
+                    return Selection {
+                        effect: Some(effect),
+                        collection: None,
+                    };
+                }
+                self.error = Some(format!("failed: {}", selected.choice.description));
+                self.show(shell);
+                return Selection::default();
+            }
+            self.token = self.token.wrapping_add(1);
+            self.page = Page::Options {
+                choice,
+                path: Vec::new(),
+            };
+            self.remembered.clear();
+            self.error = None;
+            self.options = Some(selected.fallback.clone());
+            let collection = selected
+                .fence
+                .owner
+                .as_ref()
+                .and_then(|owner| fleet.owned_options_menu(&selected.choice.name, owner))
+                .map(|future| {
+                    let token = self.token;
+                    let fence = selected.fence.clone();
+                    OwnedCollection {
+                        future: Box::pin(async move {
+                            CollectionCompletion {
+                                token,
+                                choice,
+                                fence,
+                                result: future.await,
+                            }
+                        }),
+                    }
+                });
+            self.loading = collection.is_some();
+            self.show(shell);
+            return Selection {
+                collection,
+                effect: None,
+            };
+        }
+        let Page::Options { choice, path } = &self.page else {
+            return Selection::default();
+        };
+        let selected = &self
+            .snapshot
+            .as_ref()
+            .expect("open state has snapshot")
+            .choices[*choice];
+        let kind = match row {
+            Row::Item(item) => {
+                self.remembered.insert(path.clone(), item.id.clone());
+                if item.items.is_some() {
+                    let Page::Options { path, .. } = &mut self.page else {
+                        unreachable!()
+                    };
+                    path.push(item.id);
+                    self.show(shell);
+                    return Selection::default();
+                }
+                EffectKind::MenuLeaf {
+                    path: path.clone(),
+                    item,
+                    generated: self
+                        .options
+                        .as_ref()
+                        .expect("options page has menu")
+                        .generated,
+                }
+            }
+            Row::Enable(enabled) => EffectKind::Enabled(enabled),
+            Row::Authority(allowed) => EffectKind::Authority(allowed),
+            Row::Setup => EffectKind::Setup,
+            Row::Back | Row::Extension(_) => unreachable!(),
+        };
+        let effect = Effect {
+            fence: selected.fence.clone(),
+            kind,
+        };
+        self.cancel();
+        shell.close_panel();
+        Selection {
+            collection: None,
+            effect: Some(effect),
+        }
+    }
+
+    /// Host cancellation/preemption is authoritative. Call only while the menu
+    /// still owns the ordinary panel; `cancel` revokes the request token before
+    /// an approval or another surface opens. A closed shell never reopens here.
+    pub(super) fn complete(
+        &mut self,
+        completion: CollectionCompletion,
+        fleet: &ExecutableExtensions,
+        shell: &mut InteractiveShell,
+    ) -> bool {
+        if self.token != completion.token
+            || !self.loading
+            || !shell.has_panel()
+            || shell.close_requested()
+            || !matches!(&self.page, Page::Options { choice, path } if *choice == completion.choice && path.is_empty())
+        {
+            return false;
+        }
+        let selected = &self
+            .snapshot
+            .as_ref()
+            .expect("open state has snapshot")
+            .choices[completion.choice];
+        if selected.fence != completion.fence {
+            return false;
+        }
+        self.loading = false;
+        if !completion.fence.fleet_matches(fleet) {
+            self.options = Some(not_running_options());
+            self.error = Some(
+                "failed: selected source or process changed; close and reopen /extensions".into(),
+            );
+            self.show(shell);
+            return false;
+        }
+        match completion.result {
+            Ok(options) => {
+                self.options = Some(options);
+                self.error = None;
+            }
+            Err(error) => {
+                self.options = Some(selected.fallback.clone());
+                self.error = Some(format!(
+                    "failed to collect options: {error:#}; declared commands remain available"
+                ));
+            }
+        }
+        self.show(shell);
+        true
+    }
+
+    fn show(&mut self, shell: &mut InteractiveShell) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let mut labels = Vec::new();
+        let mut descriptions = Vec::new();
+        self.rows.clear();
+        let mut selected_index = self.root_selected;
+        let mut surface = match &self.page {
+            Page::Closed => return,
+            Page::Root => {
+                for (index, selected) in snapshot.choices.iter().enumerate() {
+                    labels.push(selected.choice.label.clone());
+                    descriptions.push(Some(selected.choice.description.clone()));
+                    self.rows.push(Row::Extension(index));
+                }
+                OrdinarySurfaceMetadata::with_purpose(
+                    "Manage extensions",
+                    "Browse options now; activation, authority, setup and actions apply when idle",
+                )
+            }
+            Page::Options { choice, path } => {
+                let choice = &snapshot.choices[*choice];
+                let options = self.options.as_ref().expect("options page has menu");
+                let (title, detail, items) =
+                    resolve_menu_page(&options.menu, &choice.choice.name, path)
+                        .expect("navigation only enters materialized submenus");
+                let surface = match menu_purpose(&options.menu, detail) {
+                    Some(purpose) => OrdinarySurfaceMetadata::with_purpose(title, purpose),
+                    None => OrdinarySurfaceMetadata::new(title),
+                };
+                if path.is_empty() && choice.setup {
+                    labels.push("Set up runtime".into());
+                    descriptions.push(Some("Provision this trusted extension's private Python runtime; approval waits until idle".into()));
+                    self.rows.push(Row::Setup);
+                }
+                let prefix = self.rows.len();
+                // Loading materializes host navigation/actions only. The captured
+                // fallback becomes actionable after a failed collection, not before.
+                if !self.loading {
+                    for item in items {
+                        labels.push(format!(
+                            "{}{}{}",
+                            item.label,
+                            if item.recommended {
+                                " (recommended)"
+                            } else {
+                                ""
+                            },
+                            if item.items.is_some() { " ›" } else { "" }
+                        ));
+                        descriptions.push(item.description.clone());
+                        self.rows.push(Row::Item(item.clone()));
+                    }
+                }
+                selected_index = self
+                    .remembered
+                    .get(path)
+                    .and_then(|id| items.iter().position(|item| &item.id == id))
+                    .or_else(|| items.iter().position(|item| item.recommended))
+                    .map(|index| index + prefix)
+                    .unwrap_or(0);
+                if self.loading {
+                    selected_index = 0;
+                }
+                if path.is_empty() {
+                    if let Some(allowed) = choice.authority {
+                        labels.push(
+                            if allowed {
+                                "Grant host authority"
+                            } else {
+                                "Revoke host authority"
+                            }
+                            .into(),
+                        );
+                        descriptions.push(Some("Runs code with your OS permissions, even in safe mode; approval is checked when idle".into()));
+                        self.rows.push(Row::Authority(allowed));
+                    }
+                    if choice.choice.toggleable {
+                        labels.push(format!("Disable {}", choice.choice.name));
+                        descriptions.push(Some(
+                            "Stop the extension and remove its tools when idle".into(),
+                        ));
+                        self.rows.push(Row::Enable(false));
+                    }
+                }
+                surface
+            }
+        };
+        let empty = self.rows.is_empty();
+        labels.push(
+            if self.page == Page::Root {
+                "Close"
+            } else {
+                "Back"
+            }
+            .into(),
+        );
+        descriptions.push(None);
+        self.rows.push(Row::Back);
+        if let Some(error) = &self.error {
+            surface.lifecycle = crate::tui::view::OrdinarySurfaceLifecycle::RecoverableError(
+                crate::tui::view::OrdinarySurfaceStatus::persistent(
+                    crate::tui::view::sanitize_for_terminal(error)
+                        .chars()
+                        .take(1024)
+                        .collect::<String>(),
+                ),
+            );
+        } else if self.loading {
+            surface.lifecycle =
+                crate::tui::view::OrdinarySurfaceLifecycle::loading("loading extension options");
+        } else if empty {
+            surface.lifecycle =
+                crate::tui::view::OrdinarySurfaceLifecycle::empty(if self.page == Page::Root {
+                    "no executable extensions installed"
+                } else {
+                    "no options available"
+                });
+        }
+        self.action_keys = (0..self.rows.len())
+            .map(|index| format!("extension-menu:{}:{index}", self.token))
+            .collect();
+        shell.open_panel(Panel::SelectList {
+            surface,
+            items: labels,
+            descriptions,
+            selected: selected_index.min(self.rows.len() - 1),
+            filter: String::new(),
+            action: PanelAction::SelectExtension(self.action_keys.clone()),
+        });
+    }
+}
+
+fn resolve_menu_page<'a>(
+    menu: &'a octet_agent::ExtensionMenu,
+    extension: &str,
+    path: &[String],
+) -> Option<(
+    String,
+    Option<&'a str>,
+    &'a [octet_agent::ExtensionMenuItem],
+)> {
+    let mut title = menu.title.clone().unwrap_or_else(|| extension.to_owned());
+    let mut detail = menu.detail.as_deref();
+    let mut items = menu.items.as_slice();
+    for id in path {
+        let item = items.iter().find(|item| &item.id == id)?;
+        items = item.items.as_ref()?.as_slice();
+        title = format!("{title} › {}", item.label);
+        detail = item.detail.as_deref();
+    }
+    Some((title, detail, items))
+}
+
+/// A deferred intent, never a preapproval or stale toggle. Kept separate from
+/// `ExtensionsSubcommand::Action`, which has a different presentation producer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Effect {
+    fence: Fence,
+    kind: EffectKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EffectKind {
+    Enabled(bool),
+    Authority(bool),
+    Setup,
+    MenuLeaf {
+        path: Vec<String>,
+        item: octet_agent::ExtensionMenuItem,
+        generated: bool,
+    },
+}
+
+impl Effect {
+    // Like the idle command dispatcher, keep rebuild-backed effect futures off
+    // the caller's stack rather than enlarging every queued-action future.
+    pub(super) fn apply<'a>(
+        self,
+        app: App,
+        shell: &'a mut InteractiveShell,
+        input: &'a mut EventStream,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<App>> + 'a>> {
+        Box::pin(self.apply_inner(app, shell, input))
+    }
+
+    async fn apply_inner(
+        self,
+        mut app: App,
+        shell: &mut InteractiveShell,
+        input: &mut EventStream,
+    ) -> anyhow::Result<App> {
+        if let Err(error) = self.fence.validate(&app) {
+            shell.error(format!("extension action not applied: {error:#}"));
+            return Ok(app);
+        }
+        let name = &self.fence.name;
+        match self.kind {
+            EffectKind::Enabled(desired) => {
+                // Recompute required tools, collisions, source trust and activation
+                // precedence using the current Agent, not the run-opening snapshot.
+                let choices = match installed_extension_choices(&app) {
+                    Ok(choices) => choices,
+                    Err(error) => {
+                        shell.error(format!("extension action not applied: {error:#}"));
+                        return Ok(app);
+                    }
+                };
+                let Some(current) = choices.iter().find(|choice| &choice.name == name) else {
+                    shell.error(format!("{name}: selected extension is no longer available"));
+                    return Ok(app);
+                };
+                if current.enabled == desired {
+                    return Ok(app);
+                }
+                if !current.toggleable {
+                    shell.error(format!(
+                        "{name}: activation not changed: {}",
+                        current.description
+                    ));
+                    return Ok(app);
+                }
+                let currently_enabled = current.enabled;
+                (app, _) = set_extension_enabled_fenced(
+                    app,
+                    shell,
+                    input,
+                    name,
+                    currently_enabled,
+                    Some(&self.fence),
+                )
+                .await?;
+            }
+            EffectKind::Authority(allowed) => {
+                let summary = app
+                    .executable_extensions
+                    .summaries()
+                    .into_iter()
+                    .find(|summary| &summary.name == name);
+                let eligible = summary.as_ref().and_then(|summary| {
+                    authority_action(
+                        &app.config,
+                        summary,
+                        crate::cli::extension_host_authority_menu_authoritative(),
+                    )
+                });
+                if eligible != Some(allowed) {
+                    shell.error(format!(
+                        "{name}: host authority action is no longer available; reopen /extensions"
+                    ));
+                    return Ok(app);
+                }
+                app = set_extension_host_authority_fenced(
+                    app,
+                    shell,
+                    input,
+                    name,
+                    allowed,
+                    Some(&self.fence),
+                )
+                .await?;
+            }
+            EffectKind::Setup => {
+                if !python_runtime_setup_available(&app, name) {
+                    shell.error(format!("{name}: runtime setup is no longer available"));
+                    return Ok(app);
+                }
+                setup_python_runtime_fenced(&mut app, shell, input, name, Some(&self.fence))
+                    .await?;
+            }
+            EffectKind::MenuLeaf {
+                path,
+                item,
+                generated,
+            } => {
+                let options = match app.executable_extensions.options_menu(name).await {
+                    Ok(Some(options)) => options,
+                    Err(_) if generated => {
+                        match app.executable_extensions.generated_options_menu(name) {
+                            Some(options) => options,
+                            None => {
+                                shell.error(format!("{name}: options are no longer available"));
+                                return Ok(app);
+                            }
+                        }
+                    }
+                    result => {
+                        shell.error(format!(
+                            "{name}: options could not be revalidated: {}",
+                            result
+                                .err()
+                                .map(|error| format!("{error:#}"))
+                                .unwrap_or_else(|| "extension stopped".into())
+                        ));
+                        return Ok(app);
+                    }
+                };
+                if let Err(error) = self.fence.validate(&app) {
+                    shell.error(format!("extension action not applied: {error:#}"));
+                    return Ok(app);
+                }
+                let Some((place, _, items)) = resolve_menu_page(&options.menu, name, &path) else {
+                    shell.error(format!(
+                        "{name}: selected options path changed; reopen /extensions"
+                    ));
+                    return Ok(app);
+                };
+                let current = items.iter().find(|current| current.id == item.id);
+                if options.generated != generated || current != Some(&item) || item.items.is_some()
+                {
+                    shell.error(format!(
+                        "{name}: selected options action changed; reopen /extensions"
+                    ));
+                    return Ok(app);
+                }
+                // Existing handlers own fresh destructive approval, generated
+                // argument input, progress and extension child dialogs, all at idle.
+                run_extension_menu_action(
+                    &mut app,
+                    shell,
+                    input,
+                    name,
+                    &place,
+                    &item,
+                    generated,
+                    Some(&self.fence),
+                )
+                .await?;
+            }
+        }
+        Ok(app)
+    }
+}
 
 /// Most recent progress lines kept in the running-action view.
 const ACTION_LOG_LINES: usize = 12;
@@ -516,6 +1421,7 @@ pub(super) async fn extension_options_menu(
             &title,
             &item,
             options.generated,
+            None,
         )
         .await?
             == ExtensionMenuActionDisposition::ReturnToIdle
@@ -559,6 +1465,16 @@ pub(super) async fn setup_python_runtime(
     input: &mut EventStream,
     extension: &str,
 ) -> anyhow::Result<bool> {
+    setup_python_runtime_fenced(app, shell, input, extension, None).await
+}
+
+async fn setup_python_runtime_fenced(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    extension: &str,
+    fence: Option<&Fence>,
+) -> anyhow::Result<bool> {
     let request = octet_agent::extension_process::ConfirmationRequest {
         parent_request_id: None,
         prompt: format!("Set up {extension}'s private Python runtime?"),
@@ -569,6 +1485,12 @@ pub(super) async fn setup_python_runtime(
     if !extension_confirmation_picker(shell, input, "octet", &request).await? {
         shell.notice("runtime setup cancelled; no download started");
         return Ok(false);
+    }
+    if let Some(fence) = fence {
+        if let Err(error) = fence.validate(app) {
+            shell.error(format!("runtime setup not applied: {error:#}"));
+            return Ok(false);
+        }
     }
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let lines = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::<String>::new()));
@@ -664,6 +1586,12 @@ pub(super) async fn setup_python_runtime(
             Ok(false)
         }
         Some(Ok(_)) => {
+            if let Some(fence) = fence {
+                if let Err(error) = fence.validate(app) {
+                    shell.error(format!("runtime provisioned but not activated: {error:#}"));
+                    return Ok(false);
+                }
+            }
             if let Err(error) = app
                 .executable_extensions
                 .activate_python_extension(extension)
@@ -715,6 +1643,7 @@ fn not_running_options() -> crate::extensions::ExtensionOptions {
 
 /// Runs one menu action with live progress, then shows what it reported.
 /// `place` names the menu it was chosen from, for confirmations.
+#[allow(clippy::too_many_arguments)]
 async fn run_extension_menu_action(
     app: &mut App,
     shell: &mut InteractiveShell,
@@ -723,6 +1652,7 @@ async fn run_extension_menu_action(
     place: &str,
     item: &octet_agent::ExtensionMenuItem,
     generated: bool,
+    fence: Option<&Fence>,
 ) -> anyhow::Result<ExtensionMenuActionDisposition> {
     let Some(command) = item.command.clone() else {
         return Ok(ExtensionMenuActionDisposition::Continue);
@@ -756,6 +1686,9 @@ async fn run_extension_menu_action(
                 if !console.confirm(extension, &request).await? {
                     anyhow::bail!("{} was cancelled", item.label);
                 }
+            }
+            if let Some(fence) = fence {
+                fence.validate(app)?;
             }
             run_interactive_extension_command(
                 app,
@@ -822,11 +1755,22 @@ async fn confirm_host_authority(
 
 /// Persist/revoke a source-specific host authority grant and rebuild the runtime.
 pub(super) async fn set_extension_host_authority(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    name: &str,
+    allowed: bool,
+) -> anyhow::Result<App> {
+    set_extension_host_authority_fenced(app, shell, input, name, allowed, None).await
+}
+
+async fn set_extension_host_authority_fenced(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     name: &str,
     allowed: bool,
+    fence: Option<&Fence>,
 ) -> anyhow::Result<App> {
     if !crate::cli::extension_host_authority_menu_authoritative() {
         shell.error("Host authority is controlled by OCTET_TRUSTED_EXTENSIONS; the user config is read-only".into());
@@ -857,6 +1801,12 @@ pub(super) async fn set_extension_host_authority(
     }
     if allowed && !confirm_host_authority(shell, input, name).await? {
         return Ok(app);
+    }
+    if let Some(fence) = fence {
+        if let Err(error) = fence.validate(&app) {
+            shell.error(format!("host authority not changed: {error:#}"));
+            return Ok(app);
+        }
     }
     if refuse_resource_reload(&app, shell) {
         return Ok(app);
@@ -899,11 +1849,22 @@ pub(super) async fn set_extension_host_authority(
 
 /// Persists and applies one activation change. Returns whether it applied.
 pub(super) async fn set_extension_enabled(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    name: &str,
+    currently_enabled: bool,
+) -> anyhow::Result<(App, bool)> {
+    set_extension_enabled_fenced(app, shell, input, name, currently_enabled, None).await
+}
+
+async fn set_extension_enabled_fenced(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     name: &str,
     currently_enabled: bool,
+    fence: Option<&Fence>,
 ) -> anyhow::Result<(App, bool)> {
     let authoritative = match crate::cli::extension_activation_menu_authoritative(&app.config) {
         Ok(authoritative) => authoritative,
@@ -944,6 +1905,27 @@ pub(super) async fn set_extension_enabled(
     } else {
         None
     };
+    if let Some(fence) = fence {
+        if let Err(error) = fence.validate(&app) {
+            shell.error(format!("activation not changed: {error:#}"));
+            return Ok((app, false));
+        }
+        match crate::cli::extension_activation_menu_authoritative(&app.config) {
+            Ok(true) => {}
+            Ok(false) => {
+                shell.error(format!(
+                    "{name}: activation precedence changed while awaiting approval"
+                ));
+                return Ok((app, false));
+            }
+            Err(error) => {
+                shell.error(format!(
+                    "{name}: activation precedence could not be revalidated: {error}"
+                ));
+                return Ok((app, false));
+            }
+        }
+    }
     let config_path = crate::cli::global_config_path();
     let before_config = config_path.as_deref().and_then(configuration_snapshot);
     let previous_grants = app.config.trusted_extensions.clone();
@@ -1020,6 +2002,206 @@ pub(super) async fn set_extension_enabled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn management_fixture() -> Snapshot {
+        let item = octet_agent::ExtensionMenuItem {
+            id: "configure".into(),
+            label: "Configure".into(),
+            description: None,
+            command: Some("configure".into()),
+            arguments: vec!["--local".into()],
+            destructive: true,
+            recommended: false,
+            items: None,
+            detail: None,
+        };
+        let submenu = octet_agent::ExtensionMenuItem {
+            id: "settings".into(),
+            label: "Settings".into(),
+            command: None,
+            arguments: Vec::new(),
+            destructive: false,
+            items: Some(vec![item]),
+            description: None,
+            recommended: false,
+            detail: Some("Local configuration".into()),
+        };
+        Snapshot {
+            error: None,
+            choices: vec![ManagementChoice {
+                choice: InstalledExtensionChoice {
+                    name: "fixture".into(),
+                    label: "[x] fixture".into(),
+                    description: "fixture".into(),
+                    enabled: true,
+                    toggleable: true,
+                },
+                fence: Fence {
+                    name: "fixture".into(),
+                    session_path: PathBuf::from("/session"),
+                    session_owner: "session-owner".into(),
+                    source: None,
+                    bundle: None,
+                    owner: None,
+                },
+                authority: None,
+                setup: false,
+                fallback: crate::extensions::ExtensionOptions {
+                    menu: octet_agent::ExtensionMenu {
+                        title: Some("Fixture options".into()),
+                        items: vec![submenu],
+                        ..Default::default()
+                    },
+                    generated: false,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn management_navigation_never_produces_an_idle_effect() {
+        let mut shell = InteractiveShell::test_shell();
+        let fleet = ExecutableExtensions::default();
+        let mut state = State::default();
+        state.open(management_fixture(), &mut shell);
+        assert_eq!(state.page, Page::Root);
+        assert!(shell.has_panel());
+        let selection = state.select(0, &fleet, &mut shell);
+        assert!(selection.collection.is_none()); // fixture has no running process
+        assert!(selection.effect.is_none());
+        let selection = state.select(0, &fleet, &mut shell);
+        assert!(selection.collection.is_none());
+        assert!(selection.effect.is_none());
+        assert_eq!(
+            state.page,
+            Page::Options {
+                choice: 0,
+                path: vec!["settings".into()]
+            }
+        );
+        state.back(&mut shell);
+        assert_eq!(
+            state.page,
+            Page::Options {
+                choice: 0,
+                path: Vec::new()
+            }
+        );
+        state.back(&mut shell);
+        assert_eq!(state.page, Page::Root);
+        state.back(&mut shell);
+        assert!(!state.is_open());
+        assert!(!shell.has_panel());
+    }
+
+    #[test]
+    fn options_leaf_keeps_its_producer_path_and_fresh_approval_intent() {
+        let mut shell = InteractiveShell::test_shell();
+        let fleet = ExecutableExtensions::default();
+        let mut state = State::default();
+        state.open(management_fixture(), &mut shell);
+        state.select(0, &fleet, &mut shell);
+        state.select(0, &fleet, &mut shell);
+        let selection = state.select(0, &fleet, &mut shell);
+        let EffectKind::MenuLeaf {
+            path,
+            item,
+            generated,
+        } = selection.effect.unwrap().kind
+        else {
+            panic!("expected options leaf")
+        };
+        assert_eq!(path, ["settings"]);
+        assert_eq!(item.command.as_deref(), Some("configure"));
+        assert_eq!(item.arguments, ["--local"]);
+        assert!(item.destructive);
+        assert!(!generated);
+        assert!(!state.is_open());
+        assert!(!shell.has_panel());
+    }
+
+    #[test]
+    fn activation_is_a_desired_state_not_a_captured_toggle() {
+        let mut snapshot = management_fixture();
+        snapshot.choices[0].choice.enabled = false;
+        let mut shell = InteractiveShell::test_shell();
+        let fleet = ExecutableExtensions::default();
+        let mut state = State::default();
+        state.open(snapshot, &mut shell);
+        let effect = state.select(0, &fleet, &mut shell).effect.unwrap();
+        assert_eq!(effect.kind, EffectKind::Enabled(true));
+        assert_eq!(effect.clone(), effect);
+    }
+
+    #[test]
+    fn inspection_failure_opens_a_recoverable_root_not_a_prompt_failure() {
+        let mut shell = InteractiveShell::test_shell();
+        let mut state = State::default();
+        state.open(
+            Snapshot {
+                choices: Vec::new(),
+                error: Some("failed to inspect bundles".into()),
+            },
+            &mut shell,
+        );
+        assert!(shell.has_panel());
+        assert!(matches!(state.rows.as_slice(), [Row::Back]));
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ));
+        let (result, action) = shell.panel_input(&event).unwrap();
+        assert!(matches!(result, PanelResult::Cancel));
+        assert!(state.owns_action(&action));
+        state.back(&mut shell);
+        assert!(!state.is_open());
+    }
+
+    #[test]
+    fn closed_reopened_or_preempted_menu_rejects_late_collection() {
+        for preempt in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            let fleet = ExecutableExtensions::default();
+            let mut state = State::default();
+            let snapshot = management_fixture();
+            state.open(snapshot.clone(), &mut shell);
+            state.select(0, &fleet, &mut shell);
+            state.loading = true; // deterministic completion fence, not an RPC mock
+            let completion = CollectionCompletion {
+                token: state.token,
+                choice: 0,
+                fence: snapshot.choices[0].fence.clone(),
+                result: Ok(snapshot.choices[0].fallback.clone()),
+            };
+            state.cancel();
+            if preempt {
+                shell.open_panel(Panel::SelectList {
+                    surface: OrdinarySurfaceMetadata::new("Approve action"),
+                    items: vec!["Deny".into(), "Allow".into()],
+                    descriptions: vec![None, None],
+                    selected: 0,
+                    filter: String::new(),
+                    action: PanelAction::Confirmation,
+                });
+            } else {
+                state.open(snapshot, &mut shell);
+            }
+            assert!(!state.complete(completion, &fleet, &mut shell));
+            assert_eq!(state.page, if preempt { Page::Closed } else { Page::Root });
+        }
+    }
+
+    #[test]
+    fn metadata_fence_rejects_replacement_and_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("extension.toml");
+        std::fs::write(&path, "original manifest").unwrap();
+        let original = FileStamp::capture(&path).unwrap().unwrap();
+        std::fs::write(&path, "replacement manifest").unwrap();
+        assert_ne!(FileStamp::capture(&path).unwrap().as_ref(), Some(&original));
+        std::fs::remove_file(&path).unwrap();
+        assert!(FileStamp::capture(&path).unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn fullscreen_menu_yield_preserves_command_errors_after_surface_closed() {

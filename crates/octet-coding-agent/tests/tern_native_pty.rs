@@ -345,10 +345,14 @@ impl NativePty {
             .unwrap_or_default()
     }
     fn ready(&mut self) {
+        // The unbranded startup prologue is already editable. Commands and
+        // completions need the atomic ready frame, which admits resolved chrome.
         self.wait(|pty| {
-            pty.nodes
-                .get("composer.editor")
-                .is_some_and(|node| node["p"]["readonly"] == false)
+            pty.nodes.contains_key("composer.bar")
+                && pty
+                    .nodes
+                    .get("composer.editor")
+                    .is_some_and(|node| node["p"]["readonly"] == false)
         });
     }
     fn command(&mut self, command: &str) {
@@ -708,7 +712,7 @@ fn native_keys_paste_escape_and_protocol_fragments_never_become_draft_escape_tex
 #[test]
 fn native_shell_keeps_full_command_and_never_sends_output_before_ctrl_o() {
     let mut pty = NativePty::spawn();
-    pty.wait(|pty| pty.nodes.contains_key("composer.editor"));
+    pty.ready();
     let marker = "output-requires-ctrl-o".repeat(40);
     let command = format!("printf '%s\\n' '{marker}'\nprintf 'second line\\n'");
     pty.send(format!("\x1b[200~!{command}\x1b[201~").as_bytes());
@@ -757,13 +761,23 @@ fn native_shell_keeps_full_command_and_never_sends_output_before_ctrl_o() {
 #[test]
 fn slash_completion_settings_and_theme_picker_keep_native_ownership() {
     let mut pty = NativePty::spawn();
-    pty.wait(|pty| pty.nodes.contains_key("composer.editor"));
+    pty.ready();
     pty.send(b"/");
     pty.wait(|pty| pty.nodes.values().any(|node| node["k"] == "list"));
     assert!(!pty.nodes.values().any(|node| node["k"] == "rows"));
     pty.send(b"\x1b[27u");
     pty.wait(|pty| !pty.nodes.values().any(|node| node["k"] == "list"));
-    pty.send(b"\x7f/settings\r");
+    pty.send(b"\x7f");
+    pty.wait(|pty| pty.draft().is_empty());
+    pty.command("/settings");
+    pty.wait(|pty| pty.panel().is_some());
+    assert_eq!(pty.nodes["composer.editor"]["p"]["readonly"], true);
+    assert!(!pty.nodes.contains_key("report.body"));
+    assert!(pty.nodes.values().any(|node| {
+        node["id"].as_str().is_some_and(|id| id.ends_with(".title"))
+            && node["p"]["spans"][0]["t"] == "Settings"
+    }));
+    pty.sheet_choice("Show effective settings");
     pty.wait(|pty| {
         pty.nodes.get("report.body").is_some_and(|node| {
             node["p"]["text"]
@@ -773,7 +787,8 @@ fn slash_completion_settings_and_theme_picker_keep_native_ownership() {
     });
     pty.send(b"\x1b[27u");
     pty.wait(|pty| !pty.nodes.contains_key("report.body"));
-    pty.send(b"/theme\r");
+    pty.ready();
+    pty.command("/theme");
     pty.wait(|pty| {
         pty.nodes
             .values()
@@ -879,6 +894,12 @@ fn native_reports_hotkeys_settings_and_accounting_stay_local_and_ephemeral() {
         ("/changelog", "Changelog"),
     ] {
         pty.command(command);
+        if command == "/settings" {
+            pty.wait(|pty| pty.panel().is_some());
+            assert!(!pty.nodes.contains_key("report.body"));
+            assert_eq!(pty.nodes["composer.editor"]["p"]["readonly"], true);
+            pty.sheet_choice("Show effective settings");
+        }
         pty.wait(|pty| {
             pty.nodes.values().any(|node| {
                 node["p"]["role"] == "octet.report"
@@ -1013,11 +1034,12 @@ fn native_path_completion_inserts_real_workspace_path_without_media_admission() 
     pty.ready();
     pty.send(b"@qual");
     pty.wait(|pty| {
-        pty.nodes.values().any(|node| {
-            node["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("completion.") && id.ends_with(".path"))
-        })
+        pty.draft() == "@qual"
+            && pty.nodes.values().any(|node| {
+                node["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("completion.") && id.ends_with(".path"))
+            })
     });
     let list = pty.node_kind("list").unwrap().clone();
     pty.activate(
@@ -1513,7 +1535,10 @@ fn native_session_rename_cancel_edit_stale_gestures_and_persistence_use_host_dri
 
 #[test]
 fn native_active_session_export_writes_saved_history() {
-    for mode in ["--resume", "--fork"] {
+    for (mode, command, filename) in [
+        ("--resume", "/export", "export-source.html"),
+        ("--fork", "/export exported.html", "exported.html"),
+    ] {
         let mut pty = NativePty::configured(
             Options {
                 args: vec![mode.into(), "export-source".into()],
@@ -1529,10 +1554,23 @@ fn native_active_session_export_writes_saved_history() {
             },
         );
         pty.ready();
-        pty.command("/export exported.md");
-        pty.wait(|pty| pty._root.path().join("workspace/exported.md").is_file());
-        let exported = fs::read_to_string(pty._root.path().join("workspace/exported.md")).unwrap();
+        pty.command(command);
+        pty.wait(|pty| {
+            pty.nodes.get("report.body").is_some_and(|node| {
+                node["p"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Exported ") && text.contains(filename))
+            })
+        });
+        let confirmation = pty.nodes["report.body"]["p"]["text"].as_str().unwrap();
+        assert!(confirmation.contains("Redacted 0 potentially sensitive values"));
+        assert_eq!(pty.nodes["composer.editor"]["p"]["readonly"], true);
+        let exported =
+            fs::read_to_string(pty._root.path().join("workspace").join(filename)).unwrap();
+        assert!(exported.starts_with("<!doctype html>"));
         assert!(exported.contains("saved export history 🦀"));
+        pty.action(&pty.report_id(), "close");
+        pty.ready();
         pty.close();
     }
 }
@@ -1945,13 +1983,17 @@ fn native_extensions_empty_and_untrusted_installed_menus_cannot_grant_by_pointer
     let mut pty = NativePty::spawn();
     pty.ready();
     pty.command("/extensions");
+    // With no bundles there is nothing to select: preserve the ordinary idle
+    // empty-state document, not the active-run snapshot menu's Close row.
     pty.wait(|pty| pty.nodes.contains_key("panel.document"));
+    assert_eq!(pty.nodes["composer.editor"]["p"]["readonly"], true);
     assert!(pty.nodes["panel.document"]["p"]["text"]
         .as_str()
         .unwrap()
-        .contains("No"));
+        .contains("No executable extension bundles are installed"));
     pty.escape();
     pty.ready();
+    assert!(!pty.nodes.contains_key("panel.document"));
     pty.close();
     let mut pty = NativePty::configured(
         Options {

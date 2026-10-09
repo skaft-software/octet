@@ -301,6 +301,114 @@ impl ExecutableExtensions {
         }))
     }
 
+    /// Resolve the exact host-created owner, including frozen API 0.1 processes
+    /// whose wire execution context intentionally omits resource ownership.
+    /// Menu callers must never reconstruct an instance fence from a name and
+    /// generation: complete host rebuilds can reuse a generation counter.
+    pub(crate) fn extension_menu_resource_owner(
+        &self,
+        extension: &str,
+        session_owner: &str,
+    ) -> Option<octet_agent::extension_process::ExtensionResourceOwner> {
+        if self.resource_owner.as_deref() != Some(session_owner) {
+            return None;
+        }
+        let process = self
+            .processes
+            .iter()
+            .find(|process| process.descriptor().manifest.name == extension)?;
+        Some(octet_agent::extension_process::ExtensionResourceOwner {
+            session_id: session_owner.to_owned(),
+            extension_instance_id: process.extension_instance_id().to_owned(),
+            process_generation: process.health_snapshot().generation,
+        })
+    }
+
+    /// Own one menu collection without retaining a fleet, App or Agent borrow.
+    /// The caller polls this beside run events, and owns cancellation and stale
+    /// response fencing. Errors remain recoverable; the caller can use its
+    /// captured generated menu rather than turn an inspection failure into a
+    /// failed prompt. No task is spawned and constructing this starts no RPC.
+    pub(crate) fn owned_options_menu(
+        &self,
+        extension: &str,
+        expected_owner: &octet_agent::extension_process::ExtensionResourceOwner,
+    ) -> Option<Pin<Box<dyn Future<Output = anyhow::Result<ExtensionOptions>> + Send>>> {
+        if self
+            .extension_menu_resource_owner(extension, &expected_owner.session_id)
+            .as_ref()
+            != Some(expected_owner)
+        {
+            return None;
+        }
+        let process = self
+            .processes
+            .iter()
+            .find(|process| {
+                process.extension_instance_id() == expected_owner.extension_instance_id
+                    && process.is_running()
+            })?
+            .clone();
+        let context = extension_execution_context(&process, self.resource_owner.as_deref());
+        let extension = extension.to_owned();
+        let expected_owner = expected_owner.clone();
+        Some(Box::pin(async move {
+            anyhow::ensure!(
+                process.is_running()
+                    && process.health_snapshot().generation == expected_owner.process_generation,
+                "{extension}: selected menu process retired before collection"
+            );
+            if !process.contributions().menu {
+                return Ok(generated_options(&process));
+            }
+            let menu = tokio::time::timeout(MENU_COLLECT_DEADLINE, process.collect_menu(context))
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out after {MENU_COLLECT_DEADLINE:?}"))
+                .and_then(|menu| menu.map_err(anyhow::Error::from))
+                .with_context(|| format!("{extension} could not build its options menu"))?;
+            anyhow::ensure!(
+                process.is_running()
+                    && process.health_snapshot().generation == expected_owner.process_generation,
+                "{extension}: selected menu process retired during collection"
+            );
+            Ok(ExtensionOptions {
+                menu,
+                generated: false,
+            })
+        }))
+    }
+
+    /// Check the metadata digests against the already selected host source.
+    pub(crate) fn extension_menu_source_unchanged(&self, summary: &ExtensionSummary) -> bool {
+        sha256_manifest(&summary.manifest_path) == summary.manifest_digest
+            && installed_bundle_digest(&summary.manifest_path) == summary.bundle_digest
+    }
+
+    /// Re-run the ordinary source resolver at an idle effect boundary. It reads
+    /// metadata only: it never imports, starts, grants or provisions an extension.
+    pub(crate) fn extension_menu_selected_source(
+        &self,
+        config: &Config,
+        extension: &str,
+    ) -> anyhow::Result<Option<DiscoveredExtension>> {
+        anyhow::ensure!(
+            self.workspace == config.workspace,
+            "extension menu workspace changed"
+        );
+        let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+        let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
+        let mut diagnostics = Vec::new();
+        let (policy, _) = extension_policy(config, &mut diagnostics);
+        let selected = snapshot
+            .resources()
+            .iter()
+            .filter(|resource| resource.name == extension)
+            .find_map(|resource| {
+                load_extension_descriptor(&resolver, resource, &policy, &mut diagnostics)
+            });
+        Ok(selected)
+    }
+
     /// Entries generated from a running extension's declared commands, used
     /// when it offers no menu or its menu could not be built.
     pub fn generated_options_menu(&self, extension: &str) -> Option<ExtensionOptions> {
