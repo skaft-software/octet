@@ -76,6 +76,11 @@ export function translateSessionEntries(entries, namespace) {
       if (entry.timestamp_unix_ms !== undefined) message.timestamp = entry.timestamp_unix_ms;
       return { ...base, type: 'message', message };
     }
+    if (value.type === 'branch_summary') {
+      return { ...base, type: 'branch_summary', summary: value.summary,
+        fromId: bounded(value.from_entry, 'branch summary source entry', 256),
+        ...(value.details ? { details: plainJSON(value.details, 'branch summary details') } : {}) };
+    }
     if (value.type === 'compaction') {
       if (value.snapcompact) unsupported('bitmap compaction Pi session mirror');
       return { ...base, type: 'compaction', summary: value.summary, firstKeptEntryId: value.first_kept,

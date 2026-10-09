@@ -29,9 +29,11 @@ octet's emulated path, then automatically tries installed Pi when loading fails
 or a bounded source scan detects direct Pi tool execution, such as hashline's
 image-read branch. Child-tool descriptors alone stay on the emulated path.
 Setup prints each route or skip reason and records the Pi installation path.
-Broken factories, first-party tool conflicts, conflicting registrations and schemas
-outside octet's supported JSON Schema profile are skipped. Constraints are never
-stripped to make a tool load. Reviewed builtin tool replacements instead require
+Broken factories and unsupported schemas are diagnosed; constraints are never
+stripped to make a tool load. Static registration collisions require explicit
+ownership and fresh review, refusing a partial setup rather than silently dropping
+other commands. Installed native manifests alone do not prove active ownership;
+only explicit host-active tools conflict. Reviewed builtin tool replacements require
 exact manifest grants and negotiated native `builtin_tool_overrides_v1` admission.
 For a manual list, replace `--from-pi` with absolute entrypoint paths. Replace
 `node` with `bun` to reuse Bun; configure records that executable. A load pass
@@ -84,10 +86,11 @@ The runner accepts `node runner.mjs --config /absolute/bridge.json`, with:
 {"extensions":["/absolute/reviewed/extension.ts"]}
 ```
 
-Generated config additionally retains entrypoint SHA-256 and exact static
-registration metadata. A changed entrypoint is rejected; a multi-factory bridge
-reports and skips that factory. Other static registration changes require explicit
-reconfiguration; late tools use the negotiated host-acknowledged catalog instead.
+Generated config additionally retains entrypoint SHA-256, bounded literal-relative
+import hashes and exact static registration metadata. Changed reviewed sources or
+static registrations require explicit reconfiguration; startup never recaptures
+unreviewed tools, commands, shortcuts or flags. A multi-factory bridge reports and
+skips a changed factory. Late tools use the negotiated host-acknowledged catalog instead.
 Static shortcut declarations stay reserved when a factory is
 skipped, but their missing handlers refuse execution; reconfigure to remove them.
 These hashes are change detection, not a sandbox or
@@ -674,8 +677,9 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The complete adapter run at the 2026-10-07 integration tip is **849 tests: 825 passed, 0
-failed, 24 optional skips**, exit 0. The candidate-truth numbers are read from the shipped
+The isolated working-candidate adapter and phase2 run is **900 tests: 879 passed, 0
+failed, 21 optional skips**, exit 0, with the freshly built native editor test host.
+This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing
 peers fail explicitly, never substitute a JS model. The immutable 193 upstream cases plus the

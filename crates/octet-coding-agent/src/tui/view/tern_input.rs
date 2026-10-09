@@ -363,7 +363,7 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             len,
         }) if sf == super::tern::SURFACE && id == "composer.editor" => {
             let mut shell = state.borrow_mut();
-            if !super::tern::editor_focused(&shell) || shell.startup_pending {
+            if !super::tern::editor_focused(&shell) {
                 return None;
             }
             let source = shell.editor.text();
@@ -800,6 +800,26 @@ mod tests {
                 assert_eq!(shell.state.borrow().slash_selection, 0);
             }
         }
+    }
+
+    #[test]
+    fn native_startup_draft_accepts_edits_before_branded_readiness() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.state.borrow_mut().startup_pending = true;
+        shell.state.native().lock().unwrap().accepting_input = true;
+        let handler = shell.tern_input_handler();
+        handler(Incoming::Event(Event::Edit {
+            sf: super::super::tern::SURFACE.into(),
+            id: "composer.editor".into(),
+            from: 0,
+            to: 0,
+            text: "early 🦀 draft".into(),
+            cursor: 14,
+            len: 0,
+        }));
+        assert_eq!(shell.pending(), "early 🦀 draft");
+        shell.finish_startup();
+        assert_eq!(shell.pending(), "early 🦀 draft");
     }
 
     #[test]

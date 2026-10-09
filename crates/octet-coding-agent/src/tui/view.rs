@@ -975,6 +975,9 @@ pub(crate) enum PanelAction {
     SelectSession(Vec<std::path::PathBuf>),
     /// Select a thinking level.
     SelectThinking(Vec<crate::config::ThinkingLevel>),
+    /// Select a settings menu destination or an explicit preference value.
+    /// Entries align with raw select-list indices, including the Back row.
+    SelectSettings(Vec<crate::commands::SettingsCommand>),
     /// Select a terminal theme without suspending an active run.
     SelectTheme {
         keys: Vec<String>,
@@ -993,6 +996,8 @@ pub(crate) enum PanelAction {
     ProviderSetup(Vec<String>),
     /// Drive the enhanced session browser without copying its row data.
     SessionPicker,
+    /// Navigate the same session by durable entry ID, including inactive branches.
+    SessionTree(Vec<octet_agent::EntryId>),
     /// Drive the user-message fork browser without copying its row data.
     MessagePicker,
     /// Navigate a read-only transcript document.
@@ -1695,7 +1700,13 @@ fn navigate_prompt_history(state: &mut ShellState, action: &EditAction) -> bool 
         return true;
     }
 
-    if moving_up && state.editor.cursor() == 0 && !state.prompt_history.is_empty() {
+    let at_first_visual_row = if moving_up && !state.prompt_history.is_empty() {
+        let geometry = composer_editor_geometry(state, state.size.0);
+        state.composer_editor_projection(geometry).cursor_row() == 0
+    } else {
+        false
+    };
+    if at_first_visual_row {
         let draft = capture_prompt_history_draft(state);
         let index = state.prompt_history.len() - 1;
         state.prompt_history_navigation = Some(PromptHistoryNavigation { index, draft });
@@ -2966,7 +2977,28 @@ impl ShellState {
     }
 
     fn animation_block_is_addressable(&self, index: usize) -> bool {
+        let spaced_activity = matches!(self.transcript.get(index),
+            Some(TranscriptBlock::Reasoning(reasoning))
+                if !reasoning.finished
+                    && !reasoning.reasoning_expanded
+                    && (!self.verbose_tools
+                        || (reasoning.text.is_empty() && !reasoning.show_reasoning_hint))
+        );
         if self.render_threaded && !self.application_viewport_requested {
+            if spaced_activity {
+                if let (Some(top), Some(geometry), Some(id)) = (
+                    self.native_animation_viewport_top.get(),
+                    self.render_geometry.as_ref(),
+                    self.transcript_commit_ids.get(index),
+                ) {
+                    if let Some(block) = geometry.blocks.iter().find(|block| block.id == *id) {
+                        return block.start
+                            + block.surface.transition_rows
+                            + block.surface.leading_rows
+                            >= top;
+                    }
+                }
+            }
             return self
                 .transcript_commit_ids
                 .get(index)
@@ -2977,11 +3009,19 @@ impl ShellState {
         let Some(top) = self.native_animation_viewport_top.get() else {
             return true;
         };
-        self.transcript_cache
-            .borrow()
-            .block_starts
-            .get(index)
-            .is_none_or(|start| *start >= top)
+        let cache = self.transcript_cache.borrow();
+        cache.block_starts.get(index).is_none_or(|start| {
+            // Live event spacing precedes the animated label. Its breathing
+            // row may already be in saved history while the label is still
+            // addressable; that decorative row must not stop the live clock.
+            let label_offset = if spaced_activity {
+                let geometry = cache.block_geometries[index];
+                geometry.transition_rows + geometry.leading_rows
+            } else {
+                0
+            };
+            start.saturating_add(label_offset) >= top
+        })
     }
 
     fn has_active_event_dot(&self) -> bool {
@@ -5244,10 +5284,11 @@ impl InteractiveShell {
             return;
         }
         if matches!(&action, EditAction::Up | EditAction::Down) {
+            let autocomplete_visible = self.extension_autocomplete_displayed();
             let mut state = self.state.borrow_mut();
-            // Only a visible host path menu claims arrows. An extension result
-            // and modal input keep their existing keyboard ownership.
-            if normal_editor_focused(&state) && state.extension_autocomplete.is_none() {
+            // Only visible completion menus claim arrows; stale or empty results
+            // must not disable ordinary editor/history navigation.
+            if normal_editor_focused(&state) && !autocomplete_visible {
                 let count = input_path_suggestions(&state).len();
                 if count > 0
                     && !shell_chrome(&state, state.size.0, Instant::now())
@@ -5262,7 +5303,7 @@ impl InteractiveShell {
                     };
                     return;
                 }
-                if !state.run.is_active() && navigate_prompt_history(&mut state, &action) {
+                if navigate_prompt_history(&mut state, &action) {
                     return;
                 }
             }
@@ -5502,6 +5543,16 @@ impl InteractiveShell {
         retire_file_index(&mut state);
         state.workspace = Some(root);
         state.refresh_tool_displays();
+        // An early startup draft may already contain a mention. Its first scan
+        // could not start before the workspace existed; resume it without
+        // requiring another edit or moving the user's caret.
+        if state.startup_pending
+            && state.editor.cursor() == state.editor.text().len()
+            && composer::active_mention(state.editor.text())
+                .is_some_and(|query| !composer::is_path_query(query))
+        {
+            request_file_index_scan(&mut state);
+        }
     }
 
     /// Replace the immutable prompt-template autocomplete snapshot after a
@@ -7179,6 +7230,15 @@ impl InteractiveShell {
         self.state.borrow().panel.is_some()
     }
 
+    /// Check ordinary-panel ownership without exposing or retaining a state borrow.
+    pub(crate) fn panel_action_matches(&self, matches: impl FnOnce(&PanelAction) -> bool) -> bool {
+        let state = self.state.borrow();
+        match state.panel.as_ref() {
+            Some(Panel::SelectList { action, .. }) => matches(action),
+            _ => false,
+        }
+    }
+
     /// Original item index of the highlighted select-list row, after filtering.
     pub(crate) fn highlighted_panel_index(&self) -> Option<usize> {
         let state = self.state.borrow();
@@ -7348,6 +7408,18 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         if let Some(Panel::SessionPicker { picker }) = state.panel.as_mut() {
             picker.surface.lifecycle = lifecycle;
+        }
+    }
+
+    /// Pi tree navigation restores a selected prompt only into an empty draft.
+    /// Existing text or attachment chips always remain user-owned.
+    pub(crate) fn prefill_empty_editor(&mut self, text: String) {
+        let empty = {
+            let state = self.state.borrow();
+            state.editor.text().is_empty() && state.ledger.is_empty()
+        };
+        if empty {
+            self.prefill_editor(text);
         }
     }
 
@@ -7777,13 +7849,58 @@ impl InteractiveShell {
                                             | KeyModifiers::SUPER,
                                     ) =>
                             {
+                                let previous = matches!(panel_action, PanelAction::SessionTree(_))
+                                    .then(|| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .get(*selected)
+                                        .copied()
+                                    })
+                                    .flatten();
                                 filter.push(c);
-                                // The match set changed; restart at the top.
-                                *selected = 0;
+                                *selected = previous
+                                    .and_then(|index| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .iter()
+                                        .position(|candidate| *candidate == index)
+                                    })
+                                    .unwrap_or(0);
                             }
                             KeyCode::Backspace if !confirmation && key.modifiers.is_empty() => {
+                                let previous = matches!(panel_action, PanelAction::SessionTree(_))
+                                    .then(|| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .get(*selected)
+                                        .copied()
+                                    })
+                                    .flatten();
                                 filter.pop();
-                                *selected = 0;
+                                *selected = previous
+                                    .and_then(|index| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .iter()
+                                        .position(|candidate| *candidate == index)
+                                    })
+                                    .unwrap_or(0);
                             }
                             _ => {}
                         }
@@ -8640,7 +8757,8 @@ mod viewport {
 mod builtin_welcome_card;
 mod welcome_card {
     pub(super) use super::builtin_welcome_card::{
-        restart_welcome_animation, welcome_placeholder_rows, welcome_row_budget,
+        restart_welcome_animation, welcome_placeholder_rows, welcome_placeholder_separator_rows,
+        welcome_row_budget,
     };
     pub(super) use super::remote_ui::render_welcome_card;
 }

@@ -373,6 +373,9 @@ impl Session {
                 .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
             match &entry.value {
                 EntryValue::Message(m) => newest_first.push(m.clone()),
+                EntryValue::BranchSummary { summary, .. } => {
+                    newest_first.push(branch_summary_message(summary));
+                }
                 EntryValue::ResponsesReasoning { .. }
                 | EntryValue::ResponsesSteering { .. }
                 | EntryValue::Config { .. }
@@ -437,6 +440,9 @@ impl Session {
                 .iter()
                 .filter_map(|entry| match &entry.value {
                     EntryValue::Message(message) => Some(message.clone()),
+                    EntryValue::BranchSummary { summary, .. } => {
+                        Some(branch_summary_message(summary))
+                    }
                     _ => None,
                 }),
         );
@@ -501,6 +507,9 @@ impl Session {
         for entry in reverse {
             match &entry.value {
                 EntryValue::Message(message) => messages.push(message.clone()),
+                EntryValue::BranchSummary { summary, .. } => {
+                    messages.push(branch_summary_message(summary))
+                }
                 EntryValue::Compaction {
                     summary,
                     snapcompact,
@@ -736,6 +745,14 @@ pub(super) fn compaction_parts(
         parts.extend(checkpoint.frames.iter().cloned().map(UserPart::Media));
     }
     parts
+}
+
+pub(crate) fn branch_summary_message(summary: &str) -> Message {
+    Message::User(UserMessage {
+        content: vec![UserPart::Text(format!(
+            "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{summary}</summary>"
+        ))],
+    })
 }
 
 fn coalesce_tool_results(messages: Vec<Message>) -> Vec<Message> {

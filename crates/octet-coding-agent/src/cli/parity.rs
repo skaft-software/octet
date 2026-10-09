@@ -22,13 +22,13 @@ pub struct ParityOptions {
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SEARCH")]
     pub list_models: Option<String>,
     /// Exact workspace-local session ID; create when missing, otherwise resume.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["continue_", "resume", "fork", "no_session"])]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["continue_", "resume_picker", "resume", "fork", "no_session"])]
     pub session_id: Option<String>,
     /// Set the selected session's display name (must not be empty).
     #[arg(long, short = 'n', value_name = "NAME")]
     pub name: Option<String>,
     /// Discard the headless transcript after persisting accounting-only usage.
-    #[arg(long, conflicts_with_all = ["continue_", "resume", "fork", "session_id"])]
+    #[arg(long, conflicts_with_all = ["continue_", "resume_picker", "resume", "fork", "session_id"])]
     pub no_session: bool,
     /// Comma-separated model patterns (`provider/*`, `sonnet:high`) that scope
     /// model selection and cycling to the credential-filtered catalog.

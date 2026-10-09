@@ -978,7 +978,49 @@ fn selection_is_in_current_workspace(
     }
 }
 
-/// Ask the user to choose a message boundary for `/fork`.
+/// Browse the complete durable session tree on the ordinary select surface.
+/// Filtering and page movement return original indices; entry identity remains
+/// in this immutable snapshot until the idle navigation owner commits it.
+pub(crate) async fn session_tree_picker<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    session: &octet_agent::Session,
+    initial: Option<&octet_agent::EntryId>,
+) -> anyhow::Result<Option<octet_agent::EntryId>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let rows = crate::session_tree::session_tree_rows(session);
+    if rows.is_empty() {
+        shell.notice("No entries in session");
+        return Ok(None);
+    }
+    let initial = initial.or(session.head_ref());
+    let selected = rows
+        .iter()
+        .position(|row| Some(&row.entry_id) == initial)
+        .unwrap_or(0);
+    let ids = rows
+        .iter()
+        .map(|row| row.entry_id.clone())
+        .collect::<Vec<_>>();
+    let selected = pick_list(
+        shell,
+        input,
+        OrdinarySurfaceMetadata::with_purpose(
+            "Session tree",
+            "Navigate this session · * current head · + active branch · type to search",
+        ),
+        rows.iter().map(|row| row.label.clone()).collect(),
+        rows.into_iter().map(|row| Some(row.preview)).collect(),
+        selected,
+        PanelAction::SessionTree(ids.clone()),
+    )
+    .await?;
+    Ok(selected.and_then(|index| ids.get(index).cloned()))
+}
+
+/// Ask the user to choose a message boundary for `/fork` (a new session file).
 pub async fn message_picker<S>(
     shell: &mut InteractiveShell,
     input: &mut S,

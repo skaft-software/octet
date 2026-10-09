@@ -50,6 +50,7 @@ mod queued_follow_ups_and_input_close_tests;
 mod resource_reload_tests;
 mod session_compaction_service_tests;
 mod session_head_reconfig_and_startup_tests;
+mod session_tree_tests;
 mod shell_escape_and_scoped_models_tests;
 mod support;
 mod terminal_theme_tests;

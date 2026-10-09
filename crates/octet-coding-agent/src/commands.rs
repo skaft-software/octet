@@ -39,7 +39,9 @@ pub enum Command {
     Reload,
     New,
     Resume(Option<String>),
-    /// Fork the active session from a selected user-message boundary.
+    /// Navigate the durable branch tree without creating a new session file.
+    Tree,
+    /// Fork a new session file from a selected user-message boundary.
     Fork,
     /// Clone the active session at its current head.
     Clone,
@@ -58,6 +60,10 @@ pub enum Command {
     Changelog,
     Name(Option<String>),
     Export(Option<String>),
+    /// Confirm and import a file as a new session, then switch to the new copy.
+    Import(std::path::PathBuf),
+    /// Review and explicitly confirm publication of a redacted unlisted gist.
+    Share,
     Exit,
     /// Hidden diagnostics surface: writes rendered lines and message JSONL to
     /// the owner-private debug log. Deliberately absent from the suggestion
@@ -147,6 +153,8 @@ pub enum SkillsSubcommand {
 /// deliberately absent: this surface never persists a default trust decision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsCommand {
+    /// Open the interactive settings menu without changing preferences.
+    Menu,
     /// Show the effective settings summary.
     Show,
     /// Select the compiled terminal appearance, or open the picker.
@@ -261,7 +269,13 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         "re-open or list recent sessions",
         true
     ),
-    slash!("fork", "/fork", "fork from a previous user message", false),
+    slash!("tree", "/tree", "navigate branches in this session", false),
+    slash!(
+        "fork",
+        "/fork",
+        "fork a new session from a previous user message",
+        false
+    ),
     slash!("clone", "/clone", "clone the current session", false),
     slash!(
         "session",
@@ -375,8 +389,20 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     slash!(
         "export",
         "/export [path]",
-        "export this session with secret redaction",
+        "export a redacted HTML view (.json or .jsonl for local data)",
         true
+    ),
+    slash!(
+        "import",
+        "/import <path>",
+        "import a file as a new session",
+        true
+    ),
+    slash!(
+        "share",
+        "/share",
+        "review and confirm an unlisted GitHub gist",
+        false
     ),
     slash!(
         "prompt",
@@ -404,8 +430,8 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!(
         "settings",
-        "/settings [theme|images on/off|default model/reasoning|transport|padding]",
-        "show or change display and default preferences",
+        "/settings [show|theme|images on/off|default model/reasoning|transport|padding]",
+        "open settings or change display and default preferences",
         true
     ),
     slash!(
@@ -783,6 +809,74 @@ fn parse_goal_command(argument: &str) -> GoalCommand {
     }
 }
 
+/// Pi-compatible local export selection. Explicit JSON retains the native
+/// portable package; JSONL retains the whole durable Octet graph, not Pi JSONL.
+pub(crate) fn export_for_frontend(
+    store: &crate::session_store::SessionStore,
+    id: &str,
+    output: Option<String>,
+    cwd: &Path,
+    theme: &str,
+) -> anyhow::Result<crate::session_commands::SessionExportReport> {
+    // Preserve the existing raw path grammar (including unquoted spaces), and
+    // allow a surrounding pair of quotes without treating it as shell input.
+    let output = output.map(|path| {
+        let path = path.trim();
+        let path = path
+            .strip_prefix('"')
+            .and_then(|path| path.strip_suffix('"'))
+            .or_else(|| {
+                path.strip_prefix('\'')
+                    .and_then(|path| path.strip_suffix('\''))
+            })
+            .unwrap_or(path);
+        std::path::PathBuf::from(path)
+    });
+    match output
+        .as_ref()
+        .and_then(|path| path.extension())
+        .and_then(|extension| extension.to_str())
+    {
+        Some("jsonl") => {
+            crate::session_commands::export_jsonl(store, id, output, cwd, false, false)
+        }
+        Some("json") => {
+            crate::session_commands::export_with_format(store, id, output, cwd, false, false, None)
+        }
+        _ => crate::session_commands::export_with_format(
+            store,
+            id,
+            output,
+            cwd,
+            false,
+            false,
+            Some(theme),
+        ),
+    }
+}
+
+/// One literal path: quote paths containing spaces; never interpret shell text.
+fn parse_import_path(argument: &str) -> Option<std::path::PathBuf> {
+    let argument = argument.trim();
+    if argument.is_empty() || argument.len() > 4096 || argument.chars().any(char::is_control) {
+        return None;
+    }
+    let path = match argument.chars().next()? {
+        quote @ ('\'' | '"') => {
+            let body = argument.strip_prefix(quote)?.strip_suffix(quote)?;
+            if body.is_empty() || body.contains(quote) {
+                return None;
+            }
+            body
+        }
+        _ if argument.contains(char::is_whitespace) || argument.contains(['\'', '"']) => {
+            return None
+        }
+        _ => argument,
+    };
+    Some(std::path::PathBuf::from(path))
+}
+
 /// Parse a slash command without interpreting models, paths, or capabilities.
 pub fn parse(input: &str) -> Command {
     let input = input.trim();
@@ -849,6 +943,12 @@ pub fn parse(input: &str) -> Command {
         return Command::Answer((!argument.is_empty()).then(|| argument.to_owned()));
     }
 
+    if full_name == "import" {
+        return parse_import_path(&body[name.len()..])
+            .map(Command::Import)
+            .unwrap_or_else(|| Command::Unknown(input.to_owned()));
+    }
+
     if full_name == "name" || full_name == "export" {
         let argument = body[name.len()..].trim();
         let argument = (!argument.is_empty()).then(|| argument.to_owned());
@@ -887,7 +987,8 @@ pub fn parse(input: &str) -> Command {
     if full_name == "settings" {
         let args = parts.collect::<Vec<_>>();
         return match args.as_slice() {
-            [] => Command::Settings(SettingsCommand::Show),
+            [] => Command::Settings(SettingsCommand::Menu),
+            ["show"] => Command::Settings(SettingsCommand::Show),
             ["theme"] => Command::Settings(SettingsCommand::Theme(None)),
             ["theme", value] => {
                 Command::Settings(SettingsCommand::Theme(Some((*value).to_owned())))
@@ -998,6 +1099,7 @@ pub fn parse(input: &str) -> Command {
         "reload" if argument.is_none() => Command::Reload,
         "new" if argument.is_none() => Command::New,
         "resume" => Command::Resume(argument),
+        "tree" if argument.is_none() => Command::Tree,
         "fork" if argument.is_none() => Command::Fork,
         "clone" if argument.is_none() => Command::Clone,
         "status" if argument.is_none() => Command::Status,
@@ -1015,6 +1117,7 @@ pub fn parse(input: &str) -> Command {
         "session" if matches!(argument.as_deref(), None | Some("info")) => Command::Session,
         "update" if argument.is_none() => Command::Update,
         "changelog" if argument.is_none() => Command::Changelog,
+        "share" if argument.is_none() => Command::Share,
         "exit" if argument.is_none() => Command::Exit,
         "debug" if argument.is_none() => Command::Debug,
         _ => Command::Unknown(input.to_owned()),
@@ -2081,3 +2184,5 @@ pub(crate) fn status_text_with_metrics(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tree_tests;

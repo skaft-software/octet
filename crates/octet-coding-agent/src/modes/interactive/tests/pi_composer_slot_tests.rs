@@ -223,7 +223,7 @@ async fn native_pi_custom_editor_keeps_octet_chrome_and_one_slash_popup() {
     let registry = native_slash_command_suggestions(&app.executable_extensions);
     assert!(registry.iter().any(|(name, _)| name == "shared"));
     assert!(registry.iter().any(|(name, _)| name == "fixture-command"));
-    let popups = frame.matches("navigate").count();
+    let popups = frame.matches("↑↓ navigate").count();
     assert_eq!(popups, 1, "exactly one composer popup: {frame}");
     let pi_rows = frame.matches("/model").count();
     assert_eq!(

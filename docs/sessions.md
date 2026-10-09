@@ -25,7 +25,13 @@ prompt colors. An explicit `--model` or `--reasoning` overrides the recovered
 value.
 
 Inside a session, `/resume`, `/fork`, `/clone`, `/name` and `/export` do the
-same ([commands](commands.md)). In the interactive TUI, a name you give a
+same ([commands](commands.md)). `/tree` navigates branches **inside the same
+session file**; `/fork` creates a distinct new file. Choose no summary, a normal
+branch summary, or a summary with custom instructions. A summary covers only the
+abandoned span since the common ancestor, not sibling branches; it adds handoff
+context without compacting the selected ancestry. Selecting a user/custom message
+restores its text for editing rather than submitting it. Cancellation, veto or
+summary-provider failure leaves the branch selection unpublished. In the interactive TUI, a name you give a
 session shows in the terminal window title as `octet · <name>`, and unnamed
 sessions use `octet`. Renaming, resuming or starting a session updates the
 title. Plain, print and RPC modes don't set a window title.
@@ -62,6 +68,9 @@ octet sessions rename SESSION_ID "parser hardening"
 octet sessions tag SESSION_ID rust local-model
 octet sessions export SESSION_ID
 octet sessions export SESSION_ID --output ./handoff.octet-session.json
+octet sessions export SESSION_ID --format jsonl --output ./handoff.jsonl
+octet sessions import ./handoff.octet-session.json
+octet sessions share SESSION_ID
 octet sessions delete SESSION_ID
 octet sessions repair SESSION_ID
 octet doctor
@@ -103,8 +112,27 @@ writes one owner-private, script-free file with formatted Markdown, bounded code
 highlighting, branch links and validated inline image previews. Author HTML,
 external links and terminal control characters stay inert, and audio and remote
 media aren't fetched. Metadata keys named `Image` or `Audio` stay literal data,
-not previews. Hosted viewers and cloud sharing are separate from this local
-export. See [media privacy](media.md#privacy-and-remote-reads).
+not previews. See [media privacy](media.md#privacy-and-remote-reads).
+
+JSON and native JSONL preserve the whole durable graph and selected head; JSONL
+is **Octet data, not Pi output**. `/export` defaults to HTML, while an explicit
+`.json` or `.jsonl` path selects the corresponding data format. HTML cannot be
+imported. `octet sessions import PATH` or interactive `/import PATH` creates a
+new private session from supported Octet exports/native JSONL or Pi v3 JSONL.
+The source is never rewritten; unsupported or lossy semantics refuse import.
+Imported extension metadata and effect-replay claims do not grant authority.
+Interactive import asks before making the copy/switch and preserves the draft.
+
+`/share` or `octet sessions share ID` prepares a bounded, redacted snapshot of
+**all branches**, not just visible messages, and shows a local preview path and
+SHA-256. Review it: automatic redaction cannot guarantee removal of private prose
+or media. Default confirmation is cancel. Publication starts only after explicit
+approval of that snapshot, using your separately configured GitHub CLI to create
+an **unlisted gist**. Unlisted is not private: anyone with the link can read, copy
+or redistribute it. `--yes` is explicit CLI publication approval. The verified
+snapshot bytes, not a later source reread, are sent; preview changes require fresh
+review. Cancellation cannot undo a publication GitHub already accepted. Radius
+organization sharing is not supported.
 
 <details>
 <summary>What the scanner covers</summary>
@@ -171,7 +199,7 @@ An entry, where `parent: null` marks a root:
 }
 ```
 
-Entry values are `message`, `compaction`, `config`, `prompt_template_selected`,
+Entry values include `message`, `compaction`, `branch_summary`, `config`, `prompt_template_selected`,
 `skill_activated`, `skill_resource_read` and `skill_deactivated`. Template name
 and hash stay outside the model's context. Compaction snapshots the active
 skills and the cumulative Pi-compatible `details.readFiles` and

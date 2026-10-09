@@ -111,6 +111,7 @@ mod tool_results;
 mod turn_loop;
 
 use self::budget::*;
+pub use self::compaction::TreeNavigationResult;
 use self::compaction::*;
 use self::composition::*;
 use self::context_estimate::*;

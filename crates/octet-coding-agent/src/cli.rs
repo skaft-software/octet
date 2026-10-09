@@ -196,8 +196,14 @@ pub struct Cli {
     #[arg(long, short = 'p')]
     pub print: bool,
     /// Continue the newest session in this workspace.
-    #[arg(long = "continue", conflicts_with = "resume")]
+    #[arg(long = "continue", short = 'c', conflicts_with = "resume")]
     pub continue_: bool,
+    /// Open the session picker without consuming the positional prompt.
+    #[arg(
+        short = 'r',
+        conflicts_with_all = ["continue_", "resume", "fork", "session_id", "no_session"]
+    )]
+    pub resume_picker: bool,
     /// Resume a session by id, or open the session picker interactively.
     #[arg(
         long,
@@ -220,7 +226,7 @@ pub struct Cli {
     #[arg(long)]
     pub model: Option<String>,
     /// Reasoning: off, minimal, low, medium, high, xhigh, max, ultra, or budget=N.
-    #[arg(long)]
+    #[arg(long, visible_alias = "thinking")]
     pub reasoning: Option<String>,
     /// Deprecated persisted-session compatibility; Pro migrates to Ultra when V2 delegation is advertised.
     #[arg(long, value_name = "MODE", hide = true)]
@@ -1757,6 +1763,8 @@ fn build_config_with_global_path_and_diagnostics(
     };
     let resume = if cli.continue_ {
         ResumeSelector::Continue
+    } else if cli.resume_picker {
+        ResumeSelector::Resume(None)
     } else if let Some(id) = cli.resume {
         ResumeSelector::Resume(id.and_then(|id| {
             let id = id.trim().to_owned();

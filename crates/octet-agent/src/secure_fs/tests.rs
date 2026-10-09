@@ -14,6 +14,33 @@
 
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn system_tmp_alias_preserves_private_writes_and_rejects_descendant_links() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::Builder::new()
+        .prefix("octet-secure-tmp-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let canonical = directory.path().canonicalize().unwrap();
+    assert!(canonical.starts_with("/private/tmp"));
+    let alias = Path::new("/tmp").join(canonical.strip_prefix("/private/tmp").unwrap());
+    let path = alias.join("private/state.json");
+    write_private_atomic(&path, b"synthetic", 64).unwrap();
+    assert_eq!(read_private_file_bounded(&path, 64).unwrap(), b"synthetic");
+    assert_eq!(
+        std::fs::read(canonical.join("private/state.json")).unwrap(),
+        b"synthetic"
+    );
+
+    let link = alias.join("link");
+    symlink(canonical.join("private"), &link).unwrap();
+    assert!(write_private_atomic(&link.join("refused.json"), b"no", 64).is_err());
+    assert!(!canonical.join("private/refused.json").exists());
+    assert!(read_private_file_bounded(&link.join("state.json"), 64).is_err());
+}
+
 #[test]
 fn bounded_read_rejects_extra_byte() {
     let directory = tempfile::tempdir().unwrap();

@@ -413,8 +413,11 @@ fn explicit_theme_preserves_composer_and_code_chrome() {
 
 #[test]
 fn theme_density_and_transcript_inset_change_semantic_block_geometry() {
-    let previous = TranscriptBlock::Notice("previous".into());
-    let current = TranscriptBlock::Notice("current".into());
+    // Density still controls ordinary prose seams. Event notices instead own
+    // one host blank, independently of density (event_contract_tests).
+    let previous =
+        TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("previous".into())));
+    let current = TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("current".into())));
     let render = |density: &str, inset: u16| {
         let theme = theme_with_layout(&format!(
             "density = \"{density}\"\ntranscript_inset = {inset}"

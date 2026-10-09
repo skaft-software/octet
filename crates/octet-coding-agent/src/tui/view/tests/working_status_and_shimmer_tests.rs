@@ -15,11 +15,56 @@ fn active_run_starts_with_working_until_reasoning_is_observed() {
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
-    assert_eq!(rendered.len(), 1, "{rendered:?}");
+    assert_eq!(rendered.len(), 3, "{rendered:?}");
+    assert!(rendered[0].is_empty(), "{rendered:?}");
     assert!(
-        rendered[0].starts_with("• Working (0s • esc to interrupt)"),
+        rendered[1].starts_with("• Working (0s • esc to interrupt)"),
         "{rendered:?}"
     );
+    assert!(rendered[2].is_empty(), "{rendered:?}");
+}
+
+#[test]
+fn working_clock_addressability_starts_at_the_label_not_its_breathing_row() {
+    for source in [
+        None,
+        Some("[surfaces.reasoning]\nchrome = \"card\"\npadding = 1"),
+    ] {
+        let theme = source.map_or_else(
+            crate::tui::theme::test_theme,
+            crate::tui::theme::test_theme_from_source,
+        );
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.begin_run("openai");
+        let mut state = shell.state.borrow_mut();
+        let _ = state.rendered_transcript(80);
+        let index = state.active_reasoning.unwrap();
+        let label = {
+            let cache = state.transcript_cache.borrow();
+            let geometry = cache.block_geometries[index];
+            cache.block_starts[index] + geometry.transition_rows + geometry.leading_rows
+        };
+        for threaded in [false, true] {
+            if threaded {
+                state.render_geometry =
+                    Some(Arc::new(renderer_geometry::RenderedGeometry::capture(
+                        &state,
+                        renderer_geometry::GeometryFence::capture(&state),
+                    )));
+                let id = state.transcript_commit_ids[index];
+                // The block-start receipt excludes the saved breathing row.
+                // Its visible label still owns the status clock in both lanes.
+                state.rendered_animation_addressability.insert(id, false);
+                state.render_threaded = true;
+            }
+            state.native_animation_viewport_top.set(Some(label));
+            assert!(state.animation_block_is_addressable(index));
+            assert!(state.has_active_status_shimmer());
+            state.native_animation_viewport_top.set(Some(label + 1));
+            assert!(!state.animation_block_is_addressable(index));
+            assert!(!state.has_active_status_shimmer());
+        }
+    }
 }
 
 #[test]

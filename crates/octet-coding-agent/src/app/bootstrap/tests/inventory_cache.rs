@@ -109,6 +109,155 @@ fn provider_inventory_cache_is_private_and_scoped_to_provider_url_and_account() 
     }
 }
 
+/// Exercise the three startup warning sites using only synthetic discovery and
+/// the real metadata serialization/stores. No credential file is needed.
+fn assert_startup_metadata_persists(root: &std::path::Path) {
+    let generic_path = root.join("home/.octet/cache/model-inventories/fixture.json");
+    let url = "https://inventory.test/v1/models";
+    let fingerprint = credential_fingerprint("synthetic-account");
+    let body = serde_json::json!({"data": [{"id": "fixture-model"}]});
+    assert!(!generic_path.parent().unwrap().exists());
+    refresh_provider_inventory_with(
+        &generic_path,
+        "fixture",
+        url.to_owned(),
+        http::HeaderMap::new(),
+        &fingerprint,
+        |_, _| {
+            Ok(ProviderInventoryResponse::Modified {
+                body: body.clone(),
+                etag: None,
+            })
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        load_provider_inventory_cache(&generic_path, "fixture", url, &fingerprint).unwrap(),
+        Some(CachedProviderInventory::Available(cached)) if cached == body
+    ));
+
+    let credentials = root.join("cwd/.octet/credentials");
+    let custom_path = credentials.join("custom.json");
+    let custom_store = crate::auth::custom::CredentialStore::new(&custom_path);
+    let credential = crate::auth::custom::CustomCredential {
+        base_url: "http://127.0.0.1:1234/v1/".into(),
+        api_key: String::new(),
+        api_name: String::new(),
+        headers: Vec::new(),
+        models: Vec::new(),
+        auto_discover: true,
+    };
+    let discovered = discover_and_cache_custom_models_with_for(
+        &custom_store,
+        "fixture",
+        &credential,
+        &fingerprint,
+        false,
+        |_| {
+            vec![crate::auth::custom::CustomModel {
+                api_name: "fixture-model".into(),
+                ..Default::default()
+            }]
+        },
+    );
+    assert_eq!(discovered.len(), 1);
+    assert!(matches!(
+        load_custom_model_cache_for(
+            &custom_store,
+            "fixture",
+            &credential.base_url,
+            &fingerprint,
+        )
+        .unwrap(),
+        Some(CachedCustomInventory::Available(models)) if models.len() == 1
+    ));
+    assert!(
+        !custom_path.exists(),
+        "discovery must not write credentials"
+    );
+
+    let codex_path = credentials.join("codex.json");
+    let codex_store = crate::auth::codex::CredentialStore::new(&codex_path);
+    let claims = crate::auth::codex::SubscriptionClaims {
+        account_id: "synthetic-account".into(),
+        plan: Some(crate::auth::codex::ChatGptPlan::Plus),
+    };
+    let (_, source) = codex_inventory_models(&codex_store, &claims, false, false, |_| {
+        Ok(CodexDiscovery {
+            claims: claims.clone(),
+            models: vec![codex_discovered_model("gpt-5.4", 131_072, 131_072, 16_384)],
+        })
+    });
+    assert_eq!(source, CodexInventorySource::OnlineDiscovery);
+    assert!(load_codex_model_cache(&codex_store, &claims)
+        .unwrap()
+        .is_some());
+    assert!(!codex_path.exists(), "discovery must not write credentials");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        for parent in [generic_path.parent().unwrap(), credentials.as_path()] {
+            assert_eq!(
+                std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            for entry in std::fs::read_dir(parent).unwrap() {
+                let metadata = entry.unwrap().metadata().unwrap();
+                assert!(metadata.is_file());
+                assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+                assert!(metadata.len() < 8 * 1024 * 1024);
+            }
+        }
+    }
+}
+
+#[test]
+fn startup_metadata_persists_with_absent_home_and_cwd_cache_parents() {
+    let directory = tempfile::tempdir().unwrap();
+    assert_startup_metadata_persists(&directory.path().canonicalize().unwrap());
+}
+
+/// macOS supplies `/tmp -> private/tmp` itself. Rejecting this trusted root
+/// alias makes otherwise ordinary metadata writes fail with ENOTDIR, before
+/// any private cache directory or leaf is visited.
+#[cfg(target_os = "macos")]
+#[test]
+fn startup_metadata_persists_through_macos_system_tmp_alias() {
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    assert!(directory.path().starts_with("/tmp"));
+    assert_startup_metadata_persists(directory.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn metadata_persistence_rejects_untrusted_links_without_touching_targets() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let target = root.join("private-target");
+    octet_agent::secure_fs::create_private_directory_all(&target).unwrap();
+    let sentinel = target.join("models.json");
+    crate::auth::write_private_atomic(&sentinel, b"unchanged", ".fixture-").unwrap();
+
+    let alias = root.join("untrusted-cache-alias");
+    symlink(&target, &alias).unwrap();
+    assert!(
+        crate::auth::write_private_atomic(&alias.join("models.json"), b"new", ".fixture-").is_err()
+    );
+
+    let leaf = target.join("symlink-models.json");
+    symlink(&sentinel, &leaf).unwrap();
+    assert!(crate::auth::write_private_atomic(&leaf, b"new", ".fixture-").is_err());
+
+    let hard_link = target.join("hard-link-models.json");
+    std::fs::hard_link(&sentinel, &hard_link).unwrap();
+    assert!(crate::auth::write_private_atomic(&hard_link, b"new", ".fixture-").is_err());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+}
+
 #[test]
 fn provider_inventory_cache_names_and_future_timestamps_are_collision_safe() {
     assert_ne!(

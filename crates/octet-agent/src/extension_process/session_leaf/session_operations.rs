@@ -216,7 +216,20 @@ impl SessionOperationHook for ExtensionProcess {
                         .map_err(|_| "session operation metadata refused")?;
                 }
             }
-            SessionOperation::Compacted { entry, .. } => {
+            SessionOperation::BeforeTree {
+                preparation: Some(preparation),
+                ..
+            } => {
+                for entry in &mut preparation.entries_to_summarize {
+                    *entry = session_entry_for_namespace(entry, &binding.namespace)
+                        .map_err(|_| "session operation metadata refused")?;
+                }
+            }
+            SessionOperation::Tree {
+                summary_entry: Some(entry),
+                ..
+            }
+            | SessionOperation::Compacted { entry, .. } => {
                 *entry = session_entry_for_namespace(entry, &binding.namespace)
                     .map_err(|_| "session operation metadata refused")?;
             }

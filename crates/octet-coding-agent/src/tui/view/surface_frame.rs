@@ -119,6 +119,11 @@ fn render_surface_content_line(
     _collapsed_reasoning: bool,
     marker: Option<&str>,
 ) -> String {
+    // Event breathing/promotion rows are host spacing, not rail/card cushions.
+    // In particular a reserved Working row must remain byte-visibly blank.
+    if plan.event_spacing && line.is_empty() {
+        return String::new();
+    }
     let (content_role, border_role, _) = surface_roles(plan.kind);
     let content = fit_line(line, plan.geometry.content_width);
     let left_padding = " ".repeat(usize::from(plan.padding));
@@ -471,7 +476,10 @@ pub(super) fn decorate_surface_with_frame(
                 fit_line(&line, outer_width)
             } else {
                 let frame_left = usize::from(plan.frame_left);
-                let prefix = if marker_pending {
+                let prefix = if marker_pending
+                    && (!plan.event_spacing
+                        || row >= plan.geometry.transition_rows + plan.geometry.leading_rows)
+                {
                     marker_pending = false;
                     match marker {
                         Some(marker) if frame_left >= 2 => {

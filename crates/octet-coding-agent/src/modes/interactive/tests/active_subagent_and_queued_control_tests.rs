@@ -80,9 +80,9 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         if picker {
             opening.push(key(KeyCode::Char('x'), KeyModifiers::CONTROL));
         }
-        // An impostor cannot open the roster; /extensions remains management
-        // and queues behind its diagnostic report, never behind a worker list.
-        let closing = if impostor || !picker || owner_mode == "configuration" {
+        // An impostor cannot open the roster. Extension management is now
+        // immediate read-only navigation; close it before typing into the draft.
+        let closing = if impostor || !picker {
             vec![key(KeyCode::Char('x'), KeyModifiers::NONE)]
         } else {
             vec![
@@ -211,8 +211,8 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         assert!(!quit);
         assert_eq!(
             pending.len(),
-            usize::from(owner_mode == "configuration"),
-            "{case}: only extension management waits for idle"
+            0,
+            "{case}: read-only management navigation never queues an effect"
         );
         // The open list polls read-only `status`; only stops matter here.
         let wire = std::fs::read_to_string(&log).unwrap_or_default();
@@ -366,6 +366,7 @@ async fn active_subagent_wait_queues_without_running_an_extension_command() {
         &mut input,
         &mut queue,
         &mut quit,
+        &mut extension_menu::State::default(),
     )
     .await
     .unwrap();

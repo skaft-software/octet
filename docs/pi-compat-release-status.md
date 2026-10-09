@@ -1,10 +1,41 @@
 # Pi extension compatibility: release status and merge notes
 
-Dated evidence for the Pi 1.0.2 compatibility work that ships in the octet 0.9.0
-candidate. It records observed behaviour; it is not a frozen release or a
-publication approval. Row-level detail is in the [extension API
+Dated evidence for the Pi 1.0.2 compatibility work targeted at octet 0.9.0.
+It records observed behaviour; it is not a frozen release or a publication approval. Row-level detail is in the [extension API
 ledger](pi-extension-api.md), and the user-facing scope is in
 [compatibility](pi-compatibility.md).
+
+## Current local qualification (2026-10-09)
+
+Octet is a **Pi-compatible harness that will evolve**. The integrated launch fixes
+have local evidence, but the release and an existing power-user setup remain
+**not qualified**. The dated records below are historical, not current failures
+or current-package acceptance.
+
+| Check | Observed result | Boundary |
+| --- | --- | --- |
+| Coding-agent library | 2,724 passed, 0 failed, 3 ignored | Synthetic/native-host tests |
+| Agent / AI libraries | 1,116 (2 ignored) / 553 passed, 0 failed | Unit and loopback fixtures |
+| Workspace Clippy | All targets pass with `-D warnings` | Local macOS build |
+| Adapter plus native editor/phase-2 suites | 926 tests: 905 passed, 0 failed, 21 optional skips | Built Rust editor host and hash-verified offline Pi source references |
+| Native-peer / busy-slash / startup-mouse PTY | 32 / 11 / 23 passed | Real CLI with synthetic peers/providers; startup cases run in bounded groups |
+| Real headless Tern UX | 15 checks passed | Pending-startup draft/mention recovery, caret/history, rapid thinking, busy menus, exactly two admitted mock requests |
+
+The earlier `trace.jsonl` acceptance and compaction completion race are green in
+the current library run. The native-backed editor and its ownership suite are
+also green; this does not qualify every original custom editor or footer.
+
+Package selection now covers local-file singletons as well as directory/npm/git
+packages, including empty filters, exclusions, unsupported selectors and ordered
+`autoload:false` project deltas. Reviewed static-source/registration hashes,
+workspace trust and session-only model/thinking defaults are checked before
+activation. Synthetic coverage does not establish existing-setup task acceptance.
+
+Remaining gates: actual dependency-bearing Pi setup tasks, attended macOS/Tern
+and real-provider journeys, native Linux/Windows, exact packaged candidate and
+public-install qualification. No live share upload, installation or release was
+performed. The original user metadata warning remains undiagnosed; checked macOS
+`/tmp` alias and synthetic inventory persistence tests are bounded evidence.
 
 ## Routes
 
@@ -22,7 +53,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
   for what it gives up. Path A failures it can fix report
   `pi_compat_fallback_eligible` with the names involved.
 
-## Verification at the 0.9.0 candidate
+## Historical verification (2026-10-06)
 
 - Adapter suite: `npm test` in `extensions/octet-pi-compat` -> **839 tests, 812
   passed, 0 failed, 27 skipped**, exit 0 (2026-10-06, Node 25.9.0). The skips are
@@ -143,11 +174,11 @@ are the behavioral evidence.
 
 ## Unresolved compatibility work and decisions
 
-- **Native-backed Pi editor is phase 2.** Pi's pinned editor suites are preserved
-  as an upstream test corpus (193 cases), but the adapter still exports Pi's
-  editor rather than a native-backed facade with synchronous native editing
-  operations, and the phase-2 ownership acceptance is not green. Broader Pi
-  editor parity is not claimed.
+- **Broader original-editor qualification remains open.** The current adapter
+  exports a native-backed Editor facade with synchronous Rust-host editing, and
+  the pinned editor corpus plus phase-2 ownership acceptance are green locally.
+  Existing custom-editor/footer setups still require task-level qualification;
+  neither the pinned corpus nor synthetic ownership cases establish that gate.
 - Native-backed Pi built-in tool factories on path A: `createBashTool` and
   friends returning Pi-shaped tools that call Octet's native tools through
   `ctx.executeTool`, so they need no fallback. Pi's `read`/`edit`/`write` match

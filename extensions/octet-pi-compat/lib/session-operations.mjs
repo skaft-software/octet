@@ -67,11 +67,26 @@ export async function sessionOperation(runtime, params, store) {
       fields(body, ['kind', 'reason', 'entry', 'from_extension'], 'compaction committed');
       event = { type: hook, reason: body.reason, compactionEntry: translateSessionEntries([body.entry], runtime.namespace)[0], fromExtension: body.from_extension };
     } else if (hook === 'session_before_tree') {
-      fields(body, ['kind', 'target_id', 'old_head'], 'tree preparation');
-      event = { type: hook, signal, preparation: strict({ targetId: body.target_id, oldLeafId: body.old_head }, 'native tree preparation') };
+      fields(body, ['kind', 'target_id', 'old_head', 'preparation'], 'tree preparation');
+      const preparation = { targetId: body.target_id, oldLeafId: body.old_head };
+      if (body.preparation !== undefined) {
+        const native = body.preparation;
+        fields(native, ['common_ancestor_id', 'entries_to_summarize', 'user_wants_summary', 'custom_instructions'], 'tree summary preparation');
+        if (typeof native.user_wants_summary !== 'boolean') invalid('tree summary request');
+        preparation.commonAncestorId = native.common_ancestor_id;
+        preparation.entriesToSummarize = translateSessionEntries(native.entries_to_summarize, runtime.namespace);
+        preparation.userWantsSummary = native.user_wants_summary;
+        if (native.custom_instructions !== null) preparation.customInstructions = bounded(native.custom_instructions, 'tree summary instructions', 262144, { controls: true });
+      }
+      event = { type: hook, signal, preparation: strict(preparation, 'native tree preparation') };
     } else {
-      fields(body, ['kind', 'old_head', 'new_head'], 'tree committed');
+      fields(body, ['kind', 'old_head', 'new_head', 'summary_entry'], 'tree committed');
       event = { type: hook, newLeafId: body.new_head, oldLeafId: body.old_head };
+      if (body.summary_entry !== undefined) {
+        event.summaryEntry = translateSessionEntries([body.summary_entry], runtime.namespace)[0];
+        if (event.summaryEntry.type !== 'branch_summary') invalid('tree committed summary entry');
+        event.fromExtension = false;
+      }
     }
     let decision = { action: 'continue' };
     for (const entry of [...runtime.events.get(hook) || []]) {

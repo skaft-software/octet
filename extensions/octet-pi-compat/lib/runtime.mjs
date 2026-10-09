@@ -2,10 +2,10 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { SessionTransport, SESSION_FEATURES } from './session-transport.mjs';
 import { withContextLimits } from './context-limits.mjs';
 import { createJiti } from 'jiti';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { isAbsolute } from 'node:path';
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { bounded, facade, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, extensionDisplayName, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions, ensureCompletionChain, retireAutocomplete, startCompletionChain } from './completions.mjs';
@@ -28,11 +28,13 @@ import { TranscriptRenderers } from './transcript-renderers.mjs';
 import { Timers, deadline } from './timers.mjs';
 import { activateInstalledPi, classifyLoadFailure, fallbackData, installedPiAliases, piRuntimeMode, scanPiImportGaps } from './installed-pi.mjs';
 import { emulatedPiAliases, typeboxAliases } from './pi-modules.mjs';
-import { discoverPiSetup } from './pi-setup.mjs';
+import { discoverPiSetup, resolveThemeFile, SOURCE_EXTENSIONS } from './pi-setup.mjs';
+import { readPiTheme } from './theme-palette.mjs';
+import { configureAgentDir } from './public-helpers.mjs';
 import { ExtensionIssues } from './issues.mjs';
 import { installHostKeybindings } from './keybindings.mjs';
 import { TerminalInputListeners } from './terminal-input.mjs';
-import { bindHostTheme, nativeTheme } from './theme.mjs';
+import { bindHostTheme, configureBridgeTheme, nativeTheme } from './theme.mjs';
 import { tracePhase } from './startup-trace.mjs';
 import { jitiCacheOptions } from './startup-cache.mjs';
 
@@ -40,6 +42,29 @@ const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'compo
 const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1', 'notification_source_v1', 'provider_credentials']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
+
+// Review the bounded relative-import source closure without executing it. This
+// is a change detector for reviewed code, not a sandbox or computed-import gate.
+export function reviewedSourceHashes(entry) {
+  const hashes = {}, queue = [realpathSync(entry)];
+  while (queue.length) {
+    const file = queue.shift();
+    if (Object.hasOwn(hashes, file)) continue;
+    if (Object.keys(hashes).length >= 64 || statSync(file).size > 1048576) invalid('reviewed factory source bounds; configure entrypoints explicitly');
+    const bytes = readFileSync(file), source = bytes.toString('utf8');
+    hashes[file] = createHash('sha256').update(bytes).digest('hex');
+    const imports = source.matchAll(/\b(?:from\s*|import\s*\(?\s*|require\s*\(\s*)['"](\.{1,2}\/[^'"\n]+)['"]/g);
+    for (const [, specifier] of imports) {
+      const base = resolve(dirname(file), specifier), stem = base.slice(0, base.length - extname(base).length);
+      for (const candidate of [base, ...[...SOURCE_EXTENSIONS].map(extension => base + extension), ...[...SOURCE_EXTENSIONS].map(extension => stem + extension), ...[...SOURCE_EXTENSIONS].map(extension => join(base, `index${extension}`))]) {
+        let regular = false;
+        try { regular = statSync(candidate).isFile(); } catch { continue; }
+        if (regular) { queue.push(realpathSync(candidate)); break; }
+      }
+    }
+  }
+  return hashes;
+}
 
 class SharedBus {
   constructor(runtime) { this.runtime = runtime; this.listeners = new Map(); }
@@ -82,6 +107,7 @@ class SharedBus {
 export class Runtime {
   constructor(config, transport) {
     this.config = config; this.transport = transport;
+    configureAgentDir(config.pi_agent_dir);
     this.scope = new AsyncLocalStorage(); this.tools = new Map(); this.commands = new Map(); this.shortcuts = new Map(); this.flags = new Map(); this.events = new Map();
     this.terminalInput = new TerminalInputListeners(this);
     this.bus = new SharedBus(this); this.ui = new RemoteUI(this); this.transcript = new TranscriptRenderers(this); this.timers = new Timers(this);
@@ -96,6 +122,7 @@ export class Runtime {
   /// Mirror mode is an explicit reviewed opt-in recorded in bridge.json; it is
   /// never inferred from the presence of a Pi agent directory.
   get mirrorPiSetup() { return this.config.mirror_pi_setup === true; }
+  get host() { return this.scope.getStore()?.state?.host ?? this.initialHost ?? {}; }
   diagnostic(message) {
     console.error(`[pi-compat] ${String(message).slice(0, 4096)}`);
   }
@@ -213,11 +240,18 @@ export class Runtime {
     tracePhase('adapter.load.begin');
     let extensions = this.config.extensions;
     if (this.mirrorPiSetup) {
-      // Reviewed mirror opt-in: the enabled Pi setup on this machine defines the
-      // factory list at startup. Discovery is read-only and never installs.
-      const setup = discoverPiSetup({ agentDir: this.config.pi_agent_dir, env: process.env, cwd: this.workspace });
+      // Resource discovery is dynamic, but executable sources and static
+      // authority stay within the last reviewed capture. Only native host trust
+      // admits project factories, never bridge enablement or Pi trust files.
+      if (!this.config.registrations || !this.config.entrypoint_sources) invalid('mirror static registrations require review; configure again');
+      const setup = discoverPiSetup({ agentDir: this.config.pi_agent_dir, env: process.env, cwd: this.workspace, projectTrusted: this.host.project_trusted === true });
       for (const diagnostic of setup.diagnostics.slice(0, 32)) this.diagnostic(`mirror ${diagnostic}`);
-      extensions = setup.extensions;
+      extensions = setup.extensions.map(entry => realpathSync(entry));
+      if (extensions.some(entry => !this.config.extensions?.includes(entry) || !this.config.entrypoint_sources[entry])) invalid('mirror factory list changed; review the Pi setup and configure again');
+      this.reviewedFactoriesOmitted = this.config.extensions.some(entry => !extensions.includes(entry));
+      const themePath = resolveThemeFile(setup.themesPaths, setup.defaultTheme, setup.diagnostics);
+      if (themePath?.endsWith('.json')) configureBridgeTheme({ name: readPiTheme(themePath).name, path: themePath });
+      else configureBridgeTheme();
       this.diagnostic(`mirror loading ${extensions.length} enabled Pi ${extensions.length === 1 ? 'extension' : 'extensions'}`);
     }
     if (!Array.isArray(extensions) || extensions.length > 64 || extensions.some(p => typeof p !== 'string')) invalid('bridge extensions must be an explicit list');
@@ -268,6 +302,7 @@ export class Runtime {
       try {
         resolved = realpathSync(entry);
         mode = routes[resolved] ?? globalMode;
+        if (this.mirrorPiSetup && !isDeepStrictEqual(this.config.entrypoint_sources[resolved], reviewedSourceHashes(resolved))) invalid(`reviewed factory sources changed: ${resolved}; review and configure again`);
         if (this.config.entrypoint_sha256?.[resolved]) {
           const actual = createHash('sha256').update(readFileSync(resolved)).digest('hex');
           if (actual !== this.config.entrypoint_sha256[resolved]) invalid(`reviewed factory changed: ${resolved}; configure again`);
@@ -287,6 +322,8 @@ export class Runtime {
         // Preserve U28's per-extension notification attribution. Path and
         // reviewed-digest checks already ran in the concurrent preparation pass.
         this.extensionNames.set(factory, extensionDisplayName(entry));
+        // A changed reviewed source must refuse before importing fallback code.
+        if (preparationError && this.mirrorPiSetup) throw preparationError;
         const jiti = await jitiFor(mode);
         try {
           // Preparation failures (digest mismatch, import-gap gate) take the
@@ -297,7 +334,17 @@ export class Runtime {
           tracePhase(`adapter.factory.import.${factory}`);
           if (typeof fn !== 'function') invalid(`default export must be a factory: ${entry}`);
           const s = { id: this.initializingId, controller: new AbortController(), factory, pending: new Set(), errors: [], live: false };
-          await this.scope.run(s, () => fn(createAPI(this, factory)));
+          const api = this.mirrorPiSetup ? { ...createAPI(this, factory) } : createAPI(this, factory);
+          // Mirror static surfaces cannot grow after review via retained APIs.
+          // Resource callbacks remain dynamic and host-admitted.
+          if (this.mirrorPiSetup) for (const method of ['registerTool', 'registerCommand', 'registerShortcut', 'registerFlag', 'registerMessageRenderer', 'registerEntryRenderer']) {
+            const register = api[method];
+            api[method] = (...args) => {
+              if (this.loaded) invalid(`mirror ${method} changed static registrations; review and configure again`);
+              return register(...args);
+            };
+          }
+          await this.scope.run(s, () => fn(api));
           tracePhase(`adapter.factory.registered.${factory}`);
           // Mirror mode advertises one fixed hook set recorded at configure time.
           // A hook outside it would be silently inert at the host, so name it and
@@ -407,13 +454,12 @@ export class Runtime {
     if (metadata.events.includes('before_agent_start')) this.require('before_prompt_state_v1');
     if (metadata.events.includes('input')) this.require('input_transform_v1');
     if (metadata.tools.some(tool => tool.prompt_snippet !== undefined || tool.prompt_guidelines !== undefined)) this.require('tool_prompt_metadata_v1');
-    // A mirror configuration has no frozen registration catalog; its runtime
-    // catalogs are the reviewed opt-in's actual output and need the host's
-    // dynamic-negotiation features instead of a manifest equality check.
+    // Only uncaptured manual entrypoints use a wholly dynamic renderer catalog.
+    // Reviewed snapshots and mirrors retain their captured static registrations.
     if (!this.config.registrations && metadata.tool_renderers.length) this.require('dynamic_tool_renderers');
     // A skipped extension leaves its declared registrations unused; nothing
     // beyond the reviewed declarations may appear.
-    const skipped = this.loadFailures?.length > 0;
+    const skipped = this.loadFailures?.length > 0 || this.reviewedFactoriesOmitted === true;
     if (skipped && !isDeepStrictEqual([...metadata.commands.map(command => command.name)].sort(), [...(declared.commands || [])].sort())) this.require('runtime_commands');
     for (const [kind, names] of [['tools', metadata.tools.map(t => t.name)], ['commands', metadata.commands.map(c => c.name)], ['hooks', metadata.hooks], ['tool_renderers', metadata.tool_renderers]]) {
       if (kind === 'tools' && this.features.has('dynamic_tools')) continue;
@@ -425,7 +471,10 @@ export class Runtime {
     }
     const staticMetadata = this.config.registrations;
     if (staticMetadata) {
-      const staticSurface = ({ tools, ...rest }) => rest;
+      const staticSurface = value => {
+        if (this.mirrorPiSetup) return value;
+        const { tools, ...rest } = value; return rest;
+      };
       const matches = skipped
         ? Object.entries(staticSurface(metadata)).every(([kind, values]) => values.every(value => (staticMetadata[kind] || []).some(allowed => isDeepStrictEqual(value, allowed))))
         : isDeepStrictEqual(staticSurface(staticMetadata), staticSurface(metadata));

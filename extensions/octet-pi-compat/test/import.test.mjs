@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -74,7 +74,7 @@ test('deferred direct Pi tool execution routes to installed Pi, but child-only d
   assert.ok(readFileSync(helper, 'utf8').includes('builtinRead.execute'));
 });
 
-test('a Pi tool owned by an installed first-party octet extension turns that Pi extension off', async t => {
+test('installed manifests do not establish ownership; active native collisions require review', async t => {
   const dir = temporary(t);
   const octetExtensions = join(dir, 'octet-extensions');
   for (const [name, tools] of [['octet-web-search', '["web_search", "web_fetch"]'], ['octet-computer-use', '[\n  "computer_use",\n]'], ['not-first-party', '["other_tool"]']]) {
@@ -86,8 +86,11 @@ test('a Pi tool owned by an installed first-party octet extension turns that Pi 
   const clashing = entry(dir, 'clashing', `export default pi => pi.registerTool({name:'web_search',label:'search',description:'pi search',parameters:{type:'object'},async execute(){return {content:[]};}});`);
   const other = entry(dir, 'other', `export default pi => pi.registerTool({name:'other_tool',label:'other',description:'kept',parameters:{type:'object'},async execute(){return {content:[]};}});`);
   const routed = await routeExtensions([clashing, other], { cwd: dir, firstPartyRoots: [octetExtensions], env: { ...process.env, OCTET_PI_AGENT_DIR: install(dir, []) } });
-  assert.deepEqual(routed.map(r => r.route), [null, 'shims']);
-  assert.match(routed[0].error, /web_search is provided by the first-party octet extension octet-web-search/);
+  assert.deepEqual(routed.map(r => r.route), ['shims', 'shims']);
+  const active = await routeExtensions([clashing, other], { cwd: dir, activeNativeTools: owners, env: { ...process.env, OCTET_PI_AGENT_DIR: install(dir, []) } });
+  assert.deepEqual(active.map(r => r.route), [null, 'shims']);
+  assert.equal(active[0].disposition, 'review_required');
+  assert.match(active[0].error, /web_search is owned by the active native extension octet-web-search.*choose one owner/);
 });
 
 test('the first-party list matches the release catalog, minus the Pi bridge itself', () => {
@@ -103,12 +106,17 @@ test('from-Pi setup requires review, excludes disabled entries, records routes a
   const agent = install(dir, [{ path: good, enabled: true }, { path: fallback, enabled: true }, { path: later, enabled: true }, { path: '/not/executed.ts', enabled: false }]);
   const output = join(dir, 'octet-pi-compat'), options = { output, cwd: dir, env: { ...process.env, OCTET_PI_AGENT_DIR: agent } };
   await assert.rejects(configureFromPi(options), /--reviewed/);
+  const conflictingSettings = readFileSync(join(agent, 'settings.json'), 'utf8');
+  await assert.rejects(configureFromPi({ ...options, reviewed: true, log() {} }), /active registration collision.*choose one owner.*no partial import/);
+  assert.equal(existsSync(join(output, 'extension.toml')), false);
+  assert.equal(existsSync(join(output, 'bridge.json')), false);
+  assert.equal(readFileSync(join(agent, 'settings.json'), 'utf8'), conflictingSettings);
+  // Resolve the synthetic owner conflict explicitly, then exercise the import.
+  writeFileSync(join(agent, 'settings.json'), JSON.stringify([{ path: good, enabled: true }, { path: fallback, enabled: true }, { path: '/not/executed.ts', enabled: false }]));
   const settingsBefore = readFileSync(join(agent, 'settings.json'), 'utf8');
-  const logs = [];
-  const result = await configureFromPi({ ...options, reviewed: true, log: line => logs.push(line) });
-  assert.deepEqual(result.routed.map(r => r.route), ['shims', 'installed', null]);
+  const result = await configureFromPi({ ...options, reviewed: true, log() {} });
+  assert.deepEqual(result.routed.map(r => r.route), ['shims', 'installed']);
   assert.deepEqual(result.registrations.commands.map(c => c.name), ['good', 'fallback']);
-  assert.ok(logs.some(line => /skipped.*duplicate registration good/.test(line)));
   const config = JSON.parse(readFileSync(join(output, 'bridge.json'), 'utf8'));
   assert.equal(config.pi_agent_dir, agent);
   assert.deepEqual(config.extension_runtimes, { [good]: 'shims', [fallback]: 'installed' });
