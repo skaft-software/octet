@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn default_tool_policy_excludes_search_and_keeps_powershell_explicit() {
+    fn default_tool_policy_omits_builtin_search_and_keeps_powershell_explicit() {
         let policy = ToolPolicy::default();
         for name in ["read", "edit", "write", "bash"] {
             assert!(policy.enabled(name), "{name}");
@@ -806,8 +806,11 @@ mod tests {
         assert!(ToolPolicy::only(["powershell".to_owned()])
             .unwrap()
             .enabled("powershell"));
-        assert!(!policy.enabled("search"));
+        assert!(!policy.names().any(|name| name == "search"));
         assert!(!SUPPORTED_TOOL_NAMES.contains(&"search"));
+        // Removal from the built-in inventory does not reserve an extension
+        // name: the default policy still permits discovered extension tools.
+        assert!(policy.enabled("search"));
     }
 
     #[test]

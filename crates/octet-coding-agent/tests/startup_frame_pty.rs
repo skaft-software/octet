@@ -133,8 +133,23 @@ impl Pty {
         self.wait_for_bytes(Duration::from_secs(1), b"OCTET_PTY_STALE_STARTUP_B");
     }
 
-    fn write_input(&mut self, input: &[u8]) {
-        self.master.write_all(input).expect("write PTY input");
+    fn write_input(&mut self, mut input: &[u8]) {
+        // The master is nonblocking. A touchpad burst can fill its input queue;
+        // retain the unwritten suffix and drain output so neither peer stalls.
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        while !input.is_empty() {
+            assert!(Instant::now() < deadline, "PTY input write timed out");
+            match self.master.write(input) {
+                Ok(0) => panic!("PTY input write returned zero"),
+                Ok(written) => input = &input[written..],
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.read_available();
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("write PTY input: {error}"),
+            }
+        }
         self.master.flush().expect("flush PTY input");
     }
 

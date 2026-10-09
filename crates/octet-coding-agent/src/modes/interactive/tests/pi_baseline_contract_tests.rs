@@ -301,25 +301,28 @@ export default pi => {
         private_entries(app.agent.session(), "compact-void")[0].1,
         json!({"isVoid": true})
     );
-    let request = tokio::time::timeout(Duration::from_secs(10), async {
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    // The production command pump can already execute retained compaction
+    // after the wire reply settles. Await durable completion, not a second
+    // dequeue of the same request. Both legitimate idle schedules are covered.
+    let callback = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             apply_extension_background(&mut shell, &mut app.executable_extensions);
             if let Some(request) = app.executable_extensions.next_session_lifecycle_request() {
-                break request;
+                execute_extension_session_lifecycle(&mut app, &mut shell, &mut input, request)
+                    .await;
             }
+            let callbacks = private_entries(app.agent.session(), "compact-callback");
+            if let Some((_, value)) = callbacks.first() {
+                assert_eq!(callbacks.len(), 1);
+                break value.clone();
+            }
+            assert!(private_entries(app.agent.session(), "compact-error").is_empty());
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("Pi ctx.compact must submit the real idle request after its command replies");
-    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        execute_extension_session_lifecycle(&mut app, &mut shell, &mut input, request),
-    )
-    .await
-    .expect("native Pi-requested compaction timed out");
-    let callback = wait_private(&mut app, &mut shell, "compact-callback").await;
+    .expect("Pi ctx.compact must commit and callback after its command replies");
     assert_eq!(callback["summary"], "PI_BASELINE_SUMMARY");
     assert!(private_entries(app.agent.session(), "compact-error").is_empty());
     let old_head = app.agent.session().head().unwrap();
@@ -346,6 +349,9 @@ export default pi => {
         matches!(&entry.value, EntryValue::Compaction { summary, .. } if summary == "PI_BASELINE_SUMMARY"))
         .collect::<Vec<_>>();
     assert_eq!(compacted.len(), 1);
+    assert_eq!(private_entries(&reopened, "compact-callback").len(), 1);
+    assert_eq!(private_entries(&reopened, "compact-before").len(), 1);
+    assert_eq!(private_entries(&reopened, "compact-after").len(), 1);
     assert_eq!(
         private_entries(&reopened, "compact-before")[0].1,
         json!({"reason": "manual", "instructions": "baseline instructions"})
