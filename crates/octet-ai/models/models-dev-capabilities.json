@@ -687,7 +687,7 @@
         "text"
       ]
     },
-    "name": "deepseek-ai/DeepSeek-V4.1-Flash-Fast",
+    "name": "DeepSeek V4.1 Flash Fast",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -11253,6 +11253,40 @@
     ],
     "tool_call": true
   },
+  "opencode/step-5-preview-free": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "input": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Step 5 Preview Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/trinity-large-preview-free": {
     "limit": {
       "context": 131072,
@@ -12093,30 +12127,6 @@
     "reasoning_options": [],
     "structured_output": false,
     "tool_call": true
-  },
-  "openrouter/baidu/ernie-4.5-vl-424b-a47b": {
-    "limit": {
-      "context": 123000,
-      "output": 16000
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "ERNIE 4.5 VL 424B A47B ",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": false
   },
   "openrouter/bytedance-seed/seed-1.6": {
     "limit": {
@@ -13488,8 +13498,8 @@
         "text"
       ],
       "output": [
-        "image",
-        "text"
+        "text",
+        "image"
       ]
     },
     "name": "Nano Banana 2.1",
@@ -13892,7 +13902,7 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/inclusionai/ling-3.0-flash-sante:free": {
+  "openrouter/inclusionai/ling-3.0-flash-sante": {
     "limit": {
       "context": 262144,
       "output": 32768
@@ -13905,7 +13915,7 @@
         "text"
       ]
     },
-    "name": "Ling 3.0 Flash Sante (free)",
+    "name": "Ling 3.0 Flash Sante",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -14767,7 +14777,7 @@
   },
   "openrouter/mistralai/mistral-large-4-0": {
     "limit": {
-      "context": 524288,
+      "context": 1048576,
       "output": 262144
     },
     "modalities": {
@@ -15395,7 +15405,7 @@
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -17996,7 +18006,7 @@
   "openrouter/qwen/qwen3-30b-a3b-instruct-2507": {
     "limit": {
       "context": 262144,
-      "output": 32000
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18210,7 +18220,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -18458,7 +18468,7 @@
   "openrouter/qwen/qwen3.5-397b-a17b": {
     "limit": {
       "context": 262144,
-      "output": 81920
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -19188,7 +19198,7 @@
     "name": "Llama 3.1 Euryale 70B v2.2",
     "reasoning": false,
     "structured_output": true,
-    "tool_call": true
+    "tool_call": false
   },
   "openrouter/sao10k/l3.3-euryale-70b": {
     "limit": {
@@ -19244,6 +19254,37 @@
       ]
     },
     "name": "Step 3.7 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/stepfun/step-5-preview": {
+    "limit": {
+      "context": 1000000,
+      "input": 1000000,
+      "output": 64000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Step 5 Preview",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -20361,7 +20402,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20695,7 +20736,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [

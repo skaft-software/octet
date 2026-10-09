@@ -303,6 +303,44 @@ precedence rules are unchanged; direct DeepSeek pricing remains unverified and
 excluded. These are catalog projections, not live model or capability acceptance.
 The live freshness gate must still pass on the final release source.
 
+### 2026-10-09 exact-head CI freshness refresh
+
+PR #540's quality lane detected supported projection changes after the preceding
+review. All four outputs were regenerated together from a retained public
+response with SHA-256
+`63fe28d226713ba2ad6254be9200f8cf055163f49f53d9ee9e4385f5e5de086c`
+(5,369,510 bytes). The matching response remains private local release evidence,
+not a bundled artifact; reproduce with `--source FILE` and check with
+`--source FILE --check` using that digest.
+
+Relative to the preceding release-preparation outputs:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 921 | 3 | 2 | 20 |
+| Canonical names | 415 | 0 | 0 | 0 |
+| Capability routes | 944 | 3 | 2 | 10 |
+
+The additions are OpenCode `step-5-preview-free` and OpenRouter
+`stepfun/step-5-preview` and `inclusionai/ling-3.0-flash-sante`. OpenRouter
+`baidu/ernie-4.5-vl-424b-a47b` and `inclusionai/ling-3.0-flash-sante:free`
+disappear. All 20 changed prices are OpenRouter quotes: for example, DeepSeek
+V4 Pro now quotes $0.287274/$0.574548/$0.02394 per million
+input/output/cache-read tokens, and Kimi K3 quotes $0.82/$13.50/$0.55. These are
+exact aggregator-route quotes, not direct-provider tariffs.
+
+Capability changes include seven limit records, a Baseten display name, an
+ordering-only modality change and OpenRouter `sao10k/l3.1-euryale-70b`'s source
+tool flag becoming false. OpenRouter Mistral Large 4's context becomes 1,048,576
+with its 262,144 output ceiling unchanged; Qwen3.5 397B A17B's output becomes
+235,929 and GLM-5.2's output becomes 943,718. These source assertions do not
+grant runtime tool, reasoning or structured-output support, override endpoint
+assertions or prove live route availability. Generator policy and runtime
+precedence are unchanged; direct DeepSeek pricing remains unverified and
+excluded. Saved-source reproduction, 11 offline metadata-tooling tests, 13
+release-gate tests and the live freshness check passed after this review.
+Exact-head hosted CI and later final-source freshness remain required.
+
 ## GPT-6 contract review (2026-09-23)
 
 The public [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),
