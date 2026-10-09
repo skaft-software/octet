@@ -25,6 +25,7 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
     assert_eq!(
         rendered,
         vec![
+            "",
             "• Thinking (0s • esc to interrupt)",
             "  └ Verifying reproducibility of evidence package (ctrl+o to expand)",
         ]
@@ -273,12 +274,14 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
-    assert_eq!(rendered.len(), 1, "{rendered:?}");
+    assert_eq!(rendered.len(), 3, "{rendered:?}");
+    assert!(rendered[0].is_empty(), "{rendered:?}");
     assert!(
-        rendered[0].starts_with("• Working (0s • esc to interrupt)"),
+        rendered[1].starts_with("• Working (0s • esc to interrupt)"),
         "{rendered:?}"
     );
-    assert!(!rendered[0].contains("ctrl+o"), "{rendered:?}");
+    assert!(rendered[2].is_empty(), "{rendered:?}");
+    assert!(!rendered[1].contains("ctrl+o"), "{rendered:?}");
 
     shell.on_run_event(
         run_id,
@@ -294,9 +297,15 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
-    assert_eq!(promoted.len(), 1, "{promoted:?}");
-    assert!(promoted[0].contains("Thinking"), "{promoted:?}");
-    assert!(promoted[0].contains("Ctrl+O expand"), "{promoted:?}");
+    assert_eq!(
+        promoted.len(),
+        rendered.len(),
+        "promotion moved the composer"
+    );
+    assert!(promoted[0].is_empty(), "{promoted:?}");
+    assert!(promoted[1].contains("Thinking"), "{promoted:?}");
+    assert!(promoted[1].contains("Ctrl+O expand"), "{promoted:?}");
+    assert!(promoted[2].is_empty(), "{promoted:?}");
     assert!(!promoted.join("\n").contains("provider-private detail"));
 }
 
@@ -360,9 +369,13 @@ fn public_text_stream_keeps_exactly_one_working_row_while_the_run_is_active() {
         1,
         "{rendered:?}"
     );
-    assert!(rendered
-        .last()
-        .is_some_and(|line| line.starts_with("• Working (")));
+    let working = rendered
+        .iter()
+        .position(|line| line.starts_with("• Working ("))
+        .unwrap();
+    assert_eq!(working + 2, rendered.len(), "{rendered:?}");
+    assert!(rendered[working - 1].is_empty(), "{rendered:?}");
+    assert!(rendered[working + 1].is_empty(), "{rendered:?}");
 }
 
 #[test]
@@ -413,9 +426,13 @@ fn activity_lifecycle_is_working_thinking_streaming_working_then_settled() {
         1,
         "{responding:?}"
     );
-    assert!(responding
-        .last()
-        .is_some_and(|line| line.starts_with("• Working (")));
+    let working = responding
+        .iter()
+        .position(|line| line.starts_with("• Working ("))
+        .unwrap();
+    assert_eq!(working + 2, responding.len(), "{responding:?}");
+    assert!(responding[working - 1].is_empty(), "{responding:?}");
+    assert!(responding[working + 1].is_empty(), "{responding:?}");
     assert!(shell.state.borrow().has_active_status_shimmer());
 
     shell.on_run_event(
@@ -614,9 +631,11 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_o() {
             .collect::<Vec<_>>()
     };
     let initial = transcript(&shell);
-    assert_eq!(initial.len(), 1, "{initial:?}");
-    assert!(initial[0].contains("Thinking"), "{initial:?}");
-    assert!(initial[0].contains("Ctrl+O expand"), "{initial:?}");
+    assert_eq!(initial.len(), 3, "{initial:?}");
+    assert!(initial[0].is_empty(), "{initial:?}");
+    assert!(initial[1].contains("Thinking"), "{initial:?}");
+    assert!(initial[1].contains("Ctrl+O expand"), "{initial:?}");
+    assert!(initial[2].is_empty(), "{initial:?}");
     assert!(!initial.join("\n").contains("first private sentinel"));
 
     let continuation = (0..128)

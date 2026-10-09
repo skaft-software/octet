@@ -17,6 +17,14 @@ fn plain(lines: &[String]) -> String {
     strip_terminal_sequences(&lines.join("\n"))
 }
 
+fn composer_rules(lines: &[String], width: u16) -> usize {
+    let rule = "─".repeat(usize::from(width));
+    lines
+        .iter()
+        .filter(|line| strip_terminal_sequences(line) == rule)
+        .count()
+}
+
 fn assert_unbranded(lines: &[String]) {
     let text = plain(lines);
     assert!(!text.contains("octet"), "{text}");
@@ -30,9 +38,13 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
     for application_viewport in [false, true] {
         let mut shell = pending_shell();
         let component = ShellComponent::new(shell.state.clone(), application_viewport);
-        assert_unbranded(&component.render(96));
+        let pending = component.render(96);
+        assert_unbranded(&pending);
+        assert_eq!(composer_rules(&pending, 96), 0);
         shell.set_identity("cerebras", "cerebras/gemma-4-31b", "off");
-        assert_unbranded(&component.render_update(96).unwrap().replacement);
+        let identified = component.render_update(96).unwrap().replacement;
+        assert_unbranded(&identified);
+        assert_eq!(composer_rules(&identified, 96), 0);
         shell.set_workspace(PathBuf::from("/startup-fixture/workspace"));
         shell.set_theme(test_theme_for(
             TerminalBackground::Dark,
@@ -53,6 +65,8 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
             "setup rows are not a retained prefix"
         );
         let text = plain(&update.replacement);
+        assert!(text.contains("octet v"), "{text}");
+        assert!(text.contains("full access"), "{text}");
         assert!(text.contains("cerebras/gemma-4-31b"), "{text}");
         assert!(text.contains("/startup-fixture/workspace"), "{text}");
         assert!(!text.contains("selecting model"), "{text}");
@@ -316,7 +330,7 @@ fn static_welcome_never_reflows_historical_rows_for_a_draft_edit() {
 }
 
 #[test]
-fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
+fn silent_startup_keeps_an_unframed_editable_composer_in_both_viewport_modes() {
     for application_viewport in [false, true] {
         let mut shell = pending_shell();
         let component = ShellComponent::new(shell.state.clone(), application_viewport);
@@ -326,6 +340,7 @@ fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
                 shell.state.borrow_mut().editor.set_text(draft);
                 let frame = component.render(width);
                 assert_unbranded(&frame);
+                assert_eq!(composer_rules(&frame, width), 0, "half-loaded composer");
                 if application_viewport {
                     assert_eq!(frame.len(), usize::from(height));
                 } else {
@@ -339,6 +354,28 @@ fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
                 assert!(!plain(&frame).contains("extensions"));
                 assert!(!plain(&frame).contains("discovering"));
             }
+            shell.clear_editor();
+            shell.apply_edit(EditAction::Paste("editable draftX".into()));
+            shell.apply_edit(EditAction::Backspace);
+            assert_eq!(shell.pending(), "editable draft");
+            let edited = component.render_update(width).unwrap().replacement;
+            assert_unbranded(&edited);
+            assert_eq!(composer_rules(&edited, width), 0);
+            assert!(plain(&edited).contains("editable draft"));
+            assert!(edited.iter().any(|row| row.contains(CURSOR_MARKER)));
+        }
+        shell.set_size(96, 18);
+        let resized = component.render(96);
+        assert_eq!(composer_rules(&resized, 96), 0);
+        assert!(plain(&resized).contains("editable draft"));
+        shell.set_identity("custom", "custom/probe", "off");
+        assert_eq!(composer_rules(&component.render(96), 96), 0);
+        shell.finish_startup();
+        let ready = component.render_update(96).unwrap();
+        assert_eq!(ready.stable_prefix, 0);
+        assert_eq!(composer_rules(&ready.replacement, 96), 2);
+        for expected in ["octet v", "full access", "custom/probe", "editable draft"] {
+            assert!(plain(&ready.replacement).contains(expected));
         }
     }
 }

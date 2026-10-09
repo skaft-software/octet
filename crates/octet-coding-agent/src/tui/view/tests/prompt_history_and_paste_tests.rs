@@ -166,14 +166,9 @@ fn prompt_history_restores_the_draft_cursor_and_payload_at_newest_boundary() {
         "paste must leave its chip insertion cursor"
     );
 
-    // The first Up owns ordinary visual movement and reaches the document
-    // boundary. Only an Up already at source offset zero starts recall.
-    shell.apply_edit(EditAction::Up);
-    assert_eq!(shell.pending(), draft_display);
-    assert_eq!(shell.state.borrow().editor.cursor(), 0);
-    assert!(shell.state.borrow().prompt_history_navigation.is_none());
-
-    let draft_cursor = shell.state.borrow().editor.cursor();
+    // A chip is one visual row: recall immediately, preserving its insertion
+    // cursor instead of first snapping the unsent draft to byte zero.
+    let draft_cursor = paste_cursor;
     shell.apply_edit(EditAction::Up);
     assert_eq!(shell.pending(), "sent");
     assert!(shell.state.borrow().prompt_history_navigation.is_some());
@@ -187,6 +182,73 @@ fn prompt_history_restores_the_draft_cursor_and_payload_at_newest_boundary() {
         restored.parts.as_slice(),
         [octet_agent::InputPart::Text(text)] if text.contains("draft line")
     ));
+}
+
+#[test]
+fn prompt_history_single_line_drafts_recall_immediately_idle_and_active() {
+    for active in [false, true] {
+        for cursor in [2, "é🦀 draft".len()] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.on_prompt_submitted("oldest\nmultiline");
+            shell.on_prompt_submitted("newest\nmultiline");
+            shell.prefill_editor("é🦀 draft".into());
+            shell.state.borrow_mut().editor.set_cursor(cursor);
+            let run = active.then(|| shell.begin_run("background work"));
+            shell.apply_edit(EditAction::Up);
+            assert_eq!(shell.pending(), "newest\nmultiline");
+            shell.apply_edit(EditAction::Up);
+            assert_eq!(shell.pending(), "oldest\nmultiline");
+            shell.apply_edit(EditAction::Up);
+            assert_eq!(shell.pending(), "oldest\nmultiline");
+            shell.apply_edit(EditAction::Down);
+            assert_eq!(shell.pending(), "newest\nmultiline");
+            shell.apply_edit(EditAction::Down);
+            assert_eq!(shell.pending(), "é🦀 draft");
+            assert_eq!(shell.state.borrow().editor.cursor(), cursor);
+            assert_eq!(shell.current_run_id(), run);
+        }
+    }
+}
+
+#[test]
+fn prompt_history_respects_wrapped_visual_rows_before_recall() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(16, 24);
+    shell.on_prompt_submitted("previous");
+    let draft = "a wrapped unsent draft with several visual rows";
+    shell.prefill_editor(draft.into());
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), draft);
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+    assert!(shell.state.borrow().editor.cursor() < draft.len());
+    shell.state.borrow_mut().editor.set_cursor(2);
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "previous");
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), draft);
+    assert_eq!(shell.state.borrow().editor.cursor(), 2);
+}
+
+#[test]
+fn prompt_history_preserves_chip_drafts_while_a_run_is_active() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_prompt_submitted("previous");
+    shell.apply_edit(EditAction::Paste("unsent payload\n".repeat(30)));
+    let draft = shell.pending();
+    let cursor = shell.state.borrow().editor.cursor();
+    let run = shell.begin_run("background work");
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "previous");
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), draft);
+    assert_eq!(shell.state.borrow().editor.cursor(), cursor);
+    assert_eq!(shell.current_run_id(), Some(run));
+    let restored = shell.drain_composed();
+    assert_eq!(restored.attachments.len(), 1);
+    assert!(
+        matches!(restored.parts.as_slice(), [octet_agent::InputPart::Text(text)]
+        if text.contains("unsent payload"))
+    );
 }
 
 #[test]

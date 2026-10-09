@@ -810,6 +810,49 @@ fn slash_completion_settings_and_theme_picker_keep_native_ownership() {
 fn native_fresh_startup_is_silent_and_keeps_one_welcome_and_input_owner() {
     let mut pty = NativePty::spawn();
     pty.ready();
+    // Inspect the emitted prologue, even when a read also consumes the ready
+    // frame: early editing must not be replaced by a readonly startup gate.
+    fn find<'a>(node: &'a Value, id: &str) -> Option<&'a Value> {
+        if node["id"] == id {
+            return Some(node);
+        }
+        node["c"]
+            .as_array()?
+            .iter()
+            .find_map(|child| find(child, id))
+    }
+    let prologue = &pty.messages.iter().find(|(verb, _)| verb == "f").unwrap().1;
+    let ops = prologue["ops"].as_array().unwrap();
+    let added: Vec<_> = ops
+        .iter()
+        .filter(|op| op[0] == "add")
+        .map(|op| &op[4])
+        .collect();
+    let editor = added
+        .iter()
+        .find_map(|node| find(node, "composer.editor"))
+        .unwrap();
+    assert_eq!(editor["p"]["readonly"], false);
+    assert_eq!(editor["p"]["placeholder"], "");
+    assert_eq!(editor["p"]["text"], "");
+    assert!(ops
+        .iter()
+        .any(|op| op == &json!(["focus", "composer.editor"])));
+    for hidden in [
+        "welcome",
+        "composer.rule",
+        "composer.context",
+        "composer.bar",
+    ] {
+        assert!(added.iter().all(|node| find(node, hidden).is_none()));
+    }
+    assert_eq!(
+        pty.nodes
+            .values()
+            .filter(|node| node["p"]["role"] == "octet.welcome")
+            .count(),
+        1
+    );
     assert!(pty.hello);
     for region in ["main", "dock", "layer"] {
         assert!(pty.nodes.contains_key(region));

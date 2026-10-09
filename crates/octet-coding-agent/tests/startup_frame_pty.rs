@@ -1212,6 +1212,15 @@ fn assert_unbranded_startup(parser: &vt100::Parser, columns: u16) {
     assert!(!text.contains(STALE_MARKER), "{text}");
 }
 
+fn composer_rule_rows(parser: &vt100::Parser) -> usize {
+    let (rows, columns) = parser.screen().size();
+    (0..rows)
+        .filter(|row| {
+            (0..columns).all(|column| parser.screen().cell(*row, column).unwrap().contents() == "─")
+        })
+        .count()
+}
+
 fn assert_green_gemma_frame(parser: &vt100::Parser) {
     let text = screen_text(parser, INITIAL_COLUMNS);
     assert_single_welcome(parser, INITIAL_COLUMNS, "first-ready Gemma");
@@ -1316,6 +1325,7 @@ fn real_octet_first_branded_frame_has_resolved_gemma_workspace_and_accent() {
             consumed = frame.end;
             if !branded && !parser.screen().contents().contains("octet v") {
                 assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+                assert_eq!(composer_rule_rows(&parser), 0, "half-loaded composer rails");
             } else {
                 branded = true;
                 assert_green_gemma_frame(&parser);
@@ -1702,6 +1712,12 @@ fn real_octet_model_discovery_keeps_startup_editable() {
         );
         let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
         let mut consumed = 0;
+        for frame in frame_ranges(&octet.pty.output) {
+            parser.process(&octet.pty.output[consumed..frame.end]);
+            consumed = frame.end;
+            assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+            assert_eq!(composer_rule_rows(&parser), 0, "first paint exposed rails");
+        }
         octet
             .pty
             .write_input(b"startup draftX\x7f\x1b[200~ pasted\x1b[201~");
@@ -1713,6 +1729,7 @@ fn real_octet_model_discovery_keeps_startup_editable() {
             Duration::from_millis(500),
         );
         assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        assert_eq!(composer_rule_rows(&parser), 0, "draft edit exposed rails");
         // The screen can show the edit before the frame's closing CSI 2026
         // has been read: a frame may reach the PTY in more than one write.
         octet.wait_until(Duration::from_millis(500), |bytes| {
@@ -1733,17 +1750,43 @@ fn real_octet_model_discovery_keeps_startup_editable() {
         consumed = octet.pty.output.len();
         assert!(parser.screen().contents().contains("startup draft pasted"));
         assert_unbranded_startup(&parser, RESIZED_COLUMNS);
+        assert_eq!(composer_rule_rows(&parser), 0, "resize exposed rails");
         assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(api.requests.lock().unwrap().is_empty());
 
         api.release.send(()).unwrap();
-        await_screen(
-            &mut octet,
-            &mut parser,
-            &mut consumed,
-            "custom/probe",
-            STARTUP_TIMEOUT,
-        );
+        let readiness_start = consumed;
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+            synchronized_frame_end_containing(&bytes[readiness_start..], READY_MARKER).is_some()
+        });
+        let mut ready_seen = false;
+        for frame in frame_ranges(&octet.pty.output[readiness_start..]) {
+            let end = readiness_start + frame.end;
+            parser.process(&octet.pty.output[consumed..end]);
+            consumed = end;
+            let text = parser.screen().contents();
+            if text.contains("custom/probe") {
+                ready_seen = true;
+                assert_eq!(
+                    composer_rule_rows(&parser),
+                    2,
+                    "incomplete ready chrome\n{text}"
+                );
+                for together in ["octet v", "full access", "startup draft pasted"] {
+                    assert!(
+                        text.contains(together),
+                        "ready frame omitted {together}\n{text}"
+                    );
+                }
+            } else {
+                assert!(!ready_seen, "readiness regressed\n{text}");
+                assert_unbranded_startup(&parser, RESIZED_COLUMNS);
+                assert_eq!(composer_rule_rows(&parser), 0, "pre-ready rails\n{text}");
+            }
+        }
+        assert!(ready_seen);
+        parser.process(&octet.pty.output[consumed..]);
+        consumed = octet.pty.output.len();
         assert!(parser.screen().contents().contains("startup draft pasted"));
         assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
         // A branded frame is not admission evidence: actually submit the held

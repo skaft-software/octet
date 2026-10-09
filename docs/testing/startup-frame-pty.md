@@ -47,18 +47,29 @@ The discovery tests hold a loopback `/models` response open while the real binar
 starts, in both mouse modes. Before releasing the response they require:
 
 - a synchronized startup frame, with terminal line echo disabled;
-- visible typing, backspace, bracketed paste, and resize, without provisional
-  model branding;
+- an immediately editable, neutral draft: typing, backspace, bracketed paste,
+  and resize must paint without provisional model branding or composer rails;
 - Enter retaining the draft rather than submitting a provider request;
 - Ctrl-C exiting within the existing shutdown bound and restoring terminal modes,
   even when the response is never released.
 
-The successful-discovery case then releases the gate and checks that the same
-draft survives into the resolved model frame. It then submits that draft and
+The successful-discovery case then releases the gate and checks each completed
+synchronized frame: composer rails stay absent until the welcome, permissions,
+resolved model footer, and both rails appear together. The same edited draft
+must survive that ready frame after resize. It then submits that draft and
 requires exactly one loopback chat request with the intended text and model.
 These are bounded regression assertions, not latency distributions or a claim of
 faster provider discovery or large-session replay. The composer is editable
-before submission is ready.
+before submission is ready. Setup panels, credential prompts, and actionable
+errors retain their input owners; quiet startup hides routine chrome, not setup.
+
+Native Tern has complementary in-memory protocol/tree regressions in
+`view/tern_tests.rs`: the real native editor is registered and focused before
+readiness, accepts a fenced draft edit, remains unframed through resize and
+identity resolution, and gains its rule and model controls in the same frame as
+the welcome. Separate assertions retain credential/setup/error owners. The ANSI
+readiness and lifecycle unit tests also check no pending rails, editable drafts,
+and atomic ready chrome. These tests qualify projections, not desktop paint.
 
 ## Static short-pane regression
 

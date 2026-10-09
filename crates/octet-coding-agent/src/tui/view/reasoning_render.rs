@@ -1179,7 +1179,7 @@ fn thinking_hint_fits_inline(theme: &OctetTheme, status: &str, width: u16) -> bo
         && visible_width(status) + visible_width(reasoning_inline_hint(theme)) <= usize::from(width)
 }
 
-fn collapsed_reasoning_lines_sized(
+pub(super) fn collapsed_reasoning_lines_sized(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
     shimmer_frame: usize,

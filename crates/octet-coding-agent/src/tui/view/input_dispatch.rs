@@ -456,28 +456,27 @@ impl InteractiveShell {
                     ("tui.editor.historyNext", false),
                 ] {
                     if bindings.matches(key, id) {
-                        if !active {
-                            let mut state = self.state.borrow_mut();
-                            if previous
-                                && state.prompt_history_navigation.is_none()
-                                && !state.prompt_history.is_empty()
-                            {
-                                let draft = capture_prompt_history_draft(&mut state);
-                                let index = state.prompt_history.len() - 1;
-                                state.prompt_history_navigation =
-                                    Some(PromptHistoryNavigation { index, draft });
-                                restore_prompt_history_entry(&mut state, index);
-                            } else {
-                                navigate_prompt_history(
-                                    &mut state,
-                                    &if previous {
-                                        EditAction::Up
-                                    } else {
-                                        EditAction::Down
-                                    },
-                                );
-                            }
+                        let mut state = self.state.borrow_mut();
+                        if previous
+                            && state.prompt_history_navigation.is_none()
+                            && !state.prompt_history.is_empty()
+                        {
+                            let draft = capture_prompt_history_draft(&mut state);
+                            let index = state.prompt_history.len() - 1;
+                            state.prompt_history_navigation =
+                                Some(PromptHistoryNavigation { index, draft });
+                            restore_prompt_history_entry(&mut state, index);
+                        } else {
+                            navigate_prompt_history(
+                                &mut state,
+                                &if previous {
+                                    EditAction::Up
+                                } else {
+                                    EditAction::Down
+                                },
+                            );
                         }
+                        drop(state);
                         self.render();
                         return InputAction::Ignore;
                     }
@@ -949,6 +948,31 @@ mod tests {
             InputAction::Ignore
         );
         assert_eq!(shell.pending(), "historic");
+    }
+
+    #[test]
+    fn dedicated_history_keys_preserve_active_run_and_original_caret() {
+        let mut shell = InteractiveShell::test_shell();
+        let _directory = configure(
+            &mut shell,
+            r#"{"tui.editor.historyPrevious":"ctrl+p","tui.editor.historyNext":"ctrl+n"}"#,
+        );
+        shell.on_prompt_submitted("previous");
+        shell.prefill_editor("unsent\nmultiline draft".into());
+        shell.state.borrow_mut().editor.set_cursor(10);
+        let run = shell.begin_run("background work");
+        assert_eq!(
+            shell.translate_input(Some(key(KeyCode::Char('p'), KeyModifiers::CONTROL)), true),
+            InputAction::Ignore
+        );
+        assert_eq!(shell.pending(), "previous");
+        assert_eq!(
+            shell.translate_input(Some(key(KeyCode::Char('n'), KeyModifiers::CONTROL)), true),
+            InputAction::Ignore
+        );
+        assert_eq!(shell.pending(), "unsent\nmultiline draft");
+        assert_eq!(shell.state.borrow().editor.cursor(), 10);
+        assert_eq!(shell.current_run_id(), Some(run));
     }
 
     #[test]

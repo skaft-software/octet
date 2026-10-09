@@ -401,9 +401,6 @@ impl TernSurface {
         let now = Instant::now();
         let (model, main_key, editor_revision) = {
             let mut shell = state.borrow();
-            if shell.startup_pending && shell.panel.is_none() && shell.overlay.is_none() {
-                return Ok(());
-            }
             let elapsed = shell
                 .run
                 .current()
@@ -875,7 +872,7 @@ fn project(
         ));
     } else {
         out.focus = editor_focused(shell).then(|| "composer.editor".into());
-        if editor_focused(shell) {
+        if editor_focused(shell) && !shell.startup_pending {
             if let Some(completion) =
                 super::tern_completion::Completion::capture_revision(shell, editor_revision)
             {
@@ -1295,7 +1292,7 @@ pub(super) fn focus_target(shell: &ShellState) -> Option<String> {
             .then(|| super::tern_picker::focus(shell))
             .flatten();
     }
-    (editor_focused(shell) && !shell.startup_pending).then(|| "composer.editor".into())
+    editor_focused(shell).then(|| "composer.editor".into())
 }
 
 pub(super) fn editor_focused(shell: &ShellState) -> bool {
@@ -1309,15 +1306,21 @@ pub(super) fn editor_focused(shell: &ShellState) -> bool {
 }
 
 fn composer(shell: &ShellState) -> Node {
-    let focused = editor_focused(shell) && !shell.startup_pending;
+    let focused = editor_focused(shell);
     let running = shell.run.is_active();
     let level = if shell.reasoning.is_empty() {
         "off"
     } else {
         &shell.reasoning
     };
-    let mut children = vec![Node::new("composer.rule", Kind::Rule, Props::new())];
-    if let Some((used, total)) = shell.context_estimate.filter(|(_, total)| *total > 0) {
+    let mut children = Vec::new();
+    if !shell.startup_pending {
+        children.push(Node::new("composer.rule", Kind::Rule, Props::new()));
+    }
+    if let Some((used, total)) = shell
+        .context_estimate
+        .filter(|(_, total)| !shell.startup_pending && *total > 0)
+    {
         children.push(Node::new(
             "composer.context",
             Kind::Meter,
@@ -1354,9 +1357,21 @@ fn composer(shell: &ShellState) -> Node {
                 )
                 .set("readonly", !focused)
                 .set("maxLines", 12)
-                .set("placeholder", "Ask octet — / commands · @ files · ! shell"),
+                .set(
+                    "placeholder",
+                    if shell.startup_pending {
+                        ""
+                    } else {
+                        "Ask octet — / commands · @ files · ! shell"
+                    },
+                ),
         )],
     ));
+    if shell.startup_pending {
+        // Register and focus the genuine draft immediately. Only its resolved
+        // chrome waits for the same ready frame as the welcome and transcript.
+        return Node::with_children("composer", Kind::Col, Props::new(), children);
+    }
     let mut controls = vec![
         Node::with_children(
             "composer.model",

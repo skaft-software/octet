@@ -263,6 +263,10 @@ fn full_tui_colour_modes_preserve_readable_content_and_supported_encoding() {
                 )));
                 samples.extend(render_shell(&shell.state.borrow(), width));
                 open_select_panel(&mut shell, &["Ready", "Approval required", "Failed"]);
+                // A retained transcript may leave a one-item picker window.
+                // Test the approval palette on a visibly selected item, not an
+                // offscreen alternative that correctly stays out of the frame.
+                shell.panel_input(&panel_key(crossterm::event::KeyCode::Down));
                 samples.extend(render_shell(&shell.state.borrow(), width));
                 shell.close_panel();
                 {

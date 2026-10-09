@@ -23,7 +23,16 @@ fn pending_tool_tail(
     chrome: &ShellChrome,
     width: u16,
 ) -> Option<(usize, Vec<String>)> {
-    let index = state.transcript.len().checked_sub(1)?;
+    let last = state.transcript.len().checked_sub(1)?;
+    // The live run status trails an ordinary pending call. It is chrome-like
+    // mutable content, not an unrelated answer that disqualifies that call.
+    let index = if matches!(&state.transcript[last], TranscriptBlock::Reasoning(reasoning)
+        if !reasoning.finished && reasoning.activity_started_at.is_some())
+    {
+        last.checked_sub(1)?
+    } else {
+        last
+    };
     let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
         return None;
     };
@@ -32,11 +41,18 @@ fn pending_tool_tail(
     }
     let cache = state.transcript_cache.borrow();
     let start = cache.block_starts[index];
-    let rows = &cache.lines[start..];
-    let budget =
-        usize::from(state.size.1).saturating_sub(shell_chrome_rows(chrome).saturating_add(1));
+    let end = start + cache.block_lengths[index];
+    let rows = &cache.lines[start..end];
+    let status = &cache.lines[end..];
+    let separator_rows = ShellChrome::separator_rows(cache.lines.last());
+    // At tiny heights the immutable heading may enter history once, but the
+    // newest output must keep an addressable row below it. Reserve the status
+    // separately so it cannot crowd that output out of the live preview.
+    let budget = usize::from(state.size.1)
+        .saturating_sub(shell_chrome_rows(chrome) + status.len() + separator_rows)
+        .max(2);
     if rows.len() <= budget {
-        return Some((start, rows.to_vec()));
+        return Some((start, cache.lines[start..].to_vec()));
     }
     // Keep the intent heading and the newest output, never the oldest preview
     // rows. The source/copy cache remains complete and independent of this
@@ -47,7 +63,7 @@ fn pending_tool_tail(
         .take(budget.min(1))
         .cloned()
         .collect::<Vec<_>>();
-    if budget > 1 {
+    if budget > 2 {
         preview.push(super::fit_line(
             &state.theme.fg(
                 "muted",
@@ -58,9 +74,10 @@ fn pending_tool_tail(
             ),
             width,
         ));
-        let tail = budget.saturating_sub(2);
-        preview.extend_from_slice(&rows[rows.len().saturating_sub(tail)..]);
     }
+    let tail = budget.saturating_sub(preview.len());
+    preview.extend_from_slice(&rows[rows.len().saturating_sub(tail)..]);
+    preview.extend_from_slice(status);
     Some((start, preview))
 }
 
@@ -75,10 +92,11 @@ fn record_native_animation_viewport(state: &ShellState, rows: usize) {
     ));
 }
 
-fn native_overlay_prefix_len(transcript_len: usize, chrome: &ShellChrome) -> usize {
+fn native_overlay_prefix_len(transcript: &[String], chrome: &ShellChrome) -> usize {
     let chrome_rows = shell_chrome_rows(chrome);
-    let normal_rows = transcript_len
-        .saturating_add(usize::from(transcript_len > 0))
+    let normal_rows = transcript
+        .len()
+        .saturating_add(ShellChrome::separator_rows(transcript.last()))
         .saturating_add(chrome_rows);
     let overlay_rows = chrome.transcript_rows.saturating_add(chrome_rows);
     normal_rows.saturating_sub(overlay_rows)
@@ -109,7 +127,7 @@ fn render_native_overlay_suffix(
     transcript: &[String],
     requested_stable_prefix: usize,
 ) -> (usize, Vec<String>, usize, usize) {
-    let overlay_prefix_len = native_overlay_prefix_len(transcript.len(), &chrome);
+    let overlay_prefix_len = native_overlay_prefix_len(transcript, &chrome);
     let mut overlay = overlay_lines(state, width, chrome.transcript_rows);
     append_viewport_chrome(&mut overlay, chrome);
 
@@ -147,7 +165,8 @@ pub(super) fn render_shell_at(state: &ShellState, width: u16, now: Instant) -> V
             lines.truncate(start);
             lines.extend(preview);
         }
-        append_chrome(&mut lines, chrome, 0);
+        let separator_rows = ShellChrome::separator_rows(lines.last());
+        append_chrome(&mut lines, chrome, separator_rows);
         record_native_animation_viewport(state, lines.len());
         lines
     }
@@ -157,10 +176,7 @@ pub(super) fn synchronize_shell_frame(state: &ShellState, width: u16, frame: &mu
     let _ = transcript_lines(state, width);
     let cache = state.transcript_cache.borrow();
     let overlay_prefix_len = state.overlay.as_ref().map_or(0, |_| {
-        native_overlay_prefix_len(
-            cache.lines.len(),
-            &shell_chrome(state, width, Instant::now()),
-        )
+        native_overlay_prefix_len(&cache.lines, &shell_chrome(state, width, Instant::now()))
     });
     frame.initialized = true;
     frame.width = width;
@@ -276,7 +292,8 @@ fn render_shell_update_inner(
     if state.overlay.is_some() {
         let resize_replay = (resized && include_commit_metadata).then(|| {
             let mut replay = cache.lines.clone();
-            append_chrome(&mut replay, chrome.clone(), 0);
+            let separator_rows = ShellChrome::separator_rows(replay.last());
+            append_chrome(&mut replay, chrome.clone(), separator_rows);
             replay
         });
         let (stable_prefix, replacement, total_rows, overlay_prefix_len) =
@@ -325,8 +342,10 @@ fn render_shell_update_inner(
         cache.lines[stable_prefix..].to_vec()
     };
     let projected_transcript_len = stable_prefix + replacement.len();
+    let separator_rows =
+        ShellChrome::separator_rows(replacement.last().or_else(|| cache.lines.last()));
     drop(cache);
-    append_chrome(&mut replacement, chrome, stable_prefix);
+    append_chrome(&mut replacement, chrome, separator_rows);
     // Row coordinates from the old width/session cannot fence a reflowed
     // status. The physical viewport is re-anchored below, so establish its new
     // seam instead of retaining a larger historical top and freezing Working.
@@ -384,4 +403,34 @@ pub(super) fn render_shell_update(
 
 pub(super) fn render_shell(state: &ShellState, width: u16) -> Vec<String> {
     render_shell_at(state, width, Instant::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::view::InteractiveShell;
+
+    #[test]
+    fn unchanged_native_suffix_retains_exact_full_frame_and_overlay_seam() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 8);
+        shell.begin_run("openai");
+        let state = shell.state.borrow();
+        let now = Instant::now();
+        let full = render_shell_at(&state, 80, now);
+        let mut frame = ShellFrameState::default();
+        let first = render_shell_update_without_cursor(&state, 80, now, &mut frame);
+        assert_eq!(first.replacement, full);
+        let next = render_shell_update_without_cursor(&state, 80, now, &mut frame);
+        assert_eq!(next.stable_prefix, frame.transcript_len);
+        let mut reconstructed = full[..next.stable_prefix].to_vec();
+        reconstructed.extend(next.replacement);
+        assert_eq!(reconstructed, full);
+        let transcript = transcript_lines(&state, 80);
+        let chrome = shell_chrome(&state, 80, now);
+        assert_eq!(
+            native_overlay_prefix_len(&transcript, &chrome),
+            full.len().saturating_sub(usize::from(state.size.1)),
+        );
+    }
 }

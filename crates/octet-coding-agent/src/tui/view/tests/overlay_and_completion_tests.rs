@@ -587,6 +587,36 @@ fn mention_completion_inserts_path_reference_for_text_files() {
 }
 
 #[test]
+fn early_startup_mention_recovers_when_workspace_is_installed_without_another_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), b"x").unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    shell.state.borrow_mut().startup_pending = true;
+    for character in "see @main".chars() {
+        shell.apply_edit(EditAction::Char(character));
+    }
+    let cursor = shell.state.borrow().editor.cursor();
+    assert!(!shell.state.borrow().file_index_scanning);
+
+    shell.set_workspace(dir.path().to_path_buf());
+    assert!(shell.state.borrow().file_index_scanning);
+    shell.finish_startup();
+    shell.settle_file_index();
+    assert_eq!(shell.pending(), "see @main");
+    assert_eq!(shell.state.borrow().editor.cursor(), cursor);
+    let rendered = render_shell(&shell.state.borrow(), 120);
+    assert!(rendered
+        .iter()
+        .any(|line| { strip_terminal_sequences(line).contains("project files · tab complete") }));
+    shell.complete_path();
+    assert_eq!(
+        shell.pending(),
+        format!("see @src{}main.rs ", std::path::MAIN_SEPARATOR)
+    );
+}
+
+#[test]
 fn literal_path_completion_descends_through_directories() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();

@@ -419,8 +419,8 @@ mod tests {
         .await
         .expect("the silent startup phase completes");
 
-        // 1. No startup chatter before readiness: no phase label, no notice, no
-        //    bootstrap trace line, no branding.
+        // 1. No half-loaded chrome or startup chatter before readiness: no
+        //    composer rails, phase label, notice, bootstrap trace or branding.
         let frames = recorded.borrow().clone();
         assert!(!frames.is_empty());
         for frame in &frames {
@@ -441,6 +441,7 @@ mod tests {
                 "codex",
                 "Codex context",
                 "notice",
+                "─",
             ] {
                 assert!(
                     !frame.contains(forbidden),
@@ -498,7 +499,18 @@ mod tests {
             ready_lines.iter().any(|line| line.contains(CURSOR_MARKER)),
             "the ready frame keeps a live composer cursor: {ready:?}"
         );
+        let rule = "─".repeat(96);
+        assert_eq!(
+            ready_lines
+                .iter()
+                .filter(|line| strip_terminal_sequences(line) == rule)
+                .count(),
+            2,
+            "both composer rails appear in the ready frame"
+        );
         for expected in [
+            "octet v",
+            "full access",
             "cerebras/gemma-4-31b",
             "/startup-fixture/workspace",
             "read-only onboarding notice",

@@ -72,10 +72,10 @@ fn short_transcript_chrome_follows_content_without_viewport_padding() {
         },
     );
     let streamed = render_shell_at(&shell.state.borrow(), 80, now);
-    // The response retains one trailing Working row while the run is active.
-    // The response row plus its transition therefore grow the short frame by
-    // two rows without padding it to the terminal height.
-    assert_eq!(composer_row(&streamed), initial_composer + 2);
+    // The response adds one content row before the host-spaced Working slot.
+    // Working already owns its leading blank, so there is no additional
+    // density transition or viewport padding at that seam.
+    assert_eq!(composer_row(&streamed), initial_composer + 1);
     assert!(streamed.len() < 40);
 
     shell.on_run_event(

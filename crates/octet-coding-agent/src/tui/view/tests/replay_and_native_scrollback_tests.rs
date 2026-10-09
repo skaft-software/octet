@@ -175,19 +175,18 @@ fn resize_while_overlayed_replays_the_pi_composited_frame() {
         !resize_text.contains("OVERLAY-ACTIVE-STREAM-BEFORE"),
         "Pi replays the current composited frame, not rows hidden by its overlay: {resize_text:?}"
     );
-    // The public response keeps a trailing Working row. The resize still
-    // replays only the composited overlay frame, never its hidden live tail.
-    for index in 0..17 {
+    // Host-owned Working spacing changes the overlay's physical seam. Check
+    // the retained composited prefix, not a hard-coded number of notice rows;
+    // the complete native history is still checked exactly once below.
+    let composited = render_shell(&shell.state.borrow(), RESIZED_WIDTH).join("\n");
+    for index in 0..18 {
         let sentinel = format!("OCTET-OVERLAY-RESIZE-{index:02}");
-        assert!(
+        assert_eq!(
             resize_text.contains(&sentinel),
-            "{sentinel} was not replayed with the composited overlay:\n{resize_text:?}"
+            composited.contains(&sentinel),
+            "{sentinel} disagrees with the composited overlay prefix:\n{resize_text:?}"
         );
     }
-    assert!(
-        !resize_text.contains("OCTET-OVERLAY-RESIZE-17"),
-        "unexpected mutable notice in resize replay: {resize_text:?}"
-    );
 
     process_vt100_with_saved_line_clear(&mut terminal, &resize, HEIGHT, RESIZED_WIDTH, 512);
     assert!(
