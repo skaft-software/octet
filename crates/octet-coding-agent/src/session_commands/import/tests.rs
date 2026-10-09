@@ -461,11 +461,11 @@ fn semantic_checkpoint_corruption_and_torn_jsonl_tail_do_not_publish() {
     record.push(json!({"type":"checkpoint","prompt":"missing","head":"a"}));
     std::fs::write(&source, encode_jsonl(&record).unwrap()).unwrap();
     assert!(import_session(&store, &source, store.workspace().unwrap()).is_err());
-    assert!(std::fs::read_dir(store.dir()).unwrap().all(|e| !e
+    assert!(std::fs::read_dir(store.dir()).unwrap().all(|e| e
         .unwrap()
         .path()
         .extension()
-        .is_some_and(|x| x == "jsonl")));
+        .is_none_or(|x| x != "jsonl")));
     let mut bytes = encode_jsonl(&records()).unwrap();
     bytes.extend_from_slice(b"{\"type\":");
     std::fs::write(&source, bytes).unwrap();

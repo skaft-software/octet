@@ -219,8 +219,13 @@ jobs:
           fi
           rg --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-      - run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
+      # Cold compilation has its own bound; retain the full execution budget.
+      - name: Build workspace test binaries
         timeout-minutes: 15
+        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-run
+      - name: Run workspace tests
+        timeout-minutes: 15
+        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
         env:
           OCTET_PTY_TRACE: "1"
       # `cargo test --all-targets` builds examples only as test harnesses.
