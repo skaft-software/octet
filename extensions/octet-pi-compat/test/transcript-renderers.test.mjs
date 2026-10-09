@@ -185,6 +185,16 @@ test('Pi OSC 8 diagnostic links keep visible labels without allowing arbitrary t
   ]) assert.throws(() => safeLines([unsafe]), /invalid_request/);
 });
 
+test('oversized custom transcript components are clipped to the existing renderer bounds', t => {
+  const h = harness(t), cell = '\x1b[38;2;255;255;255m\x1b[48;2;255;255;255m▀';
+  h.registry.api(0).registerMessageRenderer('notice', () => ({render: () => [`${cell.repeat(500)}\x1b[0m`]}));
+  const {lines} = h.render('message', message, {width: 1200});
+  assert.equal(lines.length, 1);
+  assert.ok(Buffer.byteLength(lines[0]) <= 16384);
+  assert.ok(lines[0].endsWith('…'));
+  assert.deepEqual(safeLines(lines), lines);
+});
+
 test('presentation callbacks cannot mutate durable caller input or send unsafe terminal escapes', t => {
   const h = harness(t);
   h.registry.api(0).registerMessageRenderer('notice', value => {value.details.value = 99; return {render: () => ['\x1b]2;unsafe\x07']};});
@@ -217,13 +227,16 @@ test('late registration requires a current owner and bounded caches dispose evic
   assert.throws(() => h.registry.api(0).registerMessageRenderer('notice', () => undefined), /retired/);
 });
 
-test('unknown profiles, malformed options and frame overflow are rejected', t => {
+test('unknown profiles and malformed options are rejected; oversized render output is clipped', t => {
   const h = harness(t);
   assert.throws(() => h.render('markdown', 'source', {messageType: 'tool'}), /Markdown message type/);
   assert.throws(() => h.render('message', message, {outputPad: -1}), /outputPad/);
   assert.throws(() => h.render('message', message, {width: 0}), /geometry/);
   h.registry.api(0).registerMessageRenderer('notice', () => ({render: () => Array(257).fill('')}));
-  assert.throws(() => h.render('message', message), /bounds_exceeded/);
+  const {lines} = h.render('message', message);
+  assert.equal(lines.length, 256);
+  assert.ok(lines.at(-1).endsWith('…'));
+  assert.deepEqual(safeLines(lines), lines);
 });
 
 test('tool resolver chain sees future tools, preserves next and can suppress a base renderer', t => {

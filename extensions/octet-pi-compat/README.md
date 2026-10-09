@@ -232,7 +232,10 @@ deliberate differences from Pi's unbounded, blocking chain.
   composer slot; native chrome and slash discovery stay visible. JS components,
   callbacks and timers stay live in this process. Only printable text and bounded safe SGR snapshots
   cross the wire; the adapter strips balanced, bounded file/http/https OSC 8 link wrappers and keeps
-  their visible labels as plain text. Other terminal escapes remain rejected. Rust paints cached lines and never calls JS synchronously.
+  their visible labels as plain text. Oversized UI and custom transcript component
+  snapshots are clipped to the existing row, per-line and aggregate wire bounds
+  at UTF-8/SGR boundaries with an ellipsis. Other terminal escapes remain rejected.
+  Rust paints cached lines and never calls JS synchronously.
 - `setStatus` is local footer-provider metadata, not an assertion that every
   frontend displays ambient chrome. The compatibility palette is local, not a
   claim to reproduce octet's host theme; unknown roles are explicit errors.

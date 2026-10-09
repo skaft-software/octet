@@ -2,7 +2,7 @@
 // interactive/components/{custom-message,custom-entry,markdown-transform}.ts.
 // Copyright (c) 2025 Mario Zechner; MIT, see ../LICENSE.pi.
 import { bounded, fields, invalid, plainJSON, rpcError } from './errors.mjs';
-import { safeLines } from './remote-ui.mjs';
+import { fitLines, safeLines } from './remote-ui.mjs';
 import { theme } from './theme.mjs';
 import { stripVTControlCharacters } from 'node:util';
 import { Box } from '../node_modules/@earendil-works/pi-tui/dist/components/box.js';
@@ -174,18 +174,18 @@ export class TranscriptRenderers {
     this.remember(cache, key, cached);
     const renderSlot = (slot, makeFallback, event) => {
       if (!cached[slot]) return [];
-      try { return this.call(store, factory, () => safeLines(cached[slot].render(params.width))); }
+      try { return this.call(store, factory, () => fitLines(cached[slot].render(params.width))); }
       catch (error) {
         this.live(store); this.runtime.reportCallbackError?.(event, factory, error);
         cached[slot]?.dispose?.(); cached[slot] = makeFallback();
-        return cached[slot] ? this.call(store, factory, () => safeLines(cached[slot].render(params.width))) : [];
+        return cached[slot] ? this.call(store, factory, () => fitLines(cached[slot].render(params.width))) : [];
       }
     };
     const lines = [
       ...renderSlot('callComponent', () => callFallback(request.name, context.args, context.expanded), 'renderCall'),
       ...(request.result === null ? [] : renderSlot('resultComponent', () => resultFallback(request.result, context.expanded), 'renderResult')),
     ].map(line => truncateToWidth(line, params.width, ''));
-    return { registered: true, lines: safeLines(lines), markdown: null, render_shell: definition.renderShell ?? 'default' };
+    return { registered: true, lines: safeLines(fitLines(lines)), markdown: null, render_shell: definition.renderShell ?? 'default' };
   }
   live(store) { store.controller.signal.throwIfAborted(); this.runtime.assertOwner(store); }
   call(store, factory, callback) {
@@ -252,9 +252,9 @@ export class TranscriptRenderers {
     this.remember(cache, key, cached);
     if (!cached.component) return { registered: true, lines: null, markdown: null };
     try {
-      const lines = this.call(store, cached.factory, () => safeLines(cached.component.render(params.width)))
+      const lines = this.call(store, cached.factory, () => fitLines(cached.component.render(params.width)))
         .map(line => truncateToWidth(line, params.width, ''));
-      return { registered: true, lines: safeLines(lines), markdown: null };
+      return { registered: true, lines: safeLines(fitLines(lines)), markdown: null };
     } catch (error) {
       this.live(store); this.runtime.reportCallbackError?.(`${request.kind} renderer`, cached.factory, error);
       throw error;

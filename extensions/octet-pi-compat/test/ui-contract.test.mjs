@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { dialogAPI, editorAPI, BorderedLoader, DynamicBorder, getSettingsListTheme } from '../lib/ui-api.mjs';
 import { keyHint } from '../lib/keybinding-hints.mjs';
-import { RemoteUI, safeLines } from '../lib/remote-ui.mjs';
+import { RemoteUI, fitLines, safeLines } from '../lib/remote-ui.mjs';
 import { theme } from '../lib/theme.mjs';
 import { getAutocompleteProvider, retireAutocomplete } from '../lib/completions.mjs';
 
@@ -62,6 +62,48 @@ test('select clamps navigation, preserves SGR and renders at host width', async 
   assert.equal(await result, 'One');
   assert.equal(h.ui.surfaces.size, 0);
   assert.equal(h.requests.at(-1).method, 'ui/close');
+});
+
+test('oversized truecolor component frames are clipped without retiring the Pi UI mount', async t => {
+  const h = harness(t);
+  const cell = '\x1b[38;2;255;255;255m\x1b[48;2;255;255;255m▀';
+  const line = `${cell.repeat(500)}\x1b[0m`;
+  const surface = await h.ui.mount(h.store, 'fullscreen', 'Wide RGB', () => ({ render: () => [line] }));
+  const frame = h.frames.find(value => value.method === 'ui/frame').params;
+  assert.equal(h.ui.surfaces.get(frame.surface_id), surface);
+  assert.ok(Buffer.byteLength(frame.lines[0]) <= 16384);
+  assert.ok(frame.lines[0].endsWith('\x1b[0m…'));
+  assert.deepEqual(safeLines(frame.lines), frame.lines);
+  assert.deepEqual(fitLines(['\x1b]8;;https://example.com/path\x07linked\x1b]8;;\x07']), ['linked']);
+});
+
+test('frame projection clips row and aggregate-text overflow while keeping snapshots bounded', () => {
+  const tooManyRows = fitLines(Array.from({ length: 257 }, (_, index) => `row-${index}`));
+  assert.equal(tooManyRows.length, 256);
+  assert.ok(tooManyRows.at(-1).endsWith('…'));
+  assert.deepEqual(safeLines(tooManyRows), tooManyRows);
+
+  const tooMuchText = fitLines(Array.from({ length: 40 }, () => 'x'.repeat(16384)));
+  assert.ok(tooMuchText.reduce((total, row) => total + Buffer.byteLength(row), 0) <= 524288);
+  assert.ok(tooMuchText.at(-1).endsWith('…'));
+  assert.deepEqual(safeLines(tooMuchText), tooMuchText);
+
+  const unicode = fitLines(['😀'.repeat(5000)]);
+  assert.ok(Buffer.byteLength(unicode[0]) <= 16384);
+  assert.ok(unicode[0].endsWith('…'));
+  assert.deepEqual(safeLines(unicode), unicode);
+
+  const narrowRemainder = fitLines([...Array(31).fill('x'.repeat(16384)), 'y'.repeat(16382), 'z', 'w', 'x']);
+  assert.ok(narrowRemainder.reduce((total, row) => total + Buffer.byteLength(row), 0) <= 524288);
+  assert.ok(narrowRemainder.at(-1).endsWith('…'));
+  assert.deepEqual(safeLines(narrowRemainder), narrowRemainder);
+  assert.throws(() => fitLines(['\x1b]8;;javascript:alert(1)\x07unsafe\x1b]8;;\x07']), /invalid_request/);
+});
+
+test('safeLines stays strict at the existing row, line and aggregate wire limits', () => {
+  assert.throws(() => safeLines(Array(257).fill('')), /bounds_exceeded ui\/frame rows/);
+  assert.throws(() => safeLines(['x'.repeat(16385)]), /bounds_exceeded ui\/frame text/);
+  assert.throws(() => safeLines(Array(33).fill('x'.repeat(16384))), /bounds_exceeded ui\/frame text/);
 });
 
 test('input accepts placeholder, edits actual Input and abort disposes the mount', async t => {
